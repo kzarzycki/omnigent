@@ -27,6 +27,7 @@ import {
   Loader2Icon,
   MessageSquareIcon,
   PaperclipIcon,
+  PinIcon,
   SquareIcon,
   TerminalIcon,
   WifiOffIcon,
@@ -98,8 +99,17 @@ import {
   useSessionLiveness,
 } from "@/hooks/useSessionLiveness";
 import { useMarkConversationSeen } from "@/hooks/useUnseenConversations";
-import { useUserMessageNav } from "@/hooks/useUserMessageNav";
+import {
+  useUserMessageNav,
+  jumpToUserMessageAfterLayoutSettles,
+} from "@/hooks/useUserMessageNav";
 import { UserMessageNav } from "@/components/UserMessageNav";
+import { PinnedMessageBanner } from "@/components/PinnedMessageBanner";
+import {
+  readPinnedMessage,
+  writePinnedMessage,
+  type PinnedMessage,
+} from "@/lib/pinnedMessages";
 import {
   BUILTIN_SLASH_COMMANDS,
   isSlashCommandText,
@@ -255,6 +265,22 @@ export function isSessionSharedWithOthers(
 // Author labels render only in a shared session; ChatPage provides the
 // value and UserBubble reads it, so the gate lives in one place.
 const SessionSharedContext = createContext(false);
+
+/**
+ * Pin-to-top wiring for user bubbles. Provided by MainAgentSurface; null
+ * outside it (isolated BubbleView tests) → the pin action is hidden.
+ * Context rather than BubbleView props because BubbleView is memoized on
+ * bubble equality alone — props added there would go stale under that
+ * comparator, while context changes always reach consumers.
+ */
+interface PinnedMessageActions {
+  /** itemId of the currently pinned user message, or null when none. */
+  pinnedItemId: string | null;
+  /** Pin this message (replacing any current pin), or unpin if already pinned. */
+  togglePin: (itemId: string, text: string) => void;
+}
+// Exported for the pinned-message bubble tests.
+export const PinnedMessageContext = createContext<PinnedMessageActions | null>(null);
 
 // Iterate code points (not UTF-16 units) so emoji aren't cut mid-surrogate;
 // prefer the last word boundary within 10 chars of the limit so we don't
@@ -1060,6 +1086,52 @@ export function shouldShowTerminalSurface(
 }
 
 /**
+ * Keep a pinned-message jump pending across older-history page loads. The
+ * banner click may target a user message that survived refresh in localStorage
+ * but is not in the current hydrated window. Drive the search from rendered
+ * bubble state (userMessageIds), not DOM timing, so one click can load pages
+ * and then jump after the render containing the target commits.
+ *
+ * @param onMissing - Called with the pinned itemId once all history is loaded
+ *   and the target still isn't present (compacted/deleted) — the caller uses
+ *   this to drop the now-dead pin rather than leave a banner that jumps nowhere.
+ */
+export function usePinnedMessageJump(
+  userMessageIds: readonly string[],
+  hasMoreHistory: boolean,
+  loadingMoreHistory: boolean,
+  flashUserMessage: (itemId: string) => void,
+  onMissing: (itemId: string) => void,
+): (itemId: string) => void {
+  const [pendingPinnedJumpId, setPendingPinnedJumpId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!pendingPinnedJumpId) return;
+    if (userMessageIds.includes(pendingPinnedJumpId)) return;
+    if (hasMoreHistory && !loadingMoreHistory) {
+      void useChatStore.getState().loadMoreHistory();
+      return;
+    }
+    if (!hasMoreHistory && !loadingMoreHistory) {
+      // All history is loaded and the target still isn't here — the message was
+      // compacted or deleted. Tell the caller so the dead pin is cleared.
+      console.warn(`Pinned message is not in loaded history: itemId=${pendingPinnedJumpId}`);
+      onMissing(pendingPinnedJumpId);
+      setPendingPinnedJumpId(null);
+    }
+  }, [pendingPinnedJumpId, userMessageIds, hasMoreHistory, loadingMoreHistory, onMissing]);
+
+  useLayoutEffect(() => {
+    if (!pendingPinnedJumpId || !userMessageIds.includes(pendingPinnedJumpId)) return;
+    return jumpToUserMessageAfterLayoutSettles(pendingPinnedJumpId, flashUserMessage, () =>
+      setPendingPinnedJumpId(null),
+    );
+  }, [pendingPinnedJumpId, userMessageIds, flashUserMessage]);
+
+  return setPendingPinnedJumpId;
+}
+
+/**
  * The conversation scroll surface + composer — the content of the
  * "Main Agent" tab (and also the standalone view on `/`).
  *
@@ -1151,6 +1223,52 @@ function MainAgentSurface({
     return () => window.removeEventListener("keydown", handler);
   }, [nav]);
 
+  // Pinned message — a per-session bookmark stuck to the top of the
+  // viewport so "what is this session doing" survives an hour of
+  // scrollback. localStorage-backed; re-read on session switch.
+  const [pinnedMessage, setPinnedMessage] = useState<PinnedMessage | null>(() =>
+    conversationId ? readPinnedMessage(conversationId) : null,
+  );
+  useEffect(() => {
+    setPinnedMessage(conversationId ? readPinnedMessage(conversationId) : null);
+  }, [conversationId]);
+  const togglePin = useCallback(
+    (itemId: string, text: string) => {
+      // No id yet (brand-new session pre-create) — nothing to key the pin on.
+      if (!conversationId) return;
+      const next = pinnedMessage?.itemId === itemId ? null : { itemId, text };
+      writePinnedMessage(conversationId, next);
+      setPinnedMessage(next);
+    },
+    [conversationId, pinnedMessage?.itemId],
+  );
+  // Memoized so bubble re-renders only happen when the pin actually changes,
+  // not on every MainAgentSurface render.
+  const pinContext = useMemo(
+    () => ({ pinnedItemId: pinnedMessage?.itemId ?? null, togglePin }),
+    [pinnedMessage?.itemId, togglePin],
+  );
+  // Drop a pin whose target no longer exists in history (compacted/deleted) so
+  // the banner doesn't linger pointing at a message the user can never reach.
+  // Guard on identity: a jump for a stale id must not clear a newer pin.
+  const clearMissingPin = useCallback(
+    (itemId: string) => {
+      if (!conversationId || pinnedMessage?.itemId !== itemId) return;
+      writePinnedMessage(conversationId, null);
+      setPinnedMessage(null);
+    },
+    [conversationId, pinnedMessage?.itemId],
+  );
+  // Banner click reuses the nav buttons' jump-and-flash machinery.
+  const flashUserMessage = useChatStore((s) => s.flashUserMessage);
+  const requestPinnedJump = usePinnedMessageJump(
+    userMessageIds,
+    hasMoreHistory,
+    loadingMoreHistory,
+    flashUserMessage,
+    clearMissingPin,
+  );
+
   // Active reply quotes — each "Reply ↵" click appends; consumed by Composer.
   const [replyQuotes, setReplyQuotes] = useState<string[]>([]);
 
@@ -1210,7 +1328,7 @@ function MainAgentSurface({
   }
 
   return (
-    <>
+    <PinnedMessageContext.Provider value={pinContext}>
       {/* Wrapper div gives us a ref to scope the SelectionPopup to the
           conversation area without requiring Conversation to forward refs. */}
       <div
@@ -1292,6 +1410,17 @@ function MainAgentSurface({
           {/* Outside ConversationContent so it's pinned to the viewport, not the scroll. See WorkingStatusPin.
               Suppressed in a sub-agent session: the composer's "Chatting with sub-agent …" tray owns this slot. */}
           <WorkingStatusPin show={showWorkingIndicator} suppress={subAgentLabel != null} />
+          {/* Pinned-message banner — stuck below the ChatHeader overlay so
+              the session's "what am I doing" message survives scrollback.
+              Clicking jumps to (and flashes) the original message. */}
+          {pinnedMessage && (
+            <PinnedMessageBanner
+              text={pinnedMessage.text}
+              className={CHAT_COLUMN_WIDTH}
+              onJump={() => requestPinnedJump(pinnedMessage.itemId)}
+              onUnpin={() => togglePin(pinnedMessage.itemId, pinnedMessage.text)}
+            />
+          )}
           <UserMessageNavConnected
             goPrev={nav.goPrev}
             goNext={nav.goNext}
@@ -1342,7 +1471,7 @@ function MainAgentSurface({
           fork banner when unreachable, nothing otherwise. Sits below the
           composer so its position is consistent with the terminal view. */}
       <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
-    </>
+    </PinnedMessageContext.Provider>
   );
 }
 
@@ -1931,6 +2060,8 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   const sessionId = useChatStore((s) => s.conversationId);
   // Author labels only matter once the session is shared with someone else.
   const isSessionShared = useContext(SessionSharedContext);
+  // Pin-to-top action; null provider (isolated BubbleView tests) hides it.
+  const pinning = useContext(PinnedMessageContext);
   // Plain-text path is the common case.
   // - input_image: render inline <img> when the file is uploaded (file_id
   //   doesn't start with "pending:"); show a chip while the upload is
@@ -1958,6 +2089,11 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   const showAuthorBadge = shouldShowAuthorBadge(author, getCurrentAuthorId(), isSessionShared);
   // Equality selector so Zustand only re-renders the matching bubble.
   const flashing = useChatStore((s) => s.flashItemId === bubble.itemId);
+  const isPinned = pinning?.pinnedItemId === bubble.itemId;
+  // Optimistic sends (`pend_*` temp ids) can't be pinned — the temp id
+  // dangles once the server commits the real item id. Attachment-only
+  // messages (no text) are skipped too: an empty banner snippet is useless.
+  const pinnable = text.length > 0 && !bubble.itemId.startsWith("pend_");
   return (
     <Message
       from="user"
@@ -1970,6 +2106,24 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
           immediately left of the right-aligned bubble (the bubble's own
           ml-auto has no free space to absorb inside a fit-width row). */}
       <div className="ml-auto flex w-fit max-w-full items-start gap-1.5">
+        {/* Hover-revealed pin, left of the right-aligned bubble. Stays
+            visible (no hover needed) while this message IS the pin, so the
+            pinned message is identifiable in place. */}
+        {pinning && pinnable && (
+          <MessageAction
+            tooltip={isPinned ? "Unpin from top" : "Pin to top"}
+            data-testid="pin-user-message"
+            onClick={() => pinning.togglePin(bubble.itemId, text)}
+            className={cn(
+              "mt-1 shrink-0",
+              isPinned
+                ? "opacity-100"
+                : "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
+            )}
+          >
+            <PinIcon size={14} className={isPinned ? "fill-current" : undefined} />
+          </MessageAction>
+        )}
         {showAuthorBadge && author && (
           <Tooltip>
             <TooltipTrigger asChild>

@@ -26,7 +26,7 @@ if (!("scrollIntoView" in Element.prototype)) {
 
 let scrollSpy: ReturnType<typeof vi.spyOn>;
 
-// The flash is deferred until the smooth-scroll settles (see jumpTo). jsdom
+// The flash is deferred until the smooth-scroll settles (see jumpToUserMessage). jsdom
 // fires no scroll events, so the settle timer is the path that flashes; advance
 // past it generously to trigger the flash in tests.
 const SETTLE_MS = 200;
@@ -42,6 +42,11 @@ beforeEach(() => {
 afterEach(() => {
   scrollSpy.mockRestore();
   document.body.innerHTML = "";
+  useChatStore.setState({
+    hasMoreHistory: false,
+    loadingMoreHistory: false,
+    oldestItemId: null,
+  });
   vi.clearAllTimers();
   vi.useRealTimers();
 });
