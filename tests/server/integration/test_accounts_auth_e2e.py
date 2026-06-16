@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from omnigent.db.utils import clear_engine_cache
 from omnigent.server.auth import create_auth_provider
 from omnigent.stores.permission_store.sqlalchemy_store import (
     SqlAlchemyPermissionStore,
@@ -139,6 +140,7 @@ async def client(accounts_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=accounts_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    clear_engine_cache()
 
 
 @pytest_asyncio.fixture()
@@ -147,6 +149,7 @@ async def setup_client(setup_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=setup_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    clear_engine_cache()
 
 
 # ── Helpers ───────────────────────────────────────────────
@@ -207,7 +210,7 @@ async def test_setup_409_after_first_admin(
         "/auth/setup",
         json={"username": "alice", "password": "alice-pw-12345"},
     )
-    assert first.status_code == 200
+    assert first.status_code == 200, first.text
 
     second = await setup_client.post(
         "/auth/setup",
@@ -227,7 +230,7 @@ async def test_login_returns_session_cookie(
         "/auth/login",
         json={"username": _ADMIN_USERNAME, "password": _ADMIN_PASSWORD},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["user"]["id"] == _ADMIN_USERNAME
     assert body["user"]["is_admin"] is True
@@ -248,8 +251,9 @@ async def test_login_wrong_password_returns_401(
         "/auth/login",
         json={"username": _ADMIN_USERNAME, "password": "wrong-password"},
     )
-    assert resp.status_code == 401
-    assert "invalid" in resp.json()["error"].lower()
+    assert resp.status_code == 401, resp.text
+    body = resp.json()
+    assert "invalid" in body["error"].lower()
 
 
 async def test_login_unknown_user_returns_401(
@@ -272,7 +276,7 @@ async def test_me_with_valid_cookie(
     """GET /auth/me with a valid session cookie returns user info."""
     cookies = await _login(client, _ADMIN_USERNAME, _ADMIN_PASSWORD)
     resp = await client.get("/auth/me", headers=_cookie_header(cookies))
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["id"] == _ADMIN_USERNAME
     assert body["is_admin"] is True
@@ -304,7 +308,7 @@ async def test_invite_and_register_flow(
         json={"is_admin": False},
         headers=admin_headers,
     )
-    assert invite_resp.status_code == 200
+    assert invite_resp.status_code == 200, invite_resp.text
     invite_body = invite_resp.json()
     token = invite_body["token"]
     assert "register_url" in invite_body
@@ -318,7 +322,7 @@ async def test_invite_and_register_flow(
             "password": "bob-pw-123456",
         },
     )
-    assert reg_resp.status_code == 200
+    assert reg_resp.status_code == 200, reg_resp.text
     reg_body = reg_resp.json()
     assert reg_body["user"]["id"] == "bob"
     assert reg_body["user"]["is_admin"] is False
@@ -336,12 +340,14 @@ async def test_invite_requires_admin(
     invite_resp = await client.post(
         "/auth/invite", json={"is_admin": False}, headers=admin_headers
     )
+    assert invite_resp.status_code == 200, invite_resp.text
     token = invite_resp.json()["token"]
 
-    await client.post(
+    reg_resp = await client.post(
         "/auth/register",
         json={"invite": token, "username": "bob", "password": "bob-pw-123456"},
     )
+    assert reg_resp.status_code == 200, reg_resp.text
 
     # Login as non-admin bob.
     bob_cookies = await _login(client, "bob", "bob-pw-123456")
@@ -411,8 +417,9 @@ async def test_admin_list_users(
     headers = _cookie_header(cookies)
 
     resp = await client.get("/auth/users", headers=headers)
-    assert resp.status_code == 200
-    users = resp.json()["users"]
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    users = body["users"]
     user_ids = {u["id"] for u in users}
     assert _ADMIN_USERNAME in user_ids
 
@@ -427,11 +434,13 @@ async def test_non_admin_cannot_list_users(
     invite_resp = await client.post(
         "/auth/invite", json={"is_admin": False}, headers=admin_headers
     )
+    assert invite_resp.status_code == 200, invite_resp.text
     token = invite_resp.json()["token"]
-    await client.post(
+    reg_resp = await client.post(
         "/auth/register",
         json={"invite": token, "username": "bob", "password": "bob-pw-123456"},
     )
+    assert reg_resp.status_code == 200, reg_resp.text
 
     bob_cookies = await _login(client, "bob", "bob-pw-123456")
     bob_headers = _cookie_header(bob_cookies)
@@ -472,7 +481,7 @@ async def test_magic_link_mint_and_redeem(
 
     # Mint a magic link.
     mint_resp = await client.post("/auth/magic", headers=headers)
-    assert mint_resp.status_code == 200
+    assert mint_resp.status_code == 200, mint_resp.text
     mint_body = mint_resp.json()
     assert "redeem_url" in mint_body
     assert "expires_at" in mint_body
@@ -496,7 +505,10 @@ async def test_magic_link_is_single_use(
     cookies = await _login(client, _ADMIN_USERNAME, _ADMIN_PASSWORD)
     headers = _cookie_header(cookies)
 
-    redeem_url = (await client.post("/auth/magic", headers=headers)).json()["redeem_url"]
+    mint_resp = await client.post("/auth/magic", headers=headers)
+    assert mint_resp.status_code == 200, mint_resp.text
+    mint_body = mint_resp.json()
+    redeem_url = mint_body["redeem_url"]
     parsed = urlparse(redeem_url)
     path_q = f"{parsed.path}?{parsed.query}"
 
