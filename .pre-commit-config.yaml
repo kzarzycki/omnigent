@@ -54,6 +54,17 @@ repos:
         files: ^uv\.lock$
         pass_filenames: true
 
+      # Same as above for the npm lockfile: a local `npm install` against
+      # the Databricks npm proxy bakes that host into `resolved` URLs. This
+      # OSS repo must always commit the public npm host. Fixer: re-stage if
+      # it changes.
+      - id: normalize-npm-lock-registry
+        name: normalize package-lock.json registry to registry.npmjs.org
+        language: system
+        entry: .venv/bin/python scripts/normalize_npm_lock_registry.py
+        files: ^ap-web/package-lock\.json$
+        pass_filenames: true
+
   # ── File hygiene ────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
