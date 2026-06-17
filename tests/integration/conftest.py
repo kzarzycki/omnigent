@@ -196,7 +196,11 @@ def journey_session(
             "exactly and literally. When asked to reply with a token, "
             "reply with the token text only."
         ),
-        mock_llm_base_url=f"{mock_llm_server_url}/v1" if mock_llm_server_url else None,
+        mock_llm_base_url=(
+            f"{mock_llm_server_url}/v1"
+            if _is_mock_mode(request.config) and mock_llm_server_url
+            else None
+        ),
     )
     session_id = create_runner_bound_session(
         http_client, agent_name=agent_name, runner_id=live_runner_id

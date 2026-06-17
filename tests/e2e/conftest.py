@@ -199,25 +199,18 @@ def using_mock_llm(request: pytest.FixtureRequest) -> bool:
 
 @pytest.fixture(scope="session")
 def mock_llm_server_url(
-    using_mock_llm: bool,
     tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[str | None]:
+) -> Iterator[str]:
     """
-    Start a mock LLM server when running without a real API key.
+    Start a mock LLM server for the test session.
 
-    The mock server implements ``POST /v1/responses`` with pre-canned
-    SSE responses. Tests configure it via ``POST /mock/configure``
-    before each turn. When a real ``--llm-api-key`` is provided,
-    yields ``None`` (real LLM path).
+    Always started regardless of ``--llm-api-key`` so mock-only
+    e2e tests run alongside real-LLM tests in the same session.
+    The mock server is a lightweight FastAPI/uvicorn subprocess.
 
-    :param using_mock_llm: Whether mock mode is active.
     :param tmp_path_factory: Pytest temp path factory for logs.
-    :returns: The mock server base URL, or ``None``.
+    :returns: The mock server base URL.
     """
-    if not using_mock_llm:
-        yield None
-        return
-
     mock_port = find_free_port()
     mock_log = tmp_path_factory.mktemp("mock_llm_logs") / "mock_llm.log"
     log_handle = open(mock_log, "w")  # noqa: SIM115
@@ -431,6 +424,7 @@ def live_runner_id() -> str:
 def live_server(
     request: pytest.FixtureRequest,
     llm_api_key: str,
+    using_mock_llm: bool,
     databricks_workspace_host: str | None,
     tmp_path_factory: pytest.TempPathFactory,
     live_runner_id: str,
@@ -492,7 +486,7 @@ def live_server(
         "PYTHONPATH": f"{_REPO_ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
         "OMNIGENT_BUILTIN_AGENT_DIRS": str(builtin_sdk_chat_spec),
     }
-    if mock_llm_server_url is not None:
+    if using_mock_llm and mock_llm_server_url is not None:
         # Mock mode: point all LLM calls at the mock server.
         # The OpenAI SDK appends /responses to the base URL, so
         # include /v1 in the base so the SDK hits /v1/responses.
@@ -541,7 +535,7 @@ def live_server(
         "--artifact-location",
         str(artifact_dir),
     ]
-    if mock_llm_server_url is not None:
+    if using_mock_llm and mock_llm_server_url is not None:
         server_cfg = tmp_path_factory.mktemp("e2e_server_cfg") / "server.yaml"
         server_cfg.write_text(
             yaml.safe_dump(
