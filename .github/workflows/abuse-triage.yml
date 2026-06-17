@@ -1,24 +1,16 @@
 name: Abuse Triage
 
-# Triages external-contributor PRs for spam/abuse:
-#   - Tier 1: auto-close PRs whose author is on .github/abuse-denylist
-#     (maintainer-curated; the "ban"), with a templated comment + spam-check.
-#   - Tier 2: add the spam-check label on soft heuristic signals, and -- only
-#     for clean-looking first-time-contributor PRs -- an advisory one-shot LLM
-#     content judge via the gateway. Label only; NEVER closes (a human decides).
-# Maintainers and repo collaborators/members are never flagged or closed.
-# See abuse-triage.js (gating) and abuse-llm.js (the gateway call).
+# Auto-closes external-contributor PRs whose author is on .github/abuse-denylist
+# (maintainer-curated; the "ban"), with a templated comment + spam-check label.
+# Maintainers and repo collaborators/members are never closed. See
+# abuse-triage.js.
 #
 # pull_request_target so it can label/close fork PRs (a fork's pull_request
 # token is read-only). Safe: it checks out only the trusted default branch
 # (.github) -- never the PR head -- and runs NO PR code. It reads
 # .github/abuse-denylist + .github/MAINTAINER from that trusted checkout (so a
-# PR can't edit either list to change the outcome) and acts via the API.
-#
-# The LLM judge makes this workflow SECRET-BEARING (LLM_API_KEY/GATEWAY_BASE_URL).
-# That is safe for the same reason Polly is: the PR diff is fetched via the API
-# as text and sent to the gateway -- no PR-authored code ever executes here, so
-# the secret cannot be exfiltrated by the PR. The verdict is advisory only.
+# PR can't edit either list to change the outcome) and acts via the API. No
+# secrets are used.
 
 on:
   pull_request_target:
@@ -51,20 +43,10 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github
           persist-credentials: false
-      - name: Triage PR for abuse signals
+      - name: Triage PR against the abuse denylist
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
-        env:
-          GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         with:
           retries: 3
           script: |
-            const triage = require('./.github/workflows/abuse-triage.js');
-            const classify = require('./.github/workflows/abuse-llm.js');
-            // Only wire the LLM judge when gateway secrets are present (they are
-            // on pull_request_target, incl. fork PRs); otherwise heuristics only.
-            const haveLLM = !!(process.env.GATEWAY_BASE_URL && process.env.LLM_API_KEY);
-            const opts = haveLLM
-              ? { llmClassify: (input) => classify({ ...input, env: process.env }) }
-              : {};
-            await triage({ github, context, core, opts });
+            const script = require('./.github/workflows/abuse-triage.js');
+            await script({ github, context, core });

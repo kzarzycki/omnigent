@@ -9,7 +9,6 @@ on:
   pull_request:
     paths:
       - .github/workflows/abuse-triage.js
-      - .github/workflows/abuse-llm.js
       - .github/workflows/abuse-triage.test.js
       - .github/abuse-denylist
   workflow_dispatch:
