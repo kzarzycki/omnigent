@@ -1,0 +1,32 @@
+name: Abuse Triage Test
+
+# Offline unit test for the abuse-triage logic: runs abuse-triage.test.js
+# (mocked GitHub client, real .github/MAINTAINER, injected denylist). Triggers
+# only when the script, its test, or the denylist change. Runs on pull_request
+# (PR head checkout) so it tests the PR's own version. No secrets, no network.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/abuse-triage.js
+      - .github/workflows/abuse-triage.test.js
+      - .github/abuse-denylist
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: abuse-triage-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run abuse-triage unit test
+        run: node .github/workflows/abuse-triage.test.js

@@ -1,0 +1,17 @@
+# Abuse denylist -- one GitHub username per line (comments start with #).
+#
+# A PR whose author appears here is automatically closed by
+# .github/workflows/abuse-triage.yml (with a templated comment + the
+# `likely-spam` label). This is the CI-level complement to GitHub's native
+# "Block user" setting -- use that too for a hard ban that stops the account
+# from interacting at all.
+#
+# Adding a name is a DELIBERATE MAINTAINER ACTION: open a PR adding the line,
+# get it reviewed, and merge. The list is read from main's tip (never the PR
+# head), so a PR can never edit the list to un-ban its own author. Maintainers
+# (.github/MAINTAINER) and repo collaborators/members are never auto-closed,
+# even if mistakenly listed here.
+#
+# Removing a name (un-ban) is likewise a normal PR.
+#
+# --- denylisted usernames below this line ---
