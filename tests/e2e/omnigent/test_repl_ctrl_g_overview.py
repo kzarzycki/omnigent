@@ -67,7 +67,22 @@ _OVERVIEW_FOOTER_HINT = "debug:"
 _SPAWN_TIMEOUT = 60.0
 _BOOT_TIMEOUT = 30.0
 _RUNNING_TIMEOUT = 20.0
-_COMPLETION_TIMEOUT = 60.0
+# Turn-completion pexpect deadline. The single ``say ok`` turn runs
+# on the openai-agents harness against gpt-5-mini through the
+# Databricks gateway, where a slow-model day routinely pushes
+# first-token + completion past the old 60s budget — the pexpect
+# TIMEOUT that suppressed this test under the ``model-gateway-compat``
+# cluster (the failure was gateway latency, not a REPL regression).
+# 120s doubles the old budget (the failure was "exceeds 60s") to give
+# the slow gateway real headroom, while the whole test — boot +
+# running + completion + overview + exit — still fits under the CI
+# per-test ``--timeout=180`` cap, so a genuine REPL hang (overview
+# never paints, turn never finishes) fails the test fast rather than
+# wedging the shard. Bumping the deadline is the right lever here
+# rather than ``llm_flaky``: a rerun of a heavy pexpect e2e test under
+# xdist+loadscope can crash the whole shard (see ``tests/conftest.py``
+# llm_flaky warning).
+_COMPLETION_TIMEOUT = 120.0
 _EXIT_TIMEOUT = 15.0
 _OVERVIEW_DRAIN_TIMEOUT = 5.0
 

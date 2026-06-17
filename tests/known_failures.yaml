@@ -160,11 +160,6 @@ skips:
     cluster: terminal-d6
     mode: skip
 
-  - id: tests/e2e/omnigent/test_example_agent_with_uc_tools.py::test_agent_with_uc_tools_one_shot
-    reason: "Shard 0 bulk: agent_with_uc_tools one-shot fails on ai-oss. Triage under #532."
-    issue: 532
-    cluster: model-gateway-compat
-    mode: skip
   - id: tests/e2e/omnigent/test_run_omnigent_policy_enforcement.py::test_policy_denies_input_containing_sentinel[openai-agents]
     reason: "Shard 0 bulk: policy-enforcement family, same cluster as test_policy_denies_tool_call_by_name[codex] (#476)."
     issue: 476
@@ -750,12 +745,6 @@ skips:
     cluster: repl-pexpect-cli
     mode: skip
 
-  - id: tests/e2e/omnigent/test_repl_ctrl_g_overview.py::test_repl_ctrl_g_overview_toggle
-    reason: "REPL pexpect TIMEOUT post-path-fix: openai-agents+gpt-5-mini turn exceeds 60s pexpect deadline on ai-oss. Original skip reason still applies after #1141."
-    issue: 532
-    cluster: model-gateway-compat
-    mode: skip
-
   - id: tests/e2e/omnigent/test_repl_history_recall.py::test_repl_history_recall_up_arrow
     reason: "REPL pexpect TIMEOUT post-path-fix: same 60s deadline issue as test_repl_ctrl_g_overview_toggle."
     issue: 532
@@ -784,12 +773,6 @@ skips:
     reason: "REPL pexpect TIMEOUT post-path-fix. Same family as test_repl_ctrl_g_overview."
     issue: 532
     cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_run_omnigent_omnigent_model_env.py::test_omnigent_model_env_var_bogus_value_fails_with_named_error
-    reason: "Wedges shard 1 with the openai-agents harness despite the ``databricks-gpt-`` prefix that should produce a fast 404. Same shard hangs ~15+ min consistently while sibling shards finish in 4 min; cause not yet root-caused (likely FM API retry loop on the bogus model, but harness-internal investigation needed). Positive sibling ``test_omnigent_model_env_var_drives_successful_run`` covers the smoke path; helper-level decisive coverage stays in ``tests/cli/test_chat.py``."
-    issue: 532
-    cluster: model-gateway-compat
     mode: skip
 
   - id: tests/e2e/omnigent/test_repl_overview_subagent_visibility.py::test_repl_overview_subagent_visibility[claude-sdk]
