@@ -827,6 +827,32 @@ async def test_mid_turn_cancelled_status_emits_turn_cancelled_and_drops_session(
     assert any(isinstance(e, TurnComplete) for e in turn2)
 
 
+async def test_mid_turn_unknown_non_finished_status_is_retryable_and_drops_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only ``finished`` is allowed to produce TurnComplete. If the SDK adds a
+    new terminal status, fail loud and retry instead of silently committing
+    partial streamed text as a successful assistant turn."""
+    scripts = [
+        {"messages": [_assistant("partial")], "status": "paused", "result": "new state"},
+        {"messages": [_assistant("recovered")], "result": "recovered"},
+    ]
+    state = _install_fake_sdk(monkeypatch, scripts)
+    executor = CursorExecutor(api_key="crsr_x")
+    try:
+        turn1 = [e async for e in executor.run_turn([_user("first")], [], "SYS")]
+        turn2 = [e async for e in executor.run_turn([_user("second")], [], "SYS")]
+    finally:
+        await executor.close()
+
+    errors = [e for e in turn1 if isinstance(e, ExecutorError)]
+    assert len(errors) == 1 and errors[0].retryable is True
+    assert "non-finished status 'paused'" in errors[0].message
+    assert not any(isinstance(e, TurnComplete) for e in turn1)
+    assert len(state["create_models"]) == 2
+    assert any(isinstance(e, TurnComplete) for e in turn2)
+
+
 async def test_empty_prompt_completes_without_sending(monkeypatch: pytest.MonkeyPatch) -> None:
     state = _install_fake_sdk(monkeypatch, [])
     executor = CursorExecutor(api_key="crsr_x")

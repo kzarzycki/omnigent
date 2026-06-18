@@ -820,6 +820,14 @@ class CursorExecutor(Executor):
             await self.close_session(session_key)
             yield TurnCancelled(reason="cursor-sdk run cancelled")
             return
+        if status != "finished":
+            await self.close_session(session_key)
+            detail = getattr(result, "result", "") or "cursor-sdk run finished with unknown status"
+            yield ExecutorError(
+                message=f"cursor-sdk run returned non-finished status {status!r}: {detail}",
+                retryable=True,
+            )
+            return
 
         # Prefer the streamed text we accumulated (which carries the paragraph
         # breaks inserted above) over the SDK's aggregate ``result`` (which does
