@@ -195,9 +195,15 @@ def test_repl_inline_tool_call_and_result_streaming(
         # contains the marker — prompt-toolkit echoes typed input
         # back through the PTY, so a single ``expect(_DONE_MARKER)``
         # would race the agent's response and match the echo).
-        # The YAML's ``name:`` is ``sys-terminal-test``; humanized
-        # to ``sys terminal test`` in the assistant marker.
-        child.expect(r"◆ sys.terminal.test", timeout=_BOOT_TIMEOUT)
+        # The assistant's streamed text renders under a bare ``◆ ``
+        # diamond (``_DiamondMarkdown`` in the UI SDK formatter);
+        # the top-level agent gets no ``◆ <agent-name>`` header
+        # (``show_agent_labels`` only prefixes sub-agent blocks at
+        # depth > 0, and as ``[<agent>]``, not ``◆ <name>``), so we
+        # anchor on the diamond glyph itself. The user's echoed
+        # prompt uses ``❯``, never ``◆`` — so ``◆`` cleanly marks
+        # the assistant turn starting.
+        child.expect("◆", timeout=_BOOT_TIMEOUT)
         # Now wait for the agent to actually emit ``done-streaming``.
         try:
             child.expect(_DONE_MARKER, timeout=_RESPONSE_TIMEOUT)

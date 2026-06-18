@@ -77,6 +77,12 @@ _RUNNING_TIMEOUT = 30.0
 # that still bounds a runaway prompt.
 _COMPLETION_TIMEOUT = 120.0
 _EXIT_TIMEOUT = 15.0
+# After the ``⏵ sys_terminal_launch`` call line appears we drain
+# until the launch's result panel lands so the terminal instance is
+# fully registered before opening the overview. Larger than the old
+# 2.0s because we now anchor on the call line (which renders slightly
+# before the tool result) rather than a completion line.
+_COMPLETION_DRAIN_TIMEOUT = 4.0
 _OVERVIEW_DRAIN_TIMEOUT = 6.0
 _EXPECT_TERMINAL_TIMEOUT = 15.0
 
@@ -134,26 +140,25 @@ def test_repl_overview_terminal_visibility(
         wait_for_ready(child, timeout=_BOOT_TIMEOUT)
         submit_prompt(child, _PROMPT)
         # Wait for the ``sys_terminal_launch`` tool call line.
-        # Once it appears, the supervisor has invoked the
-        # launch — ``_terminal_instances[("shell", "probe")]``
-        # is registered (the dict
-        # ``_collect_overview_targets`` scans). Note: unlike
-        # ``sys_session_send``, the REPL's
-        # ``_tool_display_name`` does NOT format
-        # ``sys_terminal_launch`` with its args, so we match
-        # the bare tool name. The ``• sys_terminal_launch
-        # (<ms>)`` completion line then guarantees the launch
-        # actually finished (so the instance is fully wired,
-        # not mid-spawn).
+        # Once it appears, the supervisor has invoked the launch —
+        # ``_terminal_instances[("shell", "probe")]`` is registered
+        # (the dict ``_collect_overview_targets`` scans). The tool
+        # call line renders as ``⏵ sys_terminal_launch(<args>)``
+        # (``RichBlockFormatter._tool_call_line`` / the UI SDK
+        # ``⏵`` accent glyph); the legacy ``• <name> (<N>ms)``
+        # completion line with a timing suffix was retired, so we
+        # anchor on the ``⏵`` call line instead.
         child.expect(
-            r"• sys_terminal_launch \(\d+ms\)",
+            r"⏵ sys_terminal_launch",
             timeout=_COMPLETION_TIMEOUT,
         )
-        # Drain the completion line so the subsequent overview
-        # render isn't masked by tool-call tail bytes.
-        drain_for(child, 2.0)
-        # Open the overview.
-        child.sendcontrol("g")
+        # Drain so the launch's result panel lands and the instance
+        # is fully wired (not mid-spawn) before we open the overview.
+        drain_for(child, _COMPLETION_DRAIN_TIMEOUT)
+        # Open the overview. The trigger moved from Ctrl+G to Ctrl+O
+        # (``Overlay(trigger="c-o")``) because Warp/other terminals
+        # grab Ctrl+G for their own command search.
+        child.sendcontrol("o")
         drain_for(child, _OVERVIEW_DRAIN_TIMEOUT)
         # Tab cycles through targets: main → shell:probe. The
         # overview pane then paints the terminal-specific

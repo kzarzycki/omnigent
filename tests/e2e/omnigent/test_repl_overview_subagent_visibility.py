@@ -219,12 +219,22 @@ def test_repl_overview_subagent_visibility(
         # meaning the supervisor's turn returns immediately
         # after dispatching the worker; the managed session
         # exists at the moment of dispatch.
+        #
+        # Anchor on the ``⏵ sys_session_send`` call-line glyph
+        # rather than an args-derived ``(<worker>:`` fragment:
+        # ``sys_session_send`` is not in ``format_tool_args_brief``'s
+        # known-key map, so its args_summary is a JSON dump
+        # (``{"tool": "claude_worker", ...}``), NOT ``claude_worker:``.
+        # The worker-specific assertion is carried by the overview
+        # header expect below (``Session: <worker>:``).
         child.expect(
-            rf"sys_session_send \({worker_tool}:",
+            r"⏵ sys_session_send",
             timeout=_COMPLETION_TIMEOUT,
         )
-        # Open the overview.
-        child.sendcontrol("g")
+        # Open the overview. The trigger moved from Ctrl+G to Ctrl+O
+        # (``Overlay(trigger="c-o")``) because Warp/other terminals
+        # grab Ctrl+G for their own command search.
+        child.sendcontrol("o")
         # Wait for the overview to paint and drain follow-up
         # frames so the buffer has the sidebar + main session
         # pane.

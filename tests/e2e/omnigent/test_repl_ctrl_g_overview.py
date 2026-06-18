@@ -60,9 +60,14 @@ _PROMPT = "say ok"
 # Substrings that identify overview mode. The sidebar prints the
 # target label ("main" for the top-level session) and the
 # overview pane paints "Session: main" followed by "Session ID:
-# ...". The footer prints a hint line starting with "debug:".
+# ...". The overview's title bar reads "Debug overview — <agent>"
+# (``host.add_overlay(Overlay(title=f" Debug overview — {ui_name}"))``);
+# the legacy ``debug:`` footer prefix was retired when the overview
+# moved to the SDK ``Overlay`` primitive (footer is now an
+# auto-generated ``esc/q/c-o close`` hint), so we anchor on the
+# stable title text instead.
 _OVERVIEW_SESSION_HEADER = "Session: main"
-_OVERVIEW_FOOTER_HINT = "debug:"
+_OVERVIEW_FOOTER_HINT = "Debug overview"
 
 _SPAWN_TIMEOUT = 60.0
 _BOOT_TIMEOUT = 30.0
@@ -108,12 +113,15 @@ def test_repl_ctrl_g_overview_toggle(
             running_timeout=_RUNNING_TIMEOUT,
             completion_timeout=_COMPLETION_TIMEOUT,
         )
-        # Open the debug overview. The binding schedules an
-        # async ``_toggle_overview`` via create_background_task,
-        # so we wait for the overview pane to paint "Session:
-        # main" — that's the earliest moment at which overview
-        # mode is definitively active.
-        child.sendcontrol("g")
+        # Open the debug overview. The trigger moved from Ctrl+G to
+        # Ctrl+O (``Overlay(trigger="c-o")`` in ``run_repl``) because
+        # Warp and some terminals grab Ctrl+G for their own command
+        # search, so the Ctrl+G binding never reached the program.
+        # The binding schedules an async overview build, so we wait
+        # for the overview pane to paint "Session: main" — that's the
+        # earliest moment at which overview mode is definitively
+        # active.
+        child.sendcontrol("o")
         child.expect(_OVERVIEW_SESSION_HEADER, timeout=_OVERVIEW_DRAIN_TIMEOUT)
         # Drain any trailing overview-frame bytes so tab_drain
         # only captures Tab-triggered output. The accumulated
