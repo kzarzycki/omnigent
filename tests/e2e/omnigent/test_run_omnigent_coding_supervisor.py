@@ -60,7 +60,7 @@ from tests.e2e.omnigent._pexpect_harness import (
     clean_exit,
     spawn_omnigent_run,
 )
-from tests.e2e.omnigent.conftest import configure_mock_llm
+from tests.e2e.omnigent.conftest import configure_mock_llm, reset_mock_llm
 
 # coding_supervisor's declared openai-agents harness + mock model.
 # We don't pass ``--model`` here; the YAML's model wins.
@@ -149,6 +149,7 @@ def test_run_omnigent_coding_supervisor_oneshot(
     :param mock_llm_server_url: Mock server URL for configuring
         response queues.
     """
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(mock_llm_server_url, [{"text": "translator works"}])
 
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
@@ -223,6 +224,17 @@ def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
     ``sys_session_send`` and ``list_tasks`` so the assertions pass
     deterministically.
 
+    .. note::
+
+        This test validates the **output pipeline** (that tool
+        names configured in the mock response flow through stdout
+        intact), not the SDK tool surface itself. The mock LLM
+        returns predetermined tool names regardless of what tools
+        are actually registered with the harness; a real
+        SDK-surface test would require inspecting the
+        ``/v1/responses`` request body to see what tools were
+        advertised to the LLM.
+
     :param omnigent_python: Interpreter with omnigent +
         omnigent installed.
     :param omnigent_repo_root: Omnigent repo root.
@@ -231,6 +243,7 @@ def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
     :param mock_llm_server_url: Mock server URL for configuring
         response queues.
     """
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": "sys_session_send, list_tasks, sys_cancel_task"}],
@@ -293,33 +306,30 @@ def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
     mock_llm_server_url: str,
 ) -> None:
     """
-    ``omnigent run`` on coding_supervisor.yaml must spawn a
-    Codex sub-agent that authenticates, invokes its shell/file
-    tools against the real cwd, and surfaces the result.
+    Infrastructure smoke test: ``omnigent run`` on
+    coding_supervisor.yaml boots the Omnigent stack, the mock
+    supervisor LLM responds with a file listing, and that listing
+    flows through stdout without error.
 
-    Two bugs are covered simultaneously:
+    This is **not** a regression test — the mock LLM returns the
+    expected root entries directly; the real codex binary (if
+    present) is not asked to list files. What this test validates
+    is that the Omnigent boot path, sub-agent tool registration,
+    and subprocess I/O pipeline all work together so that a mock
+    response containing filenames appears in stdout.
 
-    1. **Auth regression**: before
-       :func:`omnigent.cli._propagate_profile_to_environment`,
-       the codex_worker YAML block had no ``profile:`` field and
-       the CLI did not export ``--profile`` into
-       :envvar:`DATABRICKS_CONFIG_PROFILE`. Codex's Databricks
-       credential lookup fell through to the ``DEFAULT`` section
-       of ``~/.databrickscfg`` (usually OAuth on dev machines),
-       surfaced as "Codex App Server error", and bubbled up as
-       :class:`PermanentLLMError`.
-    2. **Tool-plumbing regression**: even when Codex authenticates,
-       its actual value is in running shell / file-reading tools
-       against the project under test. An echo-only test would
-       miss a bug where Codex authenticated but its tool surface
-       was silently stripped (missing ``codex`` binary on PATH,
-       broken dynamic-tool registration, etc.).
+    Background: two historical bugs motivated the shape of this
+    test: (1) missing ``_propagate_profile_to_environment`` caused
+    ``Codex App Server error`` on sub-agent auth; (2) stripped tool
+    surfaces caused codex workers to silently produce no output.
+    The negative assertions below catch regressions to those
+    specific error strings even though the mock LLM bypasses real
+    codex execution.
 
     :param omnigent_python: Shared session fixture pointing at
         the repo's ``.venv`` Python.
     :param omnigent_repo_root: Omnigent repo root — used as
-        cwd so ``examples/coding_supervisor.yaml`` resolves AND
-        the Codex worker's shell tool sees the real project files.
+        cwd so ``examples/coding_supervisor.yaml`` resolves.
     :param mock_credentials_env: Mock-LLM env vars pointing at the
         mock server.
     :param mock_llm_server_url: Mock server URL for configuring
@@ -336,6 +346,7 @@ def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
 
     # Mock the supervisor LLM to return a listing that includes the
     # expected root entries, simulating a successful codex delegation.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": "openapi.json omnigent pyproject.toml"}],
@@ -505,19 +516,26 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
     mock_llm_server_url: str,
 ) -> None:
     """
-    Regression: under Omnigent mode, the codex sub-agent can read
-    files in the supervisor's working directory.
+    Infrastructure smoke test: under Omnigent mode, the codex
+    sub-agent boots and the output pipeline delivers its response
+    without emitting the ``/nonexistent`` workspace-hydration error.
 
-    The original bug: omnigent' ``codex_executor`` disabled
-    codex's built-in ``shell_tool`` whenever any tools were
-    passed. Under Omnigent mode, :class:`OmnigentExecutor` always
-    injects omnigent builtins (``check_task``,
-    ``sys_session_send``, etc.) into the tools list — even for
-    codex sub-agents whose YAML declares no tools of their own.
-    So every codex_worker lost shell access and failed with
-    "unable to locate image at /nonexistent" when it tried to
-    hydrate its workspace. Legacy omnigent (no Omnigent mode) was
-    unaffected because it passed ``tools=[]``.
+    This is **not** a regression test — the mock LLM returns the
+    sentinel content directly; the real codex binary (if present)
+    is never asked to read the fixture file. What this test
+    validates is that the infrastructure plumbing (Omnigent mode
+    boot, ``codex_executor`` tool injection, subprocess I/O
+    capture) does not crash and that the mock supervisor response
+    surfaces in stdout.
+
+    Background: ``codex_executor`` historically disabled
+    ``shell_tool`` whenever any tools were passed. Under Omnigent
+    mode, :class:`OmnigentExecutor` always injects omnigent
+    builtins (``check_task``, ``sys_session_send``, etc.) into the
+    tools list — even for codex sub-agents whose YAML declares no
+    tools of their own. This test exercises that path to confirm the
+    server boots and the mock response flows through without a
+    ``/nonexistent`` error surfacing.
 
     :param omnigent_python: Interpreter with omnigent +
         omnigent installed.
@@ -540,6 +558,7 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
 
     # Mock the supervisor LLM to include the sentinel content
     # in its response, simulating what codex would return.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [{"text": f"File contents: {_CODEX_REGRESSION_CONTENT_MARKER}"}],
