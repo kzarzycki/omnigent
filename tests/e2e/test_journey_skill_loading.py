@@ -3,11 +3,14 @@
 Verifies the full user journey of loading a bundled skill and
 using its content in a follow-up turn, driven by a mock LLM:
 
-1. Create session with an inline agent that has skill tools.
+1. Create session with an inline agent.
 2. Mock LLM returns load_skill + read_skill_file tool calls.
 3. Verify the tools were called and returned skill content.
 4. Mock LLM returns text referencing the skill knowledge.
 5. Verify the response references the skill's content.
+
+load_skill and read_skill_file are always auto-registered by the
+runner's ToolManager regardless of spec tools.builtins declaration.
 
 Usage::
 
@@ -57,14 +60,6 @@ def test_skill_loading_journey(
 ) -> None:
     """Full journey: load a skill, read its reference file, use its content.
 
-    Steps:
-    1. Create a session with an inline agent.
-    2. Mock LLM returns load_skill("deep-research") and
-       read_skill_file tool calls.
-    3. Verify the tools were called and returned skill content.
-    4. Send a follow-up; mock returns text referencing the skill.
-    5. Verify the response references the skill's content.
-
     :param http_client: HTTP client pointed at the live e2e server.
     :param live_runner_id: Runner id bound to the session.
     :param mock_llm_server_url: Mock LLM server URL.
@@ -83,17 +78,15 @@ def test_skill_loading_journey(
             "When asked, call load_skill and read_skill_file tools."
         ),
         mock_llm_base_url=f"{mock_llm_server_url}/v1",
-        builtin_tools=["load_skill", "read_skill_file"],
     )
 
-    # ── Turn 1: Mock returns load_skill + read_skill_file calls ────
     configure_mock_llm(
         mock_llm_server_url,
         [
             {
                 "tool_calls": [
                     {
-                        "type": "function_call",
+                        "call_id": "call_ls1",
                         "name": "load_skill",
                         "arguments": '{"name": "deep-research"}',
                     }
@@ -102,7 +95,7 @@ def test_skill_loading_journey(
             {
                 "tool_calls": [
                     {
-                        "type": "function_call",
+                        "call_id": "call_rsf1",
                         "name": "read_skill_file",
                         "arguments": (
                             '{"skill_name": "deep-research", '
@@ -122,14 +115,12 @@ def test_skill_loading_journey(
         key=model,
     )
 
-    # ── Step 1: Create session ──────────────────────────────
     session_id = create_runner_bound_session(
         http_client,
         agent_name=agent_name,
         runner_id=live_runner_id,
     )
 
-    # ── Step 2: Ask agent to load the deep-research skill ───
     response_id = send_user_message_to_session(
         http_client,
         session_id=session_id,
@@ -153,16 +144,14 @@ def test_skill_loading_journey(
         f"Expected completed, got {body['status']}. Error: {body.get('error')}"
     )
 
-    # ── Step 3: Verify load_skill was called ────────────────
     tool_names = _extract_tool_names(body)
-    assert "load_skill" in tool_names, f"Expected load_skill tool call. Tool calls: {tool_names}."
-
-    # ── Step 4: Verify read_skill_file was called ───────────
+    assert "load_skill" in tool_names, (
+        f"Expected load_skill tool call. Tool calls: {tool_names}."
+    )
     assert "read_skill_file" in tool_names, (
         f"Expected read_skill_file tool call. Tool calls: {tool_names}."
     )
 
-    # ── Step 5: Follow-up using skill knowledge ─────────────
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -200,7 +189,6 @@ def test_skill_loading_journey(
         f"Follow-up failed: {followup_body['status']}. Error: {followup_body.get('error')}"
     )
 
-    # ── Step 6: Verify skill context was used ───────────────
     followup_text = final_assistant_text(followup_body)
     text_lower = followup_text.lower()
     assert "source" in text_lower or "verify" in text_lower, (

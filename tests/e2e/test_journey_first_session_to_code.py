@@ -9,6 +9,10 @@ coding turn, list_comments + update_comment for the review turn)
 so the test validates the session/tool dispatch pipeline without
 requiring a real LLM.
 
+list_comments and update_comment are always auto-registered by the
+runner's ToolManager. sys_os_write is dispatched by the runner via
+a per-conversation tmpdir fallback when the spec declares no os_env.
+
 Usage::
 
     pytest tests/e2e/test_journey_first_session_to_code.py -v
@@ -32,13 +36,7 @@ from tests.e2e.conftest import (
 
 
 def _tool_names_in_output(body: dict[str, Any]) -> list[str]:
-    """
-    Collect every function_call tool name from a response body.
-
-    :param body: Terminal response body from
-        :func:`poll_session_until_terminal`.
-    :returns: List of tool names in call order.
-    """
+    """Collect every function_call tool name from a response body."""
     return [
         item["name"]
         for item in body.get("output", [])
@@ -47,12 +45,7 @@ def _tool_names_in_output(body: dict[str, Any]) -> list[str]:
 
 
 def _extract_all_text(body: dict[str, Any]) -> str:
-    """
-    Concatenate all assistant output_text blocks.
-
-    :param body: The terminal response body.
-    :returns: All assistant text joined by newlines.
-    """
+    """Concatenate all assistant output_text blocks."""
     parts: list[str] = []
     for item in body.get("output", []):
         if item.get("type") == "message":
@@ -68,16 +61,7 @@ def test_first_session_to_working_code_journey(
     live_runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
-    """
-    Full developer journey: create session, code, review comment, address it.
-
-    Steps:
-    1. Create a runner-bound session with an inline mock agent.
-    2. Mock LLM returns a sys_os_write tool call to "write" palindrome.py.
-    3. Verify the agent turn completed and the tool call was made.
-    4. Add a review comment via REST.
-    5. Mock LLM returns list_comments + update_comment tool calls.
-    6. Verify the comment is now "addressed" via the REST API.
+    """Full developer journey: create session, code, review comment, address it.
 
     :param http_client: HTTP client pointed at the live server.
     :param live_runner_id: Runner id the session is bound to.
@@ -98,23 +82,21 @@ def test_first_session_to_working_code_journey(
             "review comments, call list_comments then update_comment."
         ),
         mock_llm_base_url=f"{mock_llm_server_url}/v1",
-        builtin_tools=["sys_os_write", "list_comments", "update_comment"],
     )
 
-    # ── Turn 1: Mock returns sys_os_write tool call ─────────────────
     configure_mock_llm(
         mock_llm_server_url,
         [
             {
                 "tool_calls": [
                     {
-                        "type": "function_call",
+                        "call_id": "call_sow1",
                         "name": "sys_os_write",
                         "arguments": (
                             '{"path": "palindrome.py", '
-                            '"content": "def is_palindrome(s: str) -> bool:'
-                            "\\n    s = s.lower()\\n    return s == s[::-1]"
-                            '\\n"}'
+                            '"content": "def is_palindrome(s: str) -> bool:\\n'
+                            "    s = s.lower()\\n    return s == s[::-1]\\n"
+                            '"}'
                         ),
                     }
                 ],
@@ -124,19 +106,16 @@ def test_first_session_to_working_code_journey(
         key=model,
     )
 
-    # ── 1. Create a runner-bound session ─────────────────────────────
     session_id = create_runner_bound_session(
         http_client,
         agent_name=agent_name,
         runner_id=live_runner_id,
     )
 
-    # Verify the session exists and is in a usable state.
     session_resp = http_client.get(f"/v1/sessions/{session_id}")
     session_resp.raise_for_status()
     assert session_resp.json()["id"] == session_id
 
-    # ── 2. Send coding task ──────────────────────────────────────────
     response_id = send_user_message_to_session(
         http_client,
         session_id=session_id,
@@ -146,7 +125,6 @@ def test_first_session_to_working_code_journey(
         ),
     )
 
-    # ── 3. Wait for agent to complete and verify ─────────────────────
     body = poll_session_until_terminal(
         http_client,
         session_id=session_id,
@@ -169,7 +147,6 @@ def test_first_session_to_working_code_journey(
         f"Tool calls: {tool_calls}. Text (first 500 chars): {text_output[:500]}"
     )
 
-    # ── 4. Add a review comment via REST ─────────────────────────────
     comment_resp = http_client.post(
         f"/v1/sessions/{session_id}/comments",
         json={
@@ -186,7 +163,6 @@ def test_first_session_to_working_code_journey(
     comment_resp.raise_for_status()
     comment_id: str = comment_resp.json()["id"]
 
-    # Verify comment was created in draft status.
     comments_resp = http_client.get(f"/v1/sessions/{session_id}/comments")
     comments_resp.raise_for_status()
     comment_statuses = {c["id"]: c["status"] for c in comments_resp.json()}
@@ -194,14 +170,13 @@ def test_first_session_to_working_code_journey(
         f"Expected comment to start as 'draft', got {comment_statuses.get(comment_id)!r}"
     )
 
-    # ── 5. Mock returns list_comments + update_comment tool calls ────
     configure_mock_llm(
         mock_llm_server_url,
         [
             {
                 "tool_calls": [
                     {
-                        "type": "function_call",
+                        "call_id": "call_lc1",
                         "name": "list_comments",
                         "arguments": "{}",
                     }
@@ -210,7 +185,7 @@ def test_first_session_to_working_code_journey(
             {
                 "tool_calls": [
                     {
-                        "type": "function_call",
+                        "call_id": "call_uc1",
                         "name": "update_comment",
                         "arguments": f'{{"comment_id": "{comment_id}", "status": "addressed"}}',
                     }
@@ -242,7 +217,6 @@ def test_first_session_to_working_code_journey(
         f"output={address_body.get('output', [])}"
     )
 
-    # ── 6. Verify comment was addressed ──────────────────────────────
     address_calls = _tool_names_in_output(address_body)
     assert "list_comments" in address_calls, (
         f"Agent did not call list_comments. Tool calls seen: {address_calls}. "
@@ -253,7 +227,6 @@ def test_first_session_to_working_code_journey(
         f"Output: {address_body.get('output', [])}"
     )
 
-    # Verify the comment status via REST.
     post_resp = http_client.get(f"/v1/sessions/{session_id}/comments")
     post_resp.raise_for_status()
     post_statuses = {c["id"]: c["status"] for c in post_resp.json()}
