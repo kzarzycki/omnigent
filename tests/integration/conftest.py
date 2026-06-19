@@ -60,19 +60,12 @@ def _is_mock_mode(config: pytest.Config) -> bool:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Gate the whole directory on ``--integration`` (real LLM + harness CLIs).
+    """Gate the whole directory on mock mode (no ``--llm-api-key``).
 
-    When running in mock mode (no ``--llm-api-key``), the gate is
-    lifted so the tests run without ``--integration``.
-
-    On the codex harness, also rerun each journey up to 2x: codex
-    multi-turn dispatch flakes in bursts (empty failed turns, the
-    legacy class; burn-in failures were codex-only
-    while claude-sdk / openai-agents stayed clean). Reruns resolve a
-    different pool model per attempt via tests/_model_pools rotation.
-    Per-attempt runtime stays under the CI --timeout=180 cap (turn
-    polls are capped at 50s in helpers.run_turn), so a rerun never
-    follows a thread-timeout hard kill.
+    All tests run against the mock LLM server. Without ``--llm-api-key``
+    the ``--integration`` flag is not required. If someone passes a real
+    ``--llm-api-key`` without ``--integration`` the tests are skipped so
+    they don't accidentally hit real credentials.
 
     :param config: Pytest config object.
     :param items: Collected test items.
@@ -83,10 +76,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         )
         for item in items:
             item.add_marker(marker)
-        return
-    if config.getoption("--harness") == "codex":
-        for item in items:
-            item.add_marker(pytest.mark.flaky(reruns=2, reruns_delay=5))
 
 
 @pytest.fixture(autouse=True, scope="function")

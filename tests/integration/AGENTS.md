@@ -47,11 +47,9 @@ its own session-scoped live server, same as `tests/e2e/`).
 
 ## Authoring rules
 
-- Keep every test under the CI per-test `--timeout=180` cap PER
-  ATTEMPT (turn polls are capped at 50s for this reason). Do not add
-  blanket `llm_flaky`/`flaky` markers; the one sanctioned exception is
-  the conftest's codex-only rerun (bursty empty-turn flake, #544/#599
-  class), which is safe because attempts stay under the cap.
+- Keep every test under the CI per-test `--timeout=180` cap (turn
+  polls are capped at 50s for this reason). Do not add `llm_flaky`
+  or `flaky` markers.
 - Prompts must be imperative and assertions must check literal
   markers (`uuid` hex), never just "some text came back".
 - New harness? Add a nightly.yml matrix leg and extend
