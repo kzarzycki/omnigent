@@ -28,11 +28,6 @@
 # want to debug a skipped test locally, comment out its block.
 skips:
 
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_subagent_tool_call_ask_tunnels_to_root
-    reason: "Broken fixture independent of the ASK path: the spawned toolworker sub-agent has no `echo` callable registered (live: 'Tool echo not found in agent Omnigent', 3/3), so the TOOL_CALL ASK never runs — the tool errors before policy matters. Needs the sub-agent local-tool bridge fixed; interactive mid-flight ASK tracked by #765."
-    issue: 763
-    cluster: repl-policy-ask-surfacing
-    mode: skip
 
 
 
