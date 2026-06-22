@@ -63,18 +63,19 @@ a one-line change to that synced config, outside this directory.
 
 ## Updating the baseline
 
-When a UI change is intentional, pick whichever path fits — all regenerate every
-baseline in the pinned image (so the result matches the gate) and stage only the
-PNGs that actually changed. Review each changed image before committing.
+When a UI change is intentional, pick whichever path fits — all render in the
+pinned image, so the result matches the gate. The label and Docker paths rewrite
+**only** the baselines that drift (or are missing) and leave already-passing ones
+byte-for-byte untouched. Review each changed image before committing.
 
 ### Same-repo branch — label the PR (recommended)
 
 1. Push your branch and open the PR.
 2. Add the **`update-ui-snapshot`** label.
    [`ui-snapshot-update.yml`](../../../.github/workflows/ui-snapshot-update.yml)
-   regenerates all baselines with `--update-snapshots` in the same pinned image
-   and commits the changed PNGs back to your branch, then removes the label and
-   comments the result.
+   re-renders in the same pinned image, regenerates only the baselines that drift
+   (or are missing) — passing ones are left untouched — and commits the changed
+   PNGs back to your branch, then removes the label and comments the result.
 3. **Review the committed PNG(s)** in the bot's commit.
 4. The bot pushes with the `OMNIGENT_BOT_APP` token, so the push re-fires the
    PR's checks automatically — no manual re-run. (If the App isn't configured it
@@ -89,11 +90,12 @@ This works for **same-repo branches only** — Actions tokens can't push to a fo
 tests/e2e_ui/visual/regen_baseline_docker.sh
 ```
 
-This renders inside the exact pinned image CI uses, so the PNG it writes matches
+This renders inside the exact pinned image CI uses, so the PNGs it writes match
 the gate byte-for-byte. Only Docker is required (it builds the SPA in a Node
-container, then renders the baseline). **Review the image**, then commit and push
-— your push re-runs the checks. Pass `--skip-build` to reuse an existing
-`ap-web` build.
+container, then renders the suite and rewrites only the baselines that drift —
+passing ones stay untouched). **Review the image(s)**, then commit and push —
+your push re-runs the checks. Pass `--skip-build` to reuse an existing `ap-web`
+build.
 
 ### Fork PR without Docker — adopt the run's render
 
