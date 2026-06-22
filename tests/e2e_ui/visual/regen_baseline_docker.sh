@@ -9,8 +9,9 @@
 #
 # Only Docker is required (no local Node/Python/uv). It:
 #   1. builds the ap-web SPA in a Node 20 container, then
-#   2. renders the landing with --update-snapshots in the pinned Playwright image
-#      (installs the project + Chromium-from-the-image, no browser download).
+#   2. renders the whole visual suite with --update-snapshots in the pinned
+#      Playwright image (installs the project + Chromium-from-the-image, no
+#      browser download).
 #
 # Usage:
 #   tests/e2e_ui/visual/regen_baseline_docker.sh [--skip-build]
@@ -33,7 +34,7 @@ PLATFORM="linux/amd64"
 # produces is identical to the one the gate renders.
 NPM_VERSION="11.12.1"
 BUILD_OUTPUT="omnigent/server/static/web-ui"
-BASELINE="tests/e2e_ui/visual/snapshots/test_landing_snapshot/test_empty_landing_matches_baseline/test_empty_landing_matches_baseline[chromium][linux].png"
+SNAP_ROOT="tests/e2e_ui/visual/snapshots"
 
 SKIP_BUILD=false
 while [ $# -gt 0 ]; do
@@ -59,7 +60,7 @@ else
     bash -c "npm install -g npm@${NPM_VERSION} && npm ci --legacy-peer-deps --no-audit --no-fund && npm run build"
 fi
 
-echo "Rendering + rewriting the baseline in the pinned Playwright image ..."
+echo "Rendering + rewriting the baselines in the pinned Playwright image ..."
 # --update-snapshots makes the plugin rewrite the PNG and then "fail" the run by
 # design, so `|| true` is expected -- the git diff below is the real signal.
 # UV_PROJECT_ENVIRONMENT lives in the container (not the mounted repo) so no
@@ -83,12 +84,12 @@ docker run --rm --platform "$PLATFORM" -v "$PWD":/work "$PW_IMAGE" \
   chown -R "$(id -u):$(id -g)" /work/tests/e2e_ui/visual /work/"$BUILD_OUTPUT" /work/ap-web 2>/dev/null || true
 
 echo
-if git diff --quiet -- "$BASELINE"; then
-  echo "Baseline unchanged — it already matches this render (or the render failed; check the output above)."
+if git diff --quiet -- "$SNAP_ROOT"; then
+  echo "Baselines unchanged — they already match this render (or the render failed; check the output above)."
 else
-  git --no-pager diff --stat -- "$BASELINE" || true
+  git --no-pager diff --stat -- "$SNAP_ROOT" || true
   echo
-  echo "Updated baseline: $BASELINE"
-  echo "Next: review the image, then commit + push:"
-  echo "  git add \"$BASELINE\" && git commit -m 'test(ui-snapshot): update landing baseline' && git push"
+  echo "Updated baseline(s) under: $SNAP_ROOT"
+  echo "Next: review the image(s), then commit + push:"
+  echo "  git add \"$SNAP_ROOT\" && git commit -m 'test(ui-snapshot): update visual baselines' && git push"
 fi
