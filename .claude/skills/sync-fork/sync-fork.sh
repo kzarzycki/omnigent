@@ -4,21 +4,36 @@
 #   main  = pristine mirror of upstream/main (fast-forward only)
 #   mine  = main + cherry-picked PRs; rebased onto fresh upstream each run
 #
-# Usage: ./sync-fork.sh
+# A dirty working tree is auto-stashed before the sync and restored after,
+# so in-progress edits survive. Runs against the repo this script lives in,
+# regardless of the current directory.
+#
+# Usage: .claude/skills/sync-fork/sync-fork.sh
 set -euo pipefail
 
-UPSTREAM=upstream      # remote pointing at omnigent-ai/omnigent
-FORK=origin            # remote pointing at your fork
+UPSTREAM=upstream      # remote -> omnigent-ai/omnigent
+FORK=origin            # remote -> your fork
 MIRROR=main            # pristine upstream mirror branch
 PATCHED=mine           # integration branch carrying your cherry-picks
 
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Working tree is dirty — commit or stash first." >&2
-  exit 1
-fi
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 start_branch=$(git rev-parse --abbrev-ref HEAD)
-restore() { git checkout -q "$start_branch"; }
+
+stashed=0
+if [ -n "$(git status --porcelain)" ]; then
+  echo "==> stashing dirty working tree"
+  git stash push -u -m "sync-fork autostash" >/dev/null
+  stashed=1
+fi
+
+restore() {
+  git checkout -q "$start_branch" 2>/dev/null || true
+  if [ "$stashed" = 1 ]; then
+    echo "==> restoring stashed working tree"
+    git stash pop || echo "!! stash pop conflicted — your WIP is safe in 'git stash list'; resolve manually" >&2
+  fi
+}
 trap restore EXIT
 
 echo "==> fetching $UPSTREAM"
