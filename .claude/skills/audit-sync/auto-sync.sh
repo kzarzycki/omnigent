@@ -28,10 +28,20 @@ echo "=== auto-sync $STAMP ==="
 
 cd "$REPO" || { echo "repo not found: $REPO"; exit 1; }
 
-# single-flight: never let a slow run stack on the next tick
+# single-flight: never let a slow run stack on the next tick. Self-healing —
+# a hard kill (SIGKILL/SIGQUIT, or timeout's SIGTERM) skips the EXIT trap and
+# leaves the lock; the next run reclaims it when its pid is dead, so one killed
+# run can't wedge the daily job forever.
 LOCK="$LOGDIR/.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then echo "another run in progress — exiting"; exit 0; fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [ -f "$LOCK/pid" ] && kill -0 "$(cat "$LOCK/pid")" 2>/dev/null; then
+    echo "another run in progress (pid $(cat "$LOCK/pid")) — exiting"; exit 0
+  fi
+  echo "reclaiming stale lock"; rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "lock race — exiting"; exit 0; }
+fi
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM
 
 health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
 notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
