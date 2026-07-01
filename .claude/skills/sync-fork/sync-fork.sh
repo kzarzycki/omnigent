@@ -71,6 +71,15 @@ uv tool install --editable . --reinstall -q
 if launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
   echo "==> restarting the launchd server to load the new code"
   launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
+  # Return only once the server is back, so callers (and the omnigent policy
+  # hook that gates the next command) never see it mid-restart.
+  port=$(sed -n 's/^local_server_port: *//p' "$HOME/.omnigent/config.yaml" 2>/dev/null)
+  port=${port:-6767}
+  echo "==> waiting for the server on :$port"
+  for _ in $(seq 1 40); do
+    curl -fsS --max-time 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
 else
   echo "==> launchd agent $LAUNCHD_LABEL not loaded — skipping server restart"
 fi
