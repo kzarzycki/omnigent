@@ -43,9 +43,16 @@ restore() {
 }
 trap restore EXIT
 
-# push is non-fatal: a keychain/policy hiccup must not abort the local apply.
-# The sync is useful even remote-only-stale; pushing is a separate concern.
-push() { git push "$@" || echo "!! push failed ($*) — sync applied locally, fork remote not updated" >&2; }
+# push is non-fatal, and skipped inside an omnigent runner — a runner has no
+# git credentials (no keychain, no user/agent context), so pushing there always
+# fails. Inside omnigent the external orchestrator (auto-sync.sh) pushes instead.
+push() {
+  if [ -n "${OMNIGENT_RUNNER_ID:-}" ]; then
+    echo "==> inside an omnigent session — deferring push ($*) to the orchestrator"
+    return 0
+  fi
+  git push "$@" || echo "!! push failed ($*) — sync applied locally, fork remote not updated" >&2
+}
 
 echo "==> fetching $UPSTREAM"
 git fetch "$UPSTREAM"
