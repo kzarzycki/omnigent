@@ -64,7 +64,12 @@ AFTER=$(git rev-parse mine)
 [ -f "$REPORT" ] && { echo "--- report ---"; cat "$REPORT"; }
 
 if [ "$BEFORE" != "$AFTER" ]; then
-  echo "mine advanced $BEFORE -> $AFTER — restarting server to load backend"
+  echo "mine advanced $BEFORE -> $AFTER"
+  # Push here (external context has the deploy key; the runner does not).
+  echo "pushing main + mine to origin"
+  git push origin main || echo "!! push main failed"
+  git push --force-with-lease origin mine || echo "!! push mine failed"
+  echo "restarting server to load backend"
   launchctl kickstart -k "gui/$(id -u)/$LABEL"
   for _ in $(seq 1 40); do health && break; sleep 0.5; done
   if health; then
