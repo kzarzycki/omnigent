@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Sync this fork with upstream and replay the local patch set.
+# Sync this fork with upstream, replay the local patch set, and refresh the
+# local runtime so the synced code is actually live.
 #
 #   main  = pristine mirror of upstream/main (fast-forward only)
 #   mine  = main + cherry-picked PRs; rebased onto fresh upstream each run
 #
-# A dirty working tree is auto-stashed before the sync and restored after,
-# so in-progress edits survive. Runs against the repo this script lives in,
+# A dirty working tree is auto-stashed before the sync and restored after, so
+# in-progress edits survive. Runs against the repo this script lives in,
 # regardless of the current directory.
+#
+# The server restart is deliberately NOT done here when running inside an
+# omnigent session (OMNIGENT_RUNNER_ID set) — restarting the server would kill
+# the very session running this script. In that case the caller (the launchd
+# auto-sync orchestrator, or the user from a normal shell) owns the restart.
 #
 # Usage: .claude/skills/sync-fork/sync-fork.sh
 set -euo pipefail
@@ -37,6 +43,10 @@ restore() {
 }
 trap restore EXIT
 
+# push is non-fatal: a keychain/policy hiccup must not abort the local apply.
+# The sync is useful even remote-only-stale; pushing is a separate concern.
+push() { git push "$@" || echo "!! push failed ($*) — sync applied locally, fork remote not updated" >&2; }
+
 echo "==> fetching $UPSTREAM"
 git fetch "$UPSTREAM"
 
@@ -44,12 +54,12 @@ prev_upstream=$(git rev-parse -q --verify "$MIRROR" || echo "")
 
 echo "==> fast-forwarding $MIRROR to $UPSTREAM/$MIRROR"
 git branch -f "$MIRROR" "$UPSTREAM/$MIRROR"
-git push "$FORK" "$MIRROR"
+push "$FORK" "$MIRROR"
 
 echo "==> rebasing $PATCHED onto $UPSTREAM/$MIRROR"
 git checkout -q "$PATCHED"
 git rebase "$UPSTREAM/$MIRROR"
-git push --force-with-lease "$FORK" "$PATCHED"
+push --force-with-lease "$FORK" "$PATCHED"
 
 # --- refresh the local runtime so synced code is actually live -----------
 # The editable install runs Python straight from this checkout, but: the web
@@ -68,11 +78,15 @@ fi
 echo "==> re-syncing the editable install (deps + version stamp)"
 uv tool install --editable . --reinstall -q
 
-if launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
+# Restart only from OUTSIDE an omnigent session. Inside one, restarting the
+# server kills this session mid-run; the external orchestrator restarts instead.
+if [ -n "${OMNIGENT_RUNNER_ID:-}" ]; then
+  echo "==> inside an omnigent session — skipping server restart (caller owns it)"
+elif launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
   echo "==> restarting the launchd server to load the new code"
   launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
-  # Return only once the server is back, so callers (and the omnigent policy
-  # hook that gates the next command) never see it mid-restart.
+  # Return only once the server is back, so the next command never sees it
+  # mid-restart (the omnigent policy hook fails closed while it's down).
   port=$(sed -n 's/^local_server_port: *//p' "$HOME/.omnigent/config.yaml" 2>/dev/null)
   port=${port:-6767}
   echo "==> waiting for the server on :$port"
@@ -84,4 +98,4 @@ else
   echo "==> launchd agent $LAUNCHD_LABEL not loaded — skipping server restart"
 fi
 
-echo "==> done. $MIRROR and $PATCHED are up to date; local runtime refreshed."
+echo "==> done. $MIRROR and $PATCHED up to date; local runtime refreshed."
