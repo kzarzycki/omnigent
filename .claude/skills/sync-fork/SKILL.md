@@ -27,9 +27,19 @@ It performs, in order:
 2. `git fetch upstream`.
 3. Fast-forward `main` to `upstream/main`, push to `origin`.
 4. Rebase `mine` onto `upstream/main`, force-push (`--force-with-lease`) to `origin`.
-5. Return to the starting branch and restore the stash.
+5. **Refresh the local runtime** so the synced code is actually live:
+   rebuild the web SPA if `web/` changed (it's a gitignored build artifact),
+   re-sync the editable install (`uv tool install --editable . --reinstall`)
+   for new deps + an honest `--version`, and `launchctl kickstart` the
+   `dev.zarz.omnigent` agent so the running server drops its old imports.
+6. Return to the starting branch and restore the stash.
 
-A clean tree is left exactly where it started, now on top of current upstream.
+A clean tree is left exactly where it started, now on top of current upstream,
+with the web UI, deps, and running server all matching the synced code.
+
+The refresh steps are guarded — web rebuild is skipped when `web/` is
+unchanged, and the server restart is skipped when the launchd agent isn't
+loaded — so the script still works on a checkout without the local install.
 
 ## When the rebase conflicts
 
