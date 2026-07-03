@@ -3646,6 +3646,16 @@ def _claude_transcript_record_from_session_item(
         output = item.get("output")
         if not isinstance(output, str):
             output = "" if output is None else json.dumps(output, separators=(",", ":"))
+        if output.lstrip().startswith("<"):
+            # Claude Code's resume loader JSON.parses task-tool results
+            # (TaskOutput/Monitor); raw "<retrieval_status>..." /
+            # "<tool_use_error>..." strings crash it with "JSON Parse error:
+            # Unrecognized token '<'", bricking `claude --resume`. Re-encode
+            # '<'-leading outputs as valid JSON so regenerated transcripts
+            # always parse. Ceiling: a non-JSON task output NOT starting with
+            # '<' would still crash; scope by tool name (call_id -> name map)
+            # if that ever appears.
+            output = json.dumps({"content": output}, separators=(",", ":"))
         record_type = "user"
         message = {
             "role": "user",
