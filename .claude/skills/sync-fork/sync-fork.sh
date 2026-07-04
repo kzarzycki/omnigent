@@ -77,7 +77,9 @@ new_upstream=$(git rev-parse "$MIRROR")
 if [ -f web/package.json ] && \
    { [ -z "$prev_upstream" ] || ! git diff --quiet "$prev_upstream" "$new_upstream" -- web/; }; then
   echo "==> web UI changed — rebuilding the SPA bundle"
-  ( cd web && npm ci && npm run build )
+  # npm ci fails hard when upstream ships a package.json/lock out of sync;
+  # fall back to npm install so an unattended sync self-heals the lock.
+  ( cd web && { npm ci || npm install; } && npm run build )
 else
   echo "==> web UI unchanged — skipping rebuild"
 fi
