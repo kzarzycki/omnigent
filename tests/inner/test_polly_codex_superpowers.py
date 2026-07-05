@@ -32,6 +32,23 @@ def test_polly_codex_bundle_contains_superpowers_skills() -> None:
     assert {skill.name for skill in spec.skills} >= SUPERPOWERS_SKILLS
 
 
+def test_polly_codex_superpowers_surface_through_codex_discovery(tmp_path: Path) -> None:
+    """Codex-native session discovery surfaces the vendored bundle skills."""
+    from omnigent.spec.skill_sources import SkillSourceContext, resolve_harness_skills
+
+    ctx = SkillSourceContext(
+        roots=(POLLY_CODEX_BUNDLE,),
+        home=tmp_path,
+        skills_filter="all",
+        bundle_dir=POLLY_CODEX_BUNDLE,
+    )
+
+    discovered = {skill.name for skill in resolve_harness_skills(ctx, "codex-native")}
+
+    assert discovered >= SUPERPOWERS_SKILLS
+    assert "using-superpowers" in discovered
+
+
 def test_polly_codex_superpowers_populates_private_codex_home(tmp_path: Path) -> None:
     """
     The Codex-native launcher exposes bundle skills through CODEX_HOME/skills.
