@@ -3981,6 +3981,191 @@ async def test_resolve_cold_resume_args_bootstraps_missing_local_claude_transcri
     )
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        pytest.param("plain text result", None, id="plain-text"),
+        pytest.param("[not valid json", None, id="unterminated-json-array"),
+        pytest.param("[1,2,3]", None, id="array-of-non-dicts"),
+        pytest.param(
+            json.dumps([{"type": "text", "value": "foo"}]),
+            None,
+            id="type-tag-without-required-field",
+        ),
+        pytest.param(
+            json.dumps([{"type": "image", "source": "not-an-object"}]),
+            None,
+            id="image-block-with-non-dict-source",
+        ),
+        pytest.param(
+            json.dumps([{"type": "image", "source": {}}]),
+            None,
+            id="image-block-with-source-missing-type",
+        ),
+        pytest.param("[]", None, id="empty-list"),
+        pytest.param(
+            json.dumps([{"type": "text", "text": "hello"}]),
+            None,
+            id="text-only-block-list-not-rehydrated",
+        ),
+        pytest.param(
+            json.dumps(
+                [
+                    {"type": "text", "text": "here is the screenshot"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                    },
+                ]
+            ),
+            [
+                {"type": "text", "text": "here is the screenshot"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                },
+            ],
+            id="mixed-text-and-image-blocks",
+        ),
+        pytest.param(
+            json.dumps(
+                [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                    }
+                ]
+            ),
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                }
+            ],
+            id="valid-image-block",
+        ),
+    ],
+)
+def test_claude_tool_result_blocks_from_string(output: str, expected: list[dict] | None) -> None:
+    """
+    Only a JSON-encoded block list with at least one media block rehydrates.
+
+    Covers the false-positive risks flagged in review: a `type` tag alone
+    (e.g. ``{"type": "text", "value": "foo"}``, missing the actual ``text``
+    field) or a ``source`` dict missing its own ``type`` discriminator must
+    not be mistaken for a real block. A text-only block list is left as a
+    string too, since it's indistinguishable from ordinary tool JSON that
+    happens to share the same shape, and flattening it loses nothing the fix
+    is about.
+    """
+    assert claude_native._claude_tool_result_blocks_from_string(output) == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_cold_resume_args_preserves_tool_result_image_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    An image tool result survives a cold-resume transcript rebuild as a
+    structured content block, not a flattened JSON string.
+
+    Regression for the resume-transcript regenerator: ``_tool_result_output``
+    (``claude_native_bridge.py``) JSON-dumps a non-string ``tool_result``
+    content list into the Omnigent item's ``output`` field when a live
+    session is first recorded. Without a matching rehydration step here, that
+    JSON string gets written verbatim into the regenerated transcript's
+    ``tool_result.content``, so a resumed session replays the original image
+    to the model as raw base64 text instead of a real ``image`` block —
+    inflating its token cost by roughly two orders of magnitude.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    projects = tmp_path / "claude-projects"
+    image_block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+    }
+    items = [
+        {
+            "id": "msg_user_1",
+            "response_id": "resp_1",
+            "type": "message",
+            "status": "completed",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "screenshot the deck"}],
+        },
+        {
+            "id": "fc_read_1",
+            "response_id": "resp_1",
+            "type": "function_call",
+            "status": "completed",
+            "model": "claude-native-ui",
+            "name": "Read",
+            "arguments": '{"file_path":"tile.jpg"}',
+            "call_id": "toolu_read_1",
+        },
+        {
+            "id": "fco_read_1",
+            "response_id": "resp_1",
+            "type": "function_call_output",
+            "status": "completed",
+            "call_id": "toolu_read_1",
+            # What _tool_result_output stores for a live tool_result whose
+            # content was a block list rather than a plain string.
+            "output": json.dumps([image_block], separators=(",", ":")),
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """
+        Serve the session snapshot and its single page of items.
+
+        :param request: Incoming mock HTTP request.
+        :returns: Mock Omnigent response.
+        """
+        if request.url.path == "/v1/sessions/conv_abc":
+            return httpx.Response(
+                200,
+                json=_conversation_response_body(
+                    labels={"omnigent.wrapper": "claude-code-native-ui"},
+                    external_session_id="claude-uuid-abc",
+                ),
+            )
+        if request.url.path == "/v1/sessions/conv_abc/items":
+            return httpx.Response(200, json=_items_response_body(items))
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(claude_native, "_CLAUDE_PROJECTS_DIR", projects)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await claude_native._resolve_cold_resume_args(client, "conv_abc")
+
+    transcript_path = (
+        projects
+        / claude_native._sanitize_claude_project_name(str(workspace.resolve()))
+        / "claude-uuid-abc.jsonl"
+    )
+    records = [
+        json.loads(line)
+        for line in transcript_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tool_result_record = next(
+        r
+        for r in records
+        if r["type"] == "user" and r["message"]["content"] != "screenshot the deck"
+    )
+    assert tool_result_record["message"]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_1",
+            "content": [image_block],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_resolve_cold_resume_args_replaces_existing_local_claude_transcript(
     monkeypatch: pytest.MonkeyPatch,
@@ -6244,7 +6429,7 @@ def test_claude_transcript_records_handles_compaction_item() -> None:
 
 
 @pytest.mark.parametrize(
-    ("output", "expected_parsed"),
+    ("output", "expected_parsed", "expected_content"),
     [
         # An angle-bracket display string (e.g. a TaskOutput result) is the
         # regression case: Claude's TaskOutput renderer JSON.parses
@@ -6252,18 +6437,22 @@ def test_claude_transcript_records_handles_compaction_item() -> None:
         (
             "<retrieval_status>timeout</retrieval_status>",
             "<retrieval_status>timeout</retrieval_status>",
+            "<retrieval_status>timeout</retrieval_status>",
         ),
         # A <tool_use_error> blob is the same hazard from a different tool.
         (
             "<tool_use_error>No task found</tool_use_error>",
             "<tool_use_error>No task found</tool_use_error>",
+            "<tool_use_error>No task found</tool_use_error>",
         ),
         # Ordinary plain text must also round-trip to a string.
-        ("plain text output", "plain text output"),
-        # Already-JSON output (e.g. an image content-block array) must pass
-        # through verbatim, not get double-encoded into a string literal.
+        ("plain text output", "plain text output", "plain text output"),
+        # An image content-block array must pass through toolUseResult
+        # verbatim, and rehydrate into a real block list in the tool_result
+        # content the model sees — not stay flattened JSON text.
         (
             '[{"type":"image","source":{"type":"base64","data":"AAA"}}]',
+            [{"type": "image", "source": {"type": "base64", "data": "AAA"}}],
             [{"type": "image", "source": {"type": "base64", "data": "AAA"}}],
         ),
     ],
@@ -6271,6 +6460,7 @@ def test_claude_transcript_records_handles_compaction_item() -> None:
 def test_claude_transcript_tool_use_result_is_json_parseable(
     output: str,
     expected_parsed: object,
+    expected_content: object,
 ) -> None:
     """
     Synthesized ``toolUseResult`` must survive Claude's resume-time parse.
@@ -6278,9 +6468,10 @@ def test_claude_transcript_tool_use_result_is_json_parseable(
     Claude Code ``JSON.parse``s ``toolUseResult`` for some built-in
     renderers (``TaskOutput``). A raw ``<...>`` display string crashed
     the TUI at boot before the input prompt rendered, so the resume
-    failed. The synthesizer must always emit a JSON-parseable value,
-    while leaving the ``tool_result`` content block as the verbatim
-    string the model and web UI see.
+    failed. The synthesizer must always emit a JSON-parseable value. A
+    JSON-encoded content block list (e.g. an image) must also rehydrate
+    into real blocks in the ``tool_result`` content the model and web UI
+    see, rather than staying flattened JSON text.
     """
     items: list[dict[str, Any]] = [
         {
@@ -6301,8 +6492,7 @@ def test_claude_transcript_tool_use_result_is_json_parseable(
     record = records[0]
     # toolUseResult must parse without raising, and preserve the value.
     assert json.loads(record["toolUseResult"]) == expected_parsed
-    # The tool_result content block keeps the raw string unchanged.
-    assert record["message"]["content"][0]["content"] == output
+    assert record["message"]["content"][0]["content"] == expected_content
 
 
 def test_json_safe_tool_use_result_wraps_non_json() -> None:

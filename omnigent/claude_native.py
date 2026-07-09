@@ -3660,6 +3660,15 @@ def _claude_transcript_record_from_session_item(
         output = item.get("output")
         if not isinstance(output, str):
             output = "" if output is None else json.dumps(output, separators=(",", ":"))
+        tool_result_content: str | list[dict[str, Any]] = output
+        blocks = _claude_tool_result_blocks_from_string(output)
+        if blocks is not None:
+            # A live tool_result with non-string content (e.g. an image) was
+            # JSON-dumped to this string when the item was first recorded
+            # (see _tool_result_output in claude_native_bridge.py). Restore
+            # the original block list so a resumed session replays the image
+            # to the model as an image block instead of raw base64 text.
+            tool_result_content = blocks
         record_type = "user"
         message = {
             "role": "user",
@@ -3667,7 +3676,7 @@ def _claude_transcript_record_from_session_item(
                 {
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": output,
+                    "content": tool_result_content,
                 }
             ],
         }
@@ -3771,6 +3780,61 @@ def _claude_text_blocks_from_api_content(
         if isinstance(text, str) and text:
             blocks.append({"type": "text", "text": text})
     return blocks
+
+
+def _is_claude_tool_result_block(block: object) -> bool:
+    """
+    Check whether ``block`` has the shape of a Claude tool_result block.
+
+    Validates the field Claude actually reads for each type, not just the
+    ``type`` tag, so ordinary tool JSON that happens to carry a `type` key
+    (e.g. ``{"type": "text", "value": "foo"}``) isn't misread as a block.
+
+    :param block: One element of a parsed ``tool_result.content`` list.
+    :returns: ``True`` if ``block`` looks like a genuine content block.
+    """
+    if not isinstance(block, dict):
+        return False
+    block_type = block.get("type")
+    if block_type == "text":
+        return isinstance(block.get("text"), str)
+    if block_type in ("image", "document"):
+        source = block.get("source")
+        return isinstance(source, dict) and isinstance(source.get("type"), str)
+    return False
+
+
+def _claude_tool_result_blocks_from_string(output: str) -> list[dict[str, Any]] | None:
+    """
+    Recover a tool_result content block list flattened to a JSON string.
+
+    ``_tool_result_output`` in ``claude_native_bridge.py`` JSON-dumps any
+    non-string ``tool_result.content`` (e.g. an image block) into the
+    Omnigent item's ``output`` field. This reverses that for a resumed
+    transcript so the original block type survives the round trip.
+
+    Only rehydrates lists containing at least one image/document block:
+    a text-only block list is indistinguishable from ordinary tool JSON
+    that happens to share the same shape, and flattening it to a string
+    loses nothing the token-cost bug is about.
+
+    :param output: ``function_call_output.output`` string.
+    :returns: The original content block list, or ``None`` if ``output``
+        is plain text or has no media block to recover.
+    """
+    if not output.lstrip().startswith("["):
+        return None
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(_is_claude_tool_result_block(block) for block in parsed):
+        return None
+    if not any(block.get("type") in ("image", "document") for block in parsed):
+        return None
+    return parsed
 
 
 def _json_object_from_string(value: object) -> dict[str, Any]:
