@@ -3949,11 +3949,35 @@ async def test_resolve_cold_resume_args_bootstraps_missing_local_claude_transcri
             None,
             id="image-block-with-non-dict-source",
         ),
+        pytest.param(
+            json.dumps([{"type": "image", "source": {}}]),
+            None,
+            id="image-block-with-source-missing-type",
+        ),
         pytest.param("[]", None, id="empty-list"),
         pytest.param(
             json.dumps([{"type": "text", "text": "hello"}]),
-            [{"type": "text", "text": "hello"}],
-            id="valid-text-block",
+            None,
+            id="text-only-block-list-not-rehydrated",
+        ),
+        pytest.param(
+            json.dumps(
+                [
+                    {"type": "text", "text": "here is the screenshot"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                    },
+                ]
+            ),
+            [
+                {"type": "text", "text": "here is the screenshot"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                },
+            ],
+            id="mixed-text-and-image-blocks",
         ),
         pytest.param(
             json.dumps(
@@ -3976,12 +4000,15 @@ async def test_resolve_cold_resume_args_bootstraps_missing_local_claude_transcri
 )
 def test_claude_tool_result_blocks_from_string(output: str, expected: list[dict] | None) -> None:
     """
-    Only a JSON-encoded list of well-formed Claude content blocks rehydrates.
+    Only a JSON-encoded block list with at least one media block rehydrates.
 
-    Covers the false-positive risk flagged in review: a `type` tag alone
+    Covers the false-positive risks flagged in review: a `type` tag alone
     (e.g. ``{"type": "text", "value": "foo"}``, missing the actual ``text``
-    field) must not be mistaken for a real block, or ordinary tool output
-    that happens to look list-like/JSON-like would get misclassified.
+    field) or a ``source`` dict missing its own ``type`` discriminator must
+    not be mistaken for a real block. A text-only block list is left as a
+    string too, since it's indistinguishable from ordinary tool JSON that
+    happens to share the same shape, and flattening it loses nothing the fix
+    is about.
     """
     assert claude_native._claude_tool_result_blocks_from_string(output) == expected
 

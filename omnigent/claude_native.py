@@ -3822,7 +3822,8 @@ def _is_claude_tool_result_block(block: object) -> bool:
     if block_type == "text":
         return isinstance(block.get("text"), str)
     if block_type in ("image", "document"):
-        return isinstance(block.get("source"), dict)
+        source = block.get("source")
+        return isinstance(source, dict) and isinstance(source.get("type"), str)
     return False
 
 
@@ -3835,9 +3836,14 @@ def _claude_tool_result_blocks_from_string(output: str) -> list[dict[str, Any]] 
     Omnigent item's ``output`` field. This reverses that for a resumed
     transcript so the original block type survives the round trip.
 
+    Only rehydrates lists containing at least one image/document block:
+    a text-only block list is indistinguishable from ordinary tool JSON
+    that happens to share the same shape, and flattening it to a string
+    loses nothing the token-cost bug is about.
+
     :param output: ``function_call_output.output`` string.
     :returns: The original content block list, or ``None`` if ``output``
-        is plain text rather than a JSON-encoded block list.
+        is plain text or has no media block to recover.
     """
     if not output.lstrip().startswith("["):
         return None
@@ -3848,6 +3854,8 @@ def _claude_tool_result_blocks_from_string(output: str) -> list[dict[str, Any]] 
     if not isinstance(parsed, list) or not parsed:
         return None
     if not all(_is_claude_tool_result_block(block) for block in parsed):
+        return None
+    if not any(block.get("type") in ("image", "document") for block in parsed):
         return None
     return parsed
 
