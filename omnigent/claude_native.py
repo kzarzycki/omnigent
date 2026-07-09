@@ -3654,7 +3654,16 @@ def _claude_transcript_record_from_session_item(
         output = item.get("output")
         if not isinstance(output, str):
             output = "" if output is None else json.dumps(output, separators=(",", ":"))
-        if output.lstrip().startswith("<"):
+        tool_result_content: str | list[dict[str, Any]] = output
+        blocks = _claude_tool_result_blocks_from_string(output)
+        if blocks is not None:
+            # A live tool_result with non-string content (e.g. an image) was
+            # JSON-dumped to this string when the item was first recorded
+            # (see _tool_result_output in claude_native_bridge.py). Restore
+            # the original block list so a resumed session replays the image
+            # to the model as an image block instead of raw base64 text.
+            tool_result_content = blocks
+        elif output.lstrip().startswith("<"):
             # Claude Code's resume loader JSON.parses task-tool results
             # (TaskOutput/Monitor); raw "<retrieval_status>..." /
             # "<tool_use_error>..." strings crash it with "JSON Parse error:
@@ -3664,6 +3673,7 @@ def _claude_transcript_record_from_session_item(
             # '<' would still crash; scope by tool name (call_id -> name map)
             # if that ever appears.
             output = json.dumps({"content": output}, separators=(",", ":"))
+            tool_result_content = output
         record_type = "user"
         message = {
             "role": "user",
@@ -3671,7 +3681,7 @@ def _claude_transcript_record_from_session_item(
                 {
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": output,
+                    "content": tool_result_content,
                 }
             ],
         }
@@ -3793,6 +3803,53 @@ def _json_object_from_string(value: object) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_claude_tool_result_block(block: object) -> bool:
+    """
+    Check whether ``block`` has the shape of a Claude tool_result block.
+
+    Validates the field Claude actually reads for each type, not just the
+    ``type`` tag, so ordinary tool JSON that happens to carry a `type` key
+    (e.g. ``{"type": "text", "value": "foo"}``) isn't misread as a block.
+
+    :param block: One element of a parsed ``tool_result.content`` list.
+    :returns: ``True`` if ``block`` looks like a genuine content block.
+    """
+    if not isinstance(block, dict):
+        return False
+    block_type = block.get("type")
+    if block_type == "text":
+        return isinstance(block.get("text"), str)
+    if block_type in ("image", "document"):
+        return isinstance(block.get("source"), dict)
+    return False
+
+
+def _claude_tool_result_blocks_from_string(output: str) -> list[dict[str, Any]] | None:
+    """
+    Recover a tool_result content block list flattened to a JSON string.
+
+    ``_tool_result_output`` in ``claude_native_bridge.py`` JSON-dumps any
+    non-string ``tool_result.content`` (e.g. an image block) into the
+    Omnigent item's ``output`` field. This reverses that for a resumed
+    transcript so the original block type survives the round trip.
+
+    :param output: ``function_call_output.output`` string.
+    :returns: The original content block list, or ``None`` if ``output``
+        is plain text rather than a JSON-encoded block list.
+    """
+    if not output.lstrip().startswith("["):
+        return None
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(_is_claude_tool_result_block(block) for block in parsed):
+        return None
+    return parsed
 
 
 def _preflight_local_tools(command: str) -> None:

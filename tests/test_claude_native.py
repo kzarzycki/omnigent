@@ -3933,6 +3933,164 @@ async def test_resolve_cold_resume_args_bootstraps_missing_local_claude_transcri
     )
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        pytest.param("plain text result", None, id="plain-text"),
+        pytest.param("[not valid json", None, id="unterminated-json-array"),
+        pytest.param("[1,2,3]", None, id="array-of-non-dicts"),
+        pytest.param(
+            json.dumps([{"type": "text", "value": "foo"}]),
+            None,
+            id="type-tag-without-required-field",
+        ),
+        pytest.param(
+            json.dumps([{"type": "image", "source": "not-an-object"}]),
+            None,
+            id="image-block-with-non-dict-source",
+        ),
+        pytest.param("[]", None, id="empty-list"),
+        pytest.param(
+            json.dumps([{"type": "text", "text": "hello"}]),
+            [{"type": "text", "text": "hello"}],
+            id="valid-text-block",
+        ),
+        pytest.param(
+            json.dumps(
+                [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                    }
+                ]
+            ),
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+                }
+            ],
+            id="valid-image-block",
+        ),
+    ],
+)
+def test_claude_tool_result_blocks_from_string(output: str, expected: list[dict] | None) -> None:
+    """
+    Only a JSON-encoded list of well-formed Claude content blocks rehydrates.
+
+    Covers the false-positive risk flagged in review: a `type` tag alone
+    (e.g. ``{"type": "text", "value": "foo"}``, missing the actual ``text``
+    field) must not be mistaken for a real block, or ordinary tool output
+    that happens to look list-like/JSON-like would get misclassified.
+    """
+    assert claude_native._claude_tool_result_blocks_from_string(output) == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_cold_resume_args_preserves_tool_result_image_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    An image tool result survives a cold-resume transcript rebuild as a
+    structured content block, not a flattened JSON string.
+
+    Regression for the resume-transcript regenerator: ``_tool_result_output``
+    (``claude_native_bridge.py``) JSON-dumps a non-string ``tool_result``
+    content list into the Omnigent item's ``output`` field when a live
+    session is first recorded. Without a matching rehydration step here, that
+    JSON string gets written verbatim into the regenerated transcript's
+    ``tool_result.content``, so a resumed session replays the original image
+    to the model as raw base64 text instead of a real ``image`` block —
+    inflating its token cost by roughly two orders of magnitude.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    projects = tmp_path / "claude-projects"
+    image_block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+    }
+    items = [
+        {
+            "id": "msg_user_1",
+            "response_id": "resp_1",
+            "type": "message",
+            "status": "completed",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "screenshot the deck"}],
+        },
+        {
+            "id": "fc_read_1",
+            "response_id": "resp_1",
+            "type": "function_call",
+            "status": "completed",
+            "model": "claude-native-ui",
+            "name": "Read",
+            "arguments": '{"file_path":"tile.jpg"}',
+            "call_id": "toolu_read_1",
+        },
+        {
+            "id": "fco_read_1",
+            "response_id": "resp_1",
+            "type": "function_call_output",
+            "status": "completed",
+            "call_id": "toolu_read_1",
+            # What _tool_result_output stores for a live tool_result whose
+            # content was a block list rather than a plain string.
+            "output": json.dumps([image_block], separators=(",", ":")),
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """
+        Serve the session snapshot and its single page of items.
+
+        :param request: Incoming mock HTTP request.
+        :returns: Mock Omnigent response.
+        """
+        if request.url.path == "/v1/sessions/conv_abc":
+            return httpx.Response(
+                200,
+                json=_conversation_response_body(
+                    labels={"omnigent.wrapper": "claude-code-native-ui"},
+                    external_session_id="claude-uuid-abc",
+                ),
+            )
+        if request.url.path == "/v1/sessions/conv_abc/items":
+            return httpx.Response(200, json=_items_response_body(items))
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(claude_native, "_CLAUDE_PROJECTS_DIR", projects)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await claude_native._resolve_cold_resume_args(client, "conv_abc")
+
+    transcript_path = (
+        projects
+        / claude_native._sanitize_claude_project_name(str(workspace.resolve()))
+        / "claude-uuid-abc.jsonl"
+    )
+    records = [
+        json.loads(line)
+        for line in transcript_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tool_result_record = next(
+        r
+        for r in records
+        if r["type"] == "user" and r["message"]["content"] != "screenshot the deck"
+    )
+    assert tool_result_record["message"]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_1",
+            "content": [image_block],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_resolve_cold_resume_args_replaces_existing_local_claude_transcript(
     monkeypatch: pytest.MonkeyPatch,
