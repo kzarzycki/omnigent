@@ -46,6 +46,25 @@ trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM
 health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
 notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
 
+# Push whatever is unpushed, rather than only what this run applied.
+# sync-fork.sh skips its own push when it runs inside an omnigent session and
+# defers to "the orchestrator" — but this script used to push only inside its
+# own BEFORE/AFTER window, so a sync applied by an interactive session was
+# pushed by nobody and sat local indefinitely. Reconciling against origin
+# covers both cases, and is a no-op when they already match.
+push_fork() {
+  git fetch origin -q || { echo "!! fetch origin failed — skipping push"; return 0; }
+  for br in main mine; do
+    lsha=$(git rev-parse "$br" 2>/dev/null) || continue
+    rsha=$(git rev-parse "origin/$br" 2>/dev/null || echo "")
+    [ "$lsha" = "$rsha" ] && continue
+    # mine is rebased onto fresh upstream every sync, so its history is
+    # rewritten; the lease is what keeps that from clobbering someone else.
+    echo "pushing $br -> origin ($rsha -> $lsha)"
+    git push --force-with-lease origin "$br" || echo "!! push $br failed"
+  done
+}
+
 # Nothing prunes ~/.omnigent/logs: one dead server log had grown to 1.2 GB and
 # host-runner/ to 1.9 GB across 319 per-conversation files. Age out the
 # per-run debug logs from this daily tick. auto-sync/ is skipped on purpose —
@@ -72,6 +91,10 @@ for log in "$HOME"/.omnigent/logs/launchd-*.log; do
   fi
 done
 
+# Before anything else, flush a local advance some earlier run left unpushed.
+# Runs on every tick, including the "up to date" early exit below.
+push_fork
+
 git fetch upstream -q || { echo "fetch failed"; exit 1; }
 BASE=$(git merge-base mine upstream/main)
 NEW=$(git rev-parse upstream/main)
@@ -94,7 +117,8 @@ Do NOT restart the omnigent server — the scheduler does that."
 
 echo "--- driving headless omnigent session (<=15m) ---"
 timeout 900 omnigent run --harness claude --tools coding -p "$PROMPT" < /dev/null
-echo "--- session returned (exit $?) ---"
+SESSION_RC=$?
+echo "--- session returned (exit $SESSION_RC) ---"
 
 AFTER=$(git rev-parse mine)
 [ -f "$REPORT" ] && { echo "--- report ---"; cat "$REPORT"; }
@@ -102,9 +126,7 @@ AFTER=$(git rev-parse mine)
 if [ "$BEFORE" != "$AFTER" ]; then
   echo "mine advanced $BEFORE -> $AFTER"
   # Push here (external context has the deploy key; the runner does not).
-  echo "pushing main + mine to origin"
-  git push origin main || echo "!! push main failed"
-  git push --force-with-lease origin mine || echo "!! push mine failed"
+  push_fork
   echo "restarting server to load backend"
   # kickstart only restarts an already-loaded service; after a `launchctl
   # bootout` the label is gone and only bootstrap can bring it back.
@@ -123,6 +145,13 @@ if [ "$BEFORE" != "$AFTER" ]; then
     echo "server DID NOT come back — check manually"
     notify "sync applied but server unhealthy — check logs"
   fi
+elif [ "$(sed -n 's/^VERDICT: *\(PASS\).*/\1/p' "$REPORT" 2>/dev/null | head -1)" = "PASS" ]; then
+  # A clean audit that then failed to apply is NOT the same as a deliberate
+  # hold, but both leave `mine` unchanged. Reporting them identically hid a
+  # crashed apply ("Runner disconnected unexpectedly", exit 1) for days —
+  # the daily notification just said "held", so nothing looked wrong.
+  echo "audit PASSED but nothing was applied (session exit $SESSION_RC) — apply failed, investigate"
+  notify "audit passed but APPLY FAILED (exit $SESSION_RC) — see $STAMP.log"
 else
   echo "mine unchanged — audit held or no-op; no restart"
   notify "held / no change — see report-$STAMP.md"
