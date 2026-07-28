@@ -93,20 +93,30 @@ uv tool install --editable . --reinstall -q
 # server kills this session mid-run; the external orchestrator restarts instead.
 if [ -n "${OMNIGENT_RUNNER_ID:-}" ]; then
   echo "==> inside an omnigent session — skipping server restart (caller owns it)"
-elif launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
-  echo "==> restarting the launchd server to load the new code"
-  launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
+else
+  # kickstart only restarts an ALREADY-LOADED service. A `launchctl bootout`
+  # leaves the label unregistered, and kickstart can't re-add it — bootstrap is
+  # the only way back. Without this fallback a booted-out server stays down and
+  # every later sync just prints "not loaded" and moves on.
+  if launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
+    echo "==> restarting the launchd server to load the new code"
+    launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
+  else
+    echo "==> $LAUNCHD_LABEL not loaded — bootstrapping it into the Aqua session"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+  fi
   # Return only once the server is back, so the next command never sees it
   # mid-restart (the omnigent policy hook fails closed while it's down).
+  # Cold start is slow — ~2 min on a large chat.db — so wait generously.
   port=$(sed -n 's/^local_server_port: *//p' "$HOME/.omnigent/config.yaml" 2>/dev/null)
   port=${port:-6767}
   echo "==> waiting for the server on :$port"
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 180); do
     curl -fsS --max-time 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
-    sleep 0.5
+    sleep 1
   done
-else
-  echo "==> launchd agent $LAUNCHD_LABEL not loaded — skipping server restart"
+  curl -fsS --max-time 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1 \
+    || echo "!! server did not come back on :$port — check ~/.omnigent/logs/launchd-omnigent.err.log" >&2
 fi
 
 echo "==> done. $MIRROR and $PATCHED up to date; local runtime refreshed."
