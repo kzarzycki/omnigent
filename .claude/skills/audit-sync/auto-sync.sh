@@ -80,8 +80,16 @@ if [ "$BEFORE" != "$AFTER" ]; then
   git push origin main || echo "!! push main failed"
   git push --force-with-lease origin mine || echo "!! push mine failed"
   echo "restarting server to load backend"
-  launchctl kickstart -k "gui/$(id -u)/$LABEL"
-  for _ in $(seq 1 40); do health && break; sleep 0.5; done
+  # kickstart only restarts an already-loaded service; after a `launchctl
+  # bootout` the label is gone and only bootstrap can bring it back.
+  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+  else
+    echo "$LABEL not loaded — bootstrapping it"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
+  fi
+  # Cold start is slow (~2 min on a large chat.db), so wait generously.
+  for _ in $(seq 1 180); do health && break; sleep 1; done
   if health; then
     echo "server healthy on :$PORT"
     notify "synced -> $(git rev-parse --short mine); server restarted"
