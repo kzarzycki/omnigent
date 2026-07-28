@@ -46,6 +46,32 @@ trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM
 health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
 notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
 
+# Nothing prunes ~/.omnigent/logs: one dead server log had grown to 1.2 GB and
+# host-runner/ to 1.9 GB across 319 per-conversation files. Age out the
+# per-run debug logs from this daily tick. auto-sync/ is skipped on purpose —
+# it holds the audit reports, which are the record of what got applied.
+for dir in server host-runner host-daemon cli; do
+  [ -d "$HOME/.omnigent/logs/$dir" ] || continue
+  find "$HOME/.omnigent/logs/$dir" -type f -name '*.log' -mtime +14 -print -delete
+done
+
+# The launchd-captured stdio is a single append-forever file per label, so age
+# can't retire it — launchd holds the fd for the life of the process. Cap by
+# size instead; the fd is in append mode, so truncating in place is safe while
+# the server runs.
+# ponytail: hard truncate, not rotate — switch to newsyslog.d if the last N MB
+# ever need to survive the cap.
+for log in "$HOME"/.omnigent/logs/launchd-*.log; do
+  [ -f "$log" ] || continue
+  # wc -c, not `stat`: BSD stat wants -f %z, GNU coreutils stat reads -f as
+  # "filesystem" — and a homebrew coreutils on PATH makes that ambiguous.
+  size=$(wc -c < "$log")
+  if [ "$size" -gt $((200 * 1024 * 1024)) ]; then
+    echo "truncating $(basename "$log") ($size bytes)"
+    : > "$log"
+  fi
+done
+
 git fetch upstream -q || { echo "fetch failed"; exit 1; }
 BASE=$(git merge-base mine upstream/main)
 NEW=$(git rev-parse upstream/main)
