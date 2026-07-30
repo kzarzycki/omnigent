@@ -46,6 +46,28 @@ trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM
 health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
 notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
 
+# The 04:00 tick lands in a ~2-second DarkWake, before wifi has associated:
+# 12 of 18 runs died on "Could not resolve host" or a mid-transfer reset. So
+# wait for DNS before fetching, and retry the fetch itself — the first attempt
+# often races the interface coming up.
+wait_for_net() {
+  for _ in $(seq 1 "${1:-60}"); do
+    ping -c1 -t2 github.com >/dev/null 2>&1 && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# git fetch, retried. Returns non-zero only if every attempt failed.
+fetch_retry() {
+  for attempt in 1 2 3; do
+    git fetch "$@" && return 0
+    echo "fetch $* failed (attempt $attempt/3)"
+    sleep $((attempt * 15))
+  done
+  return 1
+}
+
 # Push whatever is unpushed, rather than only what this run applied.
 # sync-fork.sh skips its own push when it runs inside an omnigent session and
 # defers to "the orchestrator" — but this script used to push only inside its
@@ -53,7 +75,7 @@ notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-
 # pushed by nobody and sat local indefinitely. Reconciling against origin
 # covers both cases, and is a no-op when they already match.
 push_fork() {
-  git fetch origin -q || { echo "!! fetch origin failed — skipping push"; return 0; }
+  fetch_retry origin -q || { echo "!! fetch origin failed — skipping push"; return 0; }
   for br in main mine; do
     lsha=$(git rev-parse "$br" 2>/dev/null) || continue
     rsha=$(git rev-parse "origin/$br" 2>/dev/null || echo "")
@@ -91,11 +113,18 @@ for log in "$HOME"/.omnigent/logs/launchd-*.log; do
   fi
 done
 
+# No network (asleep, dark wake, wifi down) means every fetch below fails.
+# Exit 0, not 1 — a sleeping laptop is not an error worth notifying about.
+if ! wait_for_net 60; then
+  echo "no network after 5m — skipping this tick"
+  exit 0
+fi
+
 # Before anything else, flush a local advance some earlier run left unpushed.
 # Runs on every tick, including the "up to date" early exit below.
 push_fork
 
-git fetch upstream -q || { echo "fetch failed"; exit 1; }
+fetch_retry upstream -q || { echo "fetch upstream failed after retries — will retry next tick"; exit 0; }
 BASE=$(git merge-base mine upstream/main)
 NEW=$(git rev-parse upstream/main)
 if [ "$BASE" = "$NEW" ]; then
