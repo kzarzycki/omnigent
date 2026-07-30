@@ -19,9 +19,49 @@ REPO="$HOME/dev/ext/omnigent/omnigent"
 LABEL="dev.zarz.omnigent"
 PORT=6767
 LOGDIR="$HOME/.omnigent/logs/auto-sync"
-mkdir -p "$LOGDIR"
+STATE="$LOGDIR/.state"
+mkdir -p "$STATE"
+TODAY=$(date +%F)
+
+# ── Gate before doing anything loud ─────────────────────────────────────────
+# launchd ticks every 15 minutes, so the checks below run ~96 times a day.
+# They must stay silent and cheap: no per-run log file, no git, no network.
+# One line per skip goes to ticks.log so a day's decisions stay reconstructable.
+tick() { echo "$(date '+%F %T') $*" >>"$LOGDIR/ticks.log"; }
+
+# Already did today's sync.
+[ "$(cat "$STATE/last-run" 2>/dev/null)" = "$TODAY" ] && exit 0
+
+# Only when the machine is genuinely awake. macOS holds this assertion exactly
+# while the display is on; during DarkWake it is absent. DarkWakes here last
+# 2-7 seconds and the audit needs ~15 minutes, so a dark-wake run cannot finish
+# — it would be suspended mid-audit and time out.
+# (IODisplayWrangler, the usual check, does not exist on Apple Silicon.)
+# Herestring, not a pipe: `set -o pipefail` is on, and `grep -q` exits on the
+# first match, SIGPIPEs the writer, and makes the pipeline report failure even
+# though it matched — which read as "display off" and disabled the sync.
+awake=$(pmset -g assertions 2>/dev/null)
+grep -q 'Prevent sleep while display is on' <<<"$awake" || exit 0
+
+# Don't restart the server under a working agent. Keyed on host-runner log
+# activity, not on a live process: orphaned runner processes outlive their
+# session and would defer the sync forever.
+recent=$(find "$HOME/.omnigent/logs/host-runner" -name '*.log' -mmin -10 2>/dev/null)
+if [ -n "$recent" ]; then
+  # ...but don't starve either. After 4h of deferring, take the restart.
+  [ -f "$STATE/first-try" ] || date +%s >"$STATE/first-try"
+  waited=$(( $(date +%s) - $(cat "$STATE/first-try") ))
+  if [ "$waited" -lt 14400 ]; then
+    tick "deferred — agent active (${waited}s waited)"
+    exit 0
+  fi
+  tick "deferring $((waited / 3600))h — running anyway"
+fi
+rm -f "$STATE/first-try"
+
 STAMP=$(date +%Y%m%d-%H%M%S)
 REPORT="$LOGDIR/report-$STAMP.md"
+tick "running -> $STAMP.log"
 
 exec >>"$LOGDIR/$STAMP.log" 2>&1
 echo "=== auto-sync $STAMP ==="
@@ -129,6 +169,7 @@ BASE=$(git merge-base mine upstream/main)
 NEW=$(git rev-parse upstream/main)
 if [ "$BASE" = "$NEW" ]; then
   echo "up to date ($NEW) — nothing to do"
+  echo "$TODAY" >"$STATE/last-run"
   exit 0
 fi
 COUNT=$(git rev-list --count "$BASE..$NEW")
@@ -185,4 +226,5 @@ else
   echo "mine unchanged — audit held or no-op; no restart"
   notify "held / no change — see report-$STAMP.md"
 fi
+echo "$TODAY" >"$STATE/last-run"
 echo "=== done ==="
