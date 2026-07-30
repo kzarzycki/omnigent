@@ -52,7 +52,23 @@ git push --force-with-lease origin mine
 git checkout mine && git stash pop   # your WIP is in `git stash list`
 ```
 
+## Working on a branch without breaking the running server
+
+**This checkout is the editable install the launchd server runs from.** Checking
+out a feature branch here swaps the code under the live server. Use a worktree:
+
+```bash
+git worktree add worktrees/<topic> -b <branch> upstream/main
+OMNIGENT_SKIP_WEB_UI=true uv sync   # in the worktree; the build fails without it
+```
+
+`mine` stays checked out in the main clone, the server keeps serving it, and the
+worktree is disposable (`git worktree remove worktrees/<topic>`).
+
 ## Notes
 
+- The restart step uses `kickstart` only when the agent is already loaded, and
+  `bootstrap` otherwise — after a `launchctl bootout` the label is gone and
+  `kickstart` can never bring it back. See `audit-sync`'s Gotchas.
 - This skill must be committed on `mine` to survive the rebase that the sync itself performs. If it lives only as an uncommitted working-tree file, it gets stashed/restored each run instead of being part of the replayed patch set.
 - The script assumes the branch/remote names in the table above. Renaming any of them means editing the four variables at the top of `sync-fork.sh`.
