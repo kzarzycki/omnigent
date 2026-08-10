@@ -186,6 +186,12 @@ Follow .claude/skills/audit-sync/SKILL.md. Do this:
 Do NOT restart the omnigent server — the scheduler does that."
 
 echo "--- driving headless omnigent session (<=15m) ---"
+# Group every daily run under one collapsible sidebar folder, dated so the runs
+# stay distinguishable and sortable. `omnigent run` has no --project/--title
+# flag; the REPL session-create seam reads these two env vars (see
+# _session_seed_from_env in omnigent/repl/_repl.py). Unset -> ungrouped, as before.
+export OMNIGENT_SESSION_PROJECT="Auto-sync"
+export OMNIGENT_SESSION_TITLE="audit-sync $(date +%F)"
 timeout 900 omnigent run --harness claude --tools coding -p "$PROMPT" < /dev/null
 SESSION_RC=$?
 echo "--- session returned (exit $SESSION_RC) ---"
