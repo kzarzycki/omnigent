@@ -117,5 +117,12 @@ Each of these silently disabled the job at some point. They are load-bearing.
 - **HOLD is the safe default** — never apply on an uncertain audit.
 - The restart is the *only* self-terminating step; it is owned exclusively by
   `auto-sync.sh` (outside omnigent), never by the in-session apply.
+- **Sessions are grouped, not top-level.** `auto-sync.sh` exports
+  `OMNIGENT_SESSION_PROJECT="Auto-sync"` and `OMNIGENT_SESSION_TITLE="audit-sync <date>"`
+  before `omnigent run`. `omnigent run` has no flag for these, so a create-time
+  seam in the launcher REPL (`_session_seed_from_env` in
+  `omnigent/repl/_repl.py`) reads them and files each run into the collapsible
+  "Auto-sync" sidebar folder with a dated title. That `_repl.py` patch lives on
+  `mine`, so it must replay across every rebase like the skills below.
 - Committed on `mine` (with `sync-fork`) so both replay across the rebase they
   perform.
