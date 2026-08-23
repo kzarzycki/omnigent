@@ -57,7 +57,11 @@ push() {
 echo "==> fetching $UPSTREAM"
 git fetch "$UPSTREAM"
 
-prev_upstream=$(git rev-parse -q --verify "$MIRROR" || echo "")
+# The last upstream tip whose web/ was actually built. Kept in a state file,
+# not read from $MIRROR: a re-run after a failed rebase would otherwise see
+# the already-fast-forwarded mirror and skip the rebuild, shipping a stale SPA.
+built_marker="$(git rev-parse --git-dir)/sync-fork-built-upstream"
+prev_upstream=$(cat "$built_marker" 2>/dev/null || git rev-parse -q --verify "$MIRROR" || echo "")
 
 echo "==> fast-forwarding $MIRROR to $UPSTREAM/$MIRROR"
 git branch -f "$MIRROR" "$UPSTREAM/$MIRROR"
@@ -82,8 +86,10 @@ if [ -f web/package.json ] && \
   # --frozen-lockfile fails hard when upstream ships a package.json/lock out of
   # sync; fall back to a resolving install so an unattended sync self-heals.
   { pnpm install --frozen-lockfile || pnpm install; } && pnpm -C web build
+  echo "$new_upstream" > "$built_marker"
 else
   echo "==> web UI unchanged — skipping rebuild"
+  echo "$new_upstream" > "$built_marker"
 fi
 
 echo "==> re-syncing the editable install (deps + version stamp)"
