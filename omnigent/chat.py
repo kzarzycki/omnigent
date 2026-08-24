@@ -66,6 +66,7 @@ from omnigent.process_logging import (
     open_process_log_file,
     process_log_dir_reference,
 )
+from omnigent.session_seed import session_seed_from_env
 from omnigent.spec import load as load_spec
 from omnigent.spec._omnigent_compat import OMNIGENT_EXECUTOR_TYPE
 from omnigent.spec.parser import discover_host_skills
@@ -1708,8 +1709,13 @@ async def _prepare_chat_session_via_daemon(
                     return fork_result["id"], False
                 if resume_conversation_id is not None:
                     return resume_conversation_id, False
+                seed_title, seed_labels = session_seed_from_env()
                 created = await sdk.sessions.create(
-                    bundle, filename="agent.tar.gz", workspace=workspace
+                    bundle,
+                    filename="agent.tar.gz",
+                    title=seed_title,
+                    labels=seed_labels,
+                    workspace=workspace,
                 )
                 return created.id, True
             except ClientOmnigentError as exc:
@@ -2435,18 +2441,25 @@ async def _query_sessions_once(
         # Record CLI cwd so the Web UI can show "ran locally in
         # <workspace>" for one-shot sessions. CLI sessions don't set
         # host_id; this column is purely informational.
+        # Same env seam as the interactive REPL: a recurring headless caller
+        # can title its runs and file them under one sidebar project.
+        seed_title, seed_labels = session_seed_from_env()
         if session_bundle is None:
             # Remote target: the agent is registered server-side, so
             # bind by id rather than uploading a bundle we don't have.
             agent = agent or await client.sessions.resolve_agent(agent_name)
             created = await client.sessions.create_from_agent_id(
                 agent.id,
+                title=seed_title,
+                labels=seed_labels,
                 workspace=os.getcwd(),
             )
         else:
             created = await client.sessions.create(
                 session_bundle,
                 filename=session_bundle_filename,
+                title=seed_title,
+                labels=seed_labels,
                 workspace=os.getcwd(),
             )
         bound = await client.sessions.bind_runner(created.id, runner_id=runner_id)
