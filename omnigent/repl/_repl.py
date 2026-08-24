@@ -80,6 +80,7 @@ from omnigent.remote_launch import (
     resolve_remote_launch_host,
 )
 from omnigent.session_host import set_session_host
+from omnigent.session_seed import session_seed_from_env
 from omnigent.spec.types import SkillSpec
 
 if TYPE_CHECKING:
@@ -150,27 +151,6 @@ def _is_recoverable_sse_transport_error(exc: BaseException) -> bool:
         next_exc = current.__cause__ or current.__context__
         current = next_exc if isinstance(next_exc, BaseException) else None
     return False
-
-
-# Reserved sidebar-grouping label (conversation store's ``PROJECT_LABEL_KEY``);
-# a session carrying it shows under that project folder in the web UI.
-_PROJECT_LABEL_KEY = "omni_project"
-
-
-def _session_seed_from_env() -> tuple[str | None, dict[str, str] | None]:
-    """Optional title + project label for a new session, from the environment.
-
-    ``OMNIGENT_SESSION_TITLE`` sets the session title; ``OMNIGENT_SESSION_PROJECT``
-    files it into a sidebar project via the ``omni_project`` label. Both unset by
-    default, so an ordinary ``omnigent run`` is unaffected; a headless caller
-    (e.g. the audited auto-sync job) exports them so its recurring sessions land
-    with a distinct title inside one collapsible folder instead of cluttering the
-    top-level list.
-    """
-    title = os.environ.get("OMNIGENT_SESSION_TITLE") or None
-    project = os.environ.get("OMNIGENT_SESSION_PROJECT") or None
-    labels = {_PROJECT_LABEL_KEY: project} if project else None
-    return title, labels
 
 
 class _SessionSnapshot(Protocol):
@@ -1887,7 +1867,7 @@ class _SessionsChatReplAdapter:
         # Snapshot the pre-create /model pick before hydration clobbers
         # it; applied after create since create has no such field.
         pending_model_override = self._model_override
-        seed_title, seed_labels = _session_seed_from_env()
+        seed_title, seed_labels = session_seed_from_env()
         progress_host = self._host if launch_host_id is not None else None
         if progress_host is not None:
             progress_host.output(StreamLive(Text(REMOTE_LAUNCH_MESSAGE)))
@@ -1934,7 +1914,7 @@ class _SessionsChatReplAdapter:
         # Snapshot the pre-create /model pick before hydration clobbers
         # it; applied after create since create has no such field.
         pending_model_override = self._model_override
-        seed_title, seed_labels = _session_seed_from_env()
+        seed_title, seed_labels = session_seed_from_env()
         session = await self._client.sessions.create(
             self._session_bundle,
             filename=self._session_bundle_filename,
