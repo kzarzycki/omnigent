@@ -118,11 +118,14 @@ Each of these silently disabled the job at some point. They are load-bearing.
 - The restart is the *only* self-terminating step; it is owned exclusively by
   `auto-sync.sh` (outside omnigent), never by the in-session apply.
 - **Sessions are grouped, not top-level.** `auto-sync.sh` exports
-  `OMNIGENT_SESSION_PROJECT="Auto-sync"` and `OMNIGENT_SESSION_TITLE="audit-sync <date>"`
-  before `omnigent run`. `omnigent run` has no flag for these, so a create-time
-  seam in the launcher REPL (`_session_seed_from_env` in
-  `omnigent/repl/_repl.py`) reads them and files each run into the collapsible
-  "Auto-sync" sidebar folder with a dated title. That `_repl.py` patch lives on
-  `mine`, so it must replay across every rebase like the skills below.
+  `OMNIGENT_SESSION_PROJECT="omnigent fork sync"` and
+  `OMNIGENT_SESSION_TITLE="audit-sync <date>"` before `omnigent run`. `omnigent run`
+  has no flag for these, so a create-time seam (`session_seed_from_env` in
+  `omnigent/session_seed.py`) reads them and files each run into the collapsible
+  "omnigent fork sync" sidebar folder with a dated title. The seam must be read by
+  *every* CLI session-create path — the headless `-p` create lives in
+  `omnigent/chat.py`, not the REPL, and while only the REPL read it the daily runs
+  landed top-level with an auto-generated title. That patch lives on `mine`, so it
+  must replay across every rebase like the skills below.
 - Committed on `mine` (with `sync-fork`) so both replay across the rebase they
   perform.
