@@ -12,6 +12,16 @@ vi.mock("@/lib/permissionsApi", () => ({
   revokePermission: vi.fn(),
 }));
 
+// The workspace-files toggle reads the session snapshot for its current state
+// and PATCHes it. Mock both so the toggle's presence and its write can be
+// driven without a live session fetch.
+vi.mock("@/hooks/useSession", () => ({
+  useSession: vi.fn(() => ({ session: null, isLoading: false, error: null })),
+}));
+vi.mock("@/lib/sessionsApi", () => ({
+  updateSession: vi.fn(),
+}));
+
 // Stub the QR renderer so tests can assert the encoded deep-link value via a
 // data attribute instead of decoding SVG paths. Renders a bare element with no
 // text content so it can't accidentally match unrelated text-based assertions.
@@ -24,7 +34,7 @@ vi.mock("qrcode.react", () => ({
 // Host config is read-once at render to decide plain-input vs combobox and to
 // transform the share link. Mock both getters so we can drive each branch.
 vi.mock("@/lib/host", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/host")>();
+  const actual = await importOriginal<typeof host>();
   return {
     ...actual,
     getOmnigentUserSearch: vi.fn(() => undefined),
@@ -34,9 +44,36 @@ vi.mock("@/lib/host", async (importOriginal) => {
 
 import * as api from "@/lib/permissionsApi";
 import * as host from "@/lib/host";
+import { useSession } from "@/hooks/useSession";
+import { updateSession } from "@/lib/sessionsApi";
+import type { Session } from "@/lib/types";
+
 const listMock = vi.mocked(api.listPermissions);
 const grantMock = vi.mocked(api.grantPermission);
 const revokeMock = vi.mocked(api.revokePermission);
+const useSessionMock = vi.mocked(useSession);
+const updateSessionMock = vi.mocked(updateSession);
+
+/** Minimal session snapshot for the workspace-toggle tests. */
+function sessionWith(overrides: Partial<Session>): Session {
+  return {
+    id: "conv_abc",
+    agentId: "ag_owner",
+    agentName: "dev",
+    runnerId: null,
+    status: "idle",
+    createdAt: 1_700_000_000,
+    title: "s",
+    labels: {},
+    items: [],
+    pendingElicitations: [],
+    permissionLevel: 3,
+    parentSessionId: null,
+    subAgentName: null,
+    kind: "default",
+    ...overrides,
+  } as Session;
+}
 const userSearchMock = vi.mocked(host.getOmnigentUserSearch);
 const transformLinkMock = vi.mocked(host.getOmnigentTransformShareLink);
 
@@ -63,10 +100,13 @@ function serverInfo(overrides: Partial<ServerInfo> = {}): ServerInfo {
     databricks_features: false,
     managed_sandboxes_enabled: false,
     sandbox_provider: null,
+    enabled_connections: [],
     sharing_mode: "on",
     public_sharing_enabled: true,
     server_version: null,
     smart_routing_enabled: false,
+    smart_routing_sources: { external: false, oss: false },
+    features: {},
     harness_install_enabled: false,
     installable_harnesses: [],
     dictation_available: false,
@@ -102,6 +142,12 @@ beforeEach(() => {
   // Default: standalone (no host providers). Combobox/transform tests opt in.
   userSearchMock.mockReturnValue(undefined);
   transformLinkMock.mockReturnValue(undefined);
+  // Default: no session snapshot, so the workspace-files toggle stays hidden
+  // for the existing grant/link tests. The toggle tests opt in below.
+  useSessionMock.mockReset();
+  useSessionMock.mockReturnValue({ session: null, isLoading: false, error: null });
+  updateSessionMock.mockReset();
+  updateSessionMock.mockResolvedValue(sessionWith({}));
 });
 
 afterEach(cleanup);
@@ -141,7 +187,7 @@ describe("PermissionsModal", () => {
     fireEvent.click(grantBtn);
 
     await waitFor(() => {
-      expect(grantMock).toHaveBeenCalledWith("conv_abc", "carol@example.com", 1, false);
+      expect(grantMock).toHaveBeenCalledWith("conv_abc", "carol@example.com", 1);
     });
   });
 
@@ -190,7 +236,7 @@ describe("PermissionsModal", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Edit" }));
 
     await waitFor(() => {
-      expect(grantMock).toHaveBeenCalledWith("conv_abc", "bob@example.com", 2, false);
+      expect(grantMock).toHaveBeenCalledWith("conv_abc", "bob@example.com", 2);
     });
     // Editing the level must never delete the existing grant.
     expect(revokeMock).not.toHaveBeenCalled();
@@ -232,43 +278,6 @@ describe("PermissionsModal", () => {
     await waitFor(() => {
       expect(grantMock).toHaveBeenCalledWith("conv_abc", "__public__", 1);
     });
-  });
-
-  it("lets owners grant edit plus approval authority", async () => {
-    listMock.mockResolvedValue([]);
-    grantMock.mockResolvedValue({
-      user_id: "bob@example.com",
-      conversation_id: "conv_abc",
-      level: 2,
-      can_approve: true,
-    });
-
-    render(
-      <PermissionsModal
-        sessionId="conv_abc"
-        open={true}
-        onOpenChange={() => {}}
-        canDelegateApprovals
-      />,
-      { wrapper: createWrapper() },
-    );
-
-    await waitFor(() => expect(listMock).toHaveBeenCalled());
-    fireEvent.change(screen.getByPlaceholderText("alice@example.com"), {
-      target: { value: "bob@example.com" },
-    });
-    const formSelect = screen.getByRole("combobox");
-    formSelect.focus();
-    fireEvent.keyDown(formSelect, { key: "Enter" });
-    fireEvent.click(await screen.findByRole("option", { name: "Edit + approve" }));
-    fireEvent.click(screen.getByRole("button", { name: /grant/i }));
-
-    await waitFor(() => {
-      expect(grantMock).toHaveBeenCalledWith("conv_abc", "bob@example.com", 2, true);
-    });
-    expect(
-      screen.getByText("Approvers can authorize actions that use your session credentials."),
-    ).toBeInTheDocument();
   });
 
   it("displays server error messages from failed grant", async () => {
@@ -315,6 +324,8 @@ describe("PermissionsModal", () => {
     // The manage grant's level is still visible to the viewer as static text.
     expect(screen.getByText("Manage")).toBeInTheDocument();
 
+    // Only one listbox can be open, so each interaction must finish first.
+    /* oxlint-disable no-await-in-loop */
     for (const trigger of triggers) {
       trigger.focus();
       fireEvent.keyDown(trigger, { key: "Enter" });
@@ -327,6 +338,7 @@ describe("PermissionsModal", () => {
       fireEvent.keyDown(listbox, { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
     }
+    /* oxlint-enable no-await-in-loop */
   });
 
   it("does not fetch permissions when closed", () => {
@@ -704,6 +716,68 @@ describe("PermissionsModal", () => {
       fireEvent.click(screen.getByRole("button", { name: /open in mobile app/i }));
       const qr = await screen.findByTestId("share-qr-code");
       expect(qr).toHaveAttribute("data-value", "omnigent://host.example.com/c/conv_xyz");
+    });
+  });
+
+  describe("workspace-files toggle", () => {
+    it("is hidden for a session with no workspace", async () => {
+      listMock.mockResolvedValue([]);
+      useSessionMock.mockReturnValue({
+        session: sessionWith({ workspace: null }),
+        isLoading: false,
+        error: null,
+      });
+
+      render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({}),
+      });
+
+      await waitFor(() => expect(listMock).toHaveBeenCalled());
+      expect(screen.queryByTestId("share-workspace-files")).toBeNull();
+    });
+
+    it("turns sharing on for a workspace session that isn't sharing yet", async () => {
+      listMock.mockResolvedValue([]);
+      useSessionMock.mockReturnValue({
+        session: sessionWith({ workspace: "/repo", shareWorkspaceFiles: false }),
+        isLoading: false,
+        error: null,
+      });
+
+      render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({}),
+      });
+
+      await waitFor(() => expect(listMock).toHaveBeenCalled());
+      const toggle = within(screen.getByTestId("share-workspace-files")).getByRole("switch");
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+
+      fireEvent.click(toggle);
+      await waitFor(() =>
+        expect(updateSessionMock).toHaveBeenCalledWith("conv_abc", { shareWorkspaceFiles: true }),
+      );
+    });
+
+    it("turns sharing off when it is already on", async () => {
+      listMock.mockResolvedValue([]);
+      useSessionMock.mockReturnValue({
+        session: sessionWith({ workspace: "/repo", shareWorkspaceFiles: true }),
+        isLoading: false,
+        error: null,
+      });
+
+      render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({}),
+      });
+
+      await waitFor(() => expect(listMock).toHaveBeenCalled());
+      const toggle = within(screen.getByTestId("share-workspace-files")).getByRole("switch");
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+
+      fireEvent.click(toggle);
+      await waitFor(() =>
+        expect(updateSessionMock).toHaveBeenCalledWith("conv_abc", { shareWorkspaceFiles: false }),
+      );
     });
   });
 });

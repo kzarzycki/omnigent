@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import uuid
@@ -16,6 +17,7 @@ import pytest
 
 from omnigent import native_dispatch
 from omnigent.codex_native_bridge import CODEX_NATIVE_BRIDGE_ID_LABEL_KEY
+from omnigent.entities.session_resources import SessionResourceView
 from omnigent.runner import create_runner_app
 from omnigent.runner import tool_dispatch as _tool_dispatch
 from omnigent.runner.app import (
@@ -416,16 +418,53 @@ async def test_launch_native_terminal_force_recreate_tears_down_existing(
 
     monkeypatch.setattr("omnigent.runner.native._launch_pi", _fake_launch_pi)
     registry = _FakeTerminalRegistry(existing=True)
+
+    async def _pre_launch(_has_terminal: bool) -> PreLaunchResult:
+        return PreLaunchResult(force_recreate=True)
+
     result = await _launch_native_terminal(
         "pi-native",
         _launch_ctx(resource_registry=_FakeResourceRegistry(registry)),
         ensure_locks={},
-        pre_launch=PreLaunchResult(force_recreate=True),
+        pre_launch=_pre_launch,
     )
 
     assert result is True
     assert registry.cleaned == ["conv_x"]
     assert created == ["conv_x"]
+
+
+@pytest.mark.asyncio
+async def test_launch_native_terminal_force_recreate_and_skip_tears_down_without_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force_recreate + skip together = teardown but NO create.
+
+    Preserves the claude rebuild+transfer-inbound case: the stale terminal is
+    torn down, but because a sibling session's terminal is rotating in (skip),
+    creation is left to the transfer instead of racing it with a fresh launch.
+    """
+    from omnigent.runner.native import PreLaunchResult, _launch_native_terminal
+
+    async def _must_not_call(ctx: NativeLaunchContext) -> object:
+        raise AssertionError("adapter must not run when the transfer will deliver")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_pi", _must_not_call)
+    registry = _FakeTerminalRegistry(existing=True)
+
+    async def _pre_launch(_has_terminal: bool) -> PreLaunchResult:
+        return PreLaunchResult(force_recreate=True, skip=True)
+
+    result = await _launch_native_terminal(
+        "pi-native",
+        _launch_ctx(resource_registry=_FakeResourceRegistry(registry)),
+        ensure_locks={},
+        pre_launch=_pre_launch,
+    )
+
+    assert result is False
+    # Torn down (rebuild) but not recreated (skip → the transfer delivers).
+    assert registry.cleaned == ["conv_x"]
 
 
 @pytest.mark.asyncio
@@ -441,8 +480,14 @@ async def test_launch_native_terminal_skip_and_needs_terminal_return_false(
     monkeypatch.setattr("omnigent.runner.native._launch_pi", _must_not_call)
 
     for decision in (PreLaunchResult(skip=True), PreLaunchResult(needs_terminal=False)):
+
+        async def _pre_launch(
+            _has_terminal: bool, _d: PreLaunchResult = decision
+        ) -> PreLaunchResult:
+            return _d
+
         result = await _launch_native_terminal(
-            "pi-native", _launch_ctx(), ensure_locks={}, pre_launch=decision
+            "pi-native", _launch_ctx(), ensure_locks={}, pre_launch=_pre_launch
         )
         assert result is False
 
@@ -514,6 +559,298 @@ async def test_launch_native_terminal_non_native_returns_none() -> None:
 
     result = await _launch_native_terminal("claude-sdk", _launch_ctx(), ensure_locks={})
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_launch_native_terminal_build_context_enriches_only_on_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_context runs inside the create block and feeds the adapter's ctx."""
+    from omnigent.runner.native import _launch_native_terminal
+
+    seen: dict[str, Any] = {}
+    build_calls = {"n": 0}
+
+    async def _fake_launch_pi(ctx: NativeLaunchContext) -> object:
+        seen["bundle_dir"] = ctx.bundle_dir
+        return object()
+
+    async def _build(ctx: NativeLaunchContext) -> NativeLaunchContext:
+        build_calls["n"] += 1
+        return dataclasses.replace(ctx, bundle_dir=Path("/tmp/enriched"))
+
+    monkeypatch.setattr("omnigent.runner.native._launch_pi", _fake_launch_pi)
+
+    await _launch_native_terminal(
+        "pi-native", _launch_ctx(), ensure_locks={}, build_context=_build
+    )
+    assert build_calls["n"] == 1
+    assert seen["bundle_dir"] == Path("/tmp/enriched")
+
+    # Existing terminal: build_context must NOT run.
+    await _launch_native_terminal(
+        "pi-native",
+        _launch_ctx(resource_registry=_FakeResourceRegistry(_FakeTerminalRegistry(existing=True))),
+        ensure_locks={},
+        build_context=_build,
+    )
+    assert build_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_launch_native_terminal_reraise_propagates_without_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reraise=True re-raises the builder failure instead of publishing an event."""
+    from omnigent.runner.native import _launch_native_terminal
+
+    async def _boom(ctx: NativeLaunchContext) -> object:
+        raise RuntimeError("cold-boot blew up")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_pi", _boom)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    with pytest.raises(RuntimeError, match="cold-boot blew up"):
+        await _launch_native_terminal(
+            "pi-native",
+            _launch_ctx(publish_event=lambda name, event: events.append((name, event))),
+            ensure_locks={},
+            reraise=True,
+        )
+
+    # No start-error event was published (the caller converts the raise to a 503);
+    # only the pending on/off bracket events, none of which carry an error.
+    assert not any("error" in name.lower() or "error" in event for name, event in events)
+
+
+class _FakeEnsureRegistry:
+    """Resource registry stub for the ensure-shell (attach path) tests.
+
+    The ensure shell is view-based: it reads the existing terminal via
+    ``get_terminal_resource`` and replaces a non-owned one via
+    ``close_terminal``. ``terminal_registry`` is unused by the ensure shell
+    but present for interface parity.
+    """
+
+    terminal_registry = None
+
+    def __init__(self, existing: SessionResourceView | None = None, close_ok: bool = True) -> None:
+        self._existing = existing
+        self._close_ok = close_ok
+        self.closed: list[tuple[str, str]] = []
+
+    async def get_terminal_resource(
+        self, session_id: str, terminal_id: str
+    ) -> SessionResourceView | None:
+        return self._existing
+
+    async def close_terminal(self, session_id: str, terminal_id: str) -> bool:
+        self.closed.append((session_id, terminal_id))
+        return self._close_ok
+
+
+def _ensure_ctx(registry: _FakeEnsureRegistry, session_id: str = "conv_e") -> NativeLaunchContext:
+    """Build a launch context whose registry drives the ensure-shell tests."""
+    return NativeLaunchContext(
+        session_id=session_id,
+        resource_registry=registry,  # type: ignore[arg-type]
+        publish_event=lambda _name, _event: None,
+    )
+
+
+def _terminal_view(name: str, terminal_id: str = "terminal_goose_main") -> SessionResourceView:
+    return SessionResourceView(id=terminal_id, type="terminal", session_id="conv_e", name=name)
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_returns_existing_without_creating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing terminal is returned as-is; the adapter never runs."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    created = False
+
+    async def _fake_launch(ctx: NativeLaunchContext) -> object:
+        nonlocal created
+        created = True
+        return object()
+
+    monkeypatch.setattr("omnigent.runner.native._launch_goose", _fake_launch)
+    registry = _FakeEnsureRegistry(existing=_terminal_view("existing"))
+    resp = await _ensure_native_terminal("goose", _ensure_ctx(registry), ensure_locks={})
+
+    assert resp is not None and resp.status_code == 200
+    assert json.loads(bytes(resp.body))["name"] == "existing"
+    assert created is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_creates_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no existing terminal, the shell resolves the adapter and creates one."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    async def _fake_launch(ctx: NativeLaunchContext) -> SessionResourceView:
+        return _terminal_view("auto-created")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_goose", _fake_launch)
+    registry = _FakeEnsureRegistry(existing=None)
+    locks: dict[str, Any] = {}
+    resp = await _ensure_native_terminal("goose", _ensure_ctx(registry), ensure_locks=locks)
+
+    assert resp is not None and resp.status_code == 200
+    assert json.loads(bytes(resp.body))["name"] == "auto-created"
+    assert "conv_e" in locks
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_builder_error_returns_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A builder failure becomes a structured 500 JSON, not a live-published error."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    async def _boom(ctx: NativeLaunchContext) -> object:
+        raise ImportError("Native goose requires the 'goose' CLI on PATH.")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_goose", _boom)
+    resp = await _ensure_native_terminal(
+        "goose", _ensure_ctx(_FakeEnsureRegistry(existing=None)), ensure_locks={}
+    )
+
+    assert resp is not None and resp.status_code == 500
+    body = json.loads(bytes(resp.body))
+    # The raw ImportError text must not leak; a fixed client-safe message is used
+    # (the display name "Goose" identifies the runtime, not the raw cause).
+    assert "requires the 'goose' CLI" not in body["error"]["message"]
+    assert "Goose" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_non_native_returns_none() -> None:
+    """A non-native terminal name returns None so the caller uses the generic path."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    resp = await _ensure_native_terminal(
+        "bash", _ensure_ctx(_FakeEnsureRegistry()), ensure_locks={}
+    )
+    assert resp is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_owned_existing_uses_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owned existing terminal is returned through ``finalize`` (codex notice wrap)."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    existing = _terminal_view("owned-existing", terminal_id="terminal_codex_main")
+    registry = _FakeEnsureRegistry(existing=existing)
+
+    def _finalize(view: SessionResourceView) -> Any:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=200, content={"name": view.name, "wrapped": True})
+
+    resp = await _ensure_native_terminal(
+        "codex",
+        _ensure_ctx(registry),
+        ensure_locks={},
+        is_owned=lambda _reg, _view: True,
+        finalize=_finalize,
+    )
+
+    assert resp is not None and resp.status_code == 200
+    body = json.loads(bytes(resp.body))
+    assert body == {"name": "owned-existing", "wrapped": True}
+    assert registry.closed == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_non_owned_closes_and_recreates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-owned existing terminal is closed, then the native one is created."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    async def _fake_launch(ctx: NativeLaunchContext) -> SessionResourceView:
+        return _terminal_view("recreated", terminal_id="terminal_codex_main")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_codex", _fake_launch)
+    existing = _terminal_view("foreign", terminal_id="terminal_codex_main")
+    registry = _FakeEnsureRegistry(existing=existing, close_ok=True)
+
+    resp = await _ensure_native_terminal(
+        "codex",
+        _ensure_ctx(registry),
+        ensure_locks={},
+        is_owned=lambda _reg, _view: False,
+        conflict_message="conflict",
+    )
+
+    assert resp is not None and resp.status_code == 200
+    assert json.loads(bytes(resp.body))["name"] == "recreated"
+    assert registry.closed == [("conv_e", "terminal_codex_main")]
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_non_owned_close_fails_returns_409() -> None:
+    """When a non-owned terminal cannot be closed, the shell returns a 409 conflict."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    existing = _terminal_view("foreign", terminal_id="terminal_antigravity_main")
+    registry = _FakeEnsureRegistry(existing=existing, close_ok=False)
+
+    resp = await _ensure_native_terminal(
+        "antigravity",
+        _ensure_ctx(registry),
+        ensure_locks={},
+        is_owned=lambda _reg, _view: False,
+        conflict_message="Existing antigravity terminal is not runner-owned.",
+    )
+
+    assert resp is not None and resp.status_code == 409
+    body = json.loads(bytes(resp.body))
+    assert body["error"]["code"] == "terminal_conflict"
+    assert body["error"]["message"] == "Existing antigravity terminal is not runner-owned."
+
+
+@pytest.mark.asyncio
+async def test_ensure_native_terminal_build_context_runs_only_on_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_context`` runs on create but is skipped when a terminal already exists."""
+    from omnigent.runner.native import _ensure_native_terminal
+
+    calls: list[str] = []
+
+    async def _fake_launch(ctx: NativeLaunchContext) -> SessionResourceView:
+        return _terminal_view("created")
+
+    async def _build(ctx: NativeLaunchContext) -> NativeLaunchContext:
+        calls.append("build")
+        return dataclasses.replace(ctx, agent_name="resolved")
+
+    monkeypatch.setattr("omnigent.runner.native._launch_goose", _fake_launch)
+
+    # Create path: build_context runs.
+    await _ensure_native_terminal(
+        "goose",
+        _ensure_ctx(_FakeEnsureRegistry(existing=None)),
+        ensure_locks={},
+        build_context=_build,
+    )
+    # Existing path: build_context skipped.
+    await _ensure_native_terminal(
+        "goose",
+        _ensure_ctx(_FakeEnsureRegistry(existing=_terminal_view("existing"))),
+        ensure_locks={},
+        build_context=_build,
+    )
+
+    assert calls == ["build"]
 
 
 @pytest.mark.asyncio
@@ -876,20 +1213,23 @@ def test_resolved_workdir_for_spec_prefers_bundle_workdir(tmp_path: Path) -> Non
 
 
 def test_resolved_workdir_for_spec_falls_back_without_bundle(tmp_path: Path) -> None:
-    """Non-bundle specs fall back to ``runner_workspace`` (prior behavior).
+    """Only an UNWRAPPED spec falls back to ``runner_workspace``.
 
-    A bare ``AgentSpec`` (no ResolvedSpec wrapper) or a ``ResolvedSpec``
-    with ``workdir=None`` carries no bundle dir, so dispatch must keep
-    using the CLI launch workspace exactly as base did.
+    A bare ``AgentSpec`` carries no bundle information at all, so dispatch
+    keeps using the CLI launch workspace exactly as base did. A
+    ``ResolvedSpec`` with ``workdir=None`` is different: resolution ran and
+    concluded there is no bundle dir for this agent. Falling back there is
+    what leaked a parent bundle into a sub-agent, so the ``None`` is
+    returned verbatim.
     """
     runner_workspace = tmp_path / "workspace"
     bare_spec = AgentSpec(spec_version=1, name="plain-agent")
 
     # Unwrapped spec → no workdir → fallback.
     assert _resolved_workdir_for_spec(bare_spec, runner_workspace) == runner_workspace
-    # ResolvedSpec with no workdir → fallback.
+    # Wrapped with no workdir → an answered "no bundle", not a fallback.
     wrapped_no_workdir = ResolvedSpec(spec=bare_spec, workdir=None)
-    assert _resolved_workdir_for_spec(wrapped_no_workdir, runner_workspace) == runner_workspace
+    assert _resolved_workdir_for_spec(wrapped_no_workdir, runner_workspace) is None
     # Missing fallback stays None (don't fabricate a path).
     assert _resolved_workdir_for_spec(bare_spec, None) is None
 
@@ -902,9 +1242,8 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
 
     End-to-end through ``POST /v1/sessions/{conv}/events`` (no live LLM):
     the scripted harness emits an ``action_required`` for a spec-declared
-    python tool, and the runner must dispatch it locally with
-    ``runner_workspace`` set to the resolved ``ResolvedSpec.workdir`` (the
-    bundle dir), not the generic CLI ``runner_workspace``. This is the
+    python tool, and the runner must dispatch it locally with the session
+    workspace kept separate from the resolved ``ResolvedSpec.workdir``. This is the
     dispatch-time counterpart to
     :func:`test_runner_session_tool_schemas_use_resolved_bundle_workdir`,
     which only proved schema generation used the bundle workdir.
@@ -920,6 +1259,8 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    session_workspace = tmp_path / "session-worktree"
+    session_workspace.mkdir()
     spec = AgentSpec(
         spec_version=1,
         name="bundle-agent",
@@ -932,10 +1273,15 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
         ],
     )
 
-    captured_workspaces: list[Path | None] = []
+    captured_workspaces: list[tuple[Path | None, Path | None]] = []
 
-    async def _fake_dispatch(*, runner_workspace: Path | None = None, **kwargs: Any) -> str:
-        captured_workspaces.append(runner_workspace)
+    async def _fake_dispatch(
+        *,
+        runner_workspace: Path | None = None,
+        local_tool_workdir: Path | None = None,
+        **kwargs: Any,
+    ) -> str:
+        captured_workspaces.append((runner_workspace, local_tool_workdir))
         return "ok"
 
     monkeypatch.setattr(_tool_dispatch, "dispatch_tool_locally", _fake_dispatch)
@@ -963,10 +1309,23 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
         del agent_id, session_id
         return ResolvedSpec(spec=spec, workdir=bundle_dir)
 
+    class _WorkspaceServerClient(NullServerClient):
+        class _WorkspaceResponse(NullServerClient._Response):
+            def json(self) -> dict[str, Any]:
+                return {
+                    "workspace": str(session_workspace),
+                    "agent_id": "31ebfedf721b44dabd76f662cb70a400",
+                }
+
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            if url.startswith("/v1/sessions/"):
+                return self._WorkspaceResponse()
+            return await super().get(url, **kwargs)
+
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
         spec_resolver=_resolver,
-        server_client=NullServerClient(),  # type: ignore[arg-type]
+        server_client=_WorkspaceServerClient(),  # type: ignore[arg-type]
         runner_workspace=workspace,
     )
     async with _runner_client(app) as client:
@@ -988,10 +1347,7 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
             await asyncio.sleep(0.05)
 
     assert captured_workspaces, "native tool must be dispatched locally"
-    assert captured_workspaces[0] == bundle_dir, (
-        "dispatch must use the resolved bundle workdir, not runner_workspace "
-        f"({workspace!r}); got {captured_workspaces[0]!r}"
-    )
+    assert captured_workspaces[0] == (session_workspace.resolve(), bundle_dir)
 
 
 @pytest.mark.asyncio
@@ -1361,14 +1717,19 @@ async def test_sessions_native_clears_in_flight_on_lazy_spec_error() -> None:
     pm = _FakeProcessManager(harness_client)
 
     async def _resolver(agent_id: str, session_id: str | None = None) -> Any:
-        # Before the harness streams response.created the two setup-phase
-        # resolutions run: return None (uncached spec → default harness) so the
-        # turn streams without populating _session_spec_cache. Once streaming
-        # has started the only caller is the lazy dispatch resolution — fail it.
+        # Setup-phase call: return a real spec so _resolve_harness_config picks
+        # the test harness and the turn can start. _resolve_harness_config does
+        # NOT populate _session_spec_cache, so _resolve_turn_spec_lazy still
+        # calls us after response.created — and we raise there to exercise the
+        # error path.
         del agent_id, session_id
         if created.is_set():
             raise RuntimeError("transient lazy spec resolution failure")
-        return None
+        return AgentSpec(
+            spec_version=1,
+            name="t",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "runner-test-default"}),
+        )
 
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
@@ -1728,6 +2089,17 @@ async def test_create_session_envelope_is_single_flight_and_skips_metadata_callb
                     (),
                     {"status_code": 200, "json": lambda self: {"data": []}},
                 )()
+            if path.endswith("/child_sessions"):
+                # Restart recovery lists the session's children; an empty
+                # list ends the scan after this single read.
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "status_code": 200,
+                        "json": lambda self: {"data": [], "has_more": False},
+                    },
+                )()
             raise AssertionError(f"unexpected metadata callback: {path}")
 
     server_client = _ServerClient()
@@ -1785,7 +2157,13 @@ async def test_create_session_envelope_is_single_flight_and_skips_metadata_callb
     assert first_response.json()["session_init_protocol_version"] == 2
     assert resolver_calls == 1
     assert len(pm.get_client_calls) == 1
-    assert server_client.get_paths == [f"/v1/sessions/{session_id}/items"]
+    # The envelope supplies session metadata, so the only snapshot-style
+    # callback is the history read; restart recovery adds one read of the
+    # durable child-session list, which is empty here.
+    assert server_client.get_paths == [
+        f"/v1/sessions/{session_id}/child_sessions",
+        f"/v1/sessions/{session_id}/items",
+    ]
 
 
 @pytest.mark.asyncio

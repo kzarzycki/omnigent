@@ -26,7 +26,8 @@ import secrets
 import shlex
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import NotRequired, TypedDict
 
 import httpx
 
@@ -79,6 +80,18 @@ _RELAY_URL_ENV = "_OMNIGENT_RELAY_URL"
 _RELAY_TOKEN_ENV = "_OMNIGENT_RELAY_TOKEN"
 
 _TOOL_RELAY_FILE = "tool_relay.json"
+
+
+class _EvaluationEvent(TypedDict):
+    type: str
+    target: str
+    data: dict[str, object]
+    context: dict[str, object]
+    request_data: NotRequired[dict[str, object]]
+
+
+class PolicyHookEvaluationRequest(TypedDict):
+    event: _EvaluationEvent
 
 
 def read_relay_policy_config(
@@ -260,7 +273,7 @@ def _is_login_redirect_or_unauthorized(response: httpx.Response) -> bool:
 def hook_payload_to_evaluation_request(
     hook_event: str,
     payload: dict[str, object],
-) -> dict[str, object] | None:
+) -> PolicyHookEvaluationRequest | None:
     """
     Convert a native-harness tool-hook payload into a proto ``EvaluationRequest``.
 
@@ -507,10 +520,60 @@ def fail_closed_hook_output(
     return None
 
 
+_EVAL_UNAVAILABLE_ASK_REASON = (
+    "Omnigent policy evaluation unavailable (could not reach or authenticate to the "
+    "Omnigent server); please approve or deny this tool call manually."
+)
+
+
+def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str, object] | None:
+    """
+    Build the fail-ask hook output for an unobtainable policy verdict.
+
+    Like :func:`fail_closed_hook_output` but for ``PreToolUse``: instead of
+    auto-denying the tool call, returns ``permissionDecision: "ask"`` so the
+    harness explicitly prompts the user for approval. This preserves human
+    oversight when the policy server is transiently unreachable — the user
+    still decides — rather than blocking all tool calls until the server
+    recovers. Unlike returning ``None`` (which fails open in
+    ``bypassPermissions`` / ``acceptEdits`` modes), ``"ask"`` forces the
+    approval dialog regardless of the current permission mode.
+
+    ``UserPromptSubmit`` still blocks (fail-closed) because it is the sole
+    pre-turn enforcement gate for native sessions; a server hiccup must not
+    let an over-budget or otherwise-blocked request proceed silently.
+
+    Use this for harnesses whose native TUI has an interactive approval UI
+    (claude-native, codex-native). For headless harnesses where no approval
+    UI is available, prefer :func:`fail_closed_hook_output`.
+
+    :param hook_event: Hook event name, e.g. ``"PreToolUse"``.
+    :param detail: Optional diagnostic string appended to the ask reason
+        shown in the UI. Forwarded to :func:`fail_closed_hook_output` for
+        non-PreToolUse events.
+    :returns: ``permissionDecision: "ask"`` hook output for ``PreToolUse``;
+        delegates to :func:`fail_closed_hook_output` for all other events.
+    """
+    if hook_event == _PRE_TOOL_USE:
+        ask_reason = (
+            f"{_EVAL_UNAVAILABLE_ASK_REASON} Detail: {detail}"
+            if detail
+            else _EVAL_UNAVAILABLE_ASK_REASON
+        )
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": _PRE_TOOL_USE,
+                "permissionDecision": "ask",
+                "permissionDecisionReason": ask_reason,
+            },
+        }
+    return fail_closed_hook_output(hook_event, detail)
+
+
 def post_evaluate_with_retry(
     url: str,
     headers: dict[str, str],
-    eval_request: dict[str, object],
+    eval_request: Mapping[str, object],
     read_timeout: float,
     hook_label: str,
     reauth: Callable[[], dict[str, str] | None] | None = None,
