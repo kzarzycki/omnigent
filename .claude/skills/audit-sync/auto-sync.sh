@@ -57,7 +57,7 @@ busy() {
   python3 - "$PORT" <<'PY' 2>/dev/null
 import json, sys, time, urllib.request
 try:
-    data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/sessions?limit=100", timeout=3)).get("data", [])
+    data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/sessions?limit=1000", timeout=3)).get("data", [])
 except Exception:
     sys.exit(1)
 now = time.time()
