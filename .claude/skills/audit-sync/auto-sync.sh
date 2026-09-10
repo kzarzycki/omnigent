@@ -28,9 +28,8 @@ TODAY=$(date +%F)
 # They must stay silent and cheap: no per-run log file, no git, no network.
 # One line per skip goes to ticks.log so a day's decisions stay reconstructable.
 tick() { echo "$(date '+%F %T') $*" >>"$LOGDIR/ticks.log"; }
-
-# Already did today's sync.
-[ "$(cat "$STATE/last-run" 2>/dev/null)" = "$TODAY" ] && exit 0
+health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
+notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
 
 # Only when the machine is genuinely awake. macOS holds this assertion exactly
 # while the display is on; during DarkWake it is absent. DarkWakes here last
@@ -43,21 +42,79 @@ tick() { echo "$(date '+%F %T') $*" >>"$LOGDIR/ticks.log"; }
 awake=$(pmset -g assertions 2>/dev/null)
 grep -q 'Prevent sleep while display is on' <<<"$awake" || exit 0
 
-# Don't restart the server under a working agent. Keyed on host-runner log
-# activity, not on a live process: orphaned runner processes outlive their
-# session and would defer the sync forever.
-recent=$(find "$HOME/.omnigent/logs/host-runner" -name '*.log' -mmin -10 2>/dev/null)
-if [ -n "$recent" ]; then
-  # ...but don't starve either. After 4h of deferring, take the restart.
-  [ -f "$STATE/first-try" ] || date +%s >"$STATE/first-try"
-  waited=$(( $(date +%s) - $(cat "$STATE/first-try") ))
-  if [ "$waited" -lt 14400 ]; then
-    tick "deferred — agent active (${waited}s waited)"
-    exit 0
+# Don't restart the server under a working agent. Ask the server itself: any
+# session `running`, or touched in the last 10 minutes, means a turn may be in
+# flight (a flowbench live run keeps several sessions warm for an hour). The
+# audit session this script drives is excluded by its project label. Server
+# down -> nothing to protect. (The previous check looked for fresh
+# ~/.omnigent/logs/host-runner/*.log; that directory has been empty since the
+# runner logs moved, so the guard was a no-op and a restart landed under a
+# live run — flowbench #135.)
+busy() {
+  python3 - "$PORT" <<'PY' 2>/dev/null
+import json, sys, time, urllib.request
+try:
+    data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/sessions?limit=100", timeout=3)).get("data", [])
+except Exception:
+    sys.exit(1)
+now = time.time()
+for s in data:
+    if (s.get("labels") or {}).get("omni_project") == "omnigent fork sync":
+        continue
+    if s.get("status") == "running" or now - (s.get("updated_at") or 0) < 600:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+# ...but don't starve either: after 4h of deferring, go ahead.
+defer_or_go() {  # $1 = what is being deferred (for ticks.log)
+  if busy; then
+    [ -f "$STATE/first-try" ] || date +%s >"$STATE/first-try"
+    waited=$(( $(date +%s) - $(cat "$STATE/first-try") ))
+    if [ "$waited" -lt 14400 ]; then
+      tick "deferred $1 — sessions active (${waited}s waited)"
+      return 1
+    fi
+    tick "deferring $1 $((waited / 3600))h — running anyway"
   fi
-  tick "deferring $((waited / 3600))h — running anyway"
+  rm -f "$STATE/first-try"
+  return 0
+}
+restart_server() {
+  echo "restarting server to load backend"
+  # kickstart only restarts an already-loaded service; after a `launchctl
+  # bootout` the label is gone and only bootstrap can bring it back.
+  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+  else
+    echo "$LABEL not loaded — bootstrapping it"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
+  fi
+  # Cold start is slow (~2 min on a large chat.db), so wait generously.
+  for _ in $(seq 1 180); do health && break; sleep 1; done
+  if health; then
+    echo "server healthy on :$PORT"
+    notify "synced -> $(git -C "$REPO" rev-parse --short mine); server restarted"
+  else
+    echo "server DID NOT come back — check manually"
+    notify "sync applied but server unhealthy — check logs"
+  fi
+}
+
+# A sync that applied under active sessions left its restart for later: take
+# it on the first quiet tick (this runs even after today's sync is done).
+if [ -f "$STATE/restart-pending" ]; then
+  defer_or_go "restart" || exit 0
+  exec >>"$LOGDIR/restart-$(date +%Y%m%d-%H%M%S).log" 2>&1
+  restart_server
+  rm -f "$STATE/restart-pending"
+  exit 0
 fi
-rm -f "$STATE/first-try"
+
+# Already did today's sync.
+[ "$(cat "$STATE/last-run" 2>/dev/null)" = "$TODAY" ] && exit 0
+
+defer_or_go "sync" || exit 0
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 REPORT="$LOGDIR/report-$STAMP.md"
@@ -83,8 +140,6 @@ fi
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM
 
-health() { python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2).read() else 1)" 2>/dev/null; }
-notify() { osascript -e "display notification \"$1\" with title \"omnigent auto-sync\"" 2>/dev/null || true; }
 
 # The 04:00 tick lands in a ~2-second DarkWake, before wifi has associated:
 # 12 of 18 runs died on "Could not resolve host" or a mid-transfer reset. So
@@ -203,23 +258,14 @@ if [ "$BEFORE" != "$AFTER" ]; then
   echo "mine advanced $BEFORE -> $AFTER"
   # Push here (external context has the deploy key; the runner does not).
   push_fork
-  echo "restarting server to load backend"
-  # kickstart only restarts an already-loaded service; after a `launchctl
-  # bootout` the label is gone and only bootstrap can bring it back.
-  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+  # The audit took ~15 min; a live run may have started meanwhile. Never
+  # restart under one — the next quiet tick takes the restart (see top).
+  if busy; then
+    echo "sessions active — restart deferred to the next quiet tick"
+    touch "$STATE/restart-pending"
+    notify "synced -> $(git rev-parse --short mine); restart deferred (sessions active)"
   else
-    echo "$LABEL not loaded — bootstrapping it"
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
-  fi
-  # Cold start is slow (~2 min on a large chat.db), so wait generously.
-  for _ in $(seq 1 180); do health && break; sleep 1; done
-  if health; then
-    echo "server healthy on :$PORT"
-    notify "synced -> $(git rev-parse --short mine); server restarted"
-  else
-    echo "server DID NOT come back — check manually"
-    notify "sync applied but server unhealthy — check logs"
+    restart_server
   fi
 elif [ "$(sed -n 's/^VERDICT: *\(PASS\).*/\1/p' "$REPORT" 2>/dev/null | head -1)" = "PASS" ]; then
   # A clean audit that then failed to apply is NOT the same as a deliberate
