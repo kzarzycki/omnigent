@@ -43,8 +43,11 @@ awake=$(pmset -g assertions 2>/dev/null)
 grep -q 'Prevent sleep while display is on' <<<"$awake" || exit 0
 
 # Don't restart the server under a working agent. Ask the server itself: any
-# session `running`, or touched in the last 10 minutes, means a turn may be in
-# flight (a flowbench live run keeps several sessions warm for an hour). The
+# session touched in the last 10 minutes means a turn may be in flight (a
+# running session heartbeats `updated_at`; a flowbench live run keeps several
+# sessions warm for an hour). Status alone is NOT the signal: sessions are left
+# alive on purpose after a run, and one parked on a permission card stays
+# `running` forever — counting it would make the 4h override fire daily. The
 # audit session this script drives is excluded by its project label. Server
 # down -> nothing to protect. (The previous check looked for fresh
 # ~/.omnigent/logs/host-runner/*.log; that directory has been empty since the
@@ -61,12 +64,14 @@ now = time.time()
 for s in data:
     if (s.get("labels") or {}).get("omni_project") == "omnigent fork sync":
         continue
-    if s.get("status") == "running" or now - (s.get("updated_at") or 0) < 600:
+    if now - (s.get("updated_at") or 0) < 600:
         sys.exit(0)
 sys.exit(1)
 PY
 }
-# ...but don't starve either: after 4h of deferring, go ahead.
+# ...but don't starve either: after 4h of deferring, go ahead — a deliberate
+# restart under whatever is still active, so the daily sync cannot be held
+# hostage by a session that never quiets down.
 defer_or_go() {  # $1 = what is being deferred (for ticks.log)
   if busy; then
     [ -f "$STATE/first-try" ] || date +%s >"$STATE/first-try"
