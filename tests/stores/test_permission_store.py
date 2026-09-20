@@ -1349,6 +1349,7 @@ def test_resolve_access_cache_evicts_least_recently_used_over_cap(
         detach()
     assert count[0] == 1, f"only the LRU-evicted entry should re-read, got {count[0]}"
 
+
 @pytest.mark.parametrize("spelling", ["dashed", "legacy_prefix"])
 def test_list_for_sessions_keys_by_caller_spelling(
     store: SqlAlchemyPermissionStore, db_uri: str, spelling: str
