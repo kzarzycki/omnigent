@@ -1722,7 +1722,13 @@ async def _auto_create_opencode_terminal(
     # through Omnigent's policy engine via the forwarder's permission gate —
     # opencode's enforcement is reactive (no pre-tool hook), so "ask" is what
     # makes the policy verdicts apply to MCP (and other) tools.
-    mcp_block = build_opencode_mcp_block(_opencode_native_mcp_servers_from_spec(agent_spec))
+    # Hindsight travels through the relay when present; don't register it twice.
+    native_mcp_servers = _opencode_native_mcp_servers_from_spec(agent_spec)
+    if server_client is not None and ensure_comment_relay is not None:
+        native_mcp_servers = [
+            server for server in native_mcp_servers if server.name != "hindsight"
+        ]
+    mcp_block = build_opencode_mcp_block(native_mcp_servers)
     if server_client is not None and ensure_comment_relay is not None:
         mcp_block.update(build_opencode_omnigent_mcp_server(bridge_dir))
     if mcp_block:
@@ -2206,6 +2212,28 @@ def _opencode_native_mcp_servers_from_spec(
         return []
 
 
+def _native_hindsight_mcp_from_spec(
+    agent_spec: AgentSpec | ResolvedSpec | None,
+) -> MCPServerConfig | None:
+    """Return only an exact-approved stdio Hindsight server for native CLIs."""
+    if agent_spec is None:
+        return None
+    from omnigent.util.mcp_trust import mcp_is_allowed
+
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    return next(
+        (
+            server
+            for server in spec.mcp_servers
+            if server.name == "hindsight"
+            and server.transport == "stdio"
+            and server.command
+            and mcp_is_allowed(server)
+        ),
+        None,
+    )
+
+
 def _render_opencode_transcript_text(items: list[object]) -> str:
     """
     Render committed Omnigent message items into a plain-text transcript.
@@ -2610,6 +2638,21 @@ async def _auto_create_pi_terminal(
 
         spec_for_tools = _unwrap_resolved_spec(agent_spec)
         pi_tools = build_native_relay_tool_schemas(spec_for_tools)
+        if (
+            spec_for_tools is not None
+            and server_client is not None
+            and any(server.name == "hindsight" for server in spec_for_tools.mcp_servers)
+        ):
+            from omnigent.runner.proxy_mcp_manager import ProxyMcpManager
+
+            mcp_schemas = await ProxyMcpManager(session_id, server_client).schemas_for(
+                spec_for_tools
+            )
+            pi_tools.extend(
+                schema
+                for schema in mcp_schemas.schemas
+                if isinstance(schema.get("name"), str) and schema["name"].startswith("hindsight__")
+            )
     except Exception:  # noqa: BLE001 — tool registration is additive
         _logger.warning(
             "Failed to build pi-native tool schemas for session %s; "
@@ -3284,11 +3327,9 @@ async def _auto_create_goose_terminal(
     Auto-create the Goose TUI terminal for a goose-native session.
 
     Launches ``goose session --name <session_id>`` in a runner-owned tmux pane.
-    Auth is Goose's own configuration (``goose configure`` → keyring /
-    ``~/.config/goose/config.yaml``), so HOME is inherited and Omnigent writes no
-    vendor config (Goose owns its own tool surface / MCP extensions). The
-    ``--name`` lets the forwarder discover *this* session's row deterministically.
-    Mirrors :func:`_auto_create_cursor_terminal`, minus the MCP machinery.
+    Auth and ordinary extensions remain in Goose's own configuration. An
+    approved Hindsight MCP is passed as a session-only extension, leaving the
+    user's global Goose config unchanged.
 
     :param session_id: Session/conversation identifier (also the goose ``--name``).
     :param resource_registry: Session resource registry for launching the terminal.
@@ -3340,8 +3381,23 @@ async def _auto_create_goose_terminal(
         "session",
         "--name",
         goose_session_name,
-        *(launch_config.terminal_launch_args or []),
     ]
+    hindsight = _native_hindsight_mcp_from_spec(agent_spec)
+    if hindsight is not None:
+        assert hindsight.command is not None
+        goose_args.extend(
+            [
+                "--with-extension",
+                shlex.join(
+                    [
+                        *(f"{key}={value}" for key, value in hindsight.env.items()),
+                        hindsight.command,
+                        *hindsight.args,
+                    ]
+                ),
+            ]
+        )
+    goose_args.extend(launch_config.terminal_launch_args or [])
     # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
     # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
     # and ``parent_os_env`` below, launch_required_terminal falls back to
@@ -4501,8 +4557,8 @@ async def _auto_create_kimi_terminal(
     supervise_kimi_forwarder`) tails kimi's per-session ``wire.jsonl`` transcript
     and mirrors each user prompt + assistant reply into the Omnigent chat, so the
     response shows in the web UI — not only the embedded terminal. Tool calls and
-    reasoning are NOT mirrored (the embedded terminal renders those). NO MCP
-    plumbing (upstream kimi has no per-spawn MCP config).
+    reasoning are NOT mirrored (the embedded terminal renders those). The
+    session-scoped Kimi home receives the operator's approved Hindsight MCP.
 
     :param session_id: Session/conversation identifier.
     :param resource_registry: Session resource registry for launching the
@@ -4580,6 +4636,7 @@ async def _auto_create_kimi_terminal(
     kimi_env = build_kimi_session_home(
         bridge_dir / "kimi-code-home",
         bridge_dir=bridge_dir,
+        mcp_server=_native_hindsight_mcp_from_spec(agent_spec),
     )
     # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
     # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
