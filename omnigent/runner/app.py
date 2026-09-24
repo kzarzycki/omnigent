@@ -2869,6 +2869,7 @@ def create_runner_app(
                 "cursor-native",
                 "opencode-native",
                 "kimi-native",
+                "goose-native",
                 "devin-native",
             ):
                 _launch_resolve_spec = lambda: _resolve_session_agent_spec_or_none(  # noqa: E731

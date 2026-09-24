@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from omnigent.harnesses.kimi_native.credentials import (
     build_kimi_session_home,
     render_kimi_hooks_toml,
 )
+from omnigent.spec.types import MCPServerConfig
 
 
 def _fake_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -84,6 +86,71 @@ def test_build_session_home_symlinks_auth_but_not_config(
     assert (oauth_link / "token").read_text(encoding="utf-8") == "secret"
     # … but config.toml is a real file (we own its content), not a symlink.
     assert not (session_home / "config.toml").is_symlink()
+
+
+def test_build_session_home_adds_hindsight_without_writing_user_mcp_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_home = _fake_user_home(tmp_path, monkeypatch)
+    user_mcp = user_home / "mcp.json"
+    original = {"mcpServers": {"other": {"command": "existing"}}, "extra": {"keep": True}}
+    user_mcp.write_text(json.dumps(original))
+    session_home = tmp_path / "session-home"
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+
+    build_kimi_session_home(session_home, bridge_dir=bridge_dir)
+    assert (session_home / "mcp.json").is_symlink()
+    server = MCPServerConfig(
+        name="hindsight",
+        transport="stdio",
+        command="node",
+        args=["/opt/hindsight/mcp-server.js"],
+        env={"HINDSIGHT_MCP_HARNESS": "omnigent"},
+    )
+    build_kimi_session_home(session_home, bridge_dir=bridge_dir, mcp_server=server)
+
+    session_mcp = session_home / "mcp.json"
+    assert not session_mcp.is_symlink()
+    assert json.loads(session_mcp.read_text()) == {
+        "mcpServers": {
+            "other": {"command": "existing"},
+            "hindsight": {
+                "command": "node",
+                "args": ["/opt/hindsight/mcp-server.js"],
+                "env": {"HINDSIGHT_MCP_HARNESS": "omnigent"},
+            },
+        },
+        "extra": {"keep": True},
+    }
+    assert json.loads(user_mcp.read_text()) == original
+    changed = {"mcpServers": {"replacement": {"command": "updated"}}}
+    user_mcp.write_text(json.dumps(changed))
+    build_kimi_session_home(session_home, bridge_dir=bridge_dir, mcp_server=server)
+    refreshed = json.loads(session_mcp.read_text())["mcpServers"]
+    assert "other" not in refreshed
+    assert refreshed["replacement"] == {"command": "updated"}
+
+    build_kimi_session_home(session_home, bridge_dir=bridge_dir)
+    assert session_mcp.is_symlink()
+    assert json.loads(session_mcp.read_text()) == changed
+
+
+def test_build_session_home_rejects_malformed_global_mcp_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_home = _fake_user_home(tmp_path, monkeypatch)
+    user_mcp = user_home / "mcp.json"
+    user_mcp.write_text("{invalid")
+    session_home = tmp_path / "session-home"
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    server = MCPServerConfig(name="hindsight", transport="stdio", command="node")
+
+    with pytest.raises(ValueError, match="invalid Kimi MCP config"):
+        build_kimi_session_home(session_home, bridge_dir=bridge_dir, mcp_server=server)
+    assert user_mcp.read_text() == "{invalid"
+    assert (session_home / "mcp.json").is_symlink()
 
 
 def test_build_session_home_keeps_sessions_store_private(
