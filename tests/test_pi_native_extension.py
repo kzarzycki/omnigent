@@ -103,7 +103,7 @@ require(extensionPath)(pi);
     sendAttempts,
     Array.from({ length: 5 }, () => ({
       content: "follow up",
-      options: { deliverAs: "followUp" },
+      options: undefined,
     })),
   );
   assert.equal(fs.existsSync(payloadPath), false);
@@ -3356,12 +3356,13 @@ def test_mid_turn_send_now_is_steered_into_active_turn() -> None:
     _run_extension_script(node, _extension_path(), script)
 
 
-def test_idle_send_stays_a_follow_up() -> None:
+def test_idle_send_starts_a_normal_prompt() -> None:
     """
-    A user message polled while the agent is IDLE keeps follow-up delivery.
+    A user message polled while the agent is IDLE is sent without ``deliverAs``.
 
-    With no active turn there is nothing to steer into; ``followUp`` starts
-    the next turn immediately, preserving initiating-message behavior.
+    With no active turn there is nothing to steer into. Omitting ``deliverAs``
+    starts a normal prompt in both Pi and oh-my-pi; oh-my-pi would park an
+    idle ``followUp`` in its queue with no run to drain it.
     """
     node = shutil.which("node")
     if node is None:
@@ -3375,7 +3376,7 @@ def test_idle_send_stays_a_follow_up() -> None:
   enqueue("start a new turn");
   await drain();
   assert.deepEqual(sends, [
-    { content: "start a new turn", options: { deliverAs: "followUp" } },
+    { content: "start a new turn", options: undefined },
   ]);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
@@ -3415,7 +3416,7 @@ def test_send_delivery_falls_back_to_agent_loop_state() -> None:
 
   assert.deepEqual(sends, [
     { content: "mid-loop", options: { deliverAs: "steer" } },
-    { content: "after-loop", options: { deliverAs: "followUp" } },
+    { content: "after-loop", options: undefined },
   ]);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);

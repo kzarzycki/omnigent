@@ -534,10 +534,16 @@ def test_resolve_cli_binary_warns_on_bad_override(monkeypatch, tmp_path, caplog)
     assert "OMNIGENT_TESTCLI_PATH" in caplog.text
 
 
-def test_resolve_cli_binary_no_env_var(monkeypatch):
-    """Without an env_var, resolution is PATH then fallback dirs only."""
-    monkeypatch.setattr(_platform.shutil, "which", lambda name: "/usr/bin/tool")
-    assert _platform.resolve_cli_binary("tool") == "/usr/bin/tool"
+def test_resolve_cli_binary_defaults_env_var_from_name(monkeypatch, tmp_path):
+    """Without an explicit env_var, ``OMNIGENT_<NAME>_PATH`` still overrides PATH,
+    so readiness probes agree with the launch path (``OMNIGENT_PI_PATH=omp``)."""
+    override = tmp_path / "omp"
+    override.write_text("#!/bin/sh\n")
+    override.chmod(0o755)
+    monkeypatch.setenv("OMNIGENT_PI_PATH", str(override))
+    monkeypatch.setattr(_platform.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_platform, "_cli_fallback_dirs", lambda: ())
+    assert _platform.resolve_cli_binary("pi") == str(override)
 
 
 def test_cli_fallback_dirs_includes_nvm_version_bins(monkeypatch, tmp_path):

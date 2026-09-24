@@ -1174,17 +1174,17 @@ function startInboxPoller(
         // holds deliverAs "followUp" until the whole agent loop finishes, so
         // a web "Send now" delivered as a follow-up stays visibly queued in
         // the Pi CLI even though the web UI already reported success. When
-        // the agent is idle, keep "followUp" — it starts the next turn
-        // immediately, preserving initiating-message behavior. A turn ending
-        // between this check and the send is benign: the message still
-        // reaches Pi's queue, and a throw leaves the file for the next tick,
+        // the agent is idle, omit deliverAs: both Pi and oh-my-pi start a
+        // normal prompt, whereas oh-my-pi parks an idle "followUp" in its
+        // queue with no run to drain it. A turn ending between this check
+        // and the send is benign: a throw leaves the file for the next tick,
         // which recomputes the mode.
-        const deliverAs =
+        const options =
           typeof isTurnActive === "function" && isTurnActive()
-            ? "steer"
-            : "followUp";
+            ? { deliverAs: "steer" }
+            : undefined;
         try {
-          pi.sendUserMessage(payload.content, { deliverAs });
+          pi.sendUserMessage(payload.content, options);
         } catch (_err) {
           // Leave the file to retry next tick, capped by attempt count.
           const key = id ?? fullPath;

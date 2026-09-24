@@ -86,14 +86,18 @@ def resolve_cli_binary(
     caller decides whether that's fatal.
 
     :param name: The binary name, e.g. ``"codex"`` or ``"claude"``.
-    :param env_var: Optional env var holding an override path/name, e.g.
-        ``"OMNIGENT_CODEX_PATH"``.
+    :param env_var: Env var holding an override path/name, e.g.
+        ``"OMNIGENT_CODEX_PATH"``. ``None`` derives ``OMNIGENT_<NAME>_PATH``
+        from *name*, so readiness probes honour the same override the
+        harness launch does (``OMNIGENT_PI_PATH`` pointing at ``omp``).
     :param which: PATH-lookup hook, defaulting to :func:`shutil.which`. The
         native harness resolvers thread their own test seam through here; the
         fallback ladder always uses the real filesystem.
     :returns: An absolute path to the executable, or ``None``.
     """
     which = shutil.which if which is None else which
+    if env_var is None:
+        env_var = f"OMNIGENT_{name.upper().replace('-', '_')}_PATH"
     if env_var:
         override = os.environ.get(env_var, "").strip()
         if override:
