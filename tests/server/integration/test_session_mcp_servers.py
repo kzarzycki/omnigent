@@ -11,6 +11,8 @@ import pytest
 import yaml
 
 from omnigent.server.routes import session_mcp_servers as mcp_routes
+from omnigent.spec.types import MCPServerConfig
+from omnigent.util.mcp_trust import mcp_config_digest
 from tests.server.helpers import create_test_session
 
 pytestmark = pytest.mark.asyncio
@@ -282,6 +284,57 @@ async def test_update_mcp_server_clears_headers_when_empty_dict_sent(
     bundle = await _agent_bundle(client, session_id)
     mcp_file = _mcp_file_from_bundle(bundle, "secure.yaml")
     assert "headers" not in mcp_file
+
+
+async def test_approved_mcp_update_checks_persisted_secret_bearing_config(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redacted UI edit preserves approval; a changed endpoint does not."""
+    config = MCPServerConfig(
+        name="secure",
+        url="https://example.com/sse",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(config))
+    session = await create_test_session(client, name="approved-mcp-agent")
+    route = f"/v1/sessions/{session['id']}/agent/mcp-servers"
+    create = await client.post(
+        route,
+        json={
+            "name": config.name,
+            "transport": "http",
+            "url": config.url,
+            "headers": config.headers,
+        },
+    )
+    assert create.status_code == 200, create.text
+
+    preserved = await client.put(
+        f"{route}/{config.name}",
+        json={
+            "name": config.name,
+            "transport": "http",
+            "url": config.url,
+            "headers": {"Authorization": "[REDACTED]"},
+        },
+    )
+    assert preserved.status_code == 200, preserved.text
+
+    substituted = await client.put(
+        f"{route}/{config.name}",
+        json={
+            "name": config.name,
+            "transport": "http",
+            "url": "https://other.example.com/sse",
+            "headers": {"Authorization": "[REDACTED]"},
+        },
+    )
+    assert substituted.status_code == 403, substituted.text
+    persisted = _mcp_file_from_bundle(await _agent_bundle(client, session["id"]), "secure.yaml")
+    assert persisted["url"] == config.url
+    assert persisted["headers"] == config.headers
 
 
 async def _agent_bundle(client: httpx.AsyncClient, session_id: str) -> bytes:
