@@ -298,6 +298,22 @@ def test_cache_key_stdio_and_http_do_not_collide() -> None:
     assert _cache_key(http) != _cache_key(stdio)
 
 
+@pytest.mark.asyncio()
+@pytest.mark.parametrize(
+    "config",
+    [
+        MCPServerConfig(name="http", url="http://127.0.0.1:9/mcp"),
+        MCPServerConfig(name="stdio", transport="stdio", command="/bin/true"),
+    ],
+)
+async def test_deployment_disables_mcp_before_connect(
+    monkeypatch: pytest.MonkeyPatch, config: MCPServerConfig
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    with pytest.raises(RuntimeError, match="MCP connections are disabled"):
+        await McpServerConnection(config=config).connect()
+
+
 # ── McpServerConnection caching ──────────────────────────
 
 
