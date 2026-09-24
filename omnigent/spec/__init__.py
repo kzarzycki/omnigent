@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -243,11 +244,12 @@ def load(
         # omnigent.spec._omnigent_compat. Tech-debt aside;
         # remove this branch when omnigent compat ends.
         if is_omnigent_yaml(source):
-            return load_omnigent_yaml(
+            spec = load_omnigent_yaml(
                 source,
                 enforce_handler_allowlist=enforce_handler_allowlist,
                 prune_invalid_sub_agents=prune_invalid_sub_agents,
             )
+            return _with_default_hindsight_mcp(spec) if prune_invalid_sub_agents else spec
         if source.suffix.lower() in {".yaml", ".yml"}:
             # The path is a YAML file but failed the omnigent check
             # (missing required key, ``spec_version`` set, malformed,
@@ -284,11 +286,12 @@ def load(
     # *expand_env* and the flag does not apply.
     candidate = _find_omnigent_yaml_in_dir(root)
     if candidate is not None:
-        return load_omnigent_yaml(
+        spec = load_omnigent_yaml(
             candidate,
             enforce_handler_allowlist=enforce_handler_allowlist,
             prune_invalid_sub_agents=prune_invalid_sub_agents,
         )
+        return _with_default_hindsight_mcp(spec) if prune_invalid_sub_agents else spec
 
     spec = parse(root, expand_env=expand_env)
     if prune_invalid_sub_agents:
@@ -308,6 +311,32 @@ def load(
         # The single-file omnigent YAML path is guarded earlier, inside
         # the loader, because that loader executes factories at parse.
         _reject_unregistered_spec_policy_handlers(spec)
+    return _with_default_hindsight_mcp(spec) if prune_invalid_sub_agents else spec
+
+
+def _with_default_hindsight_mcp(spec: AgentSpec) -> AgentSpec:
+    """Attach the operator's Hindsight MCP to every executable agent, not uploaded bundles."""
+    script = os.environ.get("OMNIGENT_HINDSIGHT_MCP_SCRIPT")
+    if not script:
+        return spec
+    if not Path(script).is_absolute():
+        raise ValueError("OMNIGENT_HINDSIGHT_MCP_SCRIPT must be an absolute path")
+
+    def attach(agent: AgentSpec) -> None:
+        agent.mcp_servers = [server for server in agent.mcp_servers if server.name != "hindsight"]
+        agent.mcp_servers.append(
+            MCPServerConfig(
+                name="hindsight",
+                transport="stdio",
+                command="node",
+                args=[script],
+                env={"HINDSIGHT_MCP_HARNESS": "omnigent"},
+            )
+        )
+        for child in agent.sub_agents:
+            attach(child)
+
+    attach(spec)
     return spec
 
 

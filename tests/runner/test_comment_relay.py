@@ -14,6 +14,7 @@ the runner-side wiring that the e2e test cannot pinpoint when it fails.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import shutil
@@ -35,7 +36,7 @@ from omnigent.harnesses.claude_native.bridge import (
 )
 from omnigent.inner.datamodel import TerminalEnvSpec
 from omnigent.runner import create_runner_app
-from omnigent.spec.types import AgentSpec, ToolsConfig
+from omnigent.spec.types import AgentSpec, MCPServerConfig, ToolsConfig
 from omnigent.terminals import TerminalListEntry
 from tests.runner.helpers import NullServerClient, make_test_terminal_instance
 
@@ -599,6 +600,89 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
         )
         # The Omnigent response's text content must be parsed back to a dict.
         assert result == {"items": []}, f"Expected parsed Omnigent response dict, got {result!r}."
+    finally:
+        shutil.rmtree(bridge_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_native_relay_advertises_and_dispatches_hindsight_mcp(tmp_path: Path) -> None:
+    """A native built-in sees the MCP tools through the policy-enforced relay."""
+    session_id = f"conv_{uuid.uuid4().hex[:12]}"
+    bridge_dir = bridge_dir_for_bridge_id(session_id)
+    prepare_bridge_dir(session_id, workspace=tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    class _Server(NullServerClient):
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            del kwargs
+            return httpx.Response(
+                200,
+                json={"agent_id": "ag_builtin", "workspace": str(tmp_path)},
+                request=httpx.Request("GET", f"http://server{url}"),
+            )
+
+        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+            body = kwargs.get("json", {})
+            calls.append({"url": url, "body": body})
+            result: dict[str, Any] = (
+                {
+                    "tools": [
+                        {
+                            "name": "hindsight__hindsight_recall",
+                            "description": "Recall memory",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
+                        }
+                    ]
+                }
+                if body.get("method") == "tools/list"
+                else {"content": [{"type": "text", "text": '{"result":"ok"}'}]}
+            )
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": 1, "result": result},
+                request=httpx.Request("POST", f"http://server{url}"),
+            )
+
+    async def resolve(_agent_id: str, _session_id: str) -> AgentSpec:
+        return AgentSpec(
+            spec_version=1,
+            mcp_servers=[
+                MCPServerConfig(
+                    name="hindsight", transport="stdio", command="node", args=["/opt/hindsight.js"]
+                )
+            ],
+        )
+
+    try:
+        app = create_runner_app(
+            resource_registry=_StubResourceRegistry(tmp_path),
+            server_client=_Server(),  # type: ignore[arg-type]
+            spec_resolver=resolve,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+            try:
+                resp = await _launch_terminal(client, session_id, bridge_inject_dir=True)
+                assert resp.status_code == 200, resp.text
+                relay = json.loads((bridge_dir / _TOOL_RELAY_FILE).read_text())
+                assert "hindsight__hindsight_recall" in {tool["name"] for tool in relay["tools"]}
+
+                from omnigent.harnesses.claude_native.bridge import _call_relay_tool
+
+                result = await asyncio.to_thread(
+                    _call_relay_tool, bridge_dir, "hindsight__hindsight_recall", {"query": "topic"}
+                )
+                assert json.loads(result["content"][0]["text"]) == {"result": "ok"}
+                assert any(
+                    entry["body"].get("method") == "tools/call"
+                    and entry["body"]["params"]["name"] == "hindsight__hindsight_recall"
+                    for entry in calls
+                )
+            finally:
+                await client.delete(f"/v1/sessions/{session_id}")
     finally:
         shutil.rmtree(bridge_dir, ignore_errors=True)
 
