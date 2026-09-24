@@ -1014,21 +1014,42 @@ def test_pi_version_is_none_when_the_probe_fails(
 
 
 @pytest.mark.parametrize(
-    ("version", "supported"),
+    ("help_text", "supported"),
     [
-        ((0, 79, 0), True),
-        ((0, 79, 10), True),
-        ((1, 0, 0), True),
-        ((0, 78, 99), False),
-        (None, False),
+        ("  --approve        Trust this project folder\n", True),
+        # oh-my-pi rejects --approve with exit 2; its lookalike flags must not match.
+        (
+            "  --auto-approve   Auto-approve all tool calls\n"
+            "  --approval-mode=<value>  Override tools.approvalMode\n",
+            False,
+        ),
+        ("", False),
     ],
 )
-def test_pi_supports_approve_from_version(
-    pi: ModuleType, monkeypatch: pytest.MonkeyPatch, version: object, supported: bool
+def test_pi_supports_approve_from_help(
+    pi: ModuleType, monkeypatch: pytest.MonkeyPatch, help_text: str, supported: bool
 ) -> None:
-    monkeypatch.setattr(pi, "pi_version", lambda executable: version)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        calls.append(argv)
+        return _Completed(help_text)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
 
     assert pi.pi_supports_approve("/bin/pi") is supported
+    assert calls == [["/bin/pi", "--help"]]
+
+
+def test_pi_supports_approve_is_false_when_the_probe_fails(
+    pi: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing(argv: list[str], **kwargs: object) -> None:
+        raise OSError("not executable")
+
+    monkeypatch.setattr("subprocess.run", failing)
+
+    assert pi.pi_supports_approve("/bin/pi") is False
 
 
 def test_pi_bridge_dir_is_stable_per_session(pi: ModuleType) -> None:
