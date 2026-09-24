@@ -966,6 +966,9 @@ class _Completed:
         ("pi 0.79.10\n", "", (0, 79, 10)),
         ("", "@earendil-works/pi-coding-agent v1.2.3", (1, 2, 3)),
         ("no version here", "", None),
+        # oh-my-pi's own version is not a Pi version; treating it as >= 0.79
+        # would pass --approve, which omp rejects with exit 2.
+        ("omp/18.2.10\n", "", None),
         ("", "", None),
     ],
 )
