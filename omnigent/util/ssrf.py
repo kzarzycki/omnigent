@@ -2,10 +2,9 @@
 Shared SSRF host classification.
 
 :func:`host_is_internal` decides whether a URL host is, or resolves to, a
-non-globally-reachable address. It is used both at MCP-server *registration*
-time (rejecting an internal ``url`` before it is persisted) and at *connect*
-time (rejecting an external→internal HTTP redirect), so the two enforcement
-points share one definition of "internal".
+non-globally-reachable address at MCP-server registration. It does not pin
+DNS answers or validate redirects; guarded MCP connections reject redirects
+instead.
 """
 
 from __future__ import annotations
