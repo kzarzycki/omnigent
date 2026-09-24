@@ -182,22 +182,30 @@ def pi_version(executable: str) -> tuple[int, int, int] | None:
 
 
 def pi_supports_approve(executable: str) -> bool:
-    """Return ``True`` when the Pi CLI at *executable* supports ``--approve``.
+    """Return ``True`` when the CLI at *executable* advertises ``--approve``.
 
-    ``--approve`` (``projectTrustOverride=true``) was added in
-    ``@earendil-works/pi-coding-agent@0.79.0``. Passing it to an older
-    version produces an "Unknown option" error and Pi exits immediately.
+    ``--approve`` (``projectTrustOverride=true``) exists in
+    ``@earendil-works/pi-coding-agent@0.79.0``+. Pi-compatible CLIs such as
+    oh-my-pi (``omp``) reject it with exit 2, and their version numbers are not
+    Pi versions, so detect the flag itself from ``--help``. The token boundary
+    keeps omp's ``--auto-approve`` / ``--approval-mode`` from matching.
 
-    Fails open — returns ``False`` on any version-probe error so an older
-    Pi keeps working without the flag.
+    Fails closed — returns ``False`` on any probe error so the CLI still starts.
 
-    :param executable: Resolved path to the Pi CLI.
-    :returns: ``True`` iff the installed Pi version is >= 0.79.0.
+    :param executable: Resolved path to the Pi-compatible CLI.
+    :returns: ``True`` iff ``--help`` lists ``--approve``.
     """
-    ver = pi_version(executable)
-    if ver is None:
+    import re
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [executable, "--help"], capture_output=True, text=True, timeout=5.0
+        )
+    except Exception:  # noqa: BLE001
         return False
-    return ver >= PI_APPROVE_MIN_VERSION
+    help_text = result.stdout + result.stderr
+    return re.search(r"(?<![\w-])--approve(?![\w-])", help_text) is not None
 
 
 def build_pi_launch(
