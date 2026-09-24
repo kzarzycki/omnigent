@@ -55,6 +55,7 @@ from mcp.types import Tool as McpToolDef
 
 from omnigent.runner.identity import strip_runner_auth_secrets
 from omnigent.spec.types import MCPServerConfig, RetryPolicy
+from omnigent.util.mcp_trust import mcp_is_allowed
 
 _T = TypeVar("_T")
 
@@ -593,11 +594,8 @@ class McpServerConnection:
             session initialize, or tool discovery is propagated
             here via the ready future.
         """
-        # ponytail: block Omnigent-managed MCP until upstream enforces bundle
-        # and redirect safety; remove with the native OpenCode filter after the fix.
-        if os.environ.get("OMNIGENT_DISABLE_MCP") == "1":
-            raise RuntimeError("MCP connections are disabled by OMNIGENT_DISABLE_MCP")
-
+        if not mcp_is_allowed(self.config):
+            raise RuntimeError("MCP server is not explicitly trusted while MCP is disabled")
         loop = asyncio.get_running_loop()
         self._ready_future = loop.create_future()
         self._close_event = asyncio.Event()
@@ -1086,11 +1084,11 @@ class McpServerConnection:
         Build an httpx client that records network failures.
 
         Drop-in ``httpx_client_factory`` for the SDK's HTTP
-        transports. Mirrors the defaults of the SDK's
-        ``create_mcp_http_client`` (``follow_redirects=True``,
-        30s/300s timeouts when none are supplied) and installs a
-        response event hook so mid-response network failures the SDK
-        swallows still surface through :attr:`_transport_error`.
+        transports. In guarded mode it disables redirects to avoid
+        following an approved endpoint to an unapproved destination.
+        The unguarded default remains ``follow_redirects=True``.
+        A response event hook surfaces mid-response network failures
+        the SDK swallows through :attr:`_transport_error`.
 
         The recorder is a response hook rather than a custom
         ``transport=`` on purpose: httpx only mounts
@@ -1107,7 +1105,7 @@ class McpServerConnection:
         :returns: A configured ``httpx.AsyncClient``.
         """
         return httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=os.environ.get("OMNIGENT_DISABLE_MCP") != "1",
             timeout=(timeout if timeout is not None else httpx.Timeout(30.0, read=300.0)),
             headers=headers,
             auth=auth,

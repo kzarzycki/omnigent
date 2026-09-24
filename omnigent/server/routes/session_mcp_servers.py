@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import io
 import logging
+import os
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from omnigent.spec.types import MCPServerConfig
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.util.mcp_trust import mcp_is_allowed
 from omnigent.util.ssrf import host_is_internal
 
 if TYPE_CHECKING:
@@ -57,45 +59,33 @@ class _McpLocation:
     raw: dict[str, Any]
 
 
-# Registration-time SSRF / multi-tenant-RCE guard for MCP-server declarations:
-# reject an http url that targets a non-public host, and stdio transport on a
-# multi-tenant server, before the declaration is persisted. Host classification
-# is shared (omnigent.util.ssrf) with the connect-time redirect guard in
-# omnigent.tools.mcp, so both enforcement points agree on what "internal" means.
+# Validate the effective MCP config after a direct edit, before persistence.
+# Runtime approval also covers declarations imported through bundles.
 
 
-def assert_mcp_server_request_safe(body: UpsertMCPServerRequest) -> None:
-    """
-    Reject an MCP-server declaration that enables SSRF or multi-tenant RCE.
-
-    - ``http``: the url must not target a non-public address (SSRF to cloud
-      metadata / internal services).
-    - ``stdio``: forbidden on a multi-tenant server, where the command would be
-      spawned on shared runner infrastructure with access to other tenants'
-      runner environment (RCE). A single-user/local server still allows it.
-
-    :param body: The create/update request body.
-    :raises OmnigentError: ``FORBIDDEN`` when the declaration is not permitted.
-    """
-    if body.transport == "stdio":
-        if not local_single_user_enabled():
+def assert_mcp_server_config_safe(config: MCPServerConfig) -> None:
+    """Reject an MCP server that the deployment does not permit."""
+    guarded = os.environ.get("OMNIGENT_DISABLE_MCP") == "1"
+    if guarded and not mcp_is_allowed(config):
+        raise OmnigentError(
+            "MCP server is not explicitly approved by this deployment.",
+            code=ErrorCode.FORBIDDEN,
+        )
+    if config.transport == "stdio":
+        if not guarded and not local_single_user_enabled():
             raise OmnigentError(
                 "stdio MCP servers are not permitted on this server; use an http transport.",
                 code=ErrorCode.FORBIDDEN,
             )
         return
-    if body.transport == "http" and body.url:
-        # A single-user / local server has no other tenant to protect and is
-        # expected to reach its own loopback services, so it may target internal
-        # endpoints — mirroring the stdio carve-out above.
+    if config.transport == "http" and config.url:
         if local_single_user_enabled():
             return
         try:
-            host = urlsplit(body.url).hostname
+            host = urlsplit(config.url).hostname
         except ValueError:
-            # Malformed authority (e.g. an unclosed IPv6 literal `http://[::1`).
             host = None
-        if not host or host_is_internal(host):
+        if not host or (not guarded and host_is_internal(host)):
             raise OmnigentError(
                 "MCP server url must be a public http(s) endpoint; loopback, "
                 "private, shared, link-local and cloud-metadata addresses are "
@@ -168,7 +158,6 @@ def create_session_mcp_servers_router(
     ) -> MCPServerSummary:
         """Create one MCP server declaration on a session-scoped agent."""
         agent, user_id = await _editable_agent(request, session_id)
-        await asyncio.to_thread(assert_mcp_server_request_safe, body)
         spec = await asyncio.to_thread(
             _mutate_bundle,
             agent,
@@ -191,7 +180,6 @@ def create_session_mcp_servers_router(
     ) -> MCPServerSummary:
         """Replace one MCP server declaration on a session-scoped agent."""
         agent, user_id = await _editable_agent(request, session_id)
-        await asyncio.to_thread(assert_mcp_server_request_safe, body)
         spec = await asyncio.to_thread(
             _mutate_bundle,
             agent,
@@ -317,6 +305,17 @@ def create_session_mcp_servers_router(
                     "MCP edit changed the agent name; refusing to save.",
                     code=ErrorCode.INVALID_INPUT,
                 )
+            if body is not None:
+                effective = next(
+                    (server for server in new_spec.mcp_servers if server.name == body.name),
+                    None,
+                )
+                if effective is None:
+                    raise OmnigentError(
+                        "MCP edit did not produce the requested server.",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                assert_mcp_server_config_safe(effective)
 
         new_location = bundle_location(agent.id, new_bundle)
         # Sha-segment compare: legacy rows keep an ``ag_``-prefixed left

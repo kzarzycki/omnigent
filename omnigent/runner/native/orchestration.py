@@ -2049,18 +2049,28 @@ def _opencode_native_mcp_servers_from_spec(
     agent_spec: AgentSpec | ResolvedSpec | None,
 ) -> list[MCPServerConfig]:
     """
-    Return the resolved agent spec's MCP server declarations (or empty).
+    Return the resolved agent spec's permitted MCP declarations (or empty).
+
+    In guarded mode native OpenCode can project only exact-approved stdio
+    servers; its HTTP client can follow redirects outside this trust boundary.
 
     :param agent_spec: Optional resolved agent spec.
-    :returns: The spec's ``mcp_servers`` list, or ``[]``.
+    :returns: The permitted ``mcp_servers`` list, or ``[]``.
     """
-    if os.environ.get("OMNIGENT_DISABLE_MCP") == "1":
-        return []
     if agent_spec is None:
         return []
+    from omnigent.util.mcp_trust import mcp_is_allowed
+
     try:
         spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-        return list(spec.mcp_servers or [])
+        servers = list(spec.mcp_servers or [])
+        if os.environ.get("OMNIGENT_DISABLE_MCP") == "1":
+            return [
+                server
+                for server in servers
+                if server.transport == "stdio" and mcp_is_allowed(server)
+            ]
+        return servers
     except Exception:  # noqa: BLE001 - best effort.
         return []
 
