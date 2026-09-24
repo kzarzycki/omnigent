@@ -961,33 +961,34 @@ class _Completed:
 
 
 @pytest.mark.parametrize(
-    ("stdout", "stderr", "expected"),
+    ("help_text", "supported"),
     [
-        ("pi 0.79.10\n", "", (0, 79, 10)),
-        ("", "@earendil-works/pi-coding-agent v1.2.3", (1, 2, 3)),
-        ("no version here", "", None),
-        # oh-my-pi's own version is not a Pi version; treating it as >= 0.79
-        # would pass --approve, which omp rejects with exit 2.
-        ("omp/18.2.10\n", "", None),
-        ("", "", None),
+        ("  --approve        Trust this project folder\n", True),
+        # oh-my-pi rejects --approve with exit 2; its lookalike flags must not match.
+        (
+            "  --auto-approve   Auto-approve all tool calls\n"
+            "  --approval-mode=<value>  Override tools.approvalMode\n",
+            False,
+        ),
+        ("", False),
     ],
 )
-def test_pi_version_parses_cli_output(
-    pi: ModuleType, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str, expected: object
+def test_pi_supports_approve_from_help(
+    pi: ModuleType, monkeypatch: pytest.MonkeyPatch, help_text: str, supported: bool
 ) -> None:
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> _Completed:
         calls.append(argv)
-        return _Completed(stdout, stderr)
+        return _Completed(help_text)
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert pi.pi_version("/bin/pi") == expected
-    assert calls == [["/bin/pi", "--version"]]
+    assert pi.pi_supports_approve("/bin/pi") is supported
+    assert calls == [["/bin/pi", "--help"]]
 
 
-def test_pi_version_is_none_when_the_probe_fails(
+def test_pi_supports_approve_is_false_when_the_probe_fails(
     pi: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def failing(argv: list[str], **kwargs: object) -> None:
@@ -995,25 +996,7 @@ def test_pi_version_is_none_when_the_probe_fails(
 
     monkeypatch.setattr("subprocess.run", failing)
 
-    assert pi.pi_version("/bin/pi") is None
-
-
-@pytest.mark.parametrize(
-    ("version", "supported"),
-    [
-        ((0, 79, 0), True),
-        ((0, 79, 10), True),
-        ((1, 0, 0), True),
-        ((0, 78, 99), False),
-        (None, False),
-    ],
-)
-def test_pi_supports_approve_from_version(
-    pi: ModuleType, monkeypatch: pytest.MonkeyPatch, version: object, supported: bool
-) -> None:
-    monkeypatch.setattr(pi, "pi_version", lambda executable: version)
-
-    assert pi.pi_supports_approve("/bin/pi") is supported
+    assert pi.pi_supports_approve("/bin/pi") is False
 
 
 def test_pi_bridge_dir_is_stable_per_session(pi: ModuleType) -> None:
