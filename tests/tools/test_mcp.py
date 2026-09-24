@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +16,13 @@ import httpx
 import pytest
 from cachetools import TTLCache
 from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, ImageContent, TextContent
+from mcp.types import (
+    CONNECTION_CLOSED,
+    CallToolResult,
+    ErrorData,
+    ImageContent,
+    TextContent,
+)
 from mcp.types import Tool as McpToolDef
 
 from omnigent.spec.types import MCPServerConfig, RetryPolicy
@@ -39,6 +45,7 @@ from omnigent.tools.mcp import (
     _TransportErrorRecordingStream,
     clear_discovery_cache,
 )
+from omnigent.util.mcp_trust import mcp_config_digest, mcp_is_allowed
 
 
 @pytest.fixture(autouse=True)
@@ -302,16 +309,100 @@ def test_cache_key_stdio_and_http_do_not_collide() -> None:
 @pytest.mark.parametrize(
     "config",
     [
-        MCPServerConfig(name="http", url="http://127.0.0.1:9/mcp"),
-        MCPServerConfig(name="stdio", transport="stdio", command="/bin/true"),
+        MCPServerConfig(
+            name="http",
+            url="http://127.0.0.1:9/mcp",
+            headers={"Authorization": "secret-http-token"},
+        ),
+        MCPServerConfig(
+            name="stdio",
+            transport="stdio",
+            command="/bin/true",
+            env={"SECRET_TOKEN": "secret-stdio-token"},
+        ),
     ],
 )
-async def test_deployment_disables_mcp_before_connect(
+async def test_guarded_mcp_denies_unapproved_configs_without_leaking_secrets(
     monkeypatch: pytest.MonkeyPatch, config: MCPServerConfig
 ) -> None:
     monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
-    with pytest.raises(RuntimeError, match="MCP connections are disabled"):
+    monkeypatch.delenv("OMNIGENT_TRUSTED_MCP_SHA256", raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
         await McpServerConnection(config=config).connect()
+
+    assert not mcp_is_allowed(config)
+    assert "secret-http-token" not in str(exc_info.value)
+    assert "secret-stdio-token" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("config", "mutations"),
+    [
+        (
+            MCPServerConfig(
+                name="http",
+                url="https://mcp.example.test/sse",
+                headers={"Authorization": "Bearer secret"},
+            ),
+            [
+                {"url": "https://changed.example.test/sse"},
+                {"headers": {"Authorization": "Bearer changed-secret"}},
+            ],
+        ),
+        (
+            MCPServerConfig(
+                name="stdio",
+                transport="stdio",
+                command="trusted-command",
+                args=["serve"],
+                env={"TOKEN": "secret"},
+            ),
+            [
+                {"command": "changed-command"},
+                {"env": {"TOKEN": "changed-secret"}},
+            ],
+        ),
+    ],
+)
+def test_guarded_mcp_requires_exact_config_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    config: MCPServerConfig,
+    mutations: list[dict[str, Any]],
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(config))
+
+    assert mcp_is_allowed(config)
+    for changes in mutations:
+        assert not mcp_is_allowed(replace(config, **changes))
+
+
+@pytest.mark.asyncio()
+async def test_guarded_http_client_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    requests: list[httpx.Request] = []
+    real_async_client = httpx.AsyncClient
+
+    def redirect_transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "https://redirected.example.test/"})
+
+    def make_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(
+            **kwargs,
+            transport=httpx.MockTransport(redirect_transport),
+        )
+
+    monkeypatch.setattr("omnigent.tools.mcp.httpx.AsyncClient", make_client)
+    client = McpServerConnection(config=_make_http_config())._make_recording_httpx_client()
+    async with client:
+        response = await client.get("https://mcp.example.test/start")
+
+    assert response.status_code == 302
+    assert [request.url.host for request in requests] == ["mcp.example.test"]
 
 
 # ── McpServerConnection caching ──────────────────────────
