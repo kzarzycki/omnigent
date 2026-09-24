@@ -164,6 +164,11 @@ def pi_version(executable: str) -> tuple[int, int, int] | None:
     # console.error; newer Pi (earendil-works) prints to stdout via
     # console.log. Check both so the probe works across all versions.
     combined = result.stdout + result.stderr
+    # oh-my-pi (``omp``) is Pi-compatible but versioned independently
+    # (``omp/18.2.10``); its numbers are not Pi versions, and it rejects
+    # Pi-only flags such as ``--approve`` with exit 2.
+    if combined.lstrip().startswith("omp/"):
+        return None
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", combined)
     if match is None:
         return None

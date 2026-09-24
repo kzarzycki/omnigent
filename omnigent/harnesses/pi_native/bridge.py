@@ -157,7 +157,9 @@ def pi_session_dir(bridge_dir: Path) -> Path:
 
 def extension_path(bridge_dir: Path) -> Path:
     """Return the generated Pi extension path for *bridge_dir*."""
-    return bridge_dir / _EXTENSION_FILE
+    # ``.cjs``: the extension is CommonJS (``module.exports``). omp treats a
+    # ``.js`` extension as ESM and rejects it as having no factory export.
+    return bridge_dir / _EXTENSION_FILE.replace(".js", ".cjs")
 
 
 def config_path(bridge_dir: Path) -> Path:
