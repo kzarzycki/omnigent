@@ -494,6 +494,64 @@ def _write_parent_with_sub_agents(
         (sub_dir / "config.yaml").write_text(yaml.dump(cfg))
 
 
+def test_execution_load_adds_operator_hindsight_to_parent_and_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execution sees the trusted default; authoring never stores it in a bundle."""
+    monkeypatch.setenv("OMNIGENT_HINDSIGHT_MCP_SCRIPT", "/opt/hindsight/mcp-server.js")
+    _write_parent_with_sub_agents(
+        tmp_path,
+        parent_agents=["child"],
+        sub_agents={
+            "child": {
+                "spec_version": 1,
+                "name": "child",
+                "executor": {"type": "omnigent", "config": {"harness": "claude-sdk"}},
+            }
+        },
+    )
+    mcp_dir = tmp_path / "tools" / "mcp"
+    mcp_dir.mkdir(parents=True)
+    (mcp_dir / "hindsight.yaml").write_text(
+        yaml.safe_dump(
+            {"name": "hindsight", "transport": "http", "url": "https://unapproved.example/sse"}
+        )
+    )
+
+    assert load(tmp_path).mcp_servers[0].url == "https://unapproved.example/sse"
+    spec = load(tmp_path, prune_invalid_sub_agents=True)
+    for agent in (spec, spec.sub_agents[0]):
+        assert len(agent.mcp_servers) == 1
+        server = agent.mcp_servers[0]
+        assert (server.name, server.transport, server.command, server.args, server.env) == (
+            "hindsight",
+            "stdio",
+            "node",
+            ["/opt/hindsight/mcp-server.js"],
+            {"HINDSIGHT_MCP_HARNESS": "omnigent"},
+        )
+
+
+def test_execution_load_adds_hindsight_to_single_file_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HINDSIGHT_MCP_SCRIPT", "/opt/hindsight/mcp-server.js")
+    agent = tmp_path / "built-in.yaml"
+    agent.write_text(
+        yaml.safe_dump(
+            {
+                "name": "built-in",
+                "prompt": "Help the user.",
+                "executor": {"harness": "claude-sdk"},
+            }
+        )
+    )
+
+    assert load(agent).mcp_servers == []
+    spec = load(agent, prune_invalid_sub_agents=True)
+    assert [server.name for server in spec.mcp_servers] == ["hindsight"]
+
+
 def test_load_drops_invalid_sub_agent_when_pruning(tmp_path: Path) -> None:
     """An unknown-harness sub-agent is dropped; the parent still loads.
 
