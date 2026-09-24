@@ -1,24 +1,19 @@
-"""
-Guard tests for the session MCP-server SSRF / multi-tenant-RCE registration
-check (:func:`omnigent.server.routes.session_mcp_servers.assert_mcp_server_request_safe`),
-which rejects an internal http ``url`` or stdio transport on a multi-tenant
-server before the declaration is persisted, and the shared host classifier it
-uses (:mod:`omnigent.util.ssrf`).
+"""Validate effective MCP configs before a direct edit persists its bundle.
 
-The tests are hermetic: DNS resolution and the single-user server-mode flag are
-stubbed, so no network or real config is touched. The default mode is
-multi-tenant (single-user disabled); the single-user carve-out is exercised
-explicitly.
+DNS and server mode are stubbed; no network or real configuration is touched.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.routes import session_mcp_servers as mod
-from omnigent.server.schemas import UpsertMCPServerRequest
+from omnigent.spec.types import MCPServerConfig
 from omnigent.util import ssrf
+from omnigent.util.mcp_trust import mcp_config_digest
 
 
 @pytest.fixture(autouse=True)
@@ -27,14 +22,12 @@ def _multi_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mod, "local_single_user_enabled", lambda: False)
 
 
-def _http(url: str) -> UpsertMCPServerRequest:
-    return UpsertMCPServerRequest(name="srv", transport="http", url=url)
+def _http(url: str) -> MCPServerConfig:
+    return MCPServerConfig(name="srv", transport="http", url=url)
 
 
-def _stdio() -> UpsertMCPServerRequest:
-    return UpsertMCPServerRequest(
-        name="srv", transport="stdio", command="/bin/sh", args=["-c", "x"]
-    )
+def _stdio() -> MCPServerConfig:
+    return MCPServerConfig(name="srv", transport="stdio", command="/bin/sh", args=["-c", "x"])
 
 
 def _stub_dns(monkeypatch: pytest.MonkeyPatch, ip: str | None) -> None:
@@ -65,13 +58,13 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch, ip: str | None) -> None:
 def test_http_ip_literal_internal_blocked(url: str) -> None:
     """An http url whose host is an internal IP literal is rejected (SSRF)."""
     with pytest.raises(OmnigentError) as exc:
-        mod.assert_mcp_server_request_safe(_http(url))
+        mod.assert_mcp_server_config_safe(_http(url))
     assert exc.value.code == ErrorCode.FORBIDDEN
 
 
 def test_http_public_ip_literal_allowed() -> None:
     """A public IP literal is permitted (no DNS needed for a literal)."""
-    mod.assert_mcp_server_request_safe(_http("http://8.8.8.8/"))
+    mod.assert_mcp_server_config_safe(_http("http://8.8.8.8/"))
 
 
 @pytest.mark.parametrize("resolved_ip", ["169.254.169.254", "100.64.0.1", "10.0.0.9"])
@@ -81,21 +74,21 @@ def test_http_hostname_resolving_to_internal_blocked(
     """A hostname that resolves to an internal / shared address is rejected."""
     _stub_dns(monkeypatch, resolved_ip)
     with pytest.raises(OmnigentError) as exc:
-        mod.assert_mcp_server_request_safe(_http("http://metadata.example/"))
+        mod.assert_mcp_server_config_safe(_http("http://metadata.example/"))
     assert exc.value.code == ErrorCode.FORBIDDEN
 
 
 def test_http_public_hostname_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hostname that resolves to a public address is permitted."""
     _stub_dns(monkeypatch, "93.184.216.34")
-    mod.assert_mcp_server_request_safe(_http("https://example.com/mcp"))
+    mod.assert_mcp_server_config_safe(_http("https://example.com/mcp"))
 
 
 def test_http_unresolvable_host_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unresolvable host is treated as internal and rejected (fail closed)."""
     _stub_dns(monkeypatch, None)
     with pytest.raises(OmnigentError) as exc:
-        mod.assert_mcp_server_request_safe(_http("http://nope.invalid/"))
+        mod.assert_mcp_server_config_safe(_http("http://nope.invalid/"))
     assert exc.value.code == ErrorCode.FORBIDDEN
 
 
@@ -107,21 +100,52 @@ def test_http_malformed_url_rejected() -> None:
     unhandled 500.
     """
     with pytest.raises(OmnigentError) as exc:
-        mod.assert_mcp_server_request_safe(_http("http://[::1"))
+        mod.assert_mcp_server_config_safe(_http("http://[::1"))
     assert exc.value.code == ErrorCode.FORBIDDEN
 
 
 def test_stdio_blocked_on_multi_tenant() -> None:
     """stdio transport is forbidden when the server is not single-user (RCE)."""
     with pytest.raises(OmnigentError) as exc:
-        mod.assert_mcp_server_request_safe(_stdio())
+        mod.assert_mcp_server_config_safe(_stdio())
     assert exc.value.code == ErrorCode.FORBIDDEN
 
 
 def test_stdio_allowed_single_user(monkeypatch: pytest.MonkeyPatch) -> None:
     """stdio transport is still allowed on a single-user / local server."""
     monkeypatch.setattr(mod, "local_single_user_enabled", lambda: True)
-    mod.assert_mcp_server_request_safe(_stdio())
+    mod.assert_mcp_server_config_safe(_stdio())
+
+
+def test_exact_operator_approved_stdio_allowed_on_multi_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-approved command can be saved without allowing another command."""
+
+    approved = _stdio()
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(approved))
+    mod.assert_mcp_server_config_safe(approved)
+
+    substituted = replace(approved, command="/bin/false")
+    with pytest.raises(OmnigentError) as exc:
+        mod.assert_mcp_server_config_safe(substituted)
+    assert exc.value.code == ErrorCode.FORBIDDEN
+
+
+def test_exact_operator_approved_internal_http_allowed_on_multi_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval of one internal endpoint does not authorize another."""
+
+    approved = _http("http://127.0.0.1:3000/mcp")
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(approved))
+    mod.assert_mcp_server_config_safe(approved)
+
+    with pytest.raises(OmnigentError) as exc:
+        mod.assert_mcp_server_config_safe(_http("http://127.0.0.1:3001/mcp"))
+    assert exc.value.code == ErrorCode.FORBIDDEN
 
 
 def test_http_internal_allowed_single_user(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +156,7 @@ def test_http_internal_allowed_single_user(monkeypatch: pytest.MonkeyPatch) -> N
     stdio carve-out.
     """
     monkeypatch.setattr(mod, "local_single_user_enabled", lambda: True)
-    mod.assert_mcp_server_request_safe(_http("http://127.0.0.1:3000/mcp"))
+    mod.assert_mcp_server_config_safe(_http("http://127.0.0.1:3000/mcp"))
 
 
 # ── host classifier: IPv6 transition forms that embed an internal IPv4 ────────
