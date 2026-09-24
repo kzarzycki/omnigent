@@ -153,6 +153,9 @@ def create_session_mcp_servers_router(
             "data": [
                 _summary_from_config(server).model_dump()
                 for server in selected_mcp_spec(loaded.spec, conv.labels).mcp_servers
+                if not (
+                    server.name == "hindsight" and os.environ.get("OMNIGENT_HINDSIGHT_MCP_SCRIPT")
+                )
             ],
         }
 
@@ -379,6 +382,16 @@ def create_session_mcp_servers_router(
                 bundle_bytes,
                 enforce_handler_allowlist=not local_single_user_enabled(),
             )
+            if (
+                mode != "delete"
+                and body is not None
+                and body.name == "hindsight"
+                and os.environ.get("OMNIGENT_HINDSIGHT_MCP_SCRIPT")
+            ):
+                raise OmnigentError(
+                    "Hindsight is managed by this deployment, not the agent bundle.",
+                    code=ErrorCode.CONFLICT,
+                )
             current_names = {server.name for server in current_spec.mcp_servers} | {
                 server.name for server in selected_mcp_spec(current_spec, conv.labels).mcp_servers
             }
