@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TypedDict
 
 from fastapi import (
@@ -457,6 +458,9 @@ def _to_agent_object(
                     args=srv.args,
                 )
                 for srv in selected_mcp_spec(loaded.spec, mcp_selection or {}).mcp_servers
+                if not (
+                    srv.name == "hindsight" and os.environ.get("OMNIGENT_HINDSIGHT_MCP_SCRIPT")
+                )
             ]
             if loaded.spec.guardrails and loaded.spec.guardrails.policies:
                 policies = [
