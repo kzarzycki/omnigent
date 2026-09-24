@@ -2934,6 +2934,7 @@ def create_runner_app(
                 "cursor-native",
                 "opencode-native",
                 "kimi-native",
+                "goose-native",
                 "devin-native",
                 "goose-native",
                 "hermes-native",
