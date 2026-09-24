@@ -279,6 +279,24 @@ def test_resolve_gateway_env_default_ignored_when_not_gateway_id(
     assert res.model_id == "catalog-databricks-claude-default"
 
 
+def test_disabled_mcp_omits_agent_servers_but_keeps_omnigent_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.harnesses.opencode_native.provider import build_opencode_mcp_block
+    from omnigent.runner.native.orchestration import _opencode_native_mcp_servers_from_spec
+    from omnigent.spec.types import AgentSpec, MCPServerConfig
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="agent",
+        mcp_servers=[MCPServerConfig(name="external", url="http://127.0.0.1:9/mcp")],
+    )
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    block = build_opencode_mcp_block(_opencode_native_mcp_servers_from_spec(spec))
+    block.update(build_opencode_omnigent_mcp_server(Path("/tmp/bridge")))
+    assert set(block) == {"omnigent"}
+
+
 def test_build_mcp_block_stdio_and_http() -> None:
     from types import SimpleNamespace as N
 
