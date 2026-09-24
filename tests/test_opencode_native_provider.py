@@ -279,22 +279,62 @@ def test_resolve_gateway_env_default_ignored_when_not_gateway_id(
     assert res.model_id == "catalog-databricks-claude-default"
 
 
-def test_disabled_mcp_omits_agent_servers_but_keeps_omnigent_relay(
+def test_disabled_mcp_allows_only_approved_stdio_and_keeps_omnigent_relay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from omnigent.harnesses.opencode_native.provider import build_opencode_mcp_block
     from omnigent.runner.native.orchestration import _opencode_native_mcp_servers_from_spec
     from omnigent.spec.types import AgentSpec, MCPServerConfig
+    from omnigent.util.mcp_trust import mcp_config_digest
 
+    approved = MCPServerConfig(
+        name="external",
+        transport="stdio",
+        command="safe-server",
+        args=["--mode", "safe"],
+        env={"MODE": "safe"},
+    )
+    changed_command = MCPServerConfig(
+        name="external",
+        transport="stdio",
+        command="changed-server",
+        args=["--mode", "safe"],
+        env={"MODE": "safe"},
+    )
+    changed_env = MCPServerConfig(
+        name="external",
+        transport="stdio",
+        command="safe-server",
+        args=["--mode", "safe"],
+        env={"MODE": "changed"},
+    )
+    approved_http = MCPServerConfig(
+        name="remote",
+        transport="http",
+        url="https://mcp.example/sse",
+        headers={"X-Mode": "safe"},
+    )
     spec = AgentSpec(
         spec_version=1,
         name="agent",
-        mcp_servers=[MCPServerConfig(name="external", url="http://127.0.0.1:9/mcp")],
+        mcp_servers=[approved, changed_command, changed_env, approved_http],
     )
     monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv(
+        "OMNIGENT_TRUSTED_MCP_SHA256",
+        ",".join(map(mcp_config_digest, (approved, approved_http))),
+    )
     block = build_opencode_mcp_block(_opencode_native_mcp_servers_from_spec(spec))
     block.update(build_opencode_omnigent_mcp_server(Path("/tmp/bridge")))
-    assert set(block) == {"omnigent"}
+    assert block == {
+        "external": {
+            "type": "local",
+            "command": ["safe-server", "--mode", "safe"],
+            "enabled": True,
+            "environment": {"MODE": "safe"},
+        },
+        "omnigent": build_opencode_omnigent_mcp_server(Path("/tmp/bridge"))["omnigent"],
+    }
 
 
 def test_build_mcp_block_stdio_and_http() -> None:
