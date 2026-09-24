@@ -58,6 +58,26 @@ async def test_create_mcp_server_updates_agent_bundle(client: httpx.AsyncClient)
     }
 
 
+async def test_operator_hindsight_is_not_an_editable_agent_server(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_HINDSIGHT_MCP_SCRIPT", "/opt/hindsight/mcp-server.js")
+    session = await create_test_session(client, name="hindsight-managed-agent")
+    route = f"/v1/sessions/{session['id']}/agent/mcp-servers"
+
+    listed = await client.get(route)
+    agent = await client.get(f"/v1/sessions/{session['id']}/agent")
+    assert listed.status_code == agent.status_code == 200
+    assert all(server["name"] != "hindsight" for server in listed.json()["data"])
+    assert all(server["name"] != "hindsight" for server in agent.json()["mcp_servers"])
+
+    created = await client.post(
+        route, json={"name": "hindsight", "transport": "stdio", "command": "node"}
+    )
+    assert created.status_code == 409
+    assert "managed by this deployment" in created.text
+
+
 async def test_mcp_server_mutations_reset_bound_runner_agent_cache(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
