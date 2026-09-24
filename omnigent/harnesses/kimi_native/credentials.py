@@ -13,6 +13,8 @@ runner points the launched ``kimi`` process at a session-scoped home that:
 - carries a ``config.toml`` that is the user's config text with two Omnigent
   ``[[hooks]]`` appended — a ``PreToolUse`` deny-gate and a ``PermissionRequest``
   read-only surface, both dispatched to :mod:`omnigent.harnesses.kimi_native.hook`.
+  When an approved Hindsight MCP is present, its ``mcp.json`` becomes a
+  session-owned merge of the user's server declarations.
 
 Appending as text (rather than parsing + re-emitting TOML) keeps the user's
 config byte-for-byte and needs no TOML writer: a trailing ``[[hooks]]`` table
@@ -22,10 +24,13 @@ array is always valid regardless of what section preceded it.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shlex
 import sys
 from pathlib import Path
+
+from omnigent.spec.types import MCPServerConfig
 
 #: Env var Kimi Code reads to locate its data dir (config.toml + oauth + …).
 KIMI_CODE_HOME_ENV_VAR = "KIMI_CODE_HOME"
@@ -104,6 +109,7 @@ def build_kimi_session_home(
     *,
     bridge_dir: Path,
     python_executable: str | None = None,
+    mcp_server: MCPServerConfig | None = None,
 ) -> dict[str, str]:
     """Materialize a session-scoped ``KIMI_CODE_HOME`` with Omnigent hooks.
 
@@ -111,14 +117,16 @@ def build_kimi_session_home(
     except ``config.toml`` (rebuilt below with the Omnigent hooks) and the
     ``sessions`` store + ``session_index.jsonl`` (kept session-private so
     parallel kimi sessions cannot adopt each other's wire logs), then writes a
-    ``config.toml`` that is the user's config plus the Omnigent hooks.
-    Best-effort and idempotent: re-running rewrites ``config.toml`` and leaves
-    existing symlinks in place.
+    ``config.toml`` that is the user's config plus the Omnigent hooks. With
+    *mcp_server*, the session's ``mcp.json`` merges in Hindsight without
+    modifying the user's file, even when it was initially symlinked.
+    Best-effort and idempotent: re-running rewrites session-owned config files.
 
     :param session_home: Directory to use as the session's ``KIMI_CODE_HOME``.
     :param bridge_dir: The kimi-native bridge dir the hook commands read.
     :param python_executable: Interpreter for the hook commands (see
         :func:`render_kimi_hooks_toml`).
+    :param mcp_server: Approved session-only Hindsight stdio server, if enabled.
     :returns: ``{"KIMI_CODE_HOME": str(session_home)}`` to merge into the
         launched kimi process env.
     """
@@ -155,5 +163,35 @@ def build_kimi_session_home(
     if base_config and not base_config.endswith("\n"):
         base_config += "\n"
     (session_home / _CONFIG_FILE).write_text(base_config + hooks, encoding="utf-8")
+    user_mcp_file = user_home / "mcp.json"
+    mcp_file = session_home / "mcp.json"
+    if mcp_server is None:
+        # A previous launch may have written a private overlay; revoke it when
+        # the operator withdraws approval and restore the user's live config.
+        if mcp_file.is_symlink() or mcp_file.exists():
+            mcp_file.unlink()
+        if user_mcp_file.exists():
+            mcp_file.symlink_to(user_mcp_file)
+    else:
+        if mcp_server.transport != "stdio" or not mcp_server.command:
+            raise ValueError("Kimi's default Hindsight MCP must use stdio")
+        try:
+            config = json.loads(user_mcp_file.read_text()) if user_mcp_file.exists() else {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid Kimi MCP config: {user_mcp_file}") from exc
+        if not isinstance(config, dict) or not isinstance(config.get("mcpServers", {}), dict):
+            raise ValueError(f"invalid Kimi MCP server declarations: {user_mcp_file}")
+        servers = dict(config.get("mcpServers", {}))
+        servers[mcp_server.name] = {
+            "command": mcp_server.command,
+            "args": mcp_server.args,
+            "env": mcp_server.env,
+        }
+        config["mcpServers"] = servers
+        # The initial session entry may point into the user's home; never write
+        # through it when installing a session-only server.
+        if mcp_file.is_symlink():
+            mcp_file.unlink()
+        mcp_file.write_text(json.dumps(config, indent=2) + "\n")
 
     return {KIMI_CODE_HOME_ENV_VAR: str(session_home)}

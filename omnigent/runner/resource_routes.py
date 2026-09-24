@@ -477,7 +477,7 @@ def register_resource_routes(
 
                 _ensure_build = _spec_ensure_build
 
-            elif terminal_name in ("cursor", "kimi", "devin"):
+            elif terminal_name in ("cursor", "kimi", "devin", "goose"):
 
                 async def _spec_or_none_ensure_build(
                     ctx: NativeLaunchContext,

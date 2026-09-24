@@ -2793,6 +2793,7 @@ def create_runner_app(
                 "cursor-native",
                 "opencode-native",
                 "kimi-native",
+                "goose-native",
                 "devin-native",
             ):
                 _launch_resolve_spec = lambda: _resolve_session_agent_spec_or_none(  # noqa: E731
@@ -4551,6 +4552,18 @@ def create_runner_app(
         relay_schemas: list[_JsonObject] = build_native_relay_tool_schemas(
             _unwrap_spec_entry(spec_entry)
         )
+        # Native CLIs ignore the agent's ordinary tool schemas. Advertise the
+        # operator's MCP through their shared policy-enforced Omnigent relay.
+        loaded_spec = _unwrap_spec_entry(spec_entry)
+        if loaded_spec is not None and any(
+            server.name == "hindsight" for server in loaded_spec.mcp_servers
+        ):
+            mcp_schemas = await ProxyMcpManager(session_id, server_client).schemas_for(loaded_spec)
+            relay_schemas.extend(
+                schema
+                for schema in mcp_schemas.schemas
+                if isinstance(schema.get("name"), str) and schema["name"].startswith("hindsight__")
+            )
 
         _captured_session_id = session_id
 

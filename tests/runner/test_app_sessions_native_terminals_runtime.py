@@ -2311,27 +2311,18 @@ async def test_auto_create_antigravity_forwards_launch_args_to_agy_argv(
 
 
 @pytest.mark.asyncio
-async def test_auto_create_kimi_forwards_launch_args_to_kimi_argv(
+async def test_auto_create_kimi_applies_hindsight_mcp_and_launch_args(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Snapshot ``terminal_launch_args`` reach the launched kimi argv.
-
-    This is the seam the server-derived ``--yolo`` rides: a named kimi-native
-    sub-agent with ``yolo: true`` persists ``["--yolo"]`` on the session, and
-    the runner's auto-create must append it verbatim to the bare ``kimi`` TUI
-    command. A failure means the derived flag is dropped, the worker launches
-    as plain ``kimi``, and every risky tool call parks on an approval prompt
-    no headless pane can answer.
-    """
-    import omnigent.harnesses.kimi_native.credentials as kimi_creds_mod
+    """Kimi gets a session-only Hindsight server and preserves launch flags."""
     import omnigent.harnesses.kimi_native.forwarder as kimi_fwd_mod
     import omnigent.harnesses.kimi_native.main as kimi_mod
     from omnigent.harnesses.kimi_native import bridge as kimi_bridge_mod
     from omnigent.runner import app as runner_app_mod
     from omnigent.runner.app import _auto_create_kimi_terminal
     from omnigent.runner.resource_registry import KIMI_NATIVE_TERMINAL_ROLE
+    from omnigent.spec.types import MCPServerConfig
 
     session_id = "92c6f9222c7ac0f45ba2736b57b51f88"
     workspace = tmp_path / "workspace"
@@ -2340,12 +2331,23 @@ async def test_auto_create_kimi_forwards_launch_args_to_kimi_argv(
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
     monkeypatch.setattr(kimi_mod, "resolve_kimi_executable", lambda: "/fake/bin/kimi")
-    # Keep the session-home build off the user's real kimi config.
-    monkeypatch.setattr(
-        kimi_creds_mod,
-        "build_kimi_session_home",
-        lambda session_home, **_kwargs: {"KIMI_CODE_HOME": str(session_home)},
+    user_home = tmp_path / "user-kimi"
+    user_home.mkdir()
+    (user_home / "config.toml").write_text('default_model = "kimi-code/x"\n')
+    original_mcp = {"mcpServers": {"other": {"command": "existing"}}}
+    (user_home / "mcp.json").write_text(json.dumps(original_mcp))
+    monkeypatch.setenv("KIMI_CODE_HOME", str(user_home))
+    hindsight = MCPServerConfig(
+        name="hindsight",
+        transport="stdio",
+        command="node",
+        args=["/opt/hindsight/mcp-server.js"],
+        env={"HINDSIGHT_MCP_HARNESS": "omnigent"},
     )
+    from omnigent.util.mcp_trust import mcp_config_digest
+
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(hindsight))
 
     async def _sleeping_forwarder(**_kwargs: Any) -> None:
         await asyncio.Event().wait()
@@ -2395,6 +2397,7 @@ async def test_auto_create_kimi_forwards_launch_args_to_kimi_argv(
             cast(SessionResourceRegistry, _FakeResourceRegistry()),
             lambda _sid, _event: None,
             server_client=cast(httpx.AsyncClient, _SnapshotServerClient()),
+            agent_spec=AgentSpec(spec_version=1, mcp_servers=[hindsight]),
         )
         await asyncio.sleep(0)
     finally:
@@ -2402,9 +2405,101 @@ async def test_auto_create_kimi_forwards_launch_args_to_kimi_argv(
 
     assert len(launched_specs) == 1
     spec = launched_specs[0]
-    # Bare ``kimi`` plus the persisted pass-through args, verbatim.
     assert spec.command == "/fake/bin/kimi"
     assert spec.args == ["--yolo"]
+    session_mcp = Path(spec.env["KIMI_CODE_HOME"]) / "mcp.json"
+    assert not session_mcp.is_symlink()
+    assert json.loads(session_mcp.read_text())["mcpServers"] == {
+        "other": {"command": "existing"},
+        "hindsight": {
+            "command": "node",
+            "args": ["/opt/hindsight/mcp-server.js"],
+            "env": {"HINDSIGHT_MCP_HARNESS": "omnigent"},
+        },
+    }
+    assert json.loads((user_home / "mcp.json").read_text()) == original_mcp
+
+
+@pytest.mark.asyncio
+async def test_auto_create_goose_launches_approved_hindsight_only_for_its_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omnigent.harnesses.goose_native.bridge as goose_bridge
+    import omnigent.harnesses.goose_native.forwarder as goose_forwarder
+    import omnigent.harnesses.goose_native.main as goose_main
+    import omnigent.harnesses.goose_native.permissions as goose_permissions
+    from omnigent.runner import app as runner_app_mod
+    from omnigent.runner.app import _auto_create_goose_terminal
+    from omnigent.spec.types import MCPServerConfig
+    from omnigent.util.mcp_trust import mcp_config_digest
+
+    session_id = "goose-default-hindsight"
+    monkeypatch.setattr(goose_bridge, "_BRIDGE_ROOT", tmp_path / "goose-native")
+    monkeypatch.setattr(goose_main, "resolve_goose_executable", lambda: "/fake/bin/goose")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    config = MCPServerConfig(
+        name="hindsight",
+        transport="stdio",
+        command="node",
+        args=["/opt/hindsight/mcp-server.js"],
+        env={"HINDSIGHT_MCP_HARNESS": "omnigent"},
+    )
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(config))
+
+    async def _sleep(**_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(goose_forwarder, "supervise_goose_forwarder", _sleep)
+    monkeypatch.setattr(goose_permissions, "supervise_goose_approval_mirror", _sleep)
+
+    class _Server:
+        async def get(self, url: str, **_kwargs: Any) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"workspace": str(tmp_path), "terminal_launch_args": ["--theme", "dark"]},
+                request=httpx.Request("GET", f"http://ap.example{url}"),
+            )
+
+    launches: list[Any] = []
+
+    class _Registry:
+        terminal_registry = None
+
+        async def launch_required_terminal(self, **kwargs: Any) -> SessionResourceView:
+            launches.append(kwargs["spec"])
+            return SessionResourceView(
+                id="terminal_goose_main",
+                type="terminal",
+                session_id=session_id,
+                name="Goose",
+            )
+
+    try:
+        await _auto_create_goose_terminal(
+            session_id,
+            cast(SessionResourceRegistry, _Registry()),
+            lambda _sid, _event: None,
+            server_client=cast(httpx.AsyncClient, _Server()),
+            agent_spec=AgentSpec(spec_version=1, mcp_servers=[config]),
+        )
+        await asyncio.sleep(0)
+    finally:
+        await runner_app_mod._cancel_auto_forwarder_task(session_id)
+
+    assert len(launches) == 1
+    launch = launches[0]
+    assert launch.command == "/fake/bin/goose"
+    assert launch.args[:2] == ["session", "--name"]
+    assert launch.args[2].startswith(session_id + "-")
+    assert launch.args[3] == "--with-extension"
+    assert shlex.split(launch.args[4]) == [
+        "HINDSIGHT_MCP_HARNESS=omnigent",
+        "node",
+        "/opt/hindsight/mcp-server.js",
+    ]
+    assert launch.args[-2:] == ["--theme", "dark"]
 
 
 @pytest.mark.asyncio

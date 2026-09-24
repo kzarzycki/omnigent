@@ -283,6 +283,90 @@ async def test_auto_create_pi_terminal_launches_required_terminal(
 
 
 @pytest.mark.asyncio
+async def test_auto_create_pi_registers_default_hindsight_mcp_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi uses a launch-time tool list, not the shared relay's dynamic catalog."""
+    from types import SimpleNamespace
+
+    import omnigent.harnesses.pi_native.bridge as pi_bridge
+    import omnigent.harnesses.pi_native.credentials as pi_credentials
+    import omnigent.harnesses.pi_native.main as pi_main
+    from omnigent.spec.types import MCPServerConfig
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr(pi_bridge, "_BRIDGE_ROOT", tmp_path / "pi-bridge")
+    monkeypatch.setattr(pi_main, "resolve_pi_executable", lambda: "pi")
+    monkeypatch.setattr(pi_credentials, "resolve_pi_native_provider", lambda **_kwargs: None)
+
+    async def launch_config(**_kwargs: Any) -> _PiNativeLaunchConfig:
+        return _PiNativeLaunchConfig(
+            workspace=tmp_path,
+            server_url="http://ap.example",
+            terminal_launch_args=None,
+            external_session_id=None,
+        )
+
+    monkeypatch.setattr("omnigent.runner.app._pi_native_launch_config", launch_config)
+
+    class _Server(NullServerClient):
+        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+            if kwargs.get("json", {}).get("method") == "tools/list":
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "hindsight__hindsight_recall",
+                                    "description": "Recall memory",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                    request=httpx.Request("POST", f"http://ap.example{url}"),
+                )
+            return await super().post(url, **kwargs)  # type: ignore[return-value]
+
+    captured: dict[str, Any] = {}
+
+    async def launch_terminal(**kwargs: Any) -> SessionResourceView:
+        captured["spec"] = kwargs["spec"]
+        return SessionResourceView(
+            id="terminal_pi_main",
+            type="terminal",
+            session_id="pi-hindsight",
+            name="pi:main",
+        )
+
+    registry = SimpleNamespace(terminal_registry=None, launch_required_terminal=launch_terminal)
+    await _auto_create_pi_terminal(
+        "pi-hindsight",
+        registry,  # type: ignore[arg-type]
+        lambda _sid, _event: None,
+        server_client=_Server(),  # type: ignore[arg-type]
+        agent_spec=AgentSpec(
+            spec_version=1,
+            mcp_servers=[
+                MCPServerConfig(
+                    name="hindsight", transport="stdio", command="node", args=["/opt/hindsight.js"]
+                )
+            ],
+        ),
+    )
+
+    config_path = Path(captured["spec"].env[pi_bridge.PI_NATIVE_CONFIG_ENV_VAR])
+    tools = {tool["name"]: tool for tool in json.loads(config_path.read_text())["tools"]}
+    assert tools["hindsight__hindsight_recall"]["parameters"]["properties"]["query"] == {
+        "type": "string"
+    }
+
+
+@pytest.mark.asyncio
 async def test_auto_create_pi_terminal_surfaces_credential_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
