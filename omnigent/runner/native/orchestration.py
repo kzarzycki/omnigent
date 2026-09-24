@@ -2054,6 +2054,8 @@ def _opencode_native_mcp_servers_from_spec(
     :param agent_spec: Optional resolved agent spec.
     :returns: The spec's ``mcp_servers`` list, or ``[]``.
     """
+    if os.environ.get("OMNIGENT_DISABLE_MCP") == "1":
+        return []
     if agent_spec is None:
         return []
     try:

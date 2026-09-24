@@ -593,8 +593,8 @@ class McpServerConnection:
             session initialize, or tool discovery is propagated
             here via the ready future.
         """
-        # ponytail: deployment-wide MCP off switch until upstream enforces
-        # bundle and redirect safety; remove after those checks are fixed.
+        # ponytail: block Omnigent-managed MCP until upstream enforces bundle
+        # and redirect safety; remove with the native OpenCode filter after the fix.
         if os.environ.get("OMNIGENT_DISABLE_MCP") == "1":
             raise RuntimeError("MCP connections are disabled by OMNIGENT_DISABLE_MCP")
 
