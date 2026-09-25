@@ -5820,8 +5820,9 @@ def _draft_in_input_box(pane: str, needle: str) -> bool:
     """
     Return whether the pasted draft is visible in Claude's input box.
 
-    Looks only at the **last** line containing
-    :data:`_CLAUDE_PROMPT_GLYPH` — the live input box always sits at
+    Looks only at the rows from the **last** line containing
+    :data:`_CLAUDE_PROMPT_GLYPH` down to the box's closing rule — the
+    live input box always sits at
     the bottom of the pane, below the transcript, so this never
     matches the submitted message's transcript echo. The draft counts
     as visible when the text after the glyph contains *needle* (small
@@ -5835,10 +5836,21 @@ def _draft_in_input_box(pane: str, needle: str) -> bool:
         only the paste placeholder is then considered.
     :returns: ``True`` when the draft is still sitting in the input box.
     """
-    glyph_lines = [line for line in pane.splitlines() if _CLAUDE_PROMPT_GLYPH in line]
-    if not glyph_lines:
+    lines = pane.splitlines()
+    glyph_rows = [idx for idx, line in enumerate(lines) if _CLAUDE_PROMPT_GLYPH in line]
+    if not glyph_rows:
         return False
-    tail = glyph_lines[-1].rsplit(_CLAUDE_PROMPT_GLYPH, 1)[1]
+    # A draft can span rows below the glyph: when a submit Enter lands
+    # inside the paste burst it becomes a newline and the collapsed
+    # placeholder renders on the next row ("❯ " / "[Pasted text #1 …]").
+    # Reading only the glyph row then saw an empty box and reported the
+    # submit as accepted while the message sat unsent.
+    region = [lines[glyph_rows[-1]].rsplit(_CLAUDE_PROMPT_GLYPH, 1)[1]]
+    for line in lines[glyph_rows[-1] + 1 :]:
+        if _is_box_rule(line):
+            break
+        region.append(line)
+    tail = "\n".join(region)
     if _PASTED_PLACEHOLDER_PREFIX in tail:
         return True
     return bool(needle) and needle in tail

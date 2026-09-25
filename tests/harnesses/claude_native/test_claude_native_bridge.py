@@ -4247,6 +4247,53 @@ def test_inject_user_message_escapes_unsupported_slash_command_payload(
     assert not loaded_payloads[1].startswith("\ufeff".encode("utf-8"))
 
 
+def test_inject_user_message_resends_enter_when_paste_placeholder_wraps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An Enter swallowed as a newline leaves the placeholder on the row below
+    ``❯``; the bridge must see the draft there and re-send Enter.
+
+    Observed live on Claude Code 2.1.282 right after startup: the input box
+    read ``❯ `` over ``[Pasted text #1 +11 lines]`` and the turn never started.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_RETRY_INTERVAL_S", 0.0)
+    wrapped = _composer_pane().replace("❯ \n", "❯ \n  [Pasted text #1 +11 lines]\n")
+    tui = {"pane": _composer_pane()}
+    enters: list[str] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Swallow the first Enter as a newline, submit on the second.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess with rc=0.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = _composer_pane("[Pasted text #1 +11 lines]")
+        if cmd[-1] == "Enter":
+            enters.append(cmd[-1])
+            tui["pane"] = wrapped if len(enters) == 1 else _composer_pane()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content="\n".join(f"line {i}" for i in range(12)))
+
+    assert len(enters) == 2, "the swallowed submit Enter was not re-sent"
+    assert tui["pane"] == _composer_pane()
+
+
 def _rejection_pane(name: str, draft: str = "") -> str:
     """
     Render a pane where Claude Code has rejected an unknown command.
