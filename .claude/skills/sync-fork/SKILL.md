@@ -24,22 +24,17 @@ Run the bundled script:
 
 It performs, in order:
 1. Auto-stash the working tree if dirty (untracked included).
-2. `git fetch upstream`.
+2. `git fetch upstream`, `git fetch origin mine`.
 3. Fast-forward `main` to `upstream/main`, push to `origin`.
-4. Rebase `mine` onto `upstream/main`, force-push (`--force-with-lease`) to `origin`.
-5. **Refresh the local runtime** so the synced code is actually live:
-   rebuild the web SPA if `web/` changed (it's a gitignored build artifact),
-   re-sync the editable install (`uv tool install --editable . --reinstall`)
-   for new deps + an honest `--version`, and `launchctl kickstart` the
-   `dev.zarz.omnigent` agent so the running server drops its old imports.
+4. Cherry-pick commits on `origin/mine` that have no patch-equivalent in the
+   local `mine`. `origin/mine` is the source of truth: a fix landed there from
+   any machine survives the force-push below.
+5. Rebase `mine` onto `upstream/main`, force-push (`--force-with-lease`) to `origin`.
 6. Return to the starting branch and restore the stash.
 
-A clean tree is left exactly where it started, now on top of current upstream,
-with the web UI, deps, and running server all matching the synced code.
-
-The refresh steps are guarded — web rebuild is skipped when `web/` is
-unchanged, and the server restart is skipped when the launchd agent isn't
-loaded — so the script still works on a checkout without the local install.
+It does not deploy. Every machine runs `omnigent-update` (dotagents,
+`patches/omnigent/update.sh`) from an Omnigent scheduled task, which installs
+the new `origin/mine` head and restarts the host or server when idle.
 
 ## When the rebase conflicts
 
@@ -47,28 +42,13 @@ The script stops mid-rebase and the EXIT trap can't pop the stash. Recover by ha
 
 ```bash
 # resolve conflicts, then:
+git cherry-pick --continue     # if it stopped taking origin/mine commits
 git rebase --continue          # repeat until done, or: git rebase --abort
 git push --force-with-lease origin mine
 git checkout mine && git stash pop   # your WIP is in `git stash list`
 ```
 
-## Working on a branch without breaking the running server
-
-**This checkout is the editable install the launchd server runs from.** Checking
-out a feature branch here swaps the code under the live server. Use a worktree:
-
-```bash
-git worktree add worktrees/<topic> -b <branch> upstream/main
-OMNIGENT_SKIP_WEB_UI=true uv sync   # in the worktree; the build fails without it
-```
-
-`mine` stays checked out in the main clone, the server keeps serving it, and the
-worktree is disposable (`git worktree remove worktrees/<topic>`).
-
 ## Notes
 
-- The restart step uses `kickstart` only when the agent is already loaded, and
-  `bootstrap` otherwise — after a `launchctl bootout` the label is gone and
-  `kickstart` can never bring it back. See `audit-sync`'s Gotchas.
 - This skill must be committed on `mine` to survive the rebase that the sync itself performs. If it lives only as an uncommitted working-tree file, it gets stashed/restored each run instead of being part of the replayed patch set.
-- The script assumes the branch/remote names in the table above. Renaming any of them means editing the four variables at the top of `sync-fork.sh`.
+- The script assumes the branch/remote names in the table above. Renaming any of them means editing the variables at the top of `sync-fork.sh`.
