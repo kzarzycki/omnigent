@@ -9,14 +9,14 @@ One cycle: **detect the delta → audit it → apply only if clean.** This gates
 `sync-fork` skill (the mechanical apply) behind an audit of what upstream is
 introducing. Run by an agent, not a dumb script — the audit needs judgement.
 
-Repo: `~/dev/ext/omnigent/omnigent`. Branches/remotes are as in `sync-fork`
+Repo: the fork checkout the run starts in (`~/dev/ext/omnigent/omnigent` on the
+sync machine). Branches/remotes are as in `sync-fork`
 (`upstream` = omnigent-ai, `mine` = the patched branch).
 
 ## Procedure (what the agent does each run)
 
 1. **Detect the delta.**
    ```bash
-   cd ~/dev/ext/omnigent/omnigent
    git fetch upstream -q
    BASE=$(git merge-base mine upstream/main)
    NEW=$(git rev-parse upstream/main)
@@ -36,10 +36,10 @@ Repo: `~/dev/ext/omnigent/omnigent`. Branches/remotes are as in `sync-fork`
 
 3. **Gate.**
    - **No high-severity finding → APPLY:** run `bash .claude/skills/sync-fork/sync-fork.sh`.
-     It rebases `mine`, rebuilds the UI if `web/` changed, reinstalls, and
-     **auto-skips the server restart when inside omnigent** (push is non-fatal).
+     It takes commits landed in `origin/mine`, rebases `mine` onto upstream and
+     pushes. It deploys nothing: each machine's `omnigent-update` task does.
    - **Any high-severity finding, or an inconclusive audit → HOLD:** do NOT run
-     sync-fork. Leave the tree, install, and server untouched. Report the
+     sync-fork. Leave the tree and `mine` untouched. Report the
      concern and the offending commits.
 
 4. **Report** — a concise markdown summary of the delta and findings, ending
@@ -47,85 +47,20 @@ Repo: `~/dev/ext/omnigent/omnigent`. Branches/remotes are as in `sync-fork`
 
 ## Running it on a schedule
 
-`auto-sync.sh` (next to this file) is the launchd entrypoint. It runs **outside**
-any omnigent session so it can restart the server the audit session runs under:
+An Omnigent scheduled task on the always-on VPS host (`cc-experiments`) runs
+this procedure daily, with the fork checkout as its workspace. Pushing works
+from its sessions (git credentials via `gh auth setup-git`), and no restart is
+needed here, so nothing has to run outside Omnigent.
 
-1. Detects the delta; exits early if none (never wakes an agent for nothing).
-2. Drives a headless `omnigent run --harness claude -p …` session through the
-   procedure above (the apply runs inside omnigent, so sync-fork skips its own
-   restart).
-3. If `mine` advanced (audit passed and applied), restarts the launchd server
-   **here** to load the new backend, and posts a notification. Held / no-op →
-   no restart.
-
-The report and full log land in `~/.omnigent/logs/auto-sync/`.
-
-### It triggers on the first real wake, not a clock time
-
-`dev.zarz.omnigent-autosync` uses `StartInterval` (15m), **not**
-`StartCalendarInterval`. On a laptop a fixed hour does not work:
-
-- macOS runs scheduled work during **DarkWake**, which lasts 2-7 seconds here.
-  Wifi has not associated yet, so the fetch dies — 12 of 18 runs on a 04:00
-  schedule failed with `Could not resolve host` or a mid-transfer reset. A
-  15-minute audit cannot complete in a 2-second wake either.
-- `StartInterval` does not wake a sleeping Mac. launchd coalesces the missed
-  firings and runs the job once on the next genuine wake.
-
-`auto-sync.sh` then decides whether that wake deserves a run, in this order —
-all before the per-run log is opened, since 96 ticks a day would otherwise
-litter 96 files. Skips append one line to `ticks.log`:
-
-| Guard | Behaviour |
-|---|---|
-| `.state/last-run` == today | exit. Written only when a run reaches a decision, so a no-network day retries instead of burning the day. |
-| display off | exit. macOS holds a `Prevent sleep while display is on` assertion exactly while the user is present. |
-| host-runner log touched < 10m ago | defer, so the post-sync server restart doesn't land under a live agent. Capped at 4h so a busy day can't starve the sync. |
-
-**Is it working?** `tail ~/.omnigent/logs/auto-sync/ticks.log` — every tick that
-did anything logs one line, and a skip names the guard that stopped it. Silence
-all day means no tick fired at all (agent unloaded), not a quiet success.
-
-## Gotchas
-
-Each of these silently disabled the job at some point. They are load-bearing.
-
-- **`launchctl bootout` needs `bootstrap`, not `kickstart`.** `kickstart` only
-  restarts an already-loaded service; after a bootout the label is gone and
-  kickstart fails forever. Both this script and `sync-fork.sh` check
-  `launchctl print` and fall back to `bootstrap`.
-- **`pipefail` + `grep -q` inverts the result.** `grep -q` exits on first match,
-  SIGPIPEs the writer, and with `set -o pipefail` the *pipeline* reports
-  failure — so a matching guard reads as "no match". Read into a variable and
-  match with a herestring instead. This one made the display guard report
-  "asleep" while the machine was in use.
-- **`IODisplayWrangler` does not exist on Apple Silicon.** The usual
-  display-power check via `ioreg -n IODisplayWrangler` silently returns the root
-  node. Use the `pmset -g assertions` string above.
-- **Don't key "busy" on a live process.** Orphaned runner processes outlive
-  their session by many minutes; a `pgrep`-based check defers forever. Log mtime
-  reflects actual work.
-- **`stat -f %z` is ambiguous.** BSD `stat` reads `-f` as a format string, GNU
-  coreutils reads it as "filesystem", and a homebrew coreutils on `PATH` decides
-  which you get. Use `wc -c < file`.
-- **A clean audit that failed to apply looks exactly like a HOLD** — both leave
-  `mine` unchanged. Split on the report verdict and surface the session exit
-  code, or a crashed apply reports as "held" for days.
+Deploying is separate: every machine has its own scheduled task running
+`omnigent-update`, which installs the pushed `origin/mine` head and restarts
+the host or server only when no session was active in the last 10 minutes.
 
 ## Notes
 
 - **HOLD is the safe default** — never apply on an uncertain audit.
-- The restart is the *only* self-terminating step; it is owned exclusively by
-  `auto-sync.sh` (outside omnigent), never by the in-session apply.
-- **Sessions are grouped, not top-level.** `auto-sync.sh` exports
-  `OMNIGENT_SESSION_PROJECT="omnigent fork sync"` and
-  `OMNIGENT_SESSION_TITLE="audit-sync <date>"` before `omnigent run`. `omnigent run`
-  has no flag for these, so a create-time seam (`session_seed_from_env` in
-  `omnigent/session_seed.py`) reads them and files each run into the collapsible
-  "omnigent fork sync" sidebar folder with a dated title. The seam must be read by
-  *every* CLI session-create path — the headless `-p` create lives in
-  `omnigent/chat.py`, not the REPL, and while only the REPL read it the daily runs
-  landed top-level with an auto-generated title. That patch lives on `mine`, so it
-  must replay across every rebase like the skills below.
+- **A clean audit that failed to apply looks exactly like a HOLD** — both leave
+  `mine` unchanged. Report the apply's exit status next to the verdict, or a
+  crashed apply reads as "held" for days.
 - Committed on `mine` (with `sync-fork`) so both replay across the rebase they
   perform.
