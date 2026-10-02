@@ -29,6 +29,12 @@ Configuration is via environment variables:
                         Defaults to ``/data/artifacts`` (the volume
                         mount point used by docker-compose).
   HOST, PORT            Bind address. Default ``0.0.0.0:8000``.
+  OMNIGENT_AGENT_DIRS   Optional. ``os.pathsep``-separated agent
+                        directories or YAML files to register at
+                        startup, like ``omnigent server --agent``. A
+                        directory without ``config.yaml`` stands for
+                        each child directory that has one, so a mounted
+                        repo of agents needs no per-agent entry.
 """
 
 from __future__ import annotations
@@ -343,6 +349,24 @@ def log_capabilities(
     )
 
 
+def agent_sources(value: str) -> list[Path]:
+    """Expand ``OMNIGENT_AGENT_DIRS`` into the agent sources to register.
+
+    :param value: ``os.pathsep``-separated paths. A directory with a
+        ``config.yaml`` (or a YAML file) is one agent; a directory
+        without one stands for its child directories that have one.
+    :returns: Agent directories or YAML files, in a stable order.
+    """
+    sources: list[Path] = []
+    for entry in filter(None, value.split(os.pathsep)):
+        path = Path(entry)
+        if path.is_dir() and not (path / "config.yaml").is_file():
+            sources.extend(sorted(c for c in path.iterdir() if (c / "config.yaml").is_file()))
+        else:
+            sources.append(path)
+    return sources
+
+
 def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     """Resolve config if needed, wire the stores, and build the app.
 
@@ -405,6 +429,12 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
         artifact_store=artifact_store,
         cache_dir=artifact_dir / ".cache",
     )
+
+    from omnigent.cli import _preregister_agent
+
+    for agent_source in agent_sources(os.environ.get("OMNIGENT_AGENT_DIRS", "")):
+        _preregister_agent(agent_source, agent_store, artifact_store, agent_cache)
+        logger.info("Registered agent from %s", agent_source)
 
     from omnigent.spec import parse_default_policies, parse_server_llm
 
