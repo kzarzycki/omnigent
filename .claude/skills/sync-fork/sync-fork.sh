@@ -13,7 +13,16 @@
 # in-progress edits survive. Runs against the repo this script lives in,
 # regardless of the current directory.
 #
-# Usage: .claude/skills/sync-fork/sync-fork.sh
+# `mine` is rebased onto TARGET, by default the newest upstream mainline commit
+# at least 3 days old: a compromised upstream change usually surfaces within
+# days, so a short lag keeps most of them off every machine. audit-sync passes
+# the exact commit it audited.
+#
+# Commits landed in origin/mine are only taken when signed by a key in
+# gpg.ssh.allowedSignersFile: this repo signs everything it commits, so taking
+# an unsigned one would re-sign whatever a stolen push token put there.
+#
+# Usage: .claude/skills/sync-fork/sync-fork.sh [TARGET]
 set -euo pipefail
 
 UPSTREAM=upstream      # remote -> omnigent-ai/omnigent
@@ -51,6 +60,8 @@ echo "==> fetching $UPSTREAM and $FORK"
 git fetch "$UPSTREAM"
 git fetch "$FORK" "$PATCHED"
 
+TARGET=$(git rev-parse --verify "${1:-$(git rev-list -1 --first-parent --before='3 days ago' "$UPSTREAM/$MIRROR")}^{commit}")
+
 echo "==> fast-forwarding $MIRROR to $UPSTREAM/$MIRROR"
 git branch -f "$MIRROR" "$UPSTREAM/$MIRROR"
 push "$FORK" "$MIRROR"
@@ -60,12 +71,20 @@ git checkout -q "$PATCHED"
 # machine. Take them before rebasing, or the force-push below deletes them.
 landed=$(git cherry "$PATCHED" "$FORK/$PATCHED" | sed -n 's/^+ //p')
 if [ -n "$landed" ]; then
+  for c in $landed; do
+    git verify-commit "$c" 2>/dev/null \
+      || { echo "!! $FORK/$PATCHED has unsigned or unknown-signer commit $c — not taking it" >&2; exit 1; }
+  done
   echo "==> taking $(echo "$landed" | wc -l | tr -d ' ') commit(s) landed in $FORK/$PATCHED"
   git cherry-pick $landed
 fi
 
-echo "==> rebasing $PATCHED onto $UPSTREAM/$MIRROR"
-git rebase "$UPSTREAM/$MIRROR"
+if git merge-base --is-ancestor "$TARGET" "$PATCHED"; then
+  echo "==> $PATCHED already contains ${TARGET:0:9}; nothing to rebase"
+else
+  echo "==> rebasing $PATCHED onto ${TARGET:0:9}"
+  git rebase "$TARGET"
+fi
 push --force-with-lease="$PATCHED:$FORK/$PATCHED" "$FORK" "$PATCHED"
 
-echo "==> done. $MIRROR and $PATCHED up to date and pushed."
+echo "==> done. $PATCHED on ${TARGET:0:9}, pushed."
