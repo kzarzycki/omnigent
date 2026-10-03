@@ -19,17 +19,21 @@ This clone tracks two remotes and keeps two branches:
 Run the bundled script:
 
 ```bash
-.claude/skills/sync-fork/sync-fork.sh
+.claude/skills/sync-fork/sync-fork.sh [TARGET]
 ```
+
+`TARGET` defaults to the newest upstream mainline commit at least 3 days old;
+`audit-sync` passes the exact commit it audited.
 
 It performs, in order:
 1. Auto-stash the working tree if dirty (untracked included).
 2. `git fetch upstream`, `git fetch origin mine`.
 3. Fast-forward `main` to `upstream/main`, push to `origin`.
 4. Cherry-pick commits on `origin/mine` that have no patch-equivalent in the
-   local `mine`. `origin/mine` is the source of truth: a fix landed there from
+   local `mine`, after checking each is signed by a key in
+   `gpg.ssh.allowedSignersFile` (it stops on any that isn't). `origin/mine` is the source of truth: a fix landed there from
    any machine survives the force-push below.
-5. Rebase `mine` onto `upstream/main`, force-push (`--force-with-lease`) to `origin`.
+5. Rebase `mine` onto `TARGET` (skipped when `mine` already contains it), force-push (`--force-with-lease`) to `origin`.
 6. Return to the starting branch and restore the stash.
 
 It does not deploy. Every machine runs `omnigent-update` (dotagents,
@@ -49,6 +53,11 @@ git checkout mine && git stash pop   # your WIP is in `git stash list`
 ```
 
 ## Notes
+
+- Commits are signed (`commit.gpgsign`, SSH format, set in this checkout's
+  git config), so the rebased `mine` head carries this machine's signature.
+  `omnigent-update` on every machine refuses to install a head that isn't
+  signed by a key in its local allowed-signers file.
 
 - This skill must be committed on `mine` to survive the rebase that the sync itself performs. If it lives only as an uncommitted working-tree file, it gets stashed/restored each run instead of being part of the replayed patch set.
 - The script assumes the branch/remote names in the table above. Renaming any of them means editing the variables at the top of `sync-fork.sh`.
