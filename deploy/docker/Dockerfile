@@ -113,7 +113,7 @@ WORKDIR /build
 
 # Manifests + SDK path-deps first so the install layer caches across
 # pure source edits.
-COPY pyproject.toml setup.py ./
+COPY pyproject.toml setup.py uv.lock ./
 # License + third-party attribution travel into the published images (the host
 # and runtime targets COPY /build below), since the image redistributes the
 # dependency bytes baked in by the install step.
@@ -133,6 +133,14 @@ COPY examples/ ./examples/
 RUN python -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}"
+
+# Constrain every install in this and later builder stages to uv.lock's
+# versions: a bare `uv pip install` resolves fresh and skips the lockfile.
+# ponytail: base dependencies only (some extras conflict, so no --all-extras);
+# packages pulled in by OMNIGENT_EXTRAS or psycopg still resolve fresh.
+RUN uv export --frozen --no-dev --no-emit-workspace --no-hashes -o /tmp/lock.txt \
+    && grep -v '^-e ' /tmp/lock.txt > /build/constraints.txt
+ENV UV_CONSTRAINT=/build/constraints.txt
 
 # Install omnigent. Editable install (-e) is required because
 # pyproject.toml declares the sibling SDKs as editable path deps via
