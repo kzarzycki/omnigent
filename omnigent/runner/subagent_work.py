@@ -132,10 +132,11 @@ class _SubagentWorkEntry:
         the parent's inbox.
     :param cancellation_confirmed: Whether a native terminal edge confirmed
         an abort, rather than an interrupt merely being requested.
-    :param launch_timed_out: Whether the recorded ``failed`` came from the
-        launch-liveness reaper rather than from the child itself. Such a
-        failure is a guess ("no start acknowledgment"), so a genuine
-        terminal edge from the child afterwards must replace it.
+    :param launch_timed_out: Whether the recorded ``failed`` is a guess made
+        outside the child: the launch-liveness reaper's ("no start
+        acknowledgment"), or the server's report that the child's runner went
+        away mid-turn. A genuine terminal edge from the child afterwards must
+        replace it.
     """
 
     parent_session_id: str

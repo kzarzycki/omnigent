@@ -6547,6 +6547,24 @@ def create_runner_app(
             status = data.get("status") if isinstance(data, dict) else None
             forwarded_output = data.get("output") if isinstance(data, dict) else None
             output = forwarded_output if isinstance(forwarded_output, str) else None
+            if status == "failed" and isinstance(data, dict) and data.get("provisional") is True:
+                # The server inferred this failure (the child's runner went
+                # away); the child itself reported nothing. It only settles a
+                # dispatch still in flight, and like a launch-timeout guess it
+                # keeps the dispatch open, so a relaunched child's real result
+                # replaces it and is delivered again.
+                provisional_entry = await _ensure_subagent_work_entry(conversation_id)
+                if (
+                    provisional_entry is not None
+                    and provisional_entry.status not in _SUBAGENT_TERMINAL_STATUSES
+                ):
+                    provisional_entry.launch_timed_out = True
+                    _mark_subagent_terminal_and_wake(
+                        conversation_id,
+                        status="failed",
+                        output=output or "Error: native sub-agent turn failed",
+                    )
+                return Response(status_code=204)
             delivery_ack: _SubagentDeliveryAck | None = None
             recovered_entry: _SubagentWorkEntry | None = None
             terminal_status = None
@@ -6672,8 +6690,12 @@ def create_runner_app(
                 ):
                     # Acknowledge instead of asking the forwarder to poll. The
                     # entry stays terminal and undelivered; it is handed over
-                    # only if this runner ever creates the parent's inbox.
-                    return Response(status_code=204)
+                    # if this runner ever creates the parent's inbox. The
+                    # reason tells the server to try the parent's own runner.
+                    return JSONResponse(
+                        status_code=202,
+                        content={"delivered": False, "reason": delivery_ack.reason},
+                    )
                 is_known = (
                     conversation_id in _session_sub_agent_names or recovered_entry is not None
                 )

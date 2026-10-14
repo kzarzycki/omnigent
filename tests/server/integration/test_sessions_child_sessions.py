@@ -1944,14 +1944,25 @@ async def test_subagent_idle_forward_503s_when_recovery_also_fails(
 
 
 @pytest.mark.parametrize(
-    ("parent_online", "expected_status"),
-    [(True, 202), (False, 503)],
-    ids=["parent-runner-live", "parent-runner-offline"],
+    ("child_answer", "parent_online", "expected_status"),
+    [
+        (503, True, 202),
+        (503, False, 503),
+        (202, True, 202),
+        (202, False, 202),
+    ],
+    ids=[
+        "refused-parent-runner-live",
+        "refused-parent-runner-offline",
+        "kept-for-subagent-parent-live",
+        "kept-for-subagent-parent-offline",
+    ],
 )
 async def test_subagent_idle_on_own_runner_delivers_via_parent_runner(
     client: httpx.AsyncClient,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    child_answer: int,
     parent_online: bool,
     expected_status: int,
 ) -> None:
@@ -1959,24 +1970,30 @@ async def test_subagent_idle_on_own_runner_delivers_via_parent_runner(
     A child relaunched on its own runner reaches the parent inbox on the parent's runner.
 
     The child's runner is live but holds no inbox for a parent that runs
-    elsewhere, so it refuses the turn-end with 503 ``missing_parent_inbox`` on
-    every retry. The status must be re-delivered through the parent's runner,
-    without moving the child; while the parent has no runner the 503 stays so
-    the forwarder retries until it is back.
+    elsewhere. For a top-level parent it refuses the turn-end with 503
+    ``missing_parent_inbox`` on every retry; for a parent that is itself a
+    sub-agent it acknowledges with that reason and keeps the result. Either
+    way the status must be re-delivered through the parent's runner, without
+    moving the child. While the parent has no runner, a refusal stays a 503
+    so the forwarder retries, and an acknowledgement stays one.
     """
-    child = await _create_native_child(client, name=f"orch-own-runner-{parent_online}")
+    child = await _create_native_child(
+        client, name=f"orch-own-runner-{child_answer}-{parent_online}"
+    )
     parent_id = child["parent_session_id"]
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv_store.replace_runner_id(child["id"], "runner_child")
     conv_store.replace_runner_id(parent_id, "runner_parent")
 
-    async def _child_runner_refuses(*_args: Any, **_kwargs: Any) -> Any:
+    async def _child_runner_answers(*_args: Any, **_kwargs: Any) -> Any:
         """The child's own runner has no inbox for the parent."""
+        body = (
+            {"error": "subagent_delivery_not_confirmed", "reason": "missing_parent_inbox"}
+            if child_answer == 503
+            else {"delivered": False, "reason": "missing_parent_inbox"}
+        )
         return sessions_module._RunnerForwardResult(
-            status_code=503,
-            body=json.dumps(
-                {"error": "subagent_delivery_not_confirmed", "reason": "missing_parent_inbox"}
-            ),
+            status_code=child_answer, body=json.dumps(body)
         )
 
     delivered: list[tuple[str, dict[str, Any]]] = []
@@ -1993,7 +2010,7 @@ async def test_subagent_idle_on_own_runner_delivers_via_parent_runner(
         return parent_runner if parent_online and session_id == parent_id else None
 
     monkeypatch.setattr(
-        sessions_module, "_forward_session_change_to_runner", _child_runner_refuses
+        sessions_module, "_forward_session_change_to_runner", _child_runner_answers
     )
     monkeypatch.setattr(sessions_module, "_get_runner_client", _runner_client)
 

@@ -274,6 +274,7 @@ from omnigent.server.routes._sessions.helpers import (
     _HostRunnerStopAttempt,
     _invalidate_runner_backed_snapshot_state,
     _is_codex_native_subagent,
+    _is_devin_native_subagent,
     _is_kiro_native_session,
     _is_native_interrupt_record,
     _last_task_error_from_labels,
@@ -3636,7 +3637,7 @@ async def _forward_subagent_status_to_parent_runner(
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore,
     forward_body: dict[str, Any],
-    runner_result: _RunnerForwardResult,
+    runner_result: _RunnerForwardResult | None,
 ) -> _RunnerForwardResult | None:
     """
     Deliver a sub-agent terminal status through the runner holding the parent inbox.
@@ -3645,32 +3646,35 @@ async def _forward_subagent_status_to_parent_runner(
     runner stops, the child can be relaunched alone (a message or resource
     access while the parent is down goes through ``_launch_runner_on_host``,
     which does not heal via the parent). Its terminal status then reaches its
-    own live runner, which has no inbox for the parent and answers 503
-    ``missing_parent_inbox`` on every retry, while
-    :func:`_recover_subagent_status_forward_via_parent` never runs because the
-    forward did reach a runner. The parent's runner builds the child's work
-    entry from the server snapshot, queues the result in the parent's inbox
-    and wakes it. The child stays bound to its own runner.
+    own live runner, which has no inbox for the parent: it answers 503
+    ``missing_parent_inbox`` on every retry, or, for a parent that is itself a
+    sub-agent, acknowledges with that reason and keeps the result. When the
+    child's runner is gone instead (a disconnect, a refused launch), nothing
+    reached a runner at all. In each case the parent's runner builds the
+    child's work entry from the server snapshot, queues the result in the
+    parent's inbox and wakes it. The child stays bound to its own runner.
 
-    :param child_conv: The sub-agent child whose terminal status was refused.
+    :param child_conv: The sub-agent child whose terminal status was not delivered.
     :param runner_router: Router used to resolve the parent's runner client,
         or ``None`` in in-process setups.
     :param conversation_store: Store used to look up the parent.
-    :param forward_body: The ``external_session_status`` event body to re-POST.
-    :param runner_result: The child runner's answer to the first forward.
-    :returns: The parent runner's result, or ``None`` when the refusal was not
-        ``missing_parent_inbox``, the parent shares the child's runner, or the
-        parent has no reachable runner (the caller keeps the 503 and the
-        forwarder retries until the parent is back).
+    :param forward_body: The ``external_session_status`` event body to POST.
+    :param runner_result: The child runner's answer to the first forward, or
+        ``None`` when the child's runner could not be reached.
+    :returns: The parent runner's result, or ``None`` when the child's runner
+        answered for any other reason, the parent shares the child's runner, or
+        the parent has no reachable runner (the caller keeps its own outcome; a
+        503 makes the forwarder retry until the parent is back).
     """
-    if runner_result.status_code != 503:
-        return None
-    try:
-        reason = json.loads(runner_result.body).get("reason")
-    except (ValueError, AttributeError):
-        return None
+    if runner_result is not None:
+        try:
+            reason = json.loads(runner_result.body).get("reason")
+        except (ValueError, AttributeError):
+            return None
+        if reason != "missing_parent_inbox":
+            return None
     parent_id = child_conv.parent_conversation_id
-    if reason != "missing_parent_inbox" or not parent_id or parent_id == child_conv.id:
+    if not parent_id or parent_id == child_conv.id:
         return None
     parent = await asyncio.to_thread(conversation_store.get_conversation, parent_id)
     if parent is None or parent.runner_id is None or parent.runner_id == child_conv.runner_id:
@@ -3694,7 +3698,71 @@ async def _forward_subagent_status_to_parent_runner(
         resp.status_code,
         extra={"session_id": child_conv.id},
     )
+    if runner_result is not None and runner_result.status_code < 300 and resp.status_code >= 300:
+        # The child's runner acknowledged and keeps the result; don't turn
+        # that into a retry loop.
+        return None
     return _RunnerForwardResult(status_code=resp.status_code, body=resp.text)
+
+
+async def _notify_parent_of_lost_subagent(
+    session_id: str,
+    error: ErrorDetail,
+    conversation_store: ConversationStore,
+    *,
+    snapshot: Conversation | None = None,
+) -> None:
+    """
+    Tell a sub-agent's parent that the child stopped because its runner went away.
+
+    The child never reports a turn-end, so without this the parent waits on
+    it with no result. The failure is delivered as ``provisional``: the
+    parent's runner records it only on a dispatch still in flight and keeps
+    the dispatch open, so if the child is relaunched (``restore_active_children``)
+    and finishes, its real result replaces this one and is delivered again.
+    A parent on the same, now departed runner gets nothing here; its own
+    restart recovers the child instead. Best-effort: never raises.
+
+    :param session_id: The session the departed runner interrupted.
+    :param error: The cause the sweep or relay recorded, e.g.
+        ``ErrorDetail(code="runner_disconnected", message="...")``.
+    :param conversation_store: Store used to look up the session and parent.
+    :param snapshot: The session row when the caller already holds it.
+    :returns: None.
+    """
+    from omnigent.runtime import get_runner_router
+
+    try:
+        conv = snapshot or await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if (
+            conv is None
+            or conv.kind != "sub_agent"
+            or _is_codex_native_subagent(conv)
+            or _is_devin_native_subagent(conv)
+        ):
+            return
+        forward_body: dict[str, Any] = {
+            "type": _EXTERNAL_SESSION_STATUS_TYPE,
+            "data": {
+                "status": "failed",
+                "provisional": True,
+                "output": (
+                    f"Error: sub-agent session {conv.id} stopped mid-turn: {error.message} "
+                    "It may be relaunched and resume; a later result from it replaces this "
+                    "one. Inspect its session before retrying."
+                ),
+            },
+        }
+        await _forward_subagent_status_to_parent_runner(
+            conv, get_runner_router(), conversation_store, forward_body, None
+        )
+    except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
+        _logger.warning(
+            "Could not tell the parent of sub-agent %s that it stopped",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
 
 
 def _drive_terminal_resolved_elicitation(session_id: str, persisted: ConversationItem) -> None:
@@ -3951,6 +4019,7 @@ async def _mark_runner_sessions_offline_once(
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
         )
+        await _notify_parent_of_lost_subagent(conv.id, error, conversation_store, snapshot=conv)
         await _persist_session_status_error_labels(
             conv.id, error, conversation_store, owner_runner_id=conv.runner_id
         )
@@ -5594,6 +5663,7 @@ async def _persist_native_terminal_failure(
         conv,
         error,
         runner_router,
+        conversation_store,
     )
     return consumed.id
 
@@ -5681,7 +5751,9 @@ async def _persist_host_launch_failure_turn(
     )
     # A host-launched sub-agent that cannot start must wake its parent,
     # the same way a boot failure does — no-ops for top-level sessions.
-    await _forward_native_subagent_terminal_failure(session_id, conv, error, runner_router)
+    await _forward_native_subagent_terminal_failure(
+        session_id, conv, error, runner_router, conversation_store
+    )
     return consumed.id
 
 
@@ -5690,6 +5762,7 @@ async def _forward_native_subagent_terminal_failure(
     conv: Conversation,
     error: ErrorData,
     runner_router: RunnerRouter | None,
+    conversation_store: ConversationStore,
 ) -> None:
     """
     Wake the parent runner when a native sub-agent fails to boot its terminal.
@@ -5713,6 +5786,8 @@ async def _forward_native_subagent_terminal_failure(
     :param error: Boot error to relay to the parent as the turn result.
     :param runner_router: Router used to resolve the sub-agent's runner,
         or ``None`` (then the global client is used).
+    :param conversation_store: Store used to look up the parent when the
+        child's runner is gone or holds no inbox for it.
     :returns: None.
     :raises OmnigentError: If the parent's runner could not be reached
         or rejected the forwarded failure status — dropping it would
@@ -5731,6 +5806,11 @@ async def _forward_native_subagent_terminal_failure(
         runner_router,
         forward_body,
     )
+    via_parent = await _forward_subagent_status_to_parent_runner(
+        conv, runner_router, conversation_store, forward_body, runner_result
+    )
+    if via_parent is not None:
+        runner_result = via_parent
     _require_external_status_forward(session_id, "failed", runner_result)
 
 
@@ -8223,6 +8303,9 @@ async def _relay_runner_stream(
                 )
                 await record_subagent_activity(
                     session_id, "returned", conversation_store, turn_id=turn_id, status="failed"
+                )
+                await _notify_parent_of_lost_subagent(
+                    session_id, disconnect_error, conversation_store
                 )
                 # Persist the disconnect cause as durable labels so the
                 # distinction survives into snapshots and child-session

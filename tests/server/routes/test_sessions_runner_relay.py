@@ -2101,6 +2101,68 @@ async def test_relay_disconnect_status_after_adoption(
 
 
 @pytest.mark.asyncio
+async def test_relay_disconnect_tells_parent_its_subagent_stopped(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child whose relay loses its runner mid-turn wakes its parent on the parent's runner."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration.RUNNER_DISCONNECT_GRACE_S", 0.0
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation(runner_id="runner_parent")
+    child = store.create_conversation(
+        kind="sub_agent", parent_conversation_id=parent.id, runner_id="runner_child"
+    )
+    store.set_session_live_status(child.id, "running")
+    snapshot = store.get_conversation(child.id)
+    assert snapshot is not None
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def _parent_runner(request: httpx.Request) -> httpx.Response:
+        posted.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(204)
+
+    parent_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_parent_runner), base_url="http://runner"
+    )
+
+    async def _runner_client(session_id: str, *_args: Any, **_kwargs: Any) -> Any:
+        return parent_client if session_id == parent.id else None
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _runner_client)
+    gate = asyncio.Event()
+    handle = None
+    try:
+        handle = await sessions_module._ensure_runner_relay_ready(
+            child.id,
+            child.runner_id,
+            _ScriptedThenDropRunnerClient([], gate),  # type: ignore[arg-type]
+            store,
+            conversation=snapshot,
+        )
+        assert handle is not None
+        gate.set()
+        await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
+    finally:
+        gate.set()
+        if handle is not None and not handle.task.done():
+            handle.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await handle.task
+        sessions_module._session_status_cache.pop(child.id, None)
+        session_stream.close(child.id)
+
+    assert [path for path, _ in posted] == [f"/v1/sessions/{child.id}/events"]
+    data = posted[0][1]["data"]
+    assert (data["status"], data["provisional"]) == ("failed", True)
+    assert "Runner disconnected unexpectedly." in data["output"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("scenario", "expect_failed"),
     [
@@ -3366,6 +3428,67 @@ async def test_offline_sweep_saved_subagent_turn_without_a_cached_edge(
         sessions_module._session_background_task_count_cache.pop(child.id, None)
         sessions_module._session_status_cache.pop(child.id, None)
         session_stream.close(child.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parent_runner", ["runner-parent", "runner-child"], ids=["apart", "shared"]
+)
+async def test_offline_sweep_tells_parent_its_subagent_stopped(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_runner: str,
+) -> None:
+    """
+    A sub-agent failed by the sweep wakes its parent on the parent's own runner.
+
+    The child never reports a turn-end, so the parent's runner gets a
+    ``provisional`` failure naming the cause, which a relaunched child's real
+    result can still replace. A parent on the departed runner itself gets
+    nothing; its own restart recovers the child.
+    """
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.create_conversation()
+    child = store.create_conversation(kind="sub_agent", parent_conversation_id=parent.id)
+    store.replace_runner_id(parent.id, parent_runner)
+    store.replace_runner_id(child.id, "runner-child")
+    store.set_session_live_status(child.id, "running")
+    snapshot = store.get_conversation(child.id)
+    assert snapshot is not None
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def _parent_runner(request: httpx.Request) -> httpx.Response:
+        posted.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(204)
+
+    parent_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_parent_runner), base_url="http://runner"
+    )
+
+    async def _runner_client(session_id: str, *_args: Any, **_kwargs: Any) -> Any:
+        return parent_client if session_id == parent.id else None
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _runner_client)
+    error = ErrorDetail(code="runner_disconnected", message="Runner disconnected unexpectedly.")
+    try:
+        await sessions_module._mark_runner_sessions_offline([snapshot], error, store)
+    finally:
+        sessions_module._session_status_cache.pop(child.id, None)
+        session_stream.close(child.id)
+
+    if parent_runner == "runner-child":
+        assert posted == []
+        return
+    assert [path for path, _ in posted] == [f"/v1/sessions/{child.id}/events"]
+    data = posted[0][1]["data"]
+    assert data["status"] == "failed"
+    assert data["provisional"] is True
+    assert "Runner disconnected unexpectedly." in data["output"]
 
 
 @pytest.mark.asyncio

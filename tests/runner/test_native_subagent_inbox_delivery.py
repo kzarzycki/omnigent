@@ -412,7 +412,8 @@ async def test_nested_subagent_parent_without_inbox_is_acked(
         parent_body=_parent_snapshot(parent_session_id="conv_top_level"),
     )
 
-    assert http == 204
+    # 2xx, so the forwarder stops; the reason lets the server try the parent's runner.
+    assert http == 202
     assert items == []
     entry = subagent_work.get_subagent_work(CHILD_SESSION_ID)
     assert entry is not None
@@ -454,7 +455,8 @@ async def test_retained_result_is_delivered_when_parent_inbox_is_created(
             f"/v1/sessions/{CHILD_SESSION_ID}/events",
             json={"type": "external_session_status", "data": {"status": "idle", "output": "x"}},
         )
-        assert acked.status_code == 204
+        assert acked.status_code == 202
+        assert acked.json() == {"delivered": False, "reason": "missing_parent_inbox"}
         assert PARENT_SESSION_ID not in subagent_work._session_inboxes_ref
 
         # The parent's inbox appears on this process; a second creation is a no-op.
@@ -522,6 +524,69 @@ async def test_replayed_idle_after_drain_does_not_redeliver(
 
     assert replay.status_code == 204
     assert inbox.qsize() == 0, "replayed idle re-delivered a duplicate to the parent inbox"
+
+
+@pytest.mark.asyncio
+async def test_provisional_failure_wakes_parent_and_yields_to_the_real_result(
+    _clean_subagent_registry: None,
+) -> None:
+    """A server-inferred failure reaches the parent but never closes the dispatch.
+
+    When the child's runner goes away mid-turn, the server tells the parent's
+    runner with a ``provisional`` failure. The parent must get it, a repeat
+    must not deliver it twice, and the relaunched child's real result must
+    still replace it and be delivered.
+    """
+    child_body = _child_snapshot(sub_agent_name="reviewer", parent_session_id=PARENT_SESSION_ID)
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    subagent_work._session_inboxes_ref[PARENT_SESSION_ID] = inbox
+    subagent_work.register_subagent_work(
+        parent_session_id=PARENT_SESSION_ID,
+        child_session_id=CHILD_SESSION_ID,
+        agent="reviewer",
+        title="review",
+    )
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="reviewer",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+        )
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_SnapshotServerClient(child_body),  # type: ignore[arg-type]
+    )
+    lost = {
+        "type": "external_session_status",
+        "data": {"status": "failed", "provisional": True, "output": "Error: runner gone"},
+    }
+    async with _runner_client(app) as client:
+        first = await client.post(f"/v1/sessions/{CHILD_SESSION_ID}/events", json=lost)
+        repeat = await client.post(f"/v1/sessions/{CHILD_SESSION_ID}/events", json=lost)
+        assert first.status_code == repeat.status_code == 204
+        assert inbox.qsize() == 1
+        notice = inbox.get_nowait()
+        assert (notice["status"], notice["output"]) == ("failed", "Error: runner gone")
+        entry = subagent_work.get_subagent_work(CHILD_SESSION_ID)
+        assert entry is not None and entry.launch_timed_out
+
+        real = await client.post(
+            f"/v1/sessions/{CHILD_SESSION_ID}/events",
+            json={
+                "type": "external_session_status",
+                "data": {"status": "idle", "output": "review complete: LGTM"},
+            },
+        )
+
+    assert real.status_code == 204
+    assert inbox.qsize() == 1
+    result = inbox.get_nowait()
+    assert (result["status"], result["output"]) == ("completed", "review complete: LGTM")
 
 
 @pytest.mark.asyncio

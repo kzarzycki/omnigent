@@ -2090,8 +2090,9 @@ def register_events_routes(
                         runner_result = recovered
                 else:
                     # The child is live on a runner of its own, which has no
-                    # inbox for a parent that runs elsewhere: deliver through
-                    # the parent's runner instead of 503-ing until restart.
+                    # inbox for a parent that runs elsewhere (it 503s, or acks
+                    # and keeps the result for a sub-agent parent): deliver
+                    # through the parent's runner instead.
                     from omnigent.server.routes import sessions as _sf
 
                     via_parent = await _sf._forward_subagent_status_to_parent_runner(
