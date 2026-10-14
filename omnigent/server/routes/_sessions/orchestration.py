@@ -945,6 +945,9 @@ async def _archive_stop(
     "working" against a dead pane — the failure
     :func:`_stop_session_host_runner` exists to prevent.
 
+    A sub-agent on its ancestor's runner doesn't own it: archive releases
+    only the sub-agent's session on that runner, and the ancestor keeps it.
+
     Every step is best-effort: a wedged, offline, or already-stopped
     runner must not leave the session un-archived.
 
@@ -1003,8 +1006,8 @@ async def _archive_stop(
     await _facade._best_effort_stop(session_id, conversation_store, runner_router)
     if conv.host_id and conv.runner_id:
         try:
-            # A sub-agent riding an ancestor's runner leaves it up for the owner.
-            if await _owns_host_runner(conv, conversation_store):
+            owns_runner = await _owns_host_runner(conv, conversation_store)
+            if owns_runner:
                 await _stop_host_runner_intentionally(
                     session_id,
                     conv.host_id,
@@ -1013,12 +1016,27 @@ async def _archive_stop(
                     conversation_store,
                 )
         except Exception:  # noqa: BLE001
+            owns_runner = True
             _logger.debug(
                 "Archive host-runner teardown failed for %s",
                 session_id,
                 exc_info=True,
                 extra={"session_id": session_id},
             )
+        if not owns_runner:
+            # The ancestor keeps the runner; release only this session's harness on it.
+            try:
+                runner_client = await _get_runner_client(session_id, runner_router)
+                if runner_client is not None:
+                    resp = await runner_client.delete(f"/v1/sessions/{session_id}", timeout=60.0)
+                    resp.raise_for_status()
+            except (httpx.HTTPError, ConnectionError):
+                _logger.warning(
+                    "Archive couldn't release %s on its ancestor's runner",
+                    session_id,
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
     # Runs after the runner teardown so the agent isn't left in a deleted cwd.
     if delete_worktree and conv.git_branch and conv.workspace and conv.host_id:
         from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
