@@ -3631,6 +3631,72 @@ async def _recover_subagent_status_forward_via_parent(
     )
 
 
+async def _forward_subagent_status_to_parent_runner(
+    child_conv: Conversation,
+    runner_router: RunnerRouter | None,
+    conversation_store: ConversationStore,
+    forward_body: dict[str, Any],
+    runner_result: _RunnerForwardResult,
+) -> _RunnerForwardResult | None:
+    """
+    Deliver a sub-agent terminal status through the runner holding the parent inbox.
+
+    A host-bound child is not always on its parent's runner: when the shared
+    runner stops, the child can be relaunched alone (a message or resource
+    access while the parent is down goes through ``_launch_runner_on_host``,
+    which does not heal via the parent). Its terminal status then reaches its
+    own live runner, which has no inbox for the parent and answers 503
+    ``missing_parent_inbox`` on every retry, while
+    :func:`_recover_subagent_status_forward_via_parent` never runs because the
+    forward did reach a runner. The parent's runner builds the child's work
+    entry from the server snapshot, queues the result in the parent's inbox
+    and wakes it. The child stays bound to its own runner.
+
+    :param child_conv: The sub-agent child whose terminal status was refused.
+    :param runner_router: Router used to resolve the parent's runner client,
+        or ``None`` in in-process setups.
+    :param conversation_store: Store used to look up the parent.
+    :param forward_body: The ``external_session_status`` event body to re-POST.
+    :param runner_result: The child runner's answer to the first forward.
+    :returns: The parent runner's result, or ``None`` when the refusal was not
+        ``missing_parent_inbox``, the parent shares the child's runner, or the
+        parent has no reachable runner (the caller keeps the 503 and the
+        forwarder retries until the parent is back).
+    """
+    if runner_result.status_code != 503:
+        return None
+    try:
+        reason = json.loads(runner_result.body).get("reason")
+    except (ValueError, AttributeError):
+        return None
+    parent_id = child_conv.parent_conversation_id
+    if reason != "missing_parent_inbox" or not parent_id or parent_id == child_conv.id:
+        return None
+    parent = await asyncio.to_thread(conversation_store.get_conversation, parent_id)
+    if parent is None or parent.runner_id is None or parent.runner_id == child_conv.runner_id:
+        return None
+    client = await _get_runner_client(parent_id, runner_router, conversation=parent)
+    if client is None:
+        return None
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{child_conv.id}/events",
+            json=forward_body,
+            timeout=5.0,
+        )
+    except (httpx.HTTPError, ConnectionError):
+        return None
+    _logger.info(
+        "Delivered sub-agent %s terminal status through parent %s runner %s: %d",
+        child_conv.id,
+        parent_id,
+        parent.runner_id,
+        resp.status_code,
+        extra={"session_id": child_conv.id},
+    )
+    return _RunnerForwardResult(status_code=resp.status_code, body=resp.text)
+
+
 def _drive_terminal_resolved_elicitation(session_id: str, persisted: ConversationItem) -> None:
     """
     Feed a mirrored tool item into the terminal-resolved fast path.
