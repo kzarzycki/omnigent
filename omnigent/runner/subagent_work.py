@@ -82,6 +82,9 @@ _SUBAGENT_DELIVERY_MISSING_PARENT_INBOX = "missing_parent_inbox"
 # dispatch has since been replaced by a newer send on the reused child session.
 # Dropped without touching the newer dispatch so an old timer never cancels it.
 _SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH = "superseded_dispatch"
+# Status the server sends a parent's runner when it saw the child's runner go
+# away mid-turn. Runners that predate it ignore an unknown status.
+_SUBAGENT_LOST_STATUS = "lost"
 # Runner-owned labels on a child session that make sub-agent result delivery
 # durable across a runner restart. The dispatch id is stamped when a turn is
 # sent to the child; the delivered id is the receipt the parent's
@@ -139,10 +142,11 @@ class _SubagentWorkEntry:
     :param corrected_status: The provisional status this terminal report
         overturned, e.g. ``"cancelled"`` when a confirmed completion
         corrected an optimistic cancellation. ``None`` for a direct report.
-    :param launch_timed_out: Whether the recorded ``failed`` came from the
-        launch-liveness reaper rather than from the child itself. Such a
-        failure is a guess ("no start acknowledgment"), so a genuine
-        terminal edge from the child afterwards must replace it.
+    :param launch_timed_out: Whether the recorded ``failed`` is a guess made
+        outside the child: the launch-liveness reaper's ("no start
+        acknowledgment"), or the server's report that the child's runner went
+        away mid-turn. A genuine terminal edge from the child afterwards must
+        replace it.
     """
 
     parent_session_id: str
