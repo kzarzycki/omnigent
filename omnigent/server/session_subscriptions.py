@@ -43,6 +43,7 @@ _post_message: PostMessage | None = None
 # custom-lint: disable-next=workspace-scoped-cache -- task objects
 _tasks: set[asyncio.Task[None]] = set()
 _MAX_PARENT_HOPS = 32
+_loop: asyncio.AbstractEventLoop | None = None
 
 
 def configure(
@@ -136,14 +137,29 @@ async def deliver_pending_prompts(subscriber_id: str, target_id: str) -> None:
             )
 
 
+def set_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    """Remember the server loop so off-loop publishes can schedule notices onto it."""
+    global _loop
+    _loop = loop
+
+
 def _spawn(coro: Coroutine[Any, Any, None]) -> None:
     try:
-        task = asyncio.get_running_loop().create_task(coro)
+        asyncio.get_running_loop()
     except RuntimeError:
-        # ponytail: publishes from a thread without a loop are dropped; route them
-        # through the server loop if one ever needs delivering.
-        coro.close()
+        loop = _loop
+        try:
+            if loop is None:
+                raise RuntimeError("no server loop") from None
+            loop.call_soon_threadsafe(_start, coro)
+        except RuntimeError:
+            coro.close()
         return
+    _start(coro)
+
+
+def _start(coro: Coroutine[Any, Any, None]) -> None:
+    task = asyncio.get_running_loop().create_task(coro)
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
