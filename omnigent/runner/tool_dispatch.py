@@ -6110,7 +6110,12 @@ async def _session_subscription_via_rest(
                 f"{base}/{quote(cast(str, target).strip(), safe='')}", timeout=30.0
             )
         else:
-            response = await server_client.get(base, timeout=30.0)
+            after = args.get("after")
+            response = await server_client.get(
+                base,
+                params={"after": after} if isinstance(after, str) and after else None,
+                timeout=30.0,
+            )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"{tool_name} failed: {exc}"})
     if response.status_code >= 400:
