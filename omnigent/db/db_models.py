@@ -1663,3 +1663,45 @@ class SqlScheduledTaskRun(OmnigentBase):
             "conversation_id",
         ),
     )
+
+
+class SqlSessionSubscription(OmnigentBase):
+    """
+    SQLAlchemy model for the ``session_subscriptions`` table.
+
+    One row per ``(subscriber, target)`` pair: the subscriber session is told
+    when the target session ends a turn or blocks on a prompt. Server-owned, so
+    a runner's label or metadata writes never touch it. No DB foreign keys
+    (Rule R032); the conversation store drops rows when either session goes.
+
+    :param subscriber_id: Session that receives the notices.
+    :param target_id: Session being watched.
+    :param last_turn_key: Digest of the last turn end delivered, so a repeated
+        status edge for the same turn is not delivered twice.
+    :param last_prompt_key: Digest of the last prompt delivered, same purpose.
+    """
+
+    __tablename__ = "session_subscriptions"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    subscriber_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    target_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    # sha256 hex of the delivered turn's response id / prompt's elicitation id.
+    last_turn_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_prompt_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        # "Who watches this session" on every turn end.
+        Index(
+            "ix_session_subscriptions_target_id",
+            "workspace_id",
+            "target_id",
+            "subscriber_id",
+        ),
+    )
