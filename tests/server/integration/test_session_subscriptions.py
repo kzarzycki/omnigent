@@ -20,6 +20,7 @@ from omnigent.server.routes import sessions as sessions_facade
 from omnigent.server.routes._sessions import orchestration
 from omnigent.server.schemas import ErrorDetail
 from omnigent.spec.types import AgentSpec
+from omnigent.stores.conversation_store import MAX_SUBSCRIPTIONS_PER_SESSION
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.server.helpers import create_test_session
@@ -995,3 +996,45 @@ async def test_listing_shows_only_watched_sessions_the_caller_can_read(
 
     permissions.revoke("reader@example.com", targets[0])
     assert ids(await listing(reader)) == [targets[2]]
+
+
+async def test_a_full_subscriber_refuses_a_subscribe_and_bounds_its_listing_scan(
+    auth_client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    watcher, target = (store.create_conversation().id for _ in range(2))
+    for user in ("owner@example.com", "reader@example.com"):
+        permissions.ensure_user(user)
+    for session_id in (watcher, target):
+        permissions.grant("owner@example.com", session_id, LEVEL_EDIT)
+    permissions.grant("reader@example.com", watcher, LEVEL_EDIT)
+    # Watched sessions neither user can read fill the subscriber to the cap.
+    for index in range(MAX_SUBSCRIPTIONS_PER_SESSION):
+        store.add_session_subscription(watcher, f"{index + 1:032x}")
+
+    refused = await auth_client.post(
+        f"/v1/sessions/{watcher}/subscriptions",
+        json={"session_id": target},
+        headers={"X-Forwarded-Email": "owner@example.com"},
+    )
+    assert refused.status_code == 409
+    assert f"already watches {MAX_SUBSCRIPTIONS_PER_SESSION} sessions" in refused.text
+
+    listed = SqlAlchemyConversationStore.list_session_subscriptions
+    scanned: list[str] = []
+
+    def counted(self: SqlAlchemyConversationStore, *args: Any, **kwargs: Any) -> list[str]:
+        rows = listed(self, *args, **kwargs)
+        scanned.extend(rows)
+        return rows
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "list_session_subscriptions", counted)
+    page = await auth_client.get(
+        f"/v1/sessions/{watcher}/subscriptions",
+        params={"limit": 1},
+        headers={"X-Forwarded-Email": "reader@example.com"},
+    )
+    assert page.status_code == 200, page.text
+    assert page.json()["data"] == []
+    assert len(scanned) <= MAX_SUBSCRIPTIONS_PER_SESSION

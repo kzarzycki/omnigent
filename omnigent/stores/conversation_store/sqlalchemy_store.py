@@ -102,6 +102,7 @@ from omnigent.stores.conversation_store import (
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
     FORK_SOURCE_LABEL_KEY,
+    MAX_SUBSCRIPTIONS_PER_SESSION,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
     ConversationAlreadyExistsError,
@@ -113,6 +114,7 @@ from omnigent.stores.conversation_store import (
     SessionConnectivity,
     SubscriptionCycleError,
     SubscriptionDelivery,
+    SubscriptionLimitError,
     pinned_label_key,
 )
 from omnigent.stores.conversation_store.overrides import (
@@ -831,12 +833,12 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
 # Rows one subscription cleanup transaction deletes.
 _SESSION_SUBSCRIPTION_DELETE_BATCH = 500
 
-# Delivery outbox states.
 # A subscribe walks at most this many subscription rows looking for a loop, and
 # refuses when it cannot finish.
 _SUBSCRIPTION_CYCLE_LIMIT = 1000
 _SUBSCRIPTION_CYCLE_CHUNK = 100
 _SUBSCRIPTION_SERIALIZATION_RETRIES = 3
+# Delivery outbox states.
 _DELIVERY_PENDING = 0
 _DELIVERY_SETTLED = 1
 # The attempts column is a SmallInteger; retries go on past it uncounted.
@@ -5241,6 +5243,21 @@ class SqlAlchemyConversationStore(ConversationStore):
             key = (current_workspace_id(), subscriber_id, target_id)
             if session.get(SqlSessionSubscription, key) is not None:
                 return False
+            # Counted on the primary key's (workspace, subscriber) prefix, and
+            # never past the cap.
+            held = session.scalar(
+                select(func.count()).select_from(
+                    select(SqlSessionSubscription.target_id)
+                    .where(
+                        SqlSessionSubscription.workspace_id == key[0],
+                        SqlSessionSubscription.subscriber_id == subscriber_id,
+                    )
+                    .limit(MAX_SUBSCRIPTIONS_PER_SESSION)
+                    .subquery()
+                )
+            )
+            if held is not None and held >= MAX_SUBSCRIPTIONS_PER_SESSION:
+                raise SubscriptionLimitError()
             self._refuse_subscription_cycle(session, subscriber_id, target_id)
             session.add(SqlSessionSubscription(subscriber_id=subscriber_id, target_id=target_id))
             return True
