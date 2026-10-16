@@ -326,6 +326,27 @@ async def test_a_prompt_is_delivered_once_and_a_new_subscriber_hears_a_pending_o
     assert runner.notices(late) == [notice]
 
 
+async def test_a_prompt_published_off_the_event_loop_is_still_delivered(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client, title="worker"))["id"]
+    await _subscribe(client, watcher, worker)
+    session_subscriptions.set_loop(asyncio.get_running_loop())
+
+    try:
+        await asyncio.to_thread(
+            pending_elicitations.record_publish, worker, _prompt("elicit_1", "Allow it?")
+        )
+        await _settle()
+    finally:
+        session_subscriptions.set_loop(None)
+
+    assert runner.notices(watcher) == [
+        f"[System: session worker ({worker}) is waiting on a prompt: Allow it?.]"
+    ]
+
+
 async def test_only_a_pending_prompt_is_delivered_on_subscribe(
     client: httpx.AsyncClient, runner: _Runner
 ) -> None:

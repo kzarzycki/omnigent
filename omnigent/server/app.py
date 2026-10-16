@@ -1764,6 +1764,8 @@ def create_app(
             runner_router,
             agent_store=agent_store,
         )
+        # Prompts can be published off the loop; subscription notices hop back onto it.
+        session_subscriptions.set_loop(asyncio.get_running_loop())
 
         from omnigent.runner.resource_registry import (
             SessionResourceRegistry,
