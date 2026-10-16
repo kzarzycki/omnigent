@@ -1255,6 +1255,124 @@ async def test_auto_create_claude_terminal_passes_session_effort(
     await fake_client.aclose()
 
 
+def _child_session_init(session_id: str, workspace: Path) -> RunnerSessionInitEnvelope:
+    """Init envelope for a sub-agent session whose workspace is its own worktree."""
+    return RunnerSessionInitEnvelope.model_validate(
+        {
+            "protocol_version": 2,
+            "server_version": "0.6.0.dev0",
+            "session_id": session_id,
+            "agent_id": "agent",
+            "snapshot": {
+                "created_at": 10,
+                "updated_at": 11,
+                "workspace": str(workspace),
+                "terminal_launch_args": None,
+                "model_override": None,
+                "external_session_id": None,
+                "reasoning_effort": None,
+                "harness_override": None,
+                "cost_control_mode_override": None,
+                "labels": {},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_envelope", [False, True], ids=["ensure", "envelope"])
+async def test_auto_create_claude_terminal_relaunches_child_in_its_own_workspace(
+    use_envelope: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-agent relaunched on its parent's runner starts in its own workspace.
+
+    The runner's ``OMNIGENT_RUNNER_WORKSPACE`` is the parent's. The terminal
+    ensure path carries no init envelope, so the child's workspace must come
+    from the fetched session snapshot.
+    """
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
+    parent_workspace = tmp_path / "parent"
+    child_workspace = tmp_path / "child-worktree"
+    parent_workspace.mkdir()
+    child_workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(parent_workspace))
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.forwarder.supervise_forwarder",
+        _no_op_forwarder,
+    )
+
+    def _handle_request(_request: httpx.Request) -> httpx.Response:
+        if use_envelope:
+            raise AssertionError("envelope terminal startup made a legacy HTTP callback")
+        return httpx.Response(
+            200,
+            json={
+                "workspace": str(child_workspace),
+                "external_session_id": "7ce10870-0000-4000-8000-000000000000",
+                "labels": {},
+            },
+        )
+
+    session_id = "c6330ec6dccb4460b243f1f4a55b2215"
+    captured: dict[str, Any] = {}
+    async with httpx.AsyncClient(
+        base_url="http://test-server", transport=httpx.MockTransport(_handle_request)
+    ) as fake_client:
+        await _auto_create_claude_terminal(
+            session_id,
+            _RecordingClaudeRegistry(captured),
+            lambda _sid, _evt: None,
+            server_client=fake_client,
+            session_init=(
+                _child_session_init(session_id, child_workspace) if use_envelope else None
+            ),
+        )
+
+    assert captured["spec"].os_env.cwd == str(child_workspace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_envelope", [False, True], ids=["ensure", "envelope"])
+async def test_codex_launch_config_relaunches_child_in_its_own_workspace(
+    use_envelope: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Codex sub-agent relaunched on its parent's runner keeps its own workspace."""
+    from omnigent.runner.native.orchestration import _codex_native_launch_config
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    parent_workspace = tmp_path / "parent"
+    child_workspace = tmp_path / "child-worktree"
+    parent_workspace.mkdir()
+    child_workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(parent_workspace))
+
+    def _handle_request(_request: httpx.Request) -> httpx.Response:
+        if use_envelope:
+            raise AssertionError("envelope launch config made a legacy HTTP callback")
+        return httpx.Response(200, json={"workspace": str(child_workspace), "labels": {}})
+
+    session_id = "c6330ec6dccb4460b243f1f4a55b2215"
+    async with httpx.AsyncClient(
+        base_url="http://test-server", transport=httpx.MockTransport(_handle_request)
+    ) as fake_client:
+        config = await _codex_native_launch_config(
+            session_id=session_id,
+            server_client=fake_client,
+            session_init=(
+                _child_session_init(session_id, child_workspace) if use_envelope else None
+            ),
+        )
+
+    assert config.workspace == child_workspace.resolve()
+
+
 @pytest.mark.asyncio
 async def test_auto_create_claude_terminal_rejects_missing_recorded_workspace_before_setup(
     tmp_path: Path,
