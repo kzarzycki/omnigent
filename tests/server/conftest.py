@@ -428,6 +428,10 @@ def _reset_elicitation_state() -> Iterator[None]:
     _elicitation_registry.reset_for_tests()
     # create_app wires subscriptions to this test's stores; unwire them.
     session_subscriptions.configure(None, None, None)
+    # create_app also stashes its runner router and host registry for
+    # background tasks; a stale real router would route a later test's app.
+    sessions_routes.set_server_runner_router(None)
+    sessions_routes.set_server_host_registry(None)
     # Presence is likewise module-global (keyed by conversation/user)
     # with pending leave-grace timers that would fire into later tests.
     presence.reset_for_tests()
