@@ -80,8 +80,11 @@ def register_subscriptions_routes(
                 "a mutual subscription would wake both sessions forever.",
                 code=ErrorCode.CONFLICT,
             )
-        await asyncio.to_thread(conversation_store.add_session_subscription, session_id, target_id)
-        await session_subscriptions.deliver_pending_prompts(session_id, target_id)
+        if await asyncio.to_thread(
+            conversation_store.add_session_subscription, session_id, target_id
+        ):
+            # Only a new subscription replays prompts; a repeat already heard them.
+            await session_subscriptions.deliver_pending_prompts(session_id, target_id)
         return SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
 
     @router.delete("/sessions/{session_id}/subscriptions/{target_id}", status_code=204)
