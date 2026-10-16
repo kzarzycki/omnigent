@@ -1038,3 +1038,35 @@ async def test_a_full_subscriber_refuses_a_subscribe_and_bounds_its_listing_scan
     assert page.status_code == 200, page.text
     assert page.json()["data"] == []
     assert len(scanned) <= MAX_SUBSCRIPTIONS_PER_SESSION
+
+
+async def test_a_bare_runner_failure_status_reaches_subscribers_once(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    watcher = store.create_conversation()
+    worker = store.create_conversation(title="worker", harness_override="claude-native")
+    store.add_session_subscription(watcher.id, worker.id)
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    release = asyncio.Event()
+    release.set()
+    # What the runner publishes when a required terminal exits mid-turn: no
+    # terminal response event precedes it.
+    failed = {
+        "type": "session.status",
+        "status": "failed",
+        "error": {"code": "required_terminal_exited", "message": "Native terminal exited"},
+    }
+    try:
+        await orchestration._relay_runner_stream_once(
+            worker.id,
+            _ScriptedRunnerClient(
+                release, [{"type": "session.status", "status": "running"}, failed, failed]
+            ),
+            store,
+        )
+        await _settle()
+    finally:
+        session_subscriptions.configure(None, None, None)
+
+    notice = session_subscriptions.turn_notice("worker", worker.id, "failed")
+    assert poster.posted == [(watcher.id, notice)]
