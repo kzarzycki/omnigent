@@ -400,6 +400,15 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
             current[key] = current.get(key, 0) + value
 
 
+# Most sessions one session may watch. It bounds a subscribe's checks and the
+# rows a listing of one session's subscriptions can examine.
+MAX_SUBSCRIPTIONS_PER_SESSION = 1000
+
+
+class SubscriptionLimitError(Exception):
+    """The subscriber already watches :data:`MAX_SUBSCRIPTIONS_PER_SESSION` sessions."""
+
+
 class SubscriptionCycleError(Exception):
     """A new subscription would let sessions wake each other in a loop.
 
@@ -2087,15 +2096,17 @@ class ConversationStore(ABC):
 
         Refuses a subscription that would close a loop: *subscriber_id* already
         reachable from *target_id* along subscriptions (the target hears the
-        subscriber, directly or through others). The check and the insert run
-        in one serialized transaction, so concurrent creations cannot close a
-        loop between them.
+        subscriber, directly or through others), or one past
+        :data:`MAX_SUBSCRIPTIONS_PER_SESSION` for the subscriber. The checks and
+        the insert run in one serialized transaction, so concurrent creations
+        cannot close a loop or overshoot the cap between them.
 
         :param subscriber_id: Session that receives the notices.
         :param target_id: Session being watched.
         :returns: ``True`` when the row was created, ``False`` when it existed.
         :raises SubscriptionCycleError: The subscription would close a loop, or
             the search hit its bound first.
+        :raises SubscriptionLimitError: The subscriber is at the cap.
         """
         ...
 
