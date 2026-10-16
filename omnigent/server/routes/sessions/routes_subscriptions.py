@@ -19,6 +19,7 @@ from omnigent.server.schemas import (
     SessionSubscriptionRequest,
 )
 from omnigent.stores import ConversationStore
+from omnigent.stores.conversation_store import SubscriptionCycleError
 from omnigent.stores.permission_store import PermissionStore
 
 
@@ -57,8 +58,9 @@ def register_subscriptions_routes(
 
         :raises OmnigentError: 400 for a self-subscription, 404 for an unknown
             or unreadable session, 409 when either session is archived or the
-            watched session already subscribes to this one (the two would wake
-            each other forever).
+            watched session already hears this one through subscriptions (they
+            would wake each other in a loop), or when there are too many
+            subscriptions to follow to rule that out.
         """
         user_id = _require_user(request, auth_provider)
         target_id = body.session_id
@@ -72,19 +74,29 @@ def register_subscriptions_routes(
             )
         await _live_session(session_id)
         await _live_session(target_id)
-        if await asyncio.to_thread(
-            conversation_store.has_session_subscription, target_id, session_id
-        ):
-            raise OmnigentError(
-                f"Session {target_id!r} already subscribes to {session_id!r}; "
-                "a mutual subscription would wake both sessions forever.",
-                code=ErrorCode.CONFLICT,
+        try:
+            created = await asyncio.to_thread(
+                conversation_store.add_session_subscription, session_id, target_id
             )
-        if await asyncio.to_thread(
-            conversation_store.add_session_subscription, session_id, target_id
-        ):
+        except SubscriptionCycleError as cycle:
+            raise OmnigentError(
+                f"Session {target_id!r} could not be checked for a subscription loop back to "
+                f"{session_id!r}: too many subscriptions to follow."
+                if cycle.bounded
+                else f"Session {target_id!r} already hears {session_id!r} through "
+                "subscriptions; subscribing back would wake them in a loop forever.",
+                code=ErrorCode.CONFLICT,
+            ) from None
+        if created:
             # Only a new subscription replays prompts; a repeat already heard them.
-            await session_subscriptions.deliver_pending_prompts(session_id, target_id)
+            try:
+                await session_subscriptions.record_pending_prompts(session_id, target_id)
+            except Exception:
+                # Undo, so a retried request is new again and replays them.
+                await asyncio.to_thread(
+                    conversation_store.delete_session_subscription, session_id, target_id
+                )
+                raise
         return SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
 
     @router.delete("/sessions/{session_id}/subscriptions/{target_id}", status_code=204)

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 import pytest
 
-from omnigent.stores.conversation_store import sqlalchemy_store
+from omnigent.stores.conversation_store import SubscriptionCycleError, sqlalchemy_store
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -67,24 +68,56 @@ def test_cleanup_removes_more_subscriptions_than_one_batch(
 def test_a_delivery_is_recorded_once_per_subscriber_and_event(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
-    enqueue = conversation_store.enqueue_subscription_delivery
-    watcher, target = f"{1:032x}", f"{2:032x}"
+    enqueue = conversation_store.enqueue_subscription_deliveries
+    watcher, other, target = f"{1:032x}", f"{3:032x}", f"{2:032x}"
 
-    assert enqueue(watcher, target, "p1", 1, due_at=100) is True
-    assert enqueue(watcher, target, "p2", 1, due_at=100) is True
+    assert enqueue([watcher], target, "p1", 1, due_at=100) == [watcher]
+    assert enqueue([watcher], target, "p2", 1, due_at=100) == [watcher]
     # A replay of the older event is still a duplicate once a newer one landed.
-    assert enqueue(watcher, target, "p1", 1, due_at=100) is False
+    assert enqueue([watcher], target, "p1", 1, due_at=100) == []
     conversation_store.settle_subscription_delivery(watcher, target, "p1", settled_at=100)
-    assert enqueue(watcher, target, "p1", 1, due_at=100) is False
-    assert enqueue(f"{3:032x}", target, "p1", 1, due_at=100) is True
+    assert enqueue([watcher, other], target, "p1", 1, due_at=100) == [other]
+    assert enqueue([], target, "p1", 1, due_at=100) == []
+
+
+def test_a_subscription_that_closes_a_loop_is_refused(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    a, b, c, d = (conversation_store.create_conversation().id for _ in range(4))
+    subscribe = conversation_store.add_session_subscription
+    assert subscribe(a, b) and subscribe(b, c)
+
+    for subscriber, target in ((c, a), (b, a), (c, b)):
+        with pytest.raises(SubscriptionCycleError) as refused:
+            subscribe(subscriber, target)
+        assert refused.value.bounded is False
+    # Fan-in without a loop is fine.
+    assert subscribe(d, b) and subscribe(a, c) and subscribe(d, a)
+    assert conversation_store.list_session_subscriptions(c) == []
+
+
+def test_a_loop_search_past_its_bound_refuses(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlalchemy_store, "_SUBSCRIPTION_CYCLE_LIMIT", 3)
+    chain = [f"{index + 1:032x}" for index in range(5)]
+    for subscriber, target in itertools.pairwise(chain):
+        conversation_store.add_session_subscription(subscriber, target)
+
+    with pytest.raises(SubscriptionCycleError) as refused:
+        conversation_store.add_session_subscription(f"{99:032x}", chain[0])
+    assert refused.value.bounded is True
+    # A short walk still decides.
+    assert conversation_store.add_session_subscription(f"{99:032x}", chain[3]) is True
 
 
 def test_due_deliveries_are_claimed_once_and_only_settled_ones_listed_for_the_prune(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     watcher, target = f"{1:032x}", f"{2:032x}"
-    conversation_store.enqueue_subscription_delivery(watcher, target, "due", 1, due_at=10)
-    conversation_store.enqueue_subscription_delivery(watcher, target, "later", 0, due_at=50)
+    conversation_store.enqueue_subscription_deliveries([watcher], target, "due", 1, due_at=10)
+    conversation_store.enqueue_subscription_deliveries([watcher], target, "later", 0, due_at=50)
 
     claimed = conversation_store.claim_due_subscription_deliveries(
         now=20, lease_until=80, limit=10

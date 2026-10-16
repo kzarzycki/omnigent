@@ -7,10 +7,13 @@ prompt, every subscriber gets a one-line ``[System: …]`` notice posted as a
 whose runner was idle-reaped is relaunched to receive it.
 
 Each notice goes through a durable outbox row keyed by subscriber, target and
-event (a turn's response id, a prompt's elicitation id). Inserting the row is
-the dedupe, so a repeated or replayed event is a no-op. The row holds only that
-identity and an outcome code; the notice text is built from the live sessions
-when it is posted. A failed post leaves the row pending; a retry sweep (after
+event (a turn's response id, a prompt's elicitation id, a native status block).
+The producer records the rows before it acknowledges the event, so a recording
+failure fails the producer instead of losing the notice; posting is
+asynchronous. Inserting the row is the dedupe, so a repeated or replayed event
+is a no-op. The row holds only that identity and an outcome code; the notice
+text is built from the live sessions when it is posted. A failed post leaves
+the row pending; a retry sweep (after
 the failure, at startup and periodically) posts it with capped backoff for as
 long as the subscription stands, and also picks up an attempt a crashed server
 never finished. Delivery is at-least-once: a notice is a wake, so a rare
@@ -31,11 +34,10 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, Literal, cast
 
-from omnigent.db.db_models import workspace_scope
+from omnigent.db.db_models import current_workspace_id, workspace_scope
 from omnigent.entities import Conversation
 from omnigent.harness_aliases import is_native_harness
 from omnigent.runtime import pending_elicitations
-from omnigent.runtime.subagent_block_notifier import _block_reason
 from omnigent.server.auth import LEVEL_READ
 from omnigent.server.permissions import check_session_access
 from omnigent.server.subagent_activity import latest_turn_id
@@ -60,6 +62,12 @@ _MAX_PARENT_HOPS = 32
 _loop: asyncio.AbstractEventLoop | None = None
 # Earliest scheduled in-process retry, so failures share one wake-up.
 _next_wake: float | None = None
+# Bounds the first attempts at freshly recorded rows; made on the server loop.
+_post_limit: asyncio.Semaphore | None = None
+# The native status block each target stands on: (blocked_on, block id). Like
+# the pending-elicitation index, it lives on the server relaying the target.
+# custom-lint: disable-next=workspace-scoped-cache -- keyed by unique session id
+_standing_blocks: dict[str, tuple[str, str]] = {}
 
 # An attempt in flight owns its row this long; a server that dies mid-attempt
 # leaves the row to the sweep after it. Longer than a relaunching post takes.
@@ -73,6 +81,7 @@ _SWEEP_MAX_BATCHES = 10
 _PRUNE_BATCH = 500
 _SUBSCRIBER_PAGE = 100
 _POST_CONCURRENCY = 16
+_RECORD_RETRY_CAP_S = 60
 _SKIP = object()
 
 # Outcome codes stored in the outbox; the notice is rebuilt from them.
@@ -95,11 +104,13 @@ def configure(
     :param post_message: Posts a notice into a session as a ``message`` event.
     :returns: None.
     """
-    global _store, _permission_store, _post_message, _next_wake
+    global _store, _permission_store, _post_message, _next_wake, _post_limit
     _store = conversation_store
     _permission_store = permission_store
     _post_message = post_message
     _next_wake = None
+    _post_limit = None
+    _standing_blocks.clear()
     pending_elicitations.add_elicitation_observer(observe_elicitation)
 
 
@@ -111,17 +122,19 @@ def turn_notice(title: str | None, target_id: str, outcome: str) -> str:
     )
 
 
-def prompt_notice(title: str | None, target_id: str, reason: str | None) -> str:
+def prompt_notice(title: str | None, target_id: str) -> str:
     """The notice a subscriber gets when the target blocks on a prompt."""
-    detail = f": {reason}" if reason else ""
-    return f"[System: session {_label(title, target_id)} is waiting on a prompt{detail}.]"
+    return (
+        f"[System: session {_label(title, target_id)} is waiting on a prompt. "
+        "Read it with sys_session_get_info.]"
+    )
 
 
 def _label(title: str | None, target_id: str) -> str:
     return f"{title} ({target_id})" if title else f"({target_id})"
 
 
-def notify_turn_end(
+async def record_turn_end(
     target_id: str,
     outcome: TurnOutcome,
     response_id: str | None,
@@ -129,7 +142,7 @@ def notify_turn_end(
     from_runner: bool = False,
 ) -> None:
     """
-    Schedule turn-end notices to the target's subscribers. Never raises.
+    Record turn-end notices to the target's subscribers, then post them in the background.
 
     :param target_id: Session whose turn ended.
     :param outcome: How it ended.
@@ -139,38 +152,145 @@ def notify_turn_end(
         harness a ``completed`` one only acknowledges prompt delivery, so it is
         dropped; the forwarder's confirmed edge reports the real end.
     :returns: None.
+    :raises Exception: The notices could not be recorded; the caller fails the
+        edge so its producer retries it.
     """
+    from omnigent.server.routes._sessions.orchestration import _native_pane_harness
+
+    store = _store
+    if store is None:
+        return
+    if not await asyncio.to_thread(store.list_session_subscribers, target_id, limit=1):
+        return
+    target = await asyncio.to_thread(store.get_conversation, target_id)
+    if target is None or target.archived:
+        return
+    if from_runner and outcome == "completed":
+        harness = await asyncio.to_thread(_native_pane_harness, target)
+        if is_native_harness(harness):
+            return
+    # An interrupted turn may have written only the user's message.
+    key = response_id or await latest_turn_id(target_id, store, failed=outcome != "completed")
+    if key is None:
+        if outcome == "completed":
+            return
+        # A runner can die or be stopped before the turn wrote anything.
+        key = target_id
+    await _record(target_id, _event_key("turn", key), _TURN_CODES[outcome])
+
+
+def notify_turn_end(
+    target_id: str,
+    outcome: TurnOutcome,
+    response_id: str | None,
+    *,
+    from_runner: bool = False,
+) -> None:
+    """:func:`record_turn_end` for a producer with no acknowledgement to fail. Never raises."""
     if _store is None:
         return
-    _spawn(_deliver_turn_end(target_id, outcome, response_id, from_runner=from_runner))
+    _spawn(
+        _retain_recording(
+            target_id,
+            lambda: record_turn_end(target_id, outcome, response_id, from_runner=from_runner),
+        )
+    )
+
+
+async def record_status(target_id: str, blocked_on: str | None, response_id: str | None) -> None:
+    """
+    Record prompt notices when a native status edge parks the target on a block.
+
+    Repeated edges of the standing block share its identity, so they record
+    nothing new; an edge without *blocked_on* ends the block.
+
+    :param target_id: Session whose status changed.
+    :param blocked_on: What the session is parked on, or ``None``.
+    :param response_id: The turn the edge belongs to, when known.
+    :returns: None.
+    :raises Exception: The notices could not be recorded.
+    """
+    key = _block_key(target_id, blocked_on, response_id)
+    if key is not None:
+        await _record(target_id, key, _PROMPT)
+
+
+def notify_status(target_id: str, blocked_on: str | None, response_id: str | None) -> None:
+    """:func:`record_status` for a producer with no acknowledgement to fail. Never raises."""
+    if _store is None:
+        return
+    key = _block_key(target_id, blocked_on, response_id)
+    if key is not None:
+        _spawn(_retain_recording(target_id, lambda: _record(target_id, key, _PROMPT)))
+
+
+def _block_key(target_id: str, blocked_on: str | None, response_id: str | None) -> str | None:
+    """Track the target's standing block; the event key of a block edge, else ``None``."""
+    if _store is None:
+        return None
+    if blocked_on is None:
+        _standing_blocks.pop(target_id, None)
+        return None
+    standing = _standing_blocks.get(target_id)
+    if standing is None or standing[0] != blocked_on:
+        # ponytail: the id lives in memory, so a repeated edge after a restart
+        # records a second notice; a persisted block generation would close it.
+        standing = (blocked_on, f"{response_id or ''}:{blocked_on}:{time.time_ns()}")
+        _standing_blocks[target_id] = standing
+    return _event_key("block", standing[1])
 
 
 def observe_elicitation(conversation_id: str, event: dict[str, Any]) -> None:
-    """Pending-elicitation observer: schedule ``blocked`` notices for a new prompt."""
+    """Pending-elicitation observer: record ``blocked`` notices for a new prompt."""
     if _store is None or event.get("type") != "response.elicitation_request":
         return
     elicitation_id = event.get("elicitation_id")
     if not isinstance(elicitation_id, str) or not elicitation_id:
         return
-    _spawn(_deliver_prompt(conversation_id, elicitation_id, _block_reason(event)))
+    # The publish path cannot await or fail, so the recording retries here.
+    _spawn(
+        _retain_recording(
+            conversation_id,
+            lambda: _record(conversation_id, _event_key("prompt", elicitation_id), _PROMPT),
+        )
+    )
 
 
-async def deliver_pending_prompts(subscriber_id: str, target_id: str) -> None:
+async def record_pending_prompts(subscriber_id: str, target_id: str) -> None:
     """
-    Tell a new subscriber about prompts the target is already blocked on.
+    Record notices for a new subscriber about the target's standing prompts and block.
 
     :param subscriber_id: The session that just subscribed.
     :param target_id: The session it watches.
     :returns: None.
+    :raises Exception: The notices could not be recorded.
     """
-    for event in pending_elicitations.snapshot_for(target_id):
-        elicitation_id = event.get("elicitation_id")
-        if isinstance(elicitation_id, str) and elicitation_id:
-            _spawn(
-                _deliver_prompt(
-                    target_id, elicitation_id, _block_reason(event), only=subscriber_id
-                )
+    keys = [
+        _event_key("prompt", elicitation_id)
+        for event in pending_elicitations.snapshot_for(target_id)
+        if isinstance(elicitation_id := event.get("elicitation_id"), str) and elicitation_id
+    ]
+    if (standing := _standing_blocks.get(target_id)) is not None:
+        keys.append(_event_key("block", standing[1]))
+    for key in keys:
+        await _record(target_id, key, _PROMPT, only=subscriber_id)
+
+
+async def _retain_recording(target_id: str, record: Callable[[], Awaitable[None]]) -> None:
+    """Retry a recording until it lands; the producer had no way to retry it."""
+    # ponytail: retained in memory only; a server that dies while the database
+    # is down loses these. Producers that can retry use the awaited ``record_*``.
+    failures = 0
+    while True:
+        try:
+            await record()
+            return
+        except Exception:  # noqa: BLE001 — retried below
+            failures += 1
+            _logger.warning(
+                "Could not record notices from %s (attempt %d)", target_id, failures, exc_info=True
             )
+        await asyncio.sleep(min(_RETRY_BASE_S * 2 ** min(failures - 1, 16), _RECORD_RETRY_CAP_S))
 
 
 def set_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -200,62 +320,6 @@ def _start(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_tasks.discard)
 
 
-async def _deliver_turn_end(
-    target_id: str,
-    outcome: TurnOutcome,
-    response_id: str | None,
-    *,
-    from_runner: bool = False,
-) -> None:
-    from omnigent.server.routes._sessions.orchestration import _native_pane_harness
-
-    store = _store
-    if store is None:
-        return
-    try:
-        if not await asyncio.to_thread(store.list_session_subscribers, target_id, limit=1):
-            return
-        target = await asyncio.to_thread(store.get_conversation, target_id)
-        if target is None or target.archived:
-            return
-        if from_runner and outcome == "completed":
-            harness = await asyncio.to_thread(_native_pane_harness, target)
-            if is_native_harness(harness):
-                return
-        # An interrupted turn may have written only the user's message.
-        key = response_id or await latest_turn_id(target_id, store, failed=outcome != "completed")
-        if key is None:
-            if outcome == "completed":
-                return
-            # A runner can die or be stopped before the turn wrote anything.
-            key = target_id
-        await _fan_out(target_id, _event_key("turn", key), _TURN_CODES[outcome])
-    except Exception:  # noqa: BLE001 — a notice must never break the status path
-        _logger.warning("Could not notify subscribers of %s", target_id, exc_info=True)
-
-
-async def _deliver_prompt(
-    target_id: str, elicitation_id: str, reason: str | None, *, only: str | None = None
-) -> None:
-    """Notify subscribers of a prompt; *reason* details the first attempt's notice."""
-    store = _store
-    if store is None:
-        return
-    try:
-        if only is None and not await asyncio.to_thread(
-            store.list_session_subscribers, target_id, limit=1
-        ):
-            return
-        target = await asyncio.to_thread(store.get_conversation, target_id)
-        if target is None or target.archived:
-            return
-        await _fan_out(
-            target_id, _event_key("prompt", elicitation_id), _PROMPT, reason=reason, only=only
-        )
-    except Exception:  # noqa: BLE001 — a notice must never break the publish path
-        _logger.warning("Could not notify subscribers of %s", target_id, exc_info=True)
-
-
 def _event_key(kind: str, event_id: str) -> str:
     return hashlib.sha256(f"{kind}:{event_id}".encode()).hexdigest()
 
@@ -273,34 +337,57 @@ def _owner(store: ConversationStore, session: Conversation) -> str | None:
     return None
 
 
-async def _fan_out(
-    target_id: str,
-    event_key: str,
-    outcome: int,
-    *,
-    reason: str | None = None,
-    only: str | None = None,
+async def _record(
+    target_id: str, event_key: str, outcome: int, *, only: str | None = None
 ) -> None:
+    """Record the event for each subscriber (or *only* one), then post the new rows.
+
+    :raises Exception: A page could not be recorded; earlier pages stay recorded
+        and a retried call skips them.
+    """
     store = _store
-    assert store is not None
-    limit = asyncio.Semaphore(_POST_CONCURRENCY)
-
-    async def deliver(subscriber_id: str) -> None:
-        async with limit:
-            await _deliver_one(subscriber_id, target_id, event_key, outcome, reason)
-
-    if only is not None:
-        await deliver(only)
+    if store is None:
         return
+    workspace_id = current_workspace_id()
     after: str | None = None
     while True:
-        page = await asyncio.to_thread(
-            store.list_session_subscribers, target_id, after=after, limit=_SUBSCRIBER_PAGE
+        if only is not None:
+            page = [only]
+        else:
+            page = await asyncio.to_thread(
+                store.list_session_subscribers, target_id, after=after, limit=_SUBSCRIBER_PAGE
+            )
+        created = await asyncio.to_thread(
+            store.enqueue_subscription_deliveries,
+            page,
+            target_id,
+            event_key,
+            outcome,
+            due_at=int(time.time()) + _LEASE_S,
         )
-        await asyncio.gather(*(deliver(subscriber_id) for subscriber_id in page))
-        if len(page) < _SUBSCRIBER_PAGE:
+        for subscriber_id in created:
+            _spawn(
+                _post_recorded(
+                    SubscriptionDelivery(
+                        workspace_id, subscriber_id, target_id, event_key, 1, outcome
+                    )
+                )
+            )
+        if only is not None or len(page) < _SUBSCRIBER_PAGE:
             return
         after = page[-1]
+
+
+async def _post_recorded(delivery: SubscriptionDelivery) -> None:
+    """First attempt at a row just recorded, bounded like the sweep's."""
+    global _post_limit
+    if _post_limit is None:
+        _post_limit = asyncio.Semaphore(_POST_CONCURRENCY)
+    store = _store
+    if store is None:
+        return
+    async with _post_limit:
+        await _retry(store, delivery)
 
 
 async def _deliverable(
@@ -319,72 +406,14 @@ async def _deliverable(
     return owner
 
 
-async def _deliver_one(
-    subscriber_id: str, target_id: str, event_key: str, outcome: int, reason: str | None
-) -> None:
-    store = _store
-    if store is None or _post_message is None:
-        return
-    try:
-        owner = await _deliverable(store, subscriber_id, target_id)
-        if owner is _SKIP:
-            return
-        if not await asyncio.to_thread(
-            store.enqueue_subscription_delivery,
-            subscriber_id,
-            target_id,
-            event_key,
-            outcome,
-            due_at=int(time.time()) + _LEASE_S,
-        ):
-            return
-    except Exception:  # noqa: BLE001
-        _logger.warning(
-            "Could not record a notice from %s for %s",
-            target_id,
-            subscriber_id,
-            exc_info=True,
-        )
-        return
-    await _attempt(
-        store, subscriber_id, target_id, event_key, outcome, 1, cast(str | None, owner), reason
-    )
-
-
-def _pending_prompt_reason(target_id: str, event_key: str) -> tuple[bool, str | None]:
-    """Whether this server holds the prompt as pending, and its message."""
-    for event in pending_elicitations.snapshot_for(target_id):
-        elicitation_id = event.get("elicitation_id")
-        if isinstance(elicitation_id, str) and _event_key("prompt", elicitation_id) == event_key:
-            return True, _block_reason(event)
-    return False, None
-
-
-def _prompt_known_resolved(target: Conversation, event_key: str) -> bool:
-    """The prompt is gone: not held here, and the target reports no pending prompt.
-
-    The pending index lives on the server holding the target's runner tunnel;
-    the persisted count covers the others. An unknown count is not proof.
-    """
-    held, _ = _pending_prompt_reason(target.id, event_key)
-    return not held and target.pending_elicitation_count == 0
-
-
-async def _render(
-    store: ConversationStore, target_id: str, event_key: str, outcome: int, reason: str | None
-) -> str | None:
-    """The notice text from the live target, or ``None`` when there is nothing to say."""
+async def _render(store: ConversationStore, target_id: str, outcome: int) -> str | None:
+    """The notice text from the live target, or ``None`` once the target is gone."""
     target = await asyncio.to_thread(store.get_conversation, target_id)
     if target is None:
         return None
-    if outcome != _PROMPT:
-        return turn_notice(target.title, target_id, _TURN_OUTCOMES[outcome])
-    held, held_reason = _pending_prompt_reason(target_id, event_key)
-    if held:
-        return prompt_notice(target.title, target_id, held_reason)
-    if target.pending_elicitation_count == 0:
-        return None
-    return prompt_notice(target.title, target_id, reason)
+    if outcome == _PROMPT:
+        return prompt_notice(target.title, target_id)
+    return turn_notice(target.title, target_id, _TURN_OUTCOMES[outcome])
 
 
 async def _attempt(
@@ -395,14 +424,13 @@ async def _attempt(
     outcome: int,
     attempts: int,
     owner: str | None,
-    reason: str | None = None,
 ) -> None:
     """Post one claimed delivery; settle it, or leave it pending for a retry."""
     post = _post_message
     try:
         if post is None:
             raise RuntimeError("subscription delivery is not configured")
-        notice = await _render(store, target_id, event_key, outcome, reason)
+        notice = await _render(store, target_id, outcome)
         if notice is not None:
             # ponytail: at-least-once. A server that dies, or a settle that
             # fails, after this post leaves the row to be posted again once its
@@ -538,6 +566,8 @@ async def prune_settled_deliveries() -> int:
             settled_before=now - _SETTLED_RETENTION_S,
             limit=_PRUNE_BATCH,
         )
+        # ponytail: a turn's identity goes after the retention window, so a
+        # replay of a turn older than that is delivered again.
         keep = [delivery for delivery in batch if await _keep_identity(store, delivery)]
         drop = [delivery for delivery in batch if delivery not in keep]
         removed += await asyncio.to_thread(store.delete_subscription_deliveries, drop)
@@ -556,7 +586,16 @@ async def _keep_identity(store: ConversationStore, delivery: SubscriptionDeliver
         ):
             return False
         target = await asyncio.to_thread(store.get_conversation, delivery.target_id)
-    return target is not None and not _prompt_known_resolved(target, delivery.event_key)
+    if target is None:
+        return False
+    standing = {
+        _event_key("prompt", event.get("elicitation_id", ""))
+        for event in pending_elicitations.snapshot_for(target.id)
+    }
+    if (block := _standing_blocks.get(target.id)) is not None:
+        standing.add(_event_key("block", block[1]))
+    # Held here, or a target that may still report a prompt pending elsewhere.
+    return delivery.event_key in standing or target.pending_elicitation_count != 0
 
 
 async def run_retry_loop() -> None:
