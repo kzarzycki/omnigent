@@ -2252,6 +2252,23 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def claim_subscription_delivery(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        leased_until: int,
+        lease_until: int,
+    ) -> bool:
+        """
+        Take a pending delivery still leased until *leased_until*, extending it.
+
+        :returns: ``False`` when the row is settled or another attempt took it.
+        """
+        ...
+
+    @abstractmethod
     def settle_subscription_delivery(
         self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
     ) -> None:
