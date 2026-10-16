@@ -402,14 +402,14 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
 
 @dataclass(frozen=True)
 class SubscriptionDelivery:
-    """A pending subscription notice taken over by the retry sweep."""
+    """One subscription outbox row, as the retry sweep and the prune see it."""
 
     workspace_id: int
     subscriber_id: str
     target_id: str
     event_key: str
     attempts: int
-    notice: str
+    outcome: int
 
 
 class ConversationStore(ABC):
@@ -2119,7 +2119,7 @@ class ConversationStore(ABC):
         subscriber_id: str,
         target_id: str,
         event_key: str,
-        notice: str,
+        outcome: int,
         *,
         due_at: int,
     ) -> bool:
@@ -2130,7 +2130,7 @@ class ConversationStore(ABC):
         retry sweep may take it over if the caller never finishes the attempt.
 
         :param event_key: Digest identifying the event (at most 64 chars).
-        :param notice: Text to post (at most 1,024 chars).
+        :param outcome: Small code for what happened; the caller owns its meaning.
         :param due_at: Unix epoch seconds.
         :returns: ``False`` when the event was already recorded for this
             subscriber (delivered, pending or dropped).
@@ -2164,13 +2164,26 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def prune_subscription_deliveries(self, *, settled_before: int, limit: int) -> int:
+    def list_settled_subscription_deliveries(
+        self, *, settled_before: int, limit: int
+    ) -> list[SubscriptionDelivery]:
+        """Up to *limit* deliveries settled before *settled_before*, oldest first."""
+        ...
+
+    @abstractmethod
+    def delete_subscription_deliveries(self, deliveries: list[SubscriptionDelivery]) -> int:
         """
-        Delete up to *limit* deliveries settled before *settled_before*, across
-        workspaces.
+        Delete the given deliveries by their full keys.
 
         :returns: Number of rows removed.
         """
+        ...
+
+    @abstractmethod
+    def touch_subscription_deliveries(
+        self, deliveries: list[SubscriptionDelivery], *, settled_at: int
+    ) -> None:
+        """Move settled deliveries' settle time to *settled_at*; the prune skips them till then."""
         ...
 
     @abstractmethod
