@@ -4,9 +4,15 @@ A subscription is a server-side row ``(subscriber, target)``. When the target
 ends a turn (``completed`` / ``cancelled`` / ``failed``) or raises an approval
 prompt, every subscriber gets a one-line ``[System: …]`` notice posted as a
 ``message`` event, through the same path a user message takes, so a subscriber
-whose runner was idle-reaped is relaunched to receive it. Each event is claimed
-once per subscriber in the store (a turn by its response id, a prompt by its
-elicitation id), so a repeated status edge never delivers twice.
+whose runner was idle-reaped is relaunched to receive it.
+
+Each notice goes through a durable outbox row keyed by subscriber, target and
+event (a turn's response id, a prompt's elicitation id). Inserting the row is
+the dedupe, so a repeated or replayed event is a no-op. A failed post leaves
+the row pending; a retry sweep (after the failure, at startup and
+periodically) posts it with backoff, and also picks up an attempt a crashed
+server never finished. Settled rows are kept for a retention window, then
+pruned in batches.
 
 The server configures this module once in ``create_app``; until then every
 entry point is a no-op.
@@ -15,10 +21,13 @@ entry point is a no-op.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation
 from omnigent.harness_aliases import is_native_harness
 from omnigent.runtime import pending_elicitations
@@ -27,6 +36,7 @@ from omnigent.server.auth import LEVEL_READ
 from omnigent.server.permissions import check_session_access
 from omnigent.server.subagent_activity import latest_turn_id
 from omnigent.stores import ConversationStore
+from omnigent.stores.conversation_store import SubscriptionDelivery
 from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
@@ -44,6 +54,26 @@ _post_message: PostMessage | None = None
 _tasks: set[asyncio.Task[None]] = set()
 _MAX_PARENT_HOPS = 32
 _loop: asyncio.AbstractEventLoop | None = None
+# Earliest scheduled in-process retry, so failures share one wake-up.
+_next_wake: float | None = None
+
+# An attempt in flight owns its row this long; a server that dies mid-attempt
+# leaves the row to the sweep after it. Longer than a relaunching post takes.
+_LEASE_S = 300
+_RETRY_BASE_S = 1
+_RETRY_CAP_S = 600
+# ponytail: ~3.5h of retries, then the notice is dropped with a warning.
+_MAX_ATTEMPTS = 30
+# ponytail: a replay of an event settled longer ago than this is delivered again.
+_SETTLED_RETENTION_S = 7 * 24 * 3600
+_SWEEP_INTERVAL_S = 30
+_SWEEP_BATCH = 100
+_SWEEP_MAX_BATCHES = 10
+_PRUNE_BATCH = 500
+_SUBSCRIBER_PAGE = 100
+_POST_CONCURRENCY = 16
+_NOTICE_MAX_CHARS = 1024
+_SKIP = object()
 
 
 def configure(
@@ -60,10 +90,11 @@ def configure(
     :param post_message: Posts a notice into a session as a ``message`` event.
     :returns: None.
     """
-    global _store, _permission_store, _post_message
+    global _store, _permission_store, _post_message, _next_wake
     _store = conversation_store
     _permission_store = permission_store
     _post_message = post_message
+    _next_wake = None
     pending_elicitations.add_elicitation_observer(observe_elicitation)
 
 
@@ -177,7 +208,7 @@ async def _deliver_turn_end(
     if store is None:
         return
     try:
-        if not await asyncio.to_thread(store.list_session_subscribers, target_id):
+        if not await asyncio.to_thread(store.list_session_subscribers, target_id, limit=1):
             return
         target = await asyncio.to_thread(store.get_conversation, target_id)
         if target is None or target.archived:
@@ -205,7 +236,9 @@ async def _deliver_prompt(
     if store is None:
         return
     try:
-        if only is None and not await asyncio.to_thread(store.list_session_subscribers, target_id):
+        if only is None and not await asyncio.to_thread(
+            store.list_session_subscribers, target_id, limit=1
+        ):
             return
         target = await asyncio.to_thread(store.get_conversation, target_id)
         if target is None or target.archived:
@@ -230,62 +263,245 @@ def _owner(store: ConversationStore, session: Conversation) -> str | None:
 
 
 async def _fan_out(
-    target_id: str, kind: str, key: str, notice: str, *, only: str | None = None
+    target_id: str, kind: str, event_id: str, notice: str, *, only: str | None = None
 ) -> None:
     store = _store
     assert store is not None
-    subscribers = (
-        [only]
-        if only is not None
-        else await asyncio.to_thread(store.list_session_subscribers, target_id)
-    )
-    await asyncio.gather(
-        *(
-            _deliver_one(subscriber_id, target_id, kind, key, notice)
-            for subscriber_id in subscribers
+    event_key = hashlib.sha256(f"{kind}:{event_id}".encode()).hexdigest()
+    notice = notice[:_NOTICE_MAX_CHARS]
+    limit = asyncio.Semaphore(_POST_CONCURRENCY)
+
+    async def deliver(subscriber_id: str) -> None:
+        async with limit:
+            await _deliver_one(subscriber_id, target_id, event_key, notice)
+
+    if only is not None:
+        await deliver(only)
+        return
+    after: str | None = None
+    while True:
+        page = await asyncio.to_thread(
+            store.list_session_subscribers, target_id, after=after, limit=_SUBSCRIBER_PAGE
         )
-    )
+        await asyncio.gather(*(deliver(subscriber_id) for subscriber_id in page))
+        if len(page) < _SUBSCRIBER_PAGE:
+            return
+        after = page[-1]
 
 
-async def _deliver_one(
-    subscriber_id: str, target_id: str, kind: str, key: str, notice: str
-) -> None:
+async def _deliverable(
+    store: ConversationStore, subscriber_id: str, target_id: str
+) -> str | None | object:
+    """The subscriber's owner to post as, or ``_SKIP`` when it must not hear the target."""
+    subscriber = await asyncio.to_thread(store.get_conversation, subscriber_id)
+    if subscriber is None or subscriber.archived:
+        return _SKIP
+    owner = await asyncio.to_thread(_owner, store, subscriber)
+    permission_store = _permission_store
+    if permission_store is not None and not await asyncio.to_thread(
+        check_session_access, owner, target_id, LEVEL_READ, permission_store, store
+    ):
+        return _SKIP
+    return owner
+
+
+async def _deliver_one(subscriber_id: str, target_id: str, event_key: str, notice: str) -> None:
     store = _store
-    post = _post_message
-    if store is None or post is None:
+    if store is None or _post_message is None:
         return
     try:
-        subscriber = await asyncio.to_thread(store.get_conversation, subscriber_id)
-        if subscriber is None or subscriber.archived:
-            return
-        owner = await asyncio.to_thread(_owner, store, subscriber)
-        permission_store = _permission_store
-        if permission_store is not None and not await asyncio.to_thread(
-            check_session_access, owner, target_id, LEVEL_READ, permission_store, store
-        ):
+        owner = await _deliverable(store, subscriber_id, target_id)
+        if owner is _SKIP:
             return
         if not await asyncio.to_thread(
-            store.claim_session_subscription_event, subscriber_id, target_id, kind, key
+            store.enqueue_subscription_delivery,
+            subscriber_id,
+            target_id,
+            event_key,
+            notice,
+            due_at=int(time.time()) + _LEASE_S,
         ):
             return
     except Exception:  # noqa: BLE001
         _logger.warning(
-            "Could not prepare a notice from %s for %s",
+            "Could not record a notice from %s for %s",
             target_id,
             subscriber_id,
             exc_info=True,
         )
         return
+    await _attempt(store, subscriber_id, target_id, event_key, notice, 1, cast(str | None, owner))
+
+
+async def _attempt(
+    store: ConversationStore,
+    subscriber_id: str,
+    target_id: str,
+    event_key: str,
+    notice: str,
+    attempts: int,
+    owner: str | None,
+) -> None:
+    """Post one claimed delivery; settle it, or leave it pending for a retry."""
+    post = _post_message
     try:
+        if post is None:
+            raise RuntimeError("subscription delivery is not configured")
         await post(subscriber_id, owner, notice)
-    except Exception:  # noqa: BLE001 — release so a repeated edge can retry
+    except Exception:  # noqa: BLE001 — the row stays pending for the retry sweep
         _logger.warning(
-            "Could not deliver a notice from %s to %s",
+            "Could not deliver a notice from %s to %s (attempt %d)",
             target_id,
             subscriber_id,
+            attempts,
             exc_info=True,
             extra={"session_id": subscriber_id},
         )
+        now = int(time.time())
+        try:
+            if attempts >= _MAX_ATTEMPTS:
+                _logger.warning(
+                    "Dropping a notice from %s to %s after %d attempts",
+                    target_id,
+                    subscriber_id,
+                    attempts,
+                )
+                await asyncio.to_thread(
+                    store.settle_subscription_delivery,
+                    subscriber_id,
+                    target_id,
+                    event_key,
+                    settled_at=now,
+                )
+                return
+            due = now + min(_RETRY_BASE_S * 2 ** (attempts - 1), _RETRY_CAP_S)
+            await asyncio.to_thread(
+                store.reschedule_subscription_delivery,
+                subscriber_id,
+                target_id,
+                event_key,
+                due_at=due,
+            )
+            _wake_at(due)
+        except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
+            _logger.warning("Could not reschedule a notice to %s", subscriber_id, exc_info=True)
+        return
+    try:
         await asyncio.to_thread(
-            store.release_session_subscription_event, subscriber_id, target_id, kind, key
+            store.settle_subscription_delivery,
+            subscriber_id,
+            target_id,
+            event_key,
+            settled_at=int(time.time()),
         )
+    except Exception:  # noqa: BLE001
+        # ponytail: the notice was posted but stays pending, so the sweep posts
+        # it again after the lease; an idempotency key on the post would close this.
+        _logger.warning("Could not settle a notice to %s", subscriber_id, exc_info=True)
+
+
+def _wake_at(due: int) -> None:
+    """Run the retry sweep at *due*, sharing one wake-up across failures."""
+    global _next_wake
+    if _next_wake is not None and time.time() < _next_wake <= due:
+        return
+    _next_wake = due
+    _start(_sweep_at(due))
+
+
+async def _sweep_at(due: int) -> None:
+    global _next_wake
+    await asyncio.sleep(max(0.0, due - time.time()) + 0.05)
+    if _next_wake == due:
+        _next_wake = None
+    await retry_due_deliveries()
+
+
+async def retry_due_deliveries() -> int:
+    """
+    Post pending notices that are due, in bounded batches. Never raises.
+
+    :returns: Number of deliveries attempted.
+    """
+    store = _store
+    if store is None:
+        return 0
+    attempted = 0
+    limit = asyncio.Semaphore(_POST_CONCURRENCY)
+
+    async def retry(delivery: SubscriptionDelivery) -> None:
+        async with limit:
+            await _retry(store, delivery)
+
+    try:
+        for _ in range(_SWEEP_MAX_BATCHES):
+            now = int(time.time())
+            batch = await asyncio.to_thread(
+                store.claim_due_subscription_deliveries,
+                now=now,
+                lease_until=now + _LEASE_S,
+                limit=_SWEEP_BATCH,
+            )
+            await asyncio.gather(*(retry(delivery) for delivery in batch))
+            attempted += len(batch)
+            if len(batch) < _SWEEP_BATCH:
+                break
+    except Exception:  # noqa: BLE001
+        _logger.warning("Subscription notice retry sweep failed", exc_info=True)
+    return attempted
+
+
+async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> None:
+    with workspace_scope(delivery.workspace_id):
+        key = (delivery.subscriber_id, delivery.target_id, delivery.event_key)
+        try:
+            owner = (
+                await _deliverable(store, delivery.subscriber_id, delivery.target_id)
+                if await asyncio.to_thread(
+                    store.has_session_subscription, delivery.subscriber_id, delivery.target_id
+                )
+                else _SKIP
+            )
+            if owner is _SKIP:
+                await asyncio.to_thread(
+                    store.settle_subscription_delivery, *key, settled_at=int(time.time())
+                )
+                return
+        except Exception:  # noqa: BLE001 — the lease hands the row to a later sweep
+            _logger.warning(
+                "Could not prepare a retried notice to %s", delivery.subscriber_id, exc_info=True
+            )
+            return
+        await _attempt(store, *key, delivery.notice, delivery.attempts, cast(str | None, owner))
+
+
+async def prune_settled_deliveries() -> int:
+    """
+    Delete settled deliveries past the retention window, in bounded batches.
+
+    :returns: Number of rows removed.
+    """
+    store = _store
+    if store is None:
+        return 0
+    removed = 0
+    cutoff = int(time.time()) - _SETTLED_RETENTION_S
+    for _ in range(_SWEEP_MAX_BATCHES):
+        count = await asyncio.to_thread(
+            store.prune_subscription_deliveries, settled_before=cutoff, limit=_PRUNE_BATCH
+        )
+        removed += count
+        if count < _PRUNE_BATCH:
+            break
+    return removed
+
+
+async def run_retry_loop() -> None:
+    """Retry due notices and prune old ones at startup and then periodically."""
+    while True:
+        try:
+            await retry_due_deliveries()
+            await prune_settled_deliveries()
+        except Exception:  # noqa: BLE001
+            _logger.warning("Subscription notice maintenance failed", exc_info=True)
+        await asyncio.sleep(_SWEEP_INTERVAL_S)
