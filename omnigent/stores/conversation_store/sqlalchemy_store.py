@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -47,6 +46,7 @@ from omnigent.db.db_models import (
     SqlProject,
     SqlSessionPermission,
     SqlSessionSubscription,
+    SqlSessionSubscriptionDelivery,
     SqlUser,
     SqlUserDailyCost,
     current_workspace_id,
@@ -112,6 +112,7 @@ from omnigent.stores.conversation_store import (
     CreatedSession,
     DailyCostState,
     SessionConnectivity,
+    SubscriptionDelivery,
     pinned_label_key,
 )
 from omnigent.stores.conversation_store.overrides import (
@@ -827,31 +828,12 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
     )
 
 
-# Bound on one session's subscription listings.
-_SESSION_SUBSCRIPTION_LIST_CAP = 1000
+# Rows one subscription cleanup transaction deletes.
+_SESSION_SUBSCRIPTION_DELETE_BATCH = 500
 
-
-def _subscription_key_column(kind: str) -> Any:
-    """Return the dedupe column for a subscription event kind."""
-    if kind == "turn":
-        return SqlSessionSubscription.last_turn_key
-    if kind == "prompt":
-        return SqlSessionSubscription.last_prompt_key
-    raise ValueError(f"unknown subscription event kind: {kind!r}")
-
-
-def _delete_session_subscriptions(session: Session, conversation_ids: list[str]) -> int:
-    """Delete subscriptions held by or aimed at any of *conversation_ids*."""
-    result = session.execute(
-        delete(SqlSessionSubscription).where(
-            SqlSessionSubscription.workspace_id == current_workspace_id(),
-            or_(
-                SqlSessionSubscription.subscriber_id.in_(conversation_ids),
-                SqlSessionSubscription.target_id.in_(conversation_ids),
-            ),
-        )
-    )
-    return cast(Any, result).rowcount or 0
+# Delivery outbox states.
+_DELIVERY_PENDING = 0
+_DELIVERY_SETTLED = 1
 
 
 class SqlAlchemyConversationStore(ConversationStore):
@@ -5494,91 +5476,240 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         return run_write_transaction(self._session_immediate, "delete_session_subscription", write)
 
-    def list_session_subscriptions(self, subscriber_id: str) -> list[str]:
-        """List the sessions *subscriber_id* watches. See base class."""
+    def has_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """Whether one session watches another. See base class."""
+        with self._session("has_session_subscription") as session:
+            key = (current_workspace_id(), subscriber_id, target_id)
+            return session.get(SqlSessionSubscription, key) is not None
+
+    def list_session_subscriptions(
+        self, subscriber_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[str]:
+        """One page of the sessions *subscriber_id* watches. See base class."""
+        query = select(SqlSessionSubscription.target_id).where(
+            SqlSessionSubscription.workspace_id == current_workspace_id(),
+            SqlSessionSubscription.subscriber_id == subscriber_id,
+        )
+        if after is not None:
+            query = query.where(SqlSessionSubscription.target_id > after)
         with self._session("list_session_subscriptions") as session:
             return list(
-                session.scalars(
-                    select(SqlSessionSubscription.target_id)
-                    .where(
-                        SqlSessionSubscription.workspace_id == current_workspace_id(),
-                        SqlSessionSubscription.subscriber_id == subscriber_id,
-                    )
-                    .order_by(SqlSessionSubscription.target_id)
-                    # ponytail: fixed cap; paginate if one session watches more.
-                    .limit(_SESSION_SUBSCRIPTION_LIST_CAP)
-                )
+                session.scalars(query.order_by(SqlSessionSubscription.target_id).limit(limit))
             )
 
-    def list_session_subscribers(self, target_id: str) -> list[str]:
-        """List the sessions watching *target_id*. See base class."""
+    def list_session_subscribers(
+        self, target_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[str]:
+        """One page of the sessions watching *target_id*. See base class."""
+        query = select(SqlSessionSubscription.subscriber_id).where(
+            SqlSessionSubscription.workspace_id == current_workspace_id(),
+            SqlSessionSubscription.target_id == target_id,
+        )
+        if after is not None:
+            query = query.where(SqlSessionSubscription.subscriber_id > after)
         with self._session("list_session_subscribers") as session:
             return list(
-                session.scalars(
-                    select(SqlSessionSubscription.subscriber_id)
-                    .where(
-                        SqlSessionSubscription.workspace_id == current_workspace_id(),
-                        SqlSessionSubscription.target_id == target_id,
-                    )
-                    .order_by(SqlSessionSubscription.subscriber_id)
-                    .limit(_SESSION_SUBSCRIPTION_LIST_CAP)
-                )
+                session.scalars(query.order_by(SqlSessionSubscription.subscriber_id).limit(limit))
             )
 
     def delete_session_subscriptions_for(self, conversation_id: str) -> int:
         """Drop subscriptions held by or aimed at a session. See base class."""
+        held = (SqlSessionSubscription.subscriber_id, SqlSessionSubscription.target_id)
+        aimed = (SqlSessionSubscription.target_id, SqlSessionSubscription.subscriber_id)
+        removed = 0
+        for fixed, other in (held, aimed):
+            while True:
 
-        def write(session: Session) -> int:
-            return _delete_session_subscriptions(session, [conversation_id])
+                def write(session: Session, fixed: Any = fixed, other: Any = other) -> int:
+                    scope = (
+                        SqlSessionSubscription.workspace_id == current_workspace_id(),
+                        fixed == conversation_id,
+                    )
+                    batch = list(
+                        session.scalars(
+                            select(other)
+                            .where(*scope)
+                            .order_by(other)
+                            .limit(_SESSION_SUBSCRIPTION_DELETE_BATCH)
+                        )
+                    )
+                    if batch:
+                        session.execute(
+                            delete(SqlSessionSubscription).where(*scope, other.in_(batch))
+                        )
+                    return len(batch)
 
-        return run_write_transaction(
-            self._session_immediate, "delete_session_subscriptions_for", write
-        )
+                count = run_write_transaction(
+                    self._session_immediate, "delete_session_subscriptions_for", write
+                )
+                removed += count
+                if count < _SESSION_SUBSCRIPTION_DELETE_BATCH:
+                    break
+        return removed
 
-    def claim_session_subscription_event(
-        self, subscriber_id: str, target_id: str, kind: str, key: str
+    def enqueue_subscription_delivery(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        notice: str,
+        *,
+        due_at: int,
     ) -> bool:
-        """Claim one event for one subscriber. See base class."""
-        column = _subscription_key_column(kind)
-        digest = hashlib.sha256(key.encode()).hexdigest()
+        """Record a notice owed to a subscriber, once. See base class."""
+        from sqlalchemy.exc import IntegrityError
 
         def write(session: Session) -> bool:
-            result = session.execute(
-                update(SqlSessionSubscription)
-                .where(
-                    SqlSessionSubscription.workspace_id == current_workspace_id(),
-                    SqlSessionSubscription.subscriber_id == subscriber_id,
-                    SqlSessionSubscription.target_id == target_id,
-                    or_(column.is_(None), column != digest),
+            key = (current_workspace_id(), subscriber_id, target_id, event_key)
+            if session.get(SqlSessionSubscriptionDelivery, key) is not None:
+                return False
+            session.add(
+                SqlSessionSubscriptionDelivery(
+                    subscriber_id=subscriber_id,
+                    target_id=target_id,
+                    event_key=event_key,
+                    state=_DELIVERY_PENDING,
+                    due_at=due_at,
+                    attempts=1,
+                    notice=notice,
                 )
-                .values({column.key: digest})
             )
-            return cast(Any, result).rowcount > 0
+            return True
+
+        try:
+            return run_write_transaction(
+                self._session_immediate, "enqueue_subscription_delivery", write
+            )
+        except IntegrityError:
+            # A concurrent edge recorded the same event first.
+            return False
+
+    def claim_due_subscription_deliveries(
+        self, *, now: int, lease_until: int, limit: int
+    ) -> list[SubscriptionDelivery]:
+        """Take over due pending deliveries. See base class."""
+        row = SqlSessionSubscriptionDelivery
+
+        def write(session: Session) -> list[SubscriptionDelivery]:
+            due = session.execute(
+                select(
+                    row.workspace_id,
+                    row.subscriber_id,
+                    row.target_id,
+                    row.event_key,
+                    row.due_at,
+                    row.attempts,
+                    row.notice,
+                )
+                .where(row.state == _DELIVERY_PENDING, row.due_at <= now)
+                .order_by(
+                    row.due_at, row.workspace_id, row.subscriber_id, row.target_id, row.event_key
+                )
+                .limit(limit)
+            ).all()
+            claimed: list[SubscriptionDelivery] = []
+            for item in due:
+                result = session.execute(
+                    update(row)
+                    .where(
+                        row.workspace_id == item.workspace_id,
+                        row.subscriber_id == item.subscriber_id,
+                        row.target_id == item.target_id,
+                        row.event_key == item.event_key,
+                        row.state == _DELIVERY_PENDING,
+                        row.due_at == item.due_at,
+                    )
+                    .values(due_at=lease_until, attempts=item.attempts + 1)
+                )
+                if cast(Any, result).rowcount:
+                    claimed.append(
+                        SubscriptionDelivery(
+                            workspace_id=item.workspace_id,
+                            subscriber_id=item.subscriber_id,
+                            target_id=item.target_id,
+                            event_key=item.event_key,
+                            attempts=item.attempts + 1,
+                            notice=item.notice,
+                        )
+                    )
+            return claimed
 
         return run_write_transaction(
-            self._session_immediate, "claim_session_subscription_event", write
+            self._session_immediate, "claim_due_subscription_deliveries", write
         )
 
-    def release_session_subscription_event(
-        self, subscriber_id: str, target_id: str, kind: str, key: str
+    def _update_subscription_delivery(
+        self, operation: str, subscriber_id: str, target_id: str, event_key: str, **values: int
     ) -> None:
-        """Undo a failed delivery's claim. See base class."""
-        column = _subscription_key_column(kind)
-        digest = hashlib.sha256(key.encode()).hexdigest()
+        row = SqlSessionSubscriptionDelivery
 
         def write(session: Session) -> None:
             session.execute(
-                update(SqlSessionSubscription)
+                update(row)
                 .where(
-                    SqlSessionSubscription.workspace_id == current_workspace_id(),
-                    SqlSessionSubscription.subscriber_id == subscriber_id,
-                    SqlSessionSubscription.target_id == target_id,
-                    column == digest,
+                    row.workspace_id == current_workspace_id(),
+                    row.subscriber_id == subscriber_id,
+                    row.target_id == target_id,
+                    row.event_key == event_key,
+                    row.state == _DELIVERY_PENDING,
                 )
-                .values({column.key: None})
+                .values(**values)
             )
 
-        run_write_transaction(self._session_immediate, "release_session_subscription_event", write)
+        run_write_transaction(self._session_immediate, operation, write)
+
+    def settle_subscription_delivery(
+        self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
+    ) -> None:
+        """Mark a delivery done. See base class."""
+        self._update_subscription_delivery(
+            "settle_subscription_delivery",
+            subscriber_id,
+            target_id,
+            event_key,
+            state=_DELIVERY_SETTLED,
+            due_at=settled_at,
+        )
+
+    def reschedule_subscription_delivery(
+        self, subscriber_id: str, target_id: str, event_key: str, *, due_at: int
+    ) -> None:
+        """Leave a failed delivery pending. See base class."""
+        self._update_subscription_delivery(
+            "reschedule_subscription_delivery",
+            subscriber_id,
+            target_id,
+            event_key,
+            due_at=due_at,
+        )
+
+    def prune_subscription_deliveries(self, *, settled_before: int, limit: int) -> int:
+        """Delete old settled deliveries. See base class."""
+        row = SqlSessionSubscriptionDelivery
+
+        def write(session: Session) -> int:
+            old = session.execute(
+                select(row.workspace_id, row.subscriber_id, row.target_id, row.event_key)
+                .where(row.state == _DELIVERY_SETTLED, row.due_at < settled_before)
+                .order_by(
+                    row.due_at, row.workspace_id, row.subscriber_id, row.target_id, row.event_key
+                )
+                .limit(limit)
+            ).all()
+            for item in old:
+                session.execute(
+                    delete(row).where(
+                        row.workspace_id == item.workspace_id,
+                        row.subscriber_id == item.subscriber_id,
+                        row.target_id == item.target_id,
+                        row.event_key == item.event_key,
+                    )
+                )
+            return len(old)
+
+        return run_write_transaction(
+            self._session_immediate, "prune_subscription_deliveries", write
+        )
 
     async def delete_conversation(self, conversation_id: str) -> bool:
         """
@@ -5674,7 +5805,6 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlSessionPermission.conversation_id.in_(subtree_ids),
                 )
             )
-            _delete_session_subscriptions(session, subtree_ids)
             session.execute(
                 delete(SqlConversationMetadata).where(
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
@@ -5687,5 +5817,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             "delete_conversation_metadata",
             delete_metadata,
         )
+        for subtree_id in subtree_ids:
+            self.delete_session_subscriptions_for(subtree_id)
 
         return True
