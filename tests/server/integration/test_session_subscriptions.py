@@ -11,12 +11,14 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from omnigent.runner.tool_dispatch import execute_tool
 from omnigent.runtime import pending_elicitations
 from omnigent.server import session_subscriptions
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.routes import sessions as sessions_facade
 from omnigent.server.routes._sessions import orchestration
 from omnigent.server.schemas import ErrorDetail
+from omnigent.spec.types import AgentSpec
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.server.helpers import create_test_session
@@ -407,3 +409,32 @@ async def test_deleting_either_side_drops_the_subscription(
     store = SqlAlchemyConversationStore(db_uri)
     assert store.list_session_subscriptions(watcher) == []
     assert store.list_session_subscribers(worker) == []
+
+
+async def test_the_agent_tools_subscribe_list_and_unsubscribe_the_calling_session(
+    client: httpx.AsyncClient,
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client))["id"]
+
+    async def call(tool: str, **args: Any) -> Any:
+        output = await execute_tool(
+            tool_name=tool,
+            arguments=json.dumps(args),
+            server_client=client,
+            conversation_id=watcher,
+            agent_spec=AgentSpec(spec_version=1),
+        )
+        return json.loads(output)
+
+    assert await call("sys_session_subscribe", session_id=worker) == {
+        "subscriber_id": watcher,
+        "session_id": worker,
+    }
+    assert await call("sys_session_subscriptions") == {
+        "data": [{"subscriber_id": watcher, "session_id": worker}]
+    }
+    assert await call("sys_session_unsubscribe", session_id=worker) == {"unsubscribed": worker}
+    assert await call("sys_session_subscriptions") == {"data": []}
+    refused = await call("sys_session_subscribe", session_id=watcher)
+    assert refused["error"].startswith("sys_session_subscribe returned 400")
