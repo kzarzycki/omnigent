@@ -2974,6 +2974,35 @@ class PermissionObject(BaseModel):
     level: int
 
 
+class SessionSubscriptionRequest(BaseModel):
+    """
+    Request body for ``POST /v1/sessions/{id}/subscriptions``.
+
+    :param session_id: The session to watch, e.g. ``"conv_abc123"``.
+    """
+
+    session_id: str = Field(min_length=1, max_length=64)
+
+
+class SessionSubscriptionObject(BaseModel):
+    """
+    One subscription: ``subscriber_id`` is told when ``session_id`` ends a
+    turn (completed, cancelled or failed) or blocks on a prompt.
+
+    :param subscriber_id: The session that receives the notices.
+    :param session_id: The watched session.
+    """
+
+    subscriber_id: str
+    session_id: str
+
+
+class SessionSubscriptionList(BaseModel):
+    """Response of ``GET /v1/sessions/{id}/subscriptions``, sorted by session id."""
+
+    data: list[SessionSubscriptionObject]
+
+
 # ─────────────────────────────────────────────────────────────────────
 # STREAM EVENTS — typed Pydantic union for SSE event boundary
 # ─────────────────────────────────────────────────────────────────────

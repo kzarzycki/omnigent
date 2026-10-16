@@ -68,7 +68,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.server import presence
+from omnigent.server import presence, session_subscriptions
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -664,6 +664,19 @@ class _RunnerEventContext:
     runner_id: str
 
 
+@dataclass(frozen=True)
+class _ServerEventContext:
+    """Server-originated event, posted on behalf of ``user_id`` (no HTTP request)."""
+
+    app: Any
+    headers: Headers
+    user_id: str | None
+
+    async def is_disconnected(self) -> bool:
+        """No client connection to lose."""
+        return False
+
+
 _RUNNER_EVENT_TYPES = frozenset(
     {
         _EXTERNAL_CONVERSATION_ITEM_TYPE,
@@ -692,14 +705,17 @@ def register_events_routes(
     runner_tunnel_tokens: frozenset[str] | None = None,
     register_runner_ingest: Callable[[Callable[..., Awaitable[EventAckFrame]]], None]
     | None = None,
+    register_server_message: Callable[[Callable[..., Awaitable[object]]], None] | None = None,
 ) -> None:
     """Register the events, stream, and delete routes on router."""
 
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
 
     def _has_runner_created_by_authority(
-        request: Request | _RunnerEventContext, conv: Any
+        request: Request | _RunnerEventContext | _ServerEventContext, conv: Any
     ) -> bool:
+        if isinstance(request, _ServerEventContext):
+            return False
         if isinstance(request, _RunnerEventContext):
             return conv.runner_id == request.runner_id
         token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
@@ -711,12 +727,12 @@ def register_events_routes(
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
     async def _authorized_conversation(
-        request: Request | _RunnerEventContext, session_id: str
+        request: Request | _RunnerEventContext | _ServerEventContext, session_id: str
     ) -> tuple[str | None, Any]:
         """Require EDIT on the session and return the caller and its conversation."""
         user_id = (
             request.user_id
-            if isinstance(request, _RunnerEventContext)
+            if isinstance(request, (_RunnerEventContext, _ServerEventContext))
             else _get_user_id(request, auth_provider)
         )
         access = await _require_access_and_level(
@@ -877,8 +893,31 @@ def register_events_routes(
     if register_runner_ingest is not None:
         register_runner_ingest(ingest_runner_batch)
 
+    async def post_server_message(
+        *, app: Any, session_id: str, user_id: str | None, text: str
+    ) -> dict[str, bool | str]:
+        """Post a ``[System: …]`` notice into a session as ``user_id``'s message.
+
+        Takes the user-message path, so a host-bound session whose runner is
+        gone is relaunched to receive it.
+        """
+        body = SessionEventInput(
+            type="message",
+            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+        )
+        with contextlib.ExitStack() as in_flight:
+            return await _post_event_impl(
+                _ServerEventContext(app, Headers(), user_id),
+                session_id,
+                body,
+                in_flight=in_flight,
+            )
+
+    if register_server_message is not None:
+        register_server_message(post_server_message)
+
     async def _post_event_impl(
-        request: Request | _RunnerEventContext,
+        request: Request | _RunnerEventContext | _ServerEventContext,
         session_id: str,
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
@@ -2005,31 +2044,40 @@ def register_events_routes(
                 background_tasks=bg_tasks,
                 blocked_on=blocked_on,
             )
-            if (
-                conv.parent_conversation_id is not None
-                and status in {"idle", "failed"}
-                and conv.labels.get("omnigent.wrapper") != "claude-code-native-ui-subagent"
-            ):
-                harness = await asyncio.to_thread(
-                    _native_pane_harness,
-                    conv,
-                    agent_store=agent_store,
-                    agent_cache=agent_cache,
+            if status in {"idle", "failed"}:
+                notify_parent = (
+                    conv.parent_conversation_id is not None
+                    and conv.labels.get("omnigent.wrapper") != "claude-code-native-ui-subagent"
                 )
-                outcome = native_subagent_terminal_status(
-                    status,
-                    harness=harness,
-                    turn_outcome=data.get("turn_outcome"),
-                    turn_completed=data.get("turn_completed"),
-                )
-                if outcome is not None:
-                    await record_subagent_activity(
-                        session_id,
-                        "returned",
-                        conversation_store,
-                        turn_id=response_id,
-                        status=outcome,
+                if notify_parent or await asyncio.to_thread(
+                    conversation_store.list_session_subscribers, session_id
+                ):
+                    harness = await asyncio.to_thread(
+                        _native_pane_harness,
+                        conv,
+                        agent_store=agent_store,
+                        agent_cache=agent_cache,
                     )
+                    outcome = native_subagent_terminal_status(
+                        status,
+                        harness=harness,
+                        turn_outcome=data.get("turn_outcome"),
+                        turn_completed=data.get("turn_completed"),
+                    )
+                    if outcome is not None:
+                        if notify_parent:
+                            await record_subagent_activity(
+                                session_id,
+                                "returned",
+                                conversation_store,
+                                turn_id=response_id,
+                                status=outcome,
+                            )
+                        session_subscriptions.notify_turn_end(
+                            session_id,
+                            cast(session_subscriptions.TurnOutcome, outcome),
+                            response_id,
+                        )
             # Emit a turn-end telemetry event for native harnesses. "idle"
             # means the turn completed normally; "failed" means it errored.
             # No latency or token deltas are available on this path.

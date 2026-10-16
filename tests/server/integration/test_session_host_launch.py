@@ -71,7 +71,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from tests.budgets import Deadline, budget
-from tests.server.helpers import create_test_agent
+from tests.server.helpers import create_test_agent, create_test_session
 from tests.server.helpers import websocket_scope as _websocket_scope
 
 pytestmark = pytest.mark.asyncio
@@ -1660,6 +1660,38 @@ async def test_stopped_host_session_message_relaunches_runner(
         "relaunch must mint a NEW runner_id (replace_runner_id); a stale id "
         "would keep routing messages to the dead runner"
     )
+
+
+async def test_a_subscription_notice_relaunches_a_stopped_subscriber(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watched session's turn end wakes a subscriber whose runner is gone."""
+    from omnigent.runtime import set_runner_client
+    from omnigent.server import session_subscriptions
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    comm = await _connect_host(app)
+    watcher_id = (await _inline_launch_session(client, comm))["id"]
+    await _stop_host_session(client, comm, watcher_id)
+    worker = await create_test_session(client, title="worker")
+    response = await client.post(
+        f"/v1/sessions/{watcher_id}/subscriptions", json={"session_id": worker["id"]}
+    )
+    assert response.status_code == 200, response.text
+
+    set_runner_client(None)
+    session_subscriptions.notify_turn_end(worker["id"], "completed", "resp_1")
+    try:
+        launch_frame = await _wait_for_launch(comm, budget_s=budget(5.0))
+    finally:
+        for task in list(session_subscriptions._tasks):
+            task.cancel()
+        await asyncio.gather(*list(session_subscriptions._tasks), return_exceptions=True)
+
+    assert launch_frame is not None, "the notice must relaunch the subscriber's runner"
 
 
 @pytest.mark.parametrize("wrapper", ["claude-code-native-ui", "codex-native-ui"])
