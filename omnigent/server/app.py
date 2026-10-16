@@ -77,7 +77,12 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
-from omnigent.server import managed_host_keepalive, session_live_state, shutdown_state
+from omnigent.server import (
+    managed_host_keepalive,
+    session_live_state,
+    session_subscriptions,
+    shutdown_state,
+)
 from omnigent.server.auth import (
     AuthProvider,
     SharingMode,
@@ -3303,6 +3308,13 @@ def create_app(
             ),
             register_runner_ingest=lambda handler: setattr(
                 app.state, "runner_event_ingest", handler
+            ),
+            register_server_message=lambda handler: session_subscriptions.configure(
+                conversation_store,
+                permission_store,
+                lambda session_id, user_id, text: handler(
+                    app=app, session_id=session_id, user_id=user_id, text=text
+                ),
             ),
         ),
         prefix="/v1",
