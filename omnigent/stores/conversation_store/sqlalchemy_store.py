@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -45,6 +46,7 @@ from omnigent.db.db_models import (
     SqlPolicy,
     SqlProject,
     SqlSessionPermission,
+    SqlSessionSubscription,
     SqlUser,
     SqlUserDailyCost,
     current_workspace_id,
@@ -821,6 +823,33 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
         )
         .subquery()
     )
+
+
+# Bound on one session's subscription listings.
+_SESSION_SUBSCRIPTION_LIST_CAP = 1000
+
+
+def _subscription_key_column(kind: str) -> Any:
+    """Return the dedupe column for a subscription event kind."""
+    if kind == "turn":
+        return SqlSessionSubscription.last_turn_key
+    if kind == "prompt":
+        return SqlSessionSubscription.last_prompt_key
+    raise ValueError(f"unknown subscription event kind: {kind!r}")
+
+
+def _delete_session_subscriptions(session: Session, conversation_ids: list[str]) -> int:
+    """Delete subscriptions held by or aimed at any of *conversation_ids*."""
+    result = session.execute(
+        delete(SqlSessionSubscription).where(
+            SqlSessionSubscription.workspace_id == current_workspace_id(),
+            or_(
+                SqlSessionSubscription.subscriber_id.in_(conversation_ids),
+                SqlSessionSubscription.target_id.in_(conversation_ids),
+            ),
+        )
+    )
+    return cast(Any, result).rowcount or 0
 
 
 class SqlAlchemyConversationStore(ConversationStore):
@@ -5281,6 +5310,126 @@ class SqlAlchemyConversationStore(ConversationStore):
                 is not None
             )
 
+    def add_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """Subscribe *subscriber_id* to *target_id*. See base class."""
+        from sqlalchemy.exc import IntegrityError
+
+        def write(session: Session) -> bool:
+            key = (current_workspace_id(), subscriber_id, target_id)
+            if session.get(SqlSessionSubscription, key) is not None:
+                return False
+            session.add(SqlSessionSubscription(subscriber_id=subscriber_id, target_id=target_id))
+            return True
+
+        try:
+            return run_write_transaction(
+                self._session_immediate, "add_session_subscription", write
+            )
+        except IntegrityError:
+            # A concurrent subscribe inserted the same pair first.
+            return False
+
+    def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """Remove one subscription. See base class."""
+
+        def write(session: Session) -> bool:
+            result = session.execute(
+                delete(SqlSessionSubscription).where(
+                    SqlSessionSubscription.workspace_id == current_workspace_id(),
+                    SqlSessionSubscription.subscriber_id == subscriber_id,
+                    SqlSessionSubscription.target_id == target_id,
+                )
+            )
+            return cast(Any, result).rowcount > 0
+
+        return run_write_transaction(self._session_immediate, "delete_session_subscription", write)
+
+    def list_session_subscriptions(self, subscriber_id: str) -> list[str]:
+        """List the sessions *subscriber_id* watches. See base class."""
+        with self._session("list_session_subscriptions") as session:
+            return list(
+                session.scalars(
+                    select(SqlSessionSubscription.target_id)
+                    .where(
+                        SqlSessionSubscription.workspace_id == current_workspace_id(),
+                        SqlSessionSubscription.subscriber_id == subscriber_id,
+                    )
+                    .order_by(SqlSessionSubscription.target_id)
+                    # ponytail: fixed cap; paginate if one session watches more.
+                    .limit(_SESSION_SUBSCRIPTION_LIST_CAP)
+                )
+            )
+
+    def list_session_subscribers(self, target_id: str) -> list[str]:
+        """List the sessions watching *target_id*. See base class."""
+        with self._session("list_session_subscribers") as session:
+            return list(
+                session.scalars(
+                    select(SqlSessionSubscription.subscriber_id)
+                    .where(
+                        SqlSessionSubscription.workspace_id == current_workspace_id(),
+                        SqlSessionSubscription.target_id == target_id,
+                    )
+                    .order_by(SqlSessionSubscription.subscriber_id)
+                    .limit(_SESSION_SUBSCRIPTION_LIST_CAP)
+                )
+            )
+
+    def delete_session_subscriptions_for(self, conversation_id: str) -> int:
+        """Drop subscriptions held by or aimed at a session. See base class."""
+
+        def write(session: Session) -> int:
+            return _delete_session_subscriptions(session, [conversation_id])
+
+        return run_write_transaction(
+            self._session_immediate, "delete_session_subscriptions_for", write
+        )
+
+    def claim_session_subscription_event(
+        self, subscriber_id: str, target_id: str, kind: str, key: str
+    ) -> bool:
+        """Claim one event for one subscriber. See base class."""
+        column = _subscription_key_column(kind)
+        digest = hashlib.sha256(key.encode()).hexdigest()
+
+        def write(session: Session) -> bool:
+            result = session.execute(
+                update(SqlSessionSubscription)
+                .where(
+                    SqlSessionSubscription.workspace_id == current_workspace_id(),
+                    SqlSessionSubscription.subscriber_id == subscriber_id,
+                    SqlSessionSubscription.target_id == target_id,
+                    or_(column.is_(None), column != digest),
+                )
+                .values({column.key: digest})
+            )
+            return cast(Any, result).rowcount > 0
+
+        return run_write_transaction(
+            self._session_immediate, "claim_session_subscription_event", write
+        )
+
+    def release_session_subscription_event(
+        self, subscriber_id: str, target_id: str, kind: str, key: str
+    ) -> None:
+        """Undo a failed delivery's claim. See base class."""
+        column = _subscription_key_column(kind)
+        digest = hashlib.sha256(key.encode()).hexdigest()
+
+        def write(session: Session) -> None:
+            session.execute(
+                update(SqlSessionSubscription)
+                .where(
+                    SqlSessionSubscription.workspace_id == current_workspace_id(),
+                    SqlSessionSubscription.subscriber_id == subscriber_id,
+                    SqlSessionSubscription.target_id == target_id,
+                    column == digest,
+                )
+                .values({column.key: None})
+            )
+
+        run_write_transaction(self._session_immediate, "release_session_subscription_event", write)
+
     async def delete_conversation(self, conversation_id: str) -> bool:
         """
         Delete a conversation and all of its descendants, cleaning up
@@ -5375,6 +5524,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlSessionPermission.conversation_id.in_(subtree_ids),
                 )
             )
+            _delete_session_subscriptions(session, subtree_ids)
             session.execute(
                 delete(SqlConversationMetadata).where(
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
