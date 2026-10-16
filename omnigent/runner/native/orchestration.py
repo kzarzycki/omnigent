@@ -8661,6 +8661,7 @@ def _routed_spawn_launch_args(
 class _ClaudeSessionLaunchMetadata:
     """Persisted values consumed by Claude terminal launch."""
 
+    workspace: str | None = None
     reasoning_effort: str | None = None
     model_override: str | None = None
     terminal_launch_args: list[str] | None = None
@@ -8706,6 +8707,7 @@ def _claude_launch_metadata_from_envelope(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        workspace=snapshot.workspace,
         reasoning_effort=snapshot.reasoning_effort,
         model_override=snapshot.model_override,
         terminal_launch_args=snapshot.terminal_launch_args,
@@ -8744,6 +8746,7 @@ async def _load_legacy_claude_launch_metadata(
         return _ClaudeSessionLaunchMetadata()
 
     snapshot = response.json()
+    workspace = snapshot.get("workspace")
     effort = snapshot.get("reasoning_effort")
     model_override = snapshot.get("model_override")
     launch_args = snapshot.get("terminal_launch_args")
@@ -8762,6 +8765,7 @@ async def _load_legacy_claude_launch_metadata(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        workspace=workspace if isinstance(workspace, str) and workspace else None,
         reasoning_effort=effort if isinstance(effort, str) and effort else None,
         model_override=(
             model_override if isinstance(model_override, str) and model_override else None
@@ -8952,11 +8956,15 @@ async def _auto_create_claude_terminal(
     from omnigent.harnesses.claude_native.forwarder import reset_transcript_forward_state
     from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 
-    workspace = str(
-        _claude_session_workspace(
-            session_init.snapshot.workspace if session_init is not None else None
-        )
+    # Loaded before the workspace is resolved: a relaunch without an init
+    # envelope (terminal ensure, resume) must still start in the session's own
+    # workspace, not the runner's, which for a sub-agent is the parent's.
+    launch_metadata = await _load_claude_launch_metadata(
+        server_client=server_client,
+        session_id=session_id,
+        session_init=session_init,
     )
+    workspace = str(_claude_session_workspace(launch_metadata.workspace))
     started_at = time.monotonic()
     _logger.info(
         "Claude terminal auto-create starting: session=%s workspace=%s bundle_dir=%s "
@@ -9082,11 +9090,6 @@ async def _auto_create_claude_terminal(
         resolve_native_claude_config,
     )
 
-    launch_metadata = await _load_claude_launch_metadata(
-        server_client=server_client,
-        session_id=session_id,
-        session_init=session_init,
-    )
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args
