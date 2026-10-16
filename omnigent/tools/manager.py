@@ -42,6 +42,9 @@ from omnigent.tools.builtins import (
     SysSessionRenameTool,
     SysSessionSendTool,
     SysSessionShareTool,
+    SysSessionSubscribeTool,
+    SysSessionSubscriptionsTool,
+    SysSessionUnsubscribeTool,
     SysTimerCancelTool,
     SysTimerSetTool,
     UpdateCommentTool,
@@ -509,6 +512,12 @@ class ToolManager:
 
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
         self._tools[UiOpenFileTool.name()] = UiOpenFileTool()
+        for tool in (
+            SysSessionSubscribeTool(),
+            SysSessionUnsubscribeTool(),
+            SysSessionSubscriptionsTool(),
+        ):
+            self._tools[tool.name()] = tool
 
     def _register_agent_mgmt_tools(self) -> None:
         """

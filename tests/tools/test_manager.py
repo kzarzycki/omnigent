@@ -70,6 +70,10 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         # enforces the orchestration flag and source authorization.
         "sys_session_message",
         "ui_open_file",
+        # Every session may watch the sessions it can read.
+        "sys_session_subscribe",
+        "sys_session_unsubscribe",
+        "sys_session_subscriptions",
         # Read-only agent discovery tools are likewise always available
         # (global, permission-bounded reads of any accessible session's
         # agent / bundle).
