@@ -7,7 +7,12 @@ import itertools
 
 import pytest
 
-from omnigent.stores.conversation_store import SubscriptionCycleError, sqlalchemy_store
+from omnigent.stores.conversation_store import (
+    MAX_SUBSCRIPTIONS_PER_SESSION,
+    SubscriptionCycleError,
+    SubscriptionLimitError,
+    sqlalchemy_store,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -110,6 +115,22 @@ def test_a_loop_search_past_its_bound_refuses(
     assert refused.value.bounded is True
     # A short walk still decides.
     assert conversation_store.add_session_subscription(f"{99:032x}", chain[3]) is True
+
+
+def test_a_subscription_past_the_cap_is_refused(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    subscriber = f"{0:032x}"
+    targets = [f"{index + 1:032x}" for index in range(MAX_SUBSCRIPTIONS_PER_SESSION + 1)]
+    for target in targets[:-1]:
+        assert conversation_store.add_session_subscription(subscriber, target) is True
+
+    with pytest.raises(SubscriptionLimitError):
+        conversation_store.add_session_subscription(subscriber, targets[-1])
+    # Repeating a held subscription is still a no-op, and a freed slot is reusable.
+    assert conversation_store.add_session_subscription(subscriber, targets[0]) is False
+    conversation_store.delete_session_subscription(subscriber, targets[0])
+    assert conversation_store.add_session_subscription(subscriber, targets[-1]) is True
 
 
 def test_due_deliveries_are_claimed_once_and_only_settled_ones_listed_for_the_prune(

@@ -20,7 +20,11 @@ from omnigent.server.schemas import (
     SessionSubscriptionRequest,
 )
 from omnigent.stores import ConversationStore
-from omnigent.stores.conversation_store import SubscriptionCycleError
+from omnigent.stores.conversation_store import (
+    MAX_SUBSCRIPTIONS_PER_SESSION,
+    SubscriptionCycleError,
+    SubscriptionLimitError,
+)
 from omnigent.stores.permission_store import PermissionStore
 
 _LIST_SCAN = 100
@@ -62,8 +66,9 @@ def register_subscriptions_routes(
         :raises OmnigentError: 400 for a self-subscription, 404 for an unknown
             or unreadable session, 409 when either session is archived or the
             watched session already hears this one through subscriptions (they
-            would wake each other in a loop), or when there are too many
-            subscriptions to follow to rule that out.
+            would wake each other in a loop), when there are too many
+            subscriptions to follow to rule that out, or when this session
+            already watches the most sessions one session can.
         """
         user_id = _require_user(request, auth_provider)
         target_id = body.session_id
@@ -81,6 +86,12 @@ def register_subscriptions_routes(
             created = await asyncio.to_thread(
                 conversation_store.add_session_subscription, session_id, target_id
             )
+        except SubscriptionLimitError:
+            raise OmnigentError(
+                f"Session {session_id!r} already watches {MAX_SUBSCRIPTIONS_PER_SESSION} "
+                "sessions, the most one session can; unsubscribe from one first.",
+                code=ErrorCode.CONFLICT,
+            ) from None
         except SubscriptionCycleError as cycle:
             raise OmnigentError(
                 f"Session {target_id!r} could not be checked for a subscription loop back to "
@@ -155,8 +166,8 @@ def register_subscriptions_routes(
         """Up to *limit* watched sessions the caller can read, and whether more follow."""
         page: list[str] = []
         while True:
-            # ponytail: skipping unreadable targets scans past all of them; a
-            # subscriber watching many sessions its reader cannot see pays per row.
+            # Skipping unreadable targets may scan all of them: at most
+            # MAX_SUBSCRIPTIONS_PER_SESSION rows, the cap on creating them.
             batch = conversation_store.list_session_subscriptions(
                 session_id, after=after, limit=_LIST_SCAN
             )
