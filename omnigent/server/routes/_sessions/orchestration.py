@@ -9213,6 +9213,8 @@ async def _relay_runner_stream_once(
     current_response_id: str | None = None
     pending_subagent_return_id: str | None = None
     pending_subagent_return_status = "completed"
+    # Subscribers already heard this turn end; a repeated status must not re-notify.
+    turn_end_notified = False
     # Model/agent label from the turn header, stamped on text segments
     # flushed at tool-call boundaries (the boundary event carries no model).
     current_model: str | None = None
@@ -9360,6 +9362,8 @@ async def _relay_runner_stream_once(
 
                     if evt_type == "session.status":
                         status = event.get("status", "")
+                        if status == "running":
+                            turn_end_notified = False
                         if status in {"idle", "failed"} and pending_subagent_return_id is not None:
                             turn_outcome = (
                                 "failed" if status == "failed" else pending_subagent_return_status
@@ -9379,6 +9383,20 @@ async def _relay_runner_stream_once(
                                 from_runner=True,
                             )
                             pending_subagent_return_id = None
+                            turn_end_notified = True
+                        elif status == "failed" and not turn_end_notified:
+                            # A runner can fail a turn with no terminal response
+                            # event (a required terminal exiting); this edge ends it.
+                            failed_turn = event.get("response_id")
+                            session_subscriptions.notify_turn_end(
+                                session_id,
+                                "failed",
+                                failed_turn
+                                if isinstance(failed_turn, str) and failed_turn
+                                else None,
+                                from_runner=True,
+                            )
+                            turn_end_notified = True
                         if status:
                             # Forward the runner's failure detail on a
                             # ``failed`` transition so a SETUP-phase
