@@ -677,6 +677,20 @@ class _ServerEventContext:
         return False
 
 
+def _refuse_undelivered_server_message(
+    request: Request | _RunnerEventContext | _ServerEventContext, reason: str | None
+) -> None:
+    """Refuse a server notice no runner can take, so its sender keeps it to retry.
+
+    A user's message is instead consumed into a failed turn that shows why.
+    """
+    if isinstance(request, _ServerEventContext):
+        raise OmnigentError(
+            reason or "No runner can take this session's message.",
+            code=ErrorCode.RUNNER_UNAVAILABLE,
+        )
+
+
 _RUNNER_EVENT_TYPES = frozenset(
     {
         _EXTERNAL_CONVERSATION_ITEM_TYPE,
@@ -2586,6 +2600,7 @@ def register_events_routes(
                         # refusal. Consume the message and record the actionable
                         # reason instead of waiting into a generic unavailable
                         # response. The binding stays for a later retry.
+                        _refuse_undelivered_server_message(request, host_error)
                         item_id = await _persist_host_launch_failure_turn(
                             session_id,
                             conv,
@@ -2735,6 +2750,7 @@ def register_events_routes(
                         "The runner for this session is not available — "
                         "it may have failed to start. See the host logs."
                     )
+                _refuse_undelivered_server_message(request, failure_message)
                 offline_error = ErrorData(
                     source="execution",
                     code="runner_failed_to_start",
@@ -3010,6 +3026,7 @@ def register_events_routes(
             # Read only to refuse a codex `/side` when the host is too old to fork
             # one; absent, the dispatch forwards as before.
             host_registry=getattr(request.app.state, "host_registry", None),
+            refuse_failure=isinstance(request, _ServerEventContext),
         )
         if pending_background_title is not None:
             pending_background_title.schedule(expected_seed_title=conv.title)
