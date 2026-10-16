@@ -64,10 +64,11 @@ _loop: asyncio.AbstractEventLoop | None = None
 _next_wake: float | None = None
 # Bounds the first attempts at freshly recorded rows; made on the server loop.
 _post_limit: asyncio.Semaphore | None = None
-# The native status block each target stands on: (blocked_on, block id). Like
-# the pending-elicitation index, it lives on the server relaying the target.
+# The native status block each target stands on: (blocked_on, response id). Like
+# the pending-elicitation index, it lives on the server relaying the target; a
+# runner republishes its status when it reconnects, which restores it.
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by unique session id
-_standing_blocks: dict[str, tuple[str, str]] = {}
+_standing_blocks: dict[str, tuple[str, str | None]] = {}
 
 # An attempt in flight owns its row this long; a server that dies mid-attempt
 # leaves the row to the sweep after it. Longer than a relaunching post takes.
@@ -201,8 +202,8 @@ async def record_status(target_id: str, blocked_on: str | None, response_id: str
     """
     Record prompt notices when a native status edge parks the target on a block.
 
-    Repeated edges of the standing block share its identity, so they record
-    nothing new; an edge without *blocked_on* ends the block.
+    A block's identity is the target, its turn and *blocked_on*, so a repeated
+    or replayed edge records nothing new; an edge without *blocked_on* ends it.
 
     :param target_id: Session whose status changed.
     :param blocked_on: What the session is parked on, or ``None``.
@@ -210,34 +211,46 @@ async def record_status(target_id: str, blocked_on: str | None, response_id: str
     :returns: None.
     :raises Exception: The notices could not be recorded.
     """
-    key = _block_key(target_id, blocked_on, response_id)
-    if key is not None:
-        await _record(target_id, key, _PROMPT)
+    if _track_block(target_id, blocked_on, response_id):
+        await _record_block(target_id, cast(str, blocked_on), response_id)
 
 
 def notify_status(target_id: str, blocked_on: str | None, response_id: str | None) -> None:
     """:func:`record_status` for a producer with no acknowledgement to fail. Never raises."""
-    if _store is None:
-        return
-    key = _block_key(target_id, blocked_on, response_id)
-    if key is not None:
-        _spawn(_retain_recording(target_id, lambda: _record(target_id, key, _PROMPT)))
+    if _track_block(target_id, blocked_on, response_id):
+        _spawn(
+            _retain_recording(
+                target_id,
+                lambda: _record_block(target_id, cast(str, blocked_on), response_id),
+            )
+        )
 
 
-def _block_key(target_id: str, blocked_on: str | None, response_id: str | None) -> str | None:
-    """Track the target's standing block; the event key of a block edge, else ``None``."""
+def _track_block(target_id: str, blocked_on: str | None, response_id: str | None) -> bool:
+    """Track the target's standing block; whether this edge is a block edge."""
     if _store is None:
-        return None
+        return False
     if blocked_on is None:
         _standing_blocks.pop(target_id, None)
-        return None
-    standing = _standing_blocks.get(target_id)
-    if standing is None or standing[0] != blocked_on:
-        # ponytail: the id lives in memory, so a repeated edge after a restart
-        # records a second notice; a persisted block generation would close it.
-        standing = (blocked_on, f"{response_id or ''}:{blocked_on}:{time.time_ns()}")
-        _standing_blocks[target_id] = standing
-    return _event_key("block", standing[1])
+        return False
+    _standing_blocks[target_id] = (blocked_on, response_id)
+    return True
+
+
+async def _record_block(target_id: str, blocked_on: str, response_id: str | None) -> None:
+    await _record(target_id, await _block_key(target_id, blocked_on, response_id), _PROMPT)
+
+
+async def _block_key(target_id: str, blocked_on: str, response_id: str | None) -> str:
+    """The event key of a block: target, turn and what it is parked on."""
+    store = _store
+    # A runner's relayed status names no turn, so the transcript's latest one does.
+    # ponytail: a second block of the same kind in one turn shares the first's
+    # identity and is not notified; a per-block id from the harness would split them.
+    turn = response_id or (
+        await latest_turn_id(target_id, store, failed=True) if store is not None else None
+    )
+    return _event_key("block", f"{target_id}:{turn or ''}:{blocked_on}")
 
 
 def observe_elicitation(conversation_id: str, event: dict[str, Any]) -> None:
@@ -271,15 +284,16 @@ async def record_pending_prompts(subscriber_id: str, target_id: str) -> None:
         if isinstance(elicitation_id := event.get("elicitation_id"), str) and elicitation_id
     ]
     if (standing := _standing_blocks.get(target_id)) is not None:
-        keys.append(_event_key("block", standing[1]))
+        keys.append(await _block_key(target_id, *standing))
     for key in keys:
         await _record(target_id, key, _PROMPT, only=subscriber_id)
 
 
 async def _retain_recording(target_id: str, record: Callable[[], Awaitable[None]]) -> None:
     """Retry a recording until it lands; the producer had no way to retry it."""
-    # ponytail: retained in memory only; a server that dies while the database
-    # is down loses these. Producers that can retry use the awaited ``record_*``.
+    # ponytail: retained in memory only, so losing a notice takes a double
+    # fault: a recording outage and the server dying during it. Producers that
+    # can retry use the awaited ``record_*``.
     failures = 0
     while True:
         try:
@@ -350,6 +364,7 @@ async def _record(
         return
     workspace_id = current_workspace_id()
     after: str | None = None
+    leased_until = int(time.time()) + _LEASE_S
     while True:
         if only is not None:
             page = [only]
@@ -363,14 +378,15 @@ async def _record(
             target_id,
             event_key,
             outcome,
-            due_at=int(time.time()) + _LEASE_S,
+            due_at=leased_until,
         )
         for subscriber_id in created:
             _spawn(
                 _post_recorded(
                     SubscriptionDelivery(
                         workspace_id, subscriber_id, target_id, event_key, 1, outcome
-                    )
+                    ),
+                    leased_until,
                 )
             )
         if only is not None or len(page) < _SUBSCRIBER_PAGE:
@@ -378,7 +394,7 @@ async def _record(
         after = page[-1]
 
 
-async def _post_recorded(delivery: SubscriptionDelivery) -> None:
+async def _post_recorded(delivery: SubscriptionDelivery, leased_until: int) -> None:
     """First attempt at a row just recorded, bounded like the sweep's."""
     global _post_limit
     if _post_limit is None:
@@ -387,7 +403,26 @@ async def _post_recorded(delivery: SubscriptionDelivery) -> None:
     if store is None:
         return
     async with _post_limit:
-        await _retry(store, delivery)
+        # A wait past the recording lease hands the row to the sweep, so take it
+        # back only if it is still pending under that lease.
+        with workspace_scope(delivery.workspace_id):
+            try:
+                now = int(time.time())
+                claimed = await asyncio.to_thread(
+                    store.claim_subscription_delivery,
+                    delivery.subscriber_id,
+                    delivery.target_id,
+                    delivery.event_key,
+                    leased_until=leased_until,
+                    lease_until=now + _LEASE_S,
+                )
+            except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
+                _logger.warning(
+                    "Could not claim a notice to %s", delivery.subscriber_id, exc_info=True
+                )
+                return
+        if claimed:
+            await _retry(store, delivery)
 
 
 async def _deliverable(
@@ -593,7 +628,7 @@ async def _keep_identity(store: ConversationStore, delivery: SubscriptionDeliver
         for event in pending_elicitations.snapshot_for(target.id)
     }
     if (block := _standing_blocks.get(target.id)) is not None:
-        standing.add(_event_key("block", block[1]))
+        standing.add(await _block_key(target.id, *block))
     # Held here, or a target that may still report a prompt pending elsewhere.
     return delivery.event_key in standing or target.pending_elicitation_count != 0
 
