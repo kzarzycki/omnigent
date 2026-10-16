@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
+from urllib.parse import quote
 
 from omnigent.util.json_serialization import json_dumps_transport_safe
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -85,6 +86,11 @@ from omnigent.tools.builtins.os_env import (
     SysOsWriteTool,
 )
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
+from omnigent.tools.builtins.session_subscriptions import (
+    SysSessionSubscribeTool,
+    SysSessionSubscriptionsTool,
+    SysSessionUnsubscribeTool,
+)
 from omnigent.tools.builtins.spawn import (
     # Shared contract values with the in-process sys_session_* tools. Imported
     # (not duplicated) so the runner's REST-backed peek clamps to the same
@@ -322,6 +328,14 @@ _SESSION_QUERY_TOOLS = frozenset(
 _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
 _UI_TOOLS = frozenset({UiOpenFileTool.name()})
 
+_SESSION_SUBSCRIPTION_TOOLS = frozenset(
+    {
+        SysSessionSubscribeTool.name(),
+        SysSessionUnsubscribeTool.name(),
+        SysSessionSubscriptionsTool.name(),
+    }
+)
+
 # The title bound the rename tool advertises to the LLM — read once from the
 # tool schema so the dispatcher can never drift from the published contract.
 _SESSION_RENAME_TITLE_MAX_CHARS: int = SysSessionRenameTool().get_schema()["function"][
@@ -480,6 +494,7 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
     | _UI_TOOLS
+    | _SESSION_SUBSCRIPTION_TOOLS
     | _ASYNC_INBOX_TOOLS
     | _SUBAGENT_TOOLS
     | _LIST_MODELS_TOOLS
@@ -601,6 +616,9 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionGetInfoTool,
             SysSessionRenameTool,
             UiOpenFileTool,
+            SysSessionSubscribeTool,
+            SysSessionUnsubscribeTool,
+            SysSessionSubscriptionsTool,
             SysAgentGetTool,
             SysAgentListTool,
             SysAgentDownloadTool,
@@ -879,6 +897,7 @@ _ALL_LOCAL_TOOLS = (
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
     | _UI_TOOLS
+    | _SESSION_SUBSCRIPTION_TOOLS
     | _WEB_FETCH_TOOLS
     | _WEB_SEARCH_TOOLS
     | _WEB_READ_TOOLS
@@ -5946,6 +5965,53 @@ async def _open_file_via_rest(
         return json.dumps({"error": f"ui_open_file failed: {exc}"})
 
 
+async def _session_subscription_via_rest(
+    tool_name: str,
+    args: _JsonObject,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """Subscribe, unsubscribe or list for the calling session through the server API.
+
+    Every failure becomes a tool-result envelope, like the rename tool.
+    """
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": f"{tool_name} requires a session id"})
+    base = f"/v1/sessions/{conversation_id}/subscriptions"
+    target = args.get("session_id")
+    if tool_name != SysSessionSubscriptionsTool.name() and (
+        not isinstance(target, str) or not target.strip()
+    ):
+        return json.dumps({"error": f"{tool_name} requires a string 'session_id'"})
+    try:
+        if tool_name == SysSessionSubscribeTool.name():
+            response = await server_client.post(
+                base, json={"session_id": cast(str, target).strip()}, timeout=30.0
+            )
+        elif tool_name == SysSessionUnsubscribeTool.name():
+            response = await server_client.delete(
+                f"{base}/{quote(cast(str, target).strip(), safe='')}", timeout=30.0
+            )
+        else:
+            response = await server_client.get(base, timeout=30.0)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if response.status_code >= 400:
+        try:
+            detail = response.json()["error"]["message"]
+        except Exception:  # noqa: BLE001
+            detail = response.text[:500]
+        return json.dumps({"error": f"{tool_name} returned {response.status_code}: {detail}"})
+    if tool_name == SysSessionUnsubscribeTool.name():
+        return json.dumps({"unsubscribed": cast(str, target).strip()})
+    try:
+        return json.dumps(response.json())
+    except ValueError as exc:
+        return json.dumps({"error": f"{tool_name} returned invalid JSON: {exc}"})
+
+
 async def _rename_current_session_via_rest(
     args: _JsonObject,
     conversation_id: str | None,
@@ -6724,6 +6790,13 @@ async def execute_tool(
             output = await _open_file_via_rest(args, conversation_id, server_client)
         elif tool_name in _SESSION_SELF_WRITE_TOOLS:
             output = await _rename_current_session_via_rest(
+                args,
+                conversation_id,
+                server_client,
+            )
+        elif tool_name in _SESSION_SUBSCRIPTION_TOOLS:
+            output = await _session_subscription_via_rest(
+                tool_name,
                 args,
                 conversation_id,
                 server_client,
