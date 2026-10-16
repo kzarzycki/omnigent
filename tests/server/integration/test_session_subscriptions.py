@@ -103,13 +103,17 @@ async def test_subscribing_is_idempotent_and_listed_until_unsubscribed(
         assert response.status_code == 200, response.text
         assert response.json() == {"subscriber_id": watcher, "session_id": worker}
     listing = await client.get(f"/v1/sessions/{watcher}/subscriptions")
-    assert listing.json() == {"data": [{"subscriber_id": watcher, "session_id": worker}]}
+    assert listing.json() == {
+        "data": [{"subscriber_id": watcher, "session_id": worker}],
+        "last_id": worker,
+        "has_more": False,
+    }
 
     for _ in range(2):
         deleted = await client.delete(f"/v1/sessions/{watcher}/subscriptions/{worker}")
         assert deleted.status_code == 204
     listing = await client.get(f"/v1/sessions/{watcher}/subscriptions")
-    assert listing.json() == {"data": []}
+    assert listing.json() == {"data": [], "last_id": None, "has_more": False}
 
 
 async def test_subscribing_rejects_self_mutual_unknown_and_archived_sessions(
@@ -453,9 +457,174 @@ async def test_the_agent_tools_subscribe_list_and_unsubscribe_the_calling_sessio
         "session_id": worker,
     }
     assert await call("sys_session_subscriptions") == {
-        "data": [{"subscriber_id": watcher, "session_id": worker}]
+        "data": [{"subscriber_id": watcher, "session_id": worker}],
+        "last_id": worker,
+        "has_more": False,
     }
     assert await call("sys_session_unsubscribe", session_id=worker) == {"unsubscribed": worker}
-    assert await call("sys_session_subscriptions") == {"data": []}
+    assert await call("sys_session_subscriptions") == {
+        "data": [],
+        "last_id": None,
+        "has_more": False,
+    }
     refused = await call("sys_session_subscribe", session_id=watcher)
     assert refused["error"].startswith("sys_session_subscribe returned 400")
+
+
+class _Poster:
+    """Records posted notices; fails the first ``failures`` posts."""
+
+    def __init__(self, failures: int = 0) -> None:
+        self.failures = failures
+        self.attempts = 0
+        self.posted: list[tuple[str, str]] = []
+
+    async def __call__(self, session_id: str, _user_id: str | None, text: str) -> None:
+        self.attempts += 1
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("subscriber host temporarily offline")
+        self.posted.append((session_id, text))
+
+
+@pytest.fixture
+def outbox(db_uri: str) -> AsyncIterator[tuple[SqlAlchemyConversationStore, str, str]]:
+    store = SqlAlchemyConversationStore(db_uri)
+    watcher = store.create_conversation().id
+    target = store.create_conversation(title="worker").id
+    store.add_session_subscription(watcher, target)
+    yield store, watcher, target
+    session_subscriptions.configure(None, None, None)
+
+
+async def test_a_replayed_older_prompt_is_not_delivered_again(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    for prompt in ("p1", "p2", "p1", "p2"):
+        await session_subscriptions._deliver_prompt(target, prompt, "approval", only=watcher)
+
+    assert len(poster.posted) == 2
+
+
+async def test_a_replayed_older_turn_is_not_delivered_again(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, _watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    for response_id in ("resp_1", "resp_2", "resp_1"):
+        await session_subscriptions._deliver_turn_end(target, "completed", response_id)
+
+    assert len(poster.posted) == 2
+
+
+async def test_subscribing_again_with_two_pending_prompts_delivers_two_notices(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client, title="worker"))["id"]
+    pending_elicitations.record_publish(worker, _prompt("elicit_1", "First?"))
+    pending_elicitations.record_publish(worker, _prompt("elicit_2", "Second?"))
+
+    for _ in range(3):
+        assert (await _subscribe(client, watcher, worker)).status_code == 200
+        await _settle()
+
+    assert sorted(runner.notices(watcher)) == [
+        f"[System: session worker ({worker}) is waiting on a prompt: First?.]",
+        f"[System: session worker ({worker}) is waiting on a prompt: Second?.]",
+    ]
+
+
+async def test_a_recovered_subscriber_receives_the_notice_a_failed_post_left_pending(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+
+    await session_subscriptions._deliver_turn_end(target, "failed", "resp_1")
+    assert (poster.attempts, poster.posted) == (1, [])
+    await _settle()
+
+    assert poster.posted == [
+        (
+            watcher,
+            f"[System: session worker ({target}) ended its turn (failed). "
+            "Read it with sys_session_get_history.]",
+        )
+    ]
+    # Settled: neither a sweep nor a repeated edge posts it again.
+    assert await session_subscriptions.retry_due_deliveries() == 0
+    await session_subscriptions._deliver_turn_end(target, "failed", "resp_1")
+    assert len(poster.posted) == 1
+
+
+async def test_a_notice_recorded_before_a_restart_is_posted_once_by_the_sweep(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _watcher, target = outbox
+    session_subscriptions.configure(store, None, _Poster())
+
+    async def crash(*_args: Any, **_kwargs: Any) -> None:
+        raise asyncio.CancelledError  # the server dies between recording and posting
+
+    monkeypatch.setattr(session_subscriptions, "_attempt", crash)
+    with pytest.raises(asyncio.CancelledError):
+        await session_subscriptions._deliver_turn_end(target, "completed", "resp_1")
+    monkeypatch.undo()
+
+    restarted = _Poster()
+    session_subscriptions.configure(store, None, restarted)
+    # Still leased to the dead attempt.
+    assert await session_subscriptions.retry_due_deliveries() == 0
+    monkeypatch.setattr(session_subscriptions, "_LEASE_S", -1)
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+
+    assert [notice for _, notice in restarted.posted] == [
+        f"[System: session worker ({target}) ended its turn (completed). "
+        "Read it with sys_session_get_history.]"
+    ]
+
+
+async def test_a_pending_notice_to_an_unsubscribed_session_is_dropped(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await session_subscriptions._deliver_turn_end(target, "completed", "resp_1")
+    store.delete_session_subscription(watcher, target)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == []
+
+
+async def test_more_than_a_thousand_subscribers_all_hear_a_fan_out(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = outbox
+    watchers = [watcher]
+    for _ in range(1001):
+        subscriber = store.create_conversation().id
+        store.add_session_subscription(subscriber, target)
+        watchers.append(subscriber)
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    await session_subscriptions._deliver_turn_end(target, "completed", "resp_1")
+
+    assert sorted(session_id for session_id, _ in poster.posted) == sorted(watchers)

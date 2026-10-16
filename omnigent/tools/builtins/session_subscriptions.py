@@ -88,7 +88,10 @@ class SysSessionSubscriptionsTool(Tool):
     @classmethod
     def description(cls) -> str:
         """Return the LLM-facing description."""
-        return "List the sessions you watch (subscribed to with sys_session_subscribe)."
+        return (
+            "List the sessions you watch (subscribed to with sys_session_subscribe), "
+            "100 per page. When has_more is true, call again with after=last_id."
+        )
 
     def get_schema(self) -> dict[str, Any]:
         """Return the OpenAI-format schema."""
@@ -97,6 +100,15 @@ class SysSessionSubscriptionsTool(Tool):
             "function": {
                 "name": self.name(),
                 "description": self.description(),
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "after": {
+                            "type": "string",
+                            "description": "last_id of the previous page, to read the next one.",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
             },
         }
