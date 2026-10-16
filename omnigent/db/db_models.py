@@ -1715,7 +1715,10 @@ class SqlSessionSubscriptionDelivery(OmnigentBase):
     :param due_at: Unix epoch seconds: the next attempt while pending, the
         settle time once settled.
     :param attempts: Delivery attempts started so far.
-    :param notice: The ``[System: …]`` text to post, at most 1,024 characters.
+    :param outcome: What happened, as a small code owned by the delivery module
+        (a prompt, or a turn that completed, was cancelled or failed). The
+        notice text is built from the live sessions when it is posted, so no
+        user content is stored here.
     """
 
     __tablename__ = "session_subscription_deliveries"
@@ -1732,7 +1735,7 @@ class SqlSessionSubscriptionDelivery(OmnigentBase):
     state: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     due_at: Mapped[int] = mapped_column(Integer, nullable=False)
     attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False)
-    notice: Mapped[str] = mapped_column(String(1024), nullable=False)
+    outcome: Mapped[int] = mapped_column(SmallInteger, nullable=False)
 
     __table_args__ = (
         # The retry sweep (pending, due) and the prune (settled, old) across
