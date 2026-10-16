@@ -65,6 +65,10 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_session_list",
         "sys_session_get_info",
         "sys_session_rename",
+        # Every session may watch the sessions it can read.
+        "sys_session_subscribe",
+        "sys_session_unsubscribe",
+        "sys_session_subscriptions",
         # Read-only agent discovery tools are likewise always available
         # (global, permission-bounded reads of any accessible session's
         # agent / bundle).
