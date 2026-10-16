@@ -33,7 +33,7 @@ def upgrade() -> None:
     """Create the ``session_subscriptions`` table."""
     op.create_table(
         "session_subscriptions",
-        sa.Column("workspace_id", sa.BigInteger(), nullable=False, server_default="0"),
+        sa.Column("workspace_id", sa.BigInteger(), nullable=False),
         sa.Column("subscriber_id", Uuid16(), nullable=False),
         sa.Column("target_id", Uuid16(), nullable=False),
         sa.Column("last_turn_key", sa.String(64), nullable=True),
