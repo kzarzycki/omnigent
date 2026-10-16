@@ -8095,6 +8095,7 @@ async def _dispatch_session_event_to_runner_impl(
     background_titles_enabled: bool = True,
     agent_revision: str | None = None,
     startup_input: StartupInputContext | None = None,
+    refuse_failure: bool = False,
 ) -> _SessionEventDispatchResult:
     """
     Forward an item-event to the runner with harness-aware dispatch.
@@ -8169,6 +8170,9 @@ async def _dispatch_session_event_to_runner_impl(
         an older host row gets.
     :param agent_revision: The agent's effective bundle and selection revision, stamped on
         both native and non-native forwards to invalidate runner caches.
+    :param refuse_failure: Raise when the native terminal cannot take the
+        message, instead of consuming it into a failed turn, so a sender that
+        retries keeps it.
     :returns: A :class:`_SessionEventDispatchResult` carrying the
         persisted item id (non-native) or the pending-input id
         (claude-native message bypass).
@@ -8202,6 +8206,10 @@ async def _dispatch_session_event_to_runner_impl(
         if ensure_outcome.error is not None:
             if startup_input is not None:
                 raise OmnigentError(str(ensure_outcome.error), code=ErrorCode.RUNNER_UNAVAILABLE)
+            if refuse_failure:
+                raise OmnigentError(
+                    ensure_outcome.error.message, code=ErrorCode.RUNNER_UNAVAILABLE
+                )
             item_id = await _persist_native_terminal_failure(
                 session_id,
                 conv,
