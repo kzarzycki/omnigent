@@ -3084,9 +3084,17 @@ class SessionSubscriptionObject(BaseModel):
 
 
 class SessionSubscriptionList(BaseModel):
-    """Response of ``GET /v1/sessions/{id}/subscriptions``, sorted by session id."""
+    """
+    One page of ``GET /v1/sessions/{id}/subscriptions``, sorted by session id.
+
+    :param last_id: Watched session id of the page's last entry; pass it as
+        ``after`` to read the next page.
+    :param has_more: Whether another page follows.
+    """
 
     data: list[SessionSubscriptionObject]
+    last_id: str | None = None
+    has_more: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────

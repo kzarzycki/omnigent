@@ -2058,7 +2058,7 @@ def register_events_routes(
                     and conv.labels.get("omnigent.wrapper") != "claude-code-native-ui-subagent"
                 )
                 if notify_parent or await asyncio.to_thread(
-                    conversation_store.list_session_subscribers, session_id
+                    conversation_store.list_session_subscribers, session_id, limit=1
                 ):
                     harness = await asyncio.to_thread(
                         _native_pane_harness,
