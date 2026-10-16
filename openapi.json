@@ -16341,7 +16341,7 @@
     },
     "/v1/sessions/{session_id}/subscriptions": {
       "get": {
-        "description": "List one page of the sessions this session is subscribed to, by session id.\n\nRequires read access to this session.",
+        "description": "List one page of the sessions this session is subscribed to, by session id.\n\nRequires read access to this session. Watched sessions the caller\ncannot read are left out, and never show up as a continuation key.",
         "operationId": "list_session_subscriptions_v1_sessions__session_id__subscriptions_get",
         "parameters": [
           {
