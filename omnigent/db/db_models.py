@@ -1685,9 +1685,6 @@ class SqlSessionSubscription(OmnigentBase):
 
     :param subscriber_id: Session that receives the notices.
     :param target_id: Session being watched.
-    :param last_turn_key: Digest of the last turn end delivered, so a repeated
-        status edge for the same turn is not delivered twice.
-    :param last_prompt_key: Digest of the last prompt delivered, same purpose.
     """
 
     __tablename__ = "session_subscriptions"
@@ -1700,9 +1697,6 @@ class SqlSessionSubscription(OmnigentBase):
     )
     subscriber_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
     target_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
-    # sha256 hex of the delivered turn's response id / prompt's elicitation id.
-    last_turn_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    last_prompt_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         # "Who watches this session" on every turn end.
