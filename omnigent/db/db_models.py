@@ -1686,7 +1686,6 @@ class SqlSessionSubscription(OmnigentBase):
         BigInteger,
         primary_key=True,
         nullable=False,
-        server_default="0",
         default=current_workspace_id,
     )
     subscriber_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
@@ -1702,5 +1701,54 @@ class SqlSessionSubscription(OmnigentBase):
             "workspace_id",
             "target_id",
             "subscriber_id",
+        ),
+    )
+
+
+class SqlSessionSubscriptionDelivery(OmnigentBase):
+    """
+    SQLAlchemy model for the ``session_subscription_deliveries`` table.
+
+    One row per ``(subscriber, target, event)``: the outbox of notices owed to
+    subscribers. Inserting the row is the dedupe (a repeated or replayed event
+    hits the primary key); a pending row is retried until the notice is posted,
+    then kept as settled for a retention window and pruned in batches.
+
+    :param event_key: sha256 hex of the event's identity (``"turn:<response
+        id>"`` or ``"prompt:<elicitation id>"``).
+    :param state: ``0`` pending, ``1`` settled (delivered or dropped).
+    :param due_at: Unix epoch seconds: the next attempt while pending, the
+        settle time once settled.
+    :param attempts: Delivery attempts started so far.
+    :param notice: The ``[System: …]`` text to post, at most 1,024 characters.
+    """
+
+    __tablename__ = "session_subscription_deliveries"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        default=current_workspace_id,
+    )
+    subscriber_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    target_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    due_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    notice: Mapped[str] = mapped_column(String(1024), nullable=False)
+
+    __table_args__ = (
+        # The retry sweep (pending, due) and the prune (settled, old) across
+        # workspaces; primary-key tail for deterministic batches.
+        Index(
+            "ix_session_subscription_deliveries_state_due_at",
+            "state",
+            "due_at",
+            "workspace_id",
+            "subscriber_id",
+            "target_id",
+            "event_key",
         ),
     )
