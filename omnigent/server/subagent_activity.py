@@ -158,6 +158,30 @@ def _native_request_id(child_id: str, turn_id: str, store: ConversationStore) ->
         after = page.last_id
 
 
+async def latest_turn_id(
+    conversation_id: str, store: ConversationStore, *, failed: bool
+) -> str | None:
+    """Response id of the session's latest turn, read from its recent transcript.
+
+    A failed turn may have produced only the user's message, so ``failed``
+    also accepts a user message as the turn's evidence.
+    """
+    latest = await asyncio.to_thread(store.list_items, conversation_id, limit=20, order="desc")
+    return next(
+        (
+            row.response_id
+            for row in latest.data
+            if (
+                isinstance(row.data, MessageData)
+                and (row.data.role == "assistant" or failed)
+                and not row.data.is_meta
+            )
+            or row.type in {"function_call", "function_call_output"}
+        ),
+        None,
+    )
+
+
 async def record_subagent_activity(
     child_id: str,
     phase: Literal["delegated", "returned"],
@@ -200,20 +224,7 @@ async def record_subagent_activity(
             # Codex registers the child before thread/resume supplies its name.
             return
         if phase == "returned" and turn_id is None:
-            latest = await asyncio.to_thread(store.list_items, child.id, limit=20, order="desc")
-            turn_id = next(
-                (
-                    row.response_id
-                    for row in latest.data
-                    if (
-                        isinstance(row.data, MessageData)
-                        and (row.data.role == "assistant" or status == "failed")
-                        and not row.data.is_meta
-                    )
-                    or row.type in {"function_call", "function_call_output"}
-                ),
-                None,
-            )
+            turn_id = await latest_turn_id(child.id, store, failed=status == "failed")
             if turn_id is None:
                 if status != "failed":
                     return
