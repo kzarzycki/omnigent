@@ -9451,6 +9451,15 @@ async def _relay_runner_stream_once(
                                     )
                                 else:
                                     continue
+                            session_subscriptions.notify_status(
+                                session_id,
+                                raw_blocked_on
+                                if isinstance(raw_blocked_on, str) and raw_blocked_on
+                                else None,
+                                raw_response_id
+                                if isinstance(raw_response_id, str) and raw_response_id
+                                else None,
+                            )
                             _publish_status(
                                 session_id,
                                 status,
