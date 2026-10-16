@@ -63,6 +63,23 @@ _lock = threading.Lock()
 _observer: Callable[[str, dict[str, Any]], None] | None = None
 
 
+# Further observers that run alongside ``_observer`` (session subscriptions).
+_extra_observers: tuple[Callable[[str, dict[str, Any]], None], ...] = ()
+
+
+def add_elicitation_observer(observer: Callable[[str, dict[str, Any]], None]) -> None:
+    """
+    Register an observer that runs after the primary one; idempotent.
+
+    :param observer: Called as ``observer(conversation_id, event)`` for the
+        same events as :func:`set_elicitation_observer`'s observer.
+    :returns: None.
+    """
+    global _extra_observers
+    if observer not in _extra_observers:
+        _extra_observers = (*_extra_observers, observer)
+
+
 def set_elicitation_observer(
     observer: Callable[[str, dict[str, Any]], None] | None,
 ) -> None:
@@ -178,6 +195,8 @@ def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
     observer = _observer
     if observer is not None:
         observer(conversation_id, event)
+    for extra in _extra_observers:
+        extra(conversation_id, event)
 
 
 def resolve(conversation_id: str, elicitation_id: str) -> None:
