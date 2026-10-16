@@ -65,6 +65,7 @@ from omnigent.db.enum_codecs import (
 )
 from omnigent.db.query_context import query_name_scope
 from omnigent.db.utils import (
+    _is_serialization_failure,
     _supports_fts5,
     build_search_snippet,
     delete_fts_by_conversation_ids,
@@ -110,6 +111,7 @@ from omnigent.stores.conversation_store import (
     CreatedSession,
     DailyCostState,
     SessionConnectivity,
+    SubscriptionCycleError,
     SubscriptionDelivery,
     pinned_label_key,
 )
@@ -830,6 +832,11 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
 _SESSION_SUBSCRIPTION_DELETE_BATCH = 500
 
 # Delivery outbox states.
+# A subscribe walks at most this many subscription rows looking for a loop, and
+# refuses when it cannot finish.
+_SUBSCRIPTION_CYCLE_LIMIT = 1000
+_SUBSCRIPTION_CYCLE_CHUNK = 100
+_SUBSCRIPTION_SERIALIZATION_RETRIES = 3
 _DELIVERY_PENDING = 0
 _DELIVERY_SETTLED = 1
 # The attempts column is a SmallInteger; retries go on past it uncounted.
@@ -5295,23 +5302,67 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
 
     def add_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
-        """Subscribe *subscriber_id* to *target_id*. See base class."""
+        """Subscribe *subscriber_id* to *target_id*, refusing a loop. See base class."""
         from sqlalchemy.exc import IntegrityError
 
         def write(session: Session) -> bool:
+            if self._engine.dialect.name != "sqlite":
+                # SQLite's BEGIN IMMEDIATE already admits one writer at a time.
+                session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
             key = (current_workspace_id(), subscriber_id, target_id)
             if session.get(SqlSessionSubscription, key) is not None:
                 return False
+            self._refuse_subscription_cycle(session, subscriber_id, target_id)
             session.add(SqlSessionSubscription(subscriber_id=subscriber_id, target_id=target_id))
             return True
 
-        try:
-            return run_write_transaction(
-                self._session_immediate, "add_session_subscription", write
+        from sqlalchemy.exc import DBAPIError
+
+        for attempt in range(_SUBSCRIPTION_SERIALIZATION_RETRIES + 1):
+            try:
+                return run_write_transaction(
+                    self._session_immediate, "add_session_subscription", write
+                )
+            except IntegrityError:
+                # A concurrent subscribe inserted the same pair first.
+                return False
+            except DBAPIError as exc:
+                # A concurrent subscribe raced this one's loop check: check again.
+                if attempt == _SUBSCRIPTION_SERIALIZATION_RETRIES or not (
+                    _is_serialization_failure(exc)
+                ):
+                    raise
+        raise AssertionError("unreachable")
+
+    def _refuse_subscription_cycle(
+        self, session: Session, subscriber_id: str, target_id: str
+    ) -> None:
+        """Raise when *subscriber_id* is reachable from *target_id* along subscriptions."""
+        row = SqlSessionSubscription
+        seen = {target_id}
+        frontier = [target_id]
+        while frontier:
+            chunk, frontier = (
+                frontier[:_SUBSCRIPTION_CYCLE_CHUNK],
+                frontier[_SUBSCRIPTION_CYCLE_CHUNK:],
             )
-        except IntegrityError:
-            # A concurrent subscribe inserted the same pair first.
-            return False
+            room = _SUBSCRIPTION_CYCLE_LIMIT - len(seen)
+            watched = session.scalars(
+                select(row.target_id)
+                .where(
+                    row.workspace_id == current_workspace_id(),
+                    row.subscriber_id.in_(chunk),
+                )
+                .limit(room + 1)
+            ).all()
+            for session_id in watched:
+                if session_id == subscriber_id:
+                    raise SubscriptionCycleError()
+                if session_id not in seen:
+                    seen.add(session_id)
+                    frontier.append(session_id)
+            if len(watched) > room or len(seen) > _SUBSCRIPTION_CYCLE_LIMIT:
+                raise SubscriptionCycleError(bounded=True)
 
     def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
         """Remove one subscription. See base class."""
@@ -5399,24 +5450,34 @@ class SqlAlchemyConversationStore(ConversationStore):
                     break
         return removed
 
-    def enqueue_subscription_delivery(
+    def enqueue_subscription_deliveries(
         self,
-        subscriber_id: str,
+        subscriber_ids: list[str],
         target_id: str,
         event_key: str,
         outcome: int,
         *,
         due_at: int,
-    ) -> bool:
-        """Record a notice owed to a subscriber, once. See base class."""
+    ) -> list[str]:
+        """Record a notice owed to each subscriber, once. See base class."""
         from sqlalchemy.exc import IntegrityError
 
-        def write(session: Session) -> bool:
-            key = (current_workspace_id(), subscriber_id, target_id, event_key)
-            if session.get(SqlSessionSubscriptionDelivery, key) is not None:
-                return False
-            session.add(
-                SqlSessionSubscriptionDelivery(
+        row = SqlSessionSubscriptionDelivery
+
+        def write(session: Session) -> list[str]:
+            recorded = set(
+                session.scalars(
+                    select(row.subscriber_id).where(
+                        row.workspace_id == current_workspace_id(),
+                        row.subscriber_id.in_(subscriber_ids),
+                        row.target_id == target_id,
+                        row.event_key == event_key,
+                    )
+                ).all()
+            )
+            created = [sid for sid in dict.fromkeys(subscriber_ids) if sid not in recorded]
+            session.add_all(
+                row(
                     subscriber_id=subscriber_id,
                     target_id=target_id,
                     event_key=event_key,
@@ -5425,16 +5486,22 @@ class SqlAlchemyConversationStore(ConversationStore):
                     attempts=1,
                     outcome=outcome,
                 )
+                for subscriber_id in created
             )
-            return True
+            return created
 
-        try:
-            return run_write_transaction(
-                self._session_immediate, "enqueue_subscription_delivery", write
-            )
-        except IntegrityError:
-            # A concurrent edge recorded the same event first.
-            return False
+        if not subscriber_ids:
+            return []
+        for attempt in range(2):
+            try:
+                return run_write_transaction(
+                    self._session_immediate, "enqueue_subscription_deliveries", write
+                )
+            except IntegrityError:
+                # A concurrent edge recorded the same event first: the reread skips it.
+                if attempt:
+                    raise
+        raise AssertionError("unreachable")
 
     def claim_due_subscription_deliveries(
         self, *, now: int, lease_until: int, limit: int

@@ -400,6 +400,17 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
             current[key] = current.get(key, 0) + value
 
 
+class SubscriptionCycleError(Exception):
+    """A new subscription would let sessions wake each other in a loop.
+
+    :param bounded: The search hit its bound before it could rule a loop out.
+    """
+
+    def __init__(self, bounded: bool = False) -> None:
+        super().__init__("bounded" if bounded else "cycle")
+        self.bounded = bounded
+
+
 @dataclass(frozen=True)
 class SubscriptionDelivery:
     """One subscription outbox row, as the retry sweep and the prune see it."""
@@ -2074,9 +2085,17 @@ class ConversationStore(ABC):
         """
         Subscribe one session to another's turn ends and prompts.
 
+        Refuses a subscription that would close a loop: *subscriber_id* already
+        reachable from *target_id* along subscriptions (the target hears the
+        subscriber, directly or through others). The check and the insert run
+        in one serialized transaction, so concurrent creations cannot close a
+        loop between them.
+
         :param subscriber_id: Session that receives the notices.
         :param target_id: Session being watched.
         :returns: ``True`` when the row was created, ``False`` when it existed.
+        :raises SubscriptionCycleError: The subscription would close a loop, or
+            the search hit its bound first.
         """
         ...
 
@@ -2129,26 +2148,27 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def enqueue_subscription_delivery(
+    def enqueue_subscription_deliveries(
         self,
-        subscriber_id: str,
+        subscriber_ids: list[str],
         target_id: str,
         event_key: str,
         outcome: int,
         *,
         due_at: int,
-    ) -> bool:
+    ) -> list[str]:
         """
-        Record a notice owed to a subscriber, once per event.
+        Record a notice owed to each subscriber, once per event, in one transaction.
 
-        The new row is pending with one attempt started; *due_at* is when the
+        Each new row is pending with one attempt started; *due_at* is when the
         retry sweep may take it over if the caller never finishes the attempt.
 
+        :param subscriber_ids: Subscribers of *target_id* to record the event for.
         :param event_key: Digest identifying the event (at most 64 chars).
         :param outcome: Small code for what happened; the caller owns its meaning.
         :param due_at: Unix epoch seconds.
-        :returns: ``False`` when the event was already recorded for this
-            subscriber (delivered, pending or dropped).
+        :returns: The subscribers whose row this call created; one that already
+            had the event (delivered, pending or dropped) is left out.
         """
         ...
 
