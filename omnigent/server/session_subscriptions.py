@@ -403,26 +403,34 @@ async def _post_recorded(delivery: SubscriptionDelivery, leased_until: int) -> N
     if store is None:
         return
     async with _post_limit:
-        # A wait past the recording lease hands the row to the sweep, so take it
-        # back only if it is still pending under that lease.
-        with workspace_scope(delivery.workspace_id):
-            try:
-                now = int(time.time())
-                claimed = await asyncio.to_thread(
-                    store.claim_subscription_delivery,
-                    delivery.subscriber_id,
-                    delivery.target_id,
-                    delivery.event_key,
-                    leased_until=leased_until,
-                    lease_until=now + _LEASE_S,
-                )
-            except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
-                _logger.warning(
-                    "Could not claim a notice to %s", delivery.subscriber_id, exc_info=True
-                )
-                return
-        if claimed:
-            await _retry(store, delivery)
+        await _claim_and_retry(store, delivery, leased_until)
+
+
+async def _claim_and_retry(
+    store: ConversationStore, delivery: SubscriptionDelivery, leased_until: int
+) -> None:
+    """Attempt a row admitted to post, if it is still pending under *leased_until*.
+
+    A wait in the posting queue past that lease hands the row to a sweep, so the
+    attempt takes it back with a fresh lease, or skips it when it was taken.
+    """
+    with workspace_scope(delivery.workspace_id):
+        try:
+            claimed = await asyncio.to_thread(
+                store.claim_subscription_delivery,
+                delivery.subscriber_id,
+                delivery.target_id,
+                delivery.event_key,
+                leased_until=leased_until,
+                lease_until=int(time.time()) + _LEASE_S,
+            )
+        except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
+            _logger.warning(
+                "Could not claim a notice to %s", delivery.subscriber_id, exc_info=True
+            )
+            return
+    if claimed:
+        await _retry(store, delivery)
 
 
 async def _deliverable(
@@ -534,9 +542,9 @@ async def retry_due_deliveries() -> int:
     attempted = 0
     limit = asyncio.Semaphore(_POST_CONCURRENCY)
 
-    async def retry(delivery: SubscriptionDelivery) -> None:
+    async def retry(delivery: SubscriptionDelivery, leased_until: int) -> None:
         async with limit:
-            await _retry(store, delivery)
+            await _claim_and_retry(store, delivery, leased_until)
 
     try:
         for _ in range(_SWEEP_MAX_BATCHES):
@@ -547,7 +555,7 @@ async def retry_due_deliveries() -> int:
                 lease_until=now + _LEASE_S,
                 limit=_SWEEP_BATCH,
             )
-            await asyncio.gather(*(retry(delivery) for delivery in batch))
+            await asyncio.gather(*(retry(delivery, now + _LEASE_S) for delivery in batch))
             attempted += len(batch)
             if len(batch) < _SWEEP_BATCH:
                 break
