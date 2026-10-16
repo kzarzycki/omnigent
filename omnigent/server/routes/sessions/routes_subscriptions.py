@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server import session_subscriptions
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ, AuthProvider
+from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import require_access as _require_access
 from omnigent.server.routes._auth_helpers import require_user as _require_user
 from omnigent.server.routes._errors import session_not_found as _session_not_found
@@ -21,6 +22,8 @@ from omnigent.server.schemas import (
 from omnigent.stores import ConversationStore
 from omnigent.stores.conversation_store import SubscriptionCycleError
 from omnigent.stores.permission_store import PermissionStore
+
+_LIST_SCAN = 100
 
 
 def register_subscriptions_routes(
@@ -127,7 +130,8 @@ def register_subscriptions_routes(
         """
         List one page of the sessions this session is subscribed to, by session id.
 
-        Requires read access to this session.
+        Requires read access to this session. Watched sessions the caller
+        cannot read are left out, and never show up as a continuation key.
         """
         user_id = _require_user(request, auth_provider)
         await _require_access(
@@ -135,18 +139,39 @@ def register_subscriptions_routes(
         )
         if await asyncio.to_thread(conversation_store.get_conversation, session_id) is None:
             raise _session_not_found()
-        target_ids = await asyncio.to_thread(
-            conversation_store.list_session_subscriptions,
-            session_id,
-            after=after,
-            limit=limit + 1,
-        )
-        page = target_ids[:limit]
+        page, has_more = await asyncio.to_thread(_readable_page, user_id, session_id, after, limit)
         return SessionSubscriptionList(
             data=[
                 SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
                 for target_id in page
             ],
             last_id=page[-1] if page else None,
-            has_more=len(target_ids) > limit,
+            has_more=has_more,
         )
+
+    def _readable_page(
+        user_id: str | None, session_id: str, after: str | None, limit: int
+    ) -> tuple[list[str], bool]:
+        """Up to *limit* watched sessions the caller can read, and whether more follow."""
+        page: list[str] = []
+        while True:
+            # ponytail: skipping unreadable targets scans past all of them; a
+            # subscriber watching many sessions its reader cannot see pays per row.
+            batch = conversation_store.list_session_subscriptions(
+                session_id, after=after, limit=_LIST_SCAN
+            )
+            for target_id in batch:
+                if (
+                    user_id is not None
+                    and permission_store is not None
+                    and not check_session_access(
+                        user_id, target_id, LEVEL_READ, permission_store, conversation_store
+                    )
+                ):
+                    continue
+                if len(page) == limit:
+                    return page, True
+                page.append(target_id)
+            if len(batch) < _LIST_SCAN:
+                return page, False
+            after = batch[-1]

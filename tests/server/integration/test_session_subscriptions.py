@@ -916,3 +916,82 @@ async def test_a_relayed_block_republished_after_a_restart_reaches_only_a_new_su
 
     notice = _waiting("worker", target)
     assert poster.posted == [(watcher, notice), (late, notice)]
+
+
+async def test_a_retry_queued_past_its_lease_does_not_post_a_row_another_sweep_settled(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    other = store.create_conversation().id
+    store.add_session_subscription(other, target)
+    store.enqueue_subscription_deliveries([watcher, other], target, "a" * 64, 1, due_at=0)
+    calls: list[str] = []
+    release = asyncio.Event()
+
+    async def post(session_id: str, _user_id: str | None, _text: str) -> None:
+        calls.append(session_id)
+        if len(calls) == 1:
+            await release.wait()
+
+    monkeypatch.setattr(session_subscriptions, "_POST_CONCURRENCY", 1)
+    session_subscriptions.configure(store, None, post)
+    now = [10**9]
+    with patch.object(session_subscriptions.time, "time", lambda: now[0]):
+        first = asyncio.create_task(session_subscriptions.retry_due_deliveries())
+        while not calls:
+            await asyncio.sleep(0)
+        # The first sweep's second row waits behind a slow post until its lease ends.
+        now[0] += session_subscriptions._LEASE_S + 1
+        assert await session_subscriptions.retry_due_deliveries() == 2
+        release.set()
+        await first
+
+    queued = ({watcher, other} - {calls[0]}).pop()
+    assert calls.count(queued) == 1
+
+
+async def test_listing_shows_only_watched_sessions_the_caller_can_read(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    watcher = store.create_conversation().id
+    targets = sorted(store.create_conversation().id for _ in range(3))
+    for user in ("owner@example.com", "reader@example.com"):
+        permissions.ensure_user(user)
+    for session_id in (watcher, *targets):
+        permissions.grant("owner@example.com", session_id, LEVEL_EDIT)
+    permissions.grant("reader@example.com", watcher, LEVEL_READ)
+    permissions.grant("reader@example.com", targets[2], LEVEL_READ)
+    owner = {"X-Forwarded-Email": "owner@example.com"}
+    reader = {"X-Forwarded-Email": "reader@example.com"}
+    for target in targets:
+        response = await auth_client.post(
+            f"/v1/sessions/{watcher}/subscriptions", json={"session_id": target}, headers=owner
+        )
+        assert response.status_code == 200, response.text
+
+    async def listing(headers: dict[str, str], **params: Any) -> dict[str, Any]:
+        response = await auth_client.get(
+            f"/v1/sessions/{watcher}/subscriptions", params=params, headers=headers
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def ids(page: dict[str, Any]) -> list[str]:
+        return [row["session_id"] for row in page["data"]]
+
+    assert ids(await listing(owner)) == targets
+    # The two unreadable targets sort first; neither is listed nor a continuation key.
+    first = await listing(reader, limit=1)
+    assert (ids(first), first["last_id"], first["has_more"]) == ([targets[2]], targets[2], False)
+
+    permissions.grant("reader@example.com", targets[0], LEVEL_READ)
+    page = await listing(reader, limit=1)
+    assert (ids(page), page["last_id"], page["has_more"]) == ([targets[0]], targets[0], True)
+    rest = await listing(reader, limit=1, after=page["last_id"])
+    assert (ids(rest), rest["has_more"]) == ([targets[2]], False)
+
+    permissions.revoke("reader@example.com", targets[0])
+    assert ids(await listing(reader)) == [targets[2]]
