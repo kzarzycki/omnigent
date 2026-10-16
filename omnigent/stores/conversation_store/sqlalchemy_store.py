@@ -5560,12 +5560,18 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
 
     def _update_subscription_delivery(
-        self, operation: str, subscriber_id: str, target_id: str, event_key: str, **values: int
-    ) -> None:
+        self,
+        operation: str,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *conditions: Any,
+        **values: int,
+    ) -> bool:
         row = SqlSessionSubscriptionDelivery
 
-        def write(session: Session) -> None:
-            session.execute(
+        def write(session: Session) -> bool:
+            result = session.execute(
                 update(row)
                 .where(
                     row.workspace_id == current_workspace_id(),
@@ -5573,11 +5579,32 @@ class SqlAlchemyConversationStore(ConversationStore):
                     row.target_id == target_id,
                     row.event_key == event_key,
                     row.state == _DELIVERY_PENDING,
+                    *conditions,
                 )
                 .values(**values)
             )
+            return bool(cast(Any, result).rowcount)
 
-        run_write_transaction(self._session_immediate, operation, write)
+        return run_write_transaction(self._session_immediate, operation, write)
+
+    def claim_subscription_delivery(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        leased_until: int,
+        lease_until: int,
+    ) -> bool:
+        """Take a pending delivery still under its lease. See base class."""
+        return self._update_subscription_delivery(
+            "claim_subscription_delivery",
+            subscriber_id,
+            target_id,
+            event_key,
+            SqlSessionSubscriptionDelivery.due_at == leased_until,
+            due_at=lease_until,
+        )
 
     def settle_subscription_delivery(
         self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
