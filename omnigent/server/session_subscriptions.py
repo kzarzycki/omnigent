@@ -8,11 +8,15 @@ whose runner was idle-reaped is relaunched to receive it.
 
 Each notice goes through a durable outbox row keyed by subscriber, target and
 event (a turn's response id, a prompt's elicitation id). Inserting the row is
-the dedupe, so a repeated or replayed event is a no-op. A failed post leaves
-the row pending; a retry sweep (after the failure, at startup and
-periodically) posts it with backoff, and also picks up an attempt a crashed
-server never finished. Settled rows are kept for a retention window, then
-pruned in batches.
+the dedupe, so a repeated or replayed event is a no-op. The row holds only that
+identity and an outcome code; the notice text is built from the live sessions
+when it is posted. A failed post leaves the row pending; a retry sweep (after
+the failure, at startup and periodically) posts it with capped backoff for as
+long as the subscription stands, and also picks up an attempt a crashed server
+never finished. Delivery is at-least-once: a notice is a wake, so a rare
+duplicate costs the reader one history read while a lost one stalls it.
+Settled rows are pruned after a retention window, except a prompt's, which is
+kept while its target may still have it pending.
 
 The server configures this module once in ``create_app``; until then every
 entry point is a no-op.
@@ -62,9 +66,6 @@ _next_wake: float | None = None
 _LEASE_S = 300
 _RETRY_BASE_S = 1
 _RETRY_CAP_S = 600
-# ponytail: ~3.5h of retries, then the notice is dropped with a warning.
-_MAX_ATTEMPTS = 30
-# ponytail: a replay of an event settled longer ago than this is delivered again.
 _SETTLED_RETENTION_S = 7 * 24 * 3600
 _SWEEP_INTERVAL_S = 30
 _SWEEP_BATCH = 100
@@ -72,8 +73,12 @@ _SWEEP_MAX_BATCHES = 10
 _PRUNE_BATCH = 500
 _SUBSCRIBER_PAGE = 100
 _POST_CONCURRENCY = 16
-_NOTICE_MAX_CHARS = 1024
 _SKIP = object()
+
+# Outcome codes stored in the outbox; the notice is rebuilt from them.
+_PROMPT = 0
+_TURN_OUTCOMES: dict[int, TurnOutcome] = {1: "completed", 2: "cancelled", 3: "failed"}
+_TURN_CODES: dict[str, int] = {outcome: code for code, outcome in _TURN_OUTCOMES.items()}
 
 
 def configure(
@@ -224,7 +229,7 @@ async def _deliver_turn_end(
                 return
             # A runner can die or be stopped before the turn wrote anything.
             key = target_id
-        await _fan_out(target_id, "turn", key, turn_notice(target.title, target_id, outcome))
+        await _fan_out(target_id, _event_key("turn", key), _TURN_CODES[outcome])
     except Exception:  # noqa: BLE001 — a notice must never break the status path
         _logger.warning("Could not notify subscribers of %s", target_id, exc_info=True)
 
@@ -232,6 +237,7 @@ async def _deliver_turn_end(
 async def _deliver_prompt(
     target_id: str, elicitation_id: str, reason: str | None, *, only: str | None = None
 ) -> None:
+    """Notify subscribers of a prompt; *reason* details the first attempt's notice."""
     store = _store
     if store is None:
         return
@@ -243,10 +249,15 @@ async def _deliver_prompt(
         target = await asyncio.to_thread(store.get_conversation, target_id)
         if target is None or target.archived:
             return
-        notice = prompt_notice(target.title, target_id, reason)
-        await _fan_out(target_id, "prompt", elicitation_id, notice, only=only)
+        await _fan_out(
+            target_id, _event_key("prompt", elicitation_id), _PROMPT, reason=reason, only=only
+        )
     except Exception:  # noqa: BLE001 — a notice must never break the publish path
         _logger.warning("Could not notify subscribers of %s", target_id, exc_info=True)
+
+
+def _event_key(kind: str, event_id: str) -> str:
+    return hashlib.sha256(f"{kind}:{event_id}".encode()).hexdigest()
 
 
 def _owner(store: ConversationStore, session: Conversation) -> str | None:
@@ -263,17 +274,20 @@ def _owner(store: ConversationStore, session: Conversation) -> str | None:
 
 
 async def _fan_out(
-    target_id: str, kind: str, event_id: str, notice: str, *, only: str | None = None
+    target_id: str,
+    event_key: str,
+    outcome: int,
+    *,
+    reason: str | None = None,
+    only: str | None = None,
 ) -> None:
     store = _store
     assert store is not None
-    event_key = hashlib.sha256(f"{kind}:{event_id}".encode()).hexdigest()
-    notice = notice[:_NOTICE_MAX_CHARS]
     limit = asyncio.Semaphore(_POST_CONCURRENCY)
 
     async def deliver(subscriber_id: str) -> None:
         async with limit:
-            await _deliver_one(subscriber_id, target_id, event_key, notice)
+            await _deliver_one(subscriber_id, target_id, event_key, outcome, reason)
 
     if only is not None:
         await deliver(only)
@@ -305,7 +319,9 @@ async def _deliverable(
     return owner
 
 
-async def _deliver_one(subscriber_id: str, target_id: str, event_key: str, notice: str) -> None:
+async def _deliver_one(
+    subscriber_id: str, target_id: str, event_key: str, outcome: int, reason: str | None
+) -> None:
     store = _store
     if store is None or _post_message is None:
         return
@@ -318,7 +334,7 @@ async def _deliver_one(subscriber_id: str, target_id: str, event_key: str, notic
             subscriber_id,
             target_id,
             event_key,
-            notice,
+            outcome,
             due_at=int(time.time()) + _LEASE_S,
         ):
             return
@@ -330,7 +346,45 @@ async def _deliver_one(subscriber_id: str, target_id: str, event_key: str, notic
             exc_info=True,
         )
         return
-    await _attempt(store, subscriber_id, target_id, event_key, notice, 1, cast(str | None, owner))
+    await _attempt(
+        store, subscriber_id, target_id, event_key, outcome, 1, cast(str | None, owner), reason
+    )
+
+
+def _pending_prompt_reason(target_id: str, event_key: str) -> tuple[bool, str | None]:
+    """Whether this server holds the prompt as pending, and its message."""
+    for event in pending_elicitations.snapshot_for(target_id):
+        elicitation_id = event.get("elicitation_id")
+        if isinstance(elicitation_id, str) and _event_key("prompt", elicitation_id) == event_key:
+            return True, _block_reason(event)
+    return False, None
+
+
+def _prompt_known_resolved(target: Conversation, event_key: str) -> bool:
+    """The prompt is gone: not held here, and the target reports no pending prompt.
+
+    The pending index lives on the server holding the target's runner tunnel;
+    the persisted count covers the others. An unknown count is not proof.
+    """
+    held, _ = _pending_prompt_reason(target.id, event_key)
+    return not held and target.pending_elicitation_count == 0
+
+
+async def _render(
+    store: ConversationStore, target_id: str, event_key: str, outcome: int, reason: str | None
+) -> str | None:
+    """The notice text from the live target, or ``None`` when there is nothing to say."""
+    target = await asyncio.to_thread(store.get_conversation, target_id)
+    if target is None:
+        return None
+    if outcome != _PROMPT:
+        return turn_notice(target.title, target_id, _TURN_OUTCOMES[outcome])
+    held, held_reason = _pending_prompt_reason(target_id, event_key)
+    if held:
+        return prompt_notice(target.title, target_id, held_reason)
+    if target.pending_elicitation_count == 0:
+        return None
+    return prompt_notice(target.title, target_id, reason)
 
 
 async def _attempt(
@@ -338,16 +392,22 @@ async def _attempt(
     subscriber_id: str,
     target_id: str,
     event_key: str,
-    notice: str,
+    outcome: int,
     attempts: int,
     owner: str | None,
+    reason: str | None = None,
 ) -> None:
     """Post one claimed delivery; settle it, or leave it pending for a retry."""
     post = _post_message
     try:
         if post is None:
             raise RuntimeError("subscription delivery is not configured")
-        await post(subscriber_id, owner, notice)
+        notice = await _render(store, target_id, event_key, outcome, reason)
+        if notice is not None:
+            # ponytail: at-least-once. A server that dies, or a settle that
+            # fails, after this post leaves the row to be posted again once its
+            # lease expires; closing that needs idempotency at message acceptance.
+            await post(subscriber_id, owner, notice)
     except Exception:  # noqa: BLE001 — the row stays pending for the retry sweep
         _logger.warning(
             "Could not deliver a notice from %s to %s (attempt %d)",
@@ -357,24 +417,8 @@ async def _attempt(
             exc_info=True,
             extra={"session_id": subscriber_id},
         )
-        now = int(time.time())
+        due = int(time.time()) + min(_RETRY_BASE_S * 2 ** min(attempts - 1, 16), _RETRY_CAP_S)
         try:
-            if attempts >= _MAX_ATTEMPTS:
-                _logger.warning(
-                    "Dropping a notice from %s to %s after %d attempts",
-                    target_id,
-                    subscriber_id,
-                    attempts,
-                )
-                await asyncio.to_thread(
-                    store.settle_subscription_delivery,
-                    subscriber_id,
-                    target_id,
-                    event_key,
-                    settled_at=now,
-                )
-                return
-            due = now + min(_RETRY_BASE_S * 2 ** (attempts - 1), _RETRY_CAP_S)
             await asyncio.to_thread(
                 store.reschedule_subscription_delivery,
                 subscriber_id,
@@ -394,9 +438,7 @@ async def _attempt(
             event_key,
             settled_at=int(time.time()),
         )
-    except Exception:  # noqa: BLE001
-        # ponytail: the notice was posted but stays pending, so the sweep posts
-        # it again after the lease; an idempotency key on the post would close this.
+    except Exception:  # noqa: BLE001 — the lease hands the row to the sweep (a duplicate)
         _logger.warning("Could not settle a notice to %s", subscriber_id, exc_info=True)
 
 
@@ -472,12 +514,16 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
                 "Could not prepare a retried notice to %s", delivery.subscriber_id, exc_info=True
             )
             return
-        await _attempt(store, *key, delivery.notice, delivery.attempts, cast(str | None, owner))
+        await _attempt(store, *key, delivery.outcome, delivery.attempts, cast(str | None, owner))
 
 
 async def prune_settled_deliveries() -> int:
     """
     Delete settled deliveries past the retention window, in bounded batches.
+
+    A prompt's row is the only thing stopping a re-published, still-pending
+    prompt from being delivered again, so it is kept (its age reset) while the
+    subscription stands and the target may still have the prompt pending.
 
     :returns: Number of rows removed.
     """
@@ -485,15 +531,32 @@ async def prune_settled_deliveries() -> int:
     if store is None:
         return 0
     removed = 0
-    cutoff = int(time.time()) - _SETTLED_RETENTION_S
+    now = int(time.time())
     for _ in range(_SWEEP_MAX_BATCHES):
-        count = await asyncio.to_thread(
-            store.prune_subscription_deliveries, settled_before=cutoff, limit=_PRUNE_BATCH
+        batch = await asyncio.to_thread(
+            store.list_settled_subscription_deliveries,
+            settled_before=now - _SETTLED_RETENTION_S,
+            limit=_PRUNE_BATCH,
         )
-        removed += count
-        if count < _PRUNE_BATCH:
+        keep = [delivery for delivery in batch if await _keep_identity(store, delivery)]
+        drop = [delivery for delivery in batch if delivery not in keep]
+        removed += await asyncio.to_thread(store.delete_subscription_deliveries, drop)
+        await asyncio.to_thread(store.touch_subscription_deliveries, keep, settled_at=now)
+        if len(batch) < _PRUNE_BATCH:
             break
     return removed
+
+
+async def _keep_identity(store: ConversationStore, delivery: SubscriptionDelivery) -> bool:
+    if delivery.outcome != _PROMPT:
+        return False
+    with workspace_scope(delivery.workspace_id):
+        if not await asyncio.to_thread(
+            store.has_session_subscription, delivery.subscriber_id, delivery.target_id
+        ):
+            return False
+        target = await asyncio.to_thread(store.get_conversation, delivery.target_id)
+    return target is not None and not _prompt_known_resolved(target, delivery.event_key)
 
 
 async def run_retry_loop() -> None:

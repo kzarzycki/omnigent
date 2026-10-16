@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+import sqlalchemy as sa
 
 from omnigent.runner.tool_dispatch import execute_tool
 from omnigent.runtime import pending_elicitations
@@ -628,3 +629,129 @@ async def test_more_than_a_thousand_subscribers_all_hear_a_fan_out(
     await session_subscriptions._deliver_turn_end(target, "completed", "resp_1")
 
     assert sorted(session_id for session_id, _ in poster.posted) == sorted(watchers)
+
+
+async def test_the_outbox_keeps_no_prompt_text_and_a_retry_names_the_current_title(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    pending_elicitations.record_publish(target, _prompt("elicit_secret", "Paste the API key?"))
+
+    await session_subscriptions._deliver_prompt(target, "elicit_secret", "Paste the API key?")
+    with store._session("read outbox") as session:
+        rows = session.execute(sa.text("SELECT * FROM session_subscription_deliveries")).all()
+    assert len(rows) == 1
+    assert "API key" not in repr(rows)
+
+    store.update_conversation(target, title="renamed")
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+    assert poster.posted == [
+        (
+            watcher,
+            f"[System: session renamed ({target}) is waiting on a prompt: Paste the API key?.]",
+        )
+    ]
+    pending_elicitations.resolve(target, "elicit_secret")
+
+
+async def test_a_prompt_answered_before_its_retry_is_settled_without_a_notice(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    pending_elicitations.record_publish(target, _prompt("elicit_1", "Proceed?"))
+
+    await session_subscriptions._deliver_prompt(target, "elicit_1", "Proceed?")
+    pending_elicitations.resolve(target, "elicit_1")
+    store.set_pending_elicitation_count(target, 0)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert (poster.attempts, poster.posted) == (1, [])
+
+
+async def test_a_notice_keeps_retrying_past_thirty_failures_until_the_subscriber_recovers(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=40)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await session_subscriptions._deliver_turn_end(target, "failed", "resp_1")
+    for hour in range(1, 45):
+        with patch.object(session_subscriptions.time, "time", lambda h=hour: 10**10 + h * 3600):
+            await session_subscriptions.retry_due_deliveries()
+
+    assert poster.attempts == 41
+    assert [session_id for session_id, _ in poster.posted] == [watcher]
+
+
+async def test_a_repeated_subscribe_or_republish_never_redelivers_a_prompt_still_pending(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client, title="worker"))["id"]
+    pending_elicitations.record_publish(worker, _prompt("elicit_1", "Proceed?"))
+    await _subscribe(client, watcher, worker)
+    await _settle()
+
+    # Past the retention window the prompt's row survives while it is pending.
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.prune_settled_deliveries() == 0
+    await _subscribe(client, watcher, worker)
+    pending_elicitations.record_publish(worker, _prompt("elicit_1", "Proceed?"))
+    await _settle()
+    assert runner.notices(watcher) == [
+        f"[System: session worker ({worker}) is waiting on a prompt: Proceed?.]"
+    ]
+
+    pending_elicitations.resolve(worker, "elicit_1")
+    with patch.object(session_subscriptions.time, "time", lambda: 10**11):
+        assert await session_subscriptions.prune_settled_deliveries() == 1
+
+
+async def test_a_notice_to_a_native_subscriber_with_no_runner_stays_pending_until_it_returns(
+    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watcher = (await create_test_session(client, executor=_NATIVE))["id"]
+    target = (await create_test_session(client, title="worker"))["id"]
+    store = SqlAlchemyConversationStore(db_uri)
+    store.add_session_subscription(watcher, target)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    async def offline(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sessions_facade, "_get_runner_client", offline)
+    await session_subscriptions._deliver_turn_end(target, "completed", "resp_1")
+
+    transcript = store.list_items(watcher, limit=100, order="asc").data
+    assert [item.type for item in transcript if item.type == "error"] == []
+    # Still pending: claim it now, as a sweep after the lease would, to retry below.
+    due = store.claim_due_subscription_deliveries(now=10**10, lease_until=10**10, limit=10)
+    assert len(due) == 1
+
+    runner = _Runner()
+    async with runner.client:
+
+        async def online(*_args: Any, **_kwargs: Any) -> httpx.AsyncClient:
+            return runner.client
+
+        monkeypatch.setattr(sessions_facade, "_get_runner_client", online)
+        with patch.object(session_subscriptions.time, "time", lambda: 10**10 + 1):
+            assert await session_subscriptions.retry_due_deliveries() == 1
+    assert runner.notices(watcher) == [
+        f"[System: session worker ({target}) ended its turn (completed). "
+        "Read it with sys_session_get_history.]"
+    ]
