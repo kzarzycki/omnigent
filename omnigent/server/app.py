@@ -1711,6 +1711,8 @@ def create_app(
         )
         # Prompts can be published off the loop; subscription notices hop back onto it.
         session_subscriptions.set_loop(asyncio.get_running_loop())
+        # Retries notices left pending by a failed post or a restart.
+        subscription_retry_task = asyncio.create_task(session_subscriptions.run_retry_loop())
 
         from omnigent.runner.resource_registry import (
             SessionResourceRegistry,
@@ -1884,6 +1886,9 @@ def create_app(
                 await startup_inputs.shutdown()
             await background_title_coordinator.shutdown()
             _uninstall_subagent_block_notifier()
+            subscription_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await subscription_retry_task
             set_resource_registry(None)
             set_runner_ws_factory(None)
             set_runner_direct_attach_resolver(None)

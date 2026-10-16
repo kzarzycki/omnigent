@@ -8450,7 +8450,7 @@
         "type": "object"
       },
       "SessionSubscriptionList": {
-        "description": "Response of `GET /v1/sessions/{id}/subscriptions`, sorted by session id.",
+        "description": "One page of `GET /v1/sessions/{id}/subscriptions`, sorted by session id.",
         "properties": {
           "data": {
             "items": {
@@ -8458,6 +8458,24 @@
             },
             "title": "Data",
             "type": "array"
+          },
+          "has_more": {
+            "default": false,
+            "description": "Whether another page follows.",
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "last_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Watched session id of the page's last entry; pass it as `after` to read the next page.",
+            "title": "Last Id"
           }
         },
         "required": [
@@ -17355,7 +17373,7 @@
     },
     "/v1/sessions/{session_id}/subscriptions": {
       "get": {
-        "description": "List the sessions this session is subscribed to.\n\nRequires read access to this session.",
+        "description": "List one page of the sessions this session is subscribed to, by session id.\n\nRequires read access to this session.",
         "operationId": "list_session_subscriptions_v1_sessions__session_id__subscriptions_get",
         "parameters": [
           {
@@ -17365,6 +17383,36 @@
             "schema": {
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Continuation key: the previous page's `last_id`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Continuation key: the previous page's `last_id`.",
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
             }
           }
         ],

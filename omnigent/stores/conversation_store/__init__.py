@@ -410,6 +410,18 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
             current[key] = current.get(key, 0) + value
 
 
+@dataclass(frozen=True)
+class SubscriptionDelivery:
+    """A pending subscription notice taken over by the retry sweep."""
+
+    workspace_id: int
+    subscriber_id: str
+    target_id: str
+    event_key: str
+    attempts: int
+    notice: str
+
+
 class ConversationStore(ABC):
     """
     Abstract base for conversation persistence.
@@ -2135,50 +2147,101 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def list_session_subscriptions(self, subscriber_id: str) -> list[str]:
+    def has_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """Whether *subscriber_id* watches *target_id*."""
+        ...
+
+    @abstractmethod
+    def list_session_subscriptions(
+        self, subscriber_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[str]:
         """
-        Return the ids of the sessions *subscriber_id* watches, sorted.
+        One page of the sessions *subscriber_id* watches, sorted by id.
+
+        :param after: Continuation key: the last id of the previous page.
+        :param limit: Page size.
         """
         ...
 
     @abstractmethod
-    def list_session_subscribers(self, target_id: str) -> list[str]:
+    def list_session_subscribers(
+        self, target_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[str]:
         """
-        Return the ids of the sessions watching *target_id*, sorted.
+        One page of the sessions watching *target_id*, sorted by id.
+
+        :param after: Continuation key: the last id of the previous page.
+        :param limit: Page size.
         """
         ...
 
     @abstractmethod
     def delete_session_subscriptions_for(self, conversation_id: str) -> int:
         """
-        Drop every subscription the session holds or is the target of.
+        Drop every subscription the session holds or is the target of, in
+        bounded batches with one transaction each.
 
         :returns: Number of rows removed.
         """
         ...
 
     @abstractmethod
-    def claim_session_subscription_event(
-        self, subscriber_id: str, target_id: str, kind: str, key: str
+    def enqueue_subscription_delivery(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        notice: str,
+        *,
+        due_at: int,
     ) -> bool:
         """
-        Claim delivery of one event to one subscriber, once.
+        Record a notice owed to a subscriber, once per event.
 
-        :param kind: ``"turn"`` (key = the turn's response id) or ``"prompt"``
-            (key = the elicitation id).
-        :param key: Identity of the event; a repeat of the last claimed key
-            for this *kind* is refused.
-        :returns: ``True`` when this caller should deliver; ``False`` when the
-            subscription is gone or the event was already claimed.
+        The new row is pending with one attempt started; *due_at* is when the
+        retry sweep may take it over if the caller never finishes the attempt.
+
+        :param event_key: Digest identifying the event (at most 64 chars).
+        :param notice: Text to post (at most 1,024 chars).
+        :param due_at: Unix epoch seconds.
+        :returns: ``False`` when the event was already recorded for this
+            subscriber (delivered, pending or dropped).
         """
         ...
 
     @abstractmethod
-    def release_session_subscription_event(
-        self, subscriber_id: str, target_id: str, kind: str, key: str
-    ) -> None:
+    def claim_due_subscription_deliveries(
+        self, *, now: int, lease_until: int, limit: int
+    ) -> list[SubscriptionDelivery]:
         """
-        Undo a claim whose delivery failed, so a repeated edge can retry it.
+        Take over pending deliveries due by *now*, across workspaces.
+
+        Each returned row has its attempt count bumped and is hidden from other
+        sweeps until *lease_until*.
+        """
+        ...
+
+    @abstractmethod
+    def settle_subscription_delivery(
+        self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
+    ) -> None:
+        """Mark a delivery done (posted or dropped); it is kept for dedupe until pruned."""
+        ...
+
+    @abstractmethod
+    def reschedule_subscription_delivery(
+        self, subscriber_id: str, target_id: str, event_key: str, *, due_at: int
+    ) -> None:
+        """Leave a failed delivery pending until *due_at*."""
+        ...
+
+    @abstractmethod
+    def prune_subscription_deliveries(self, *, settled_before: int, limit: int) -> int:
+        """
+        Delete up to *limit* deliveries settled before *settled_before*, across
+        workspaces.
+
+        :returns: Number of rows removed.
         """
         ...
 
