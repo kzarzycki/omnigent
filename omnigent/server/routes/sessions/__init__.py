@@ -821,6 +821,7 @@ def create_sessions_router(
     register_runner_ingest: Callable[..., None] | None = None,
     register_startup_dispatch: Callable[..., None] | None = None,
     register_initial_file_upload: Callable[..., None] | None = None,
+    register_server_message: Callable[..., None] | None = None,
 ) -> APIRouter:
     """
     Factory that builds the sessions router.
@@ -903,6 +904,9 @@ def create_sessions_router(
     from omnigent.server.routes.sessions.routes_permissions import register_permissions_routes
     from omnigent.server.routes.sessions.routes_resources import register_resources_routes
     from omnigent.server.routes.sessions.routes_ui import register_ui_routes
+    from omnigent.server.routes.sessions.routes_subscriptions import (
+        register_subscriptions_routes,
+    )
 
     register_core_routes(
         router,
@@ -994,6 +998,7 @@ def create_sessions_router(
         runner_tunnel_tokens=runner_tunnel_tokens,
         register_runner_ingest=register_runner_ingest,
         register_startup_dispatch=register_startup_dispatch,
+        register_server_message=register_server_message,
     )
 
     register_permissions_routes(
@@ -1003,6 +1008,13 @@ def create_sessions_router(
         auth_provider=auth_provider,
         permission_store=permission_store,
         agent_cache=agent_cache,
+    )
+
+    register_subscriptions_routes(
+        router,
+        conversation_store=conversation_store,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
     )
 
     register_agent_routes(
