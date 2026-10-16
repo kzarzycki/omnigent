@@ -803,17 +803,19 @@ async def test_a_native_permission_block_wakes_subscribers_once_and_replays_whil
     await _subscribe(client, early, worker)
 
     for _ in range(2):
-        await _status(client, worker, status="running", blocked_on="permission")
+        await _status(
+            client, worker, status="running", blocked_on="permission", response_id="resp_1"
+        )
         await _settle()
     await _subscribe(client, late, worker)
     await _settle()
     await _status(client, worker, status="running", response_id="resp_1")
     await _subscribe(client, after, worker)
-    await _status(client, worker, status="running", blocked_on="permission")
+    await _status(client, worker, status="running", blocked_on="permission", response_id="resp_2")
     await _settle()
 
     notice = _waiting("worker", worker)
-    # The second block is a new event; the repeated edge of the first is not.
+    # The next turn's block is a new event; the repeated edge of the first is not.
     assert runner.notices(early) == [notice, notice]
     assert runner.notices(late) == [notice, notice]
     assert runner.notices(after) == [notice]
@@ -871,3 +873,46 @@ async def test_a_block_relayed_by_the_runner_reaches_subscribers_once(db_uri: st
         session_subscriptions.configure(None, None, None)
 
     assert poster.posted == [(watcher.id, _waiting("worker", worker.id))]
+
+
+async def test_a_first_attempt_queued_past_its_lease_does_not_post_a_swept_row_again(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    queue = asyncio.Semaphore(0)
+    monkeypatch.setattr(session_subscriptions, "_post_limit", queue)
+    await session_subscriptions.record_turn_end(target, "completed", "resp_1")
+    await asyncio.sleep(0)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        queue.release()
+        await _settle()
+
+    notice = session_subscriptions.turn_notice("worker", target, "completed")
+    assert poster.posted == [(watcher, notice)]
+
+
+async def test_a_relayed_block_republished_after_a_restart_reaches_only_a_new_subscriber(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = outbox
+    late = store.create_conversation().id
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    session_subscriptions.notify_status(target, "permission", None)
+    await _settle()
+
+    # A restarted server starts empty; the reconnecting runner republishes its status.
+    session_subscriptions.configure(store, None, poster)
+    session_subscriptions.notify_status(target, "permission", None)
+    await _settle()
+    store.add_session_subscription(late, target)
+    await session_subscriptions.record_pending_prompts(late, target)
+    await _settle()
+
+    notice = _waiting("worker", target)
+    assert poster.posted == [(watcher, notice), (late, notice)]
