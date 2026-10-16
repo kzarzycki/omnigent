@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
 
 from omnigent.errors import ErrorCode, OmnigentError
@@ -72,8 +72,8 @@ def register_subscriptions_routes(
             )
         await _live_session(session_id)
         await _live_session(target_id)
-        if session_id in await asyncio.to_thread(
-            conversation_store.list_session_subscriptions, target_id
+        if await asyncio.to_thread(
+            conversation_store.has_session_subscription, target_id, session_id
         ):
             raise OmnigentError(
                 f"Session {target_id!r} already subscribes to {session_id!r}; "
@@ -102,10 +102,15 @@ def register_subscriptions_routes(
 
     @router.get("/sessions/{session_id}/subscriptions")
     async def list_session_subscriptions(
-        request: Request, session_id: str
+        request: Request,
+        session_id: str,
+        after: str | None = Query(
+            default=None, description="Continuation key: the previous page's ``last_id``."
+        ),
+        limit: int = Query(default=100, ge=1, le=100),
     ) -> SessionSubscriptionList:
         """
-        List the sessions this session is subscribed to.
+        List one page of the sessions this session is subscribed to, by session id.
 
         Requires read access to this session.
         """
@@ -116,11 +121,17 @@ def register_subscriptions_routes(
         if await asyncio.to_thread(conversation_store.get_conversation, session_id) is None:
             raise _session_not_found()
         target_ids = await asyncio.to_thread(
-            conversation_store.list_session_subscriptions, session_id
+            conversation_store.list_session_subscriptions,
+            session_id,
+            after=after,
+            limit=limit + 1,
         )
+        page = target_ids[:limit]
         return SessionSubscriptionList(
             data=[
                 SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
-                for target_id in target_ids
-            ]
+                for target_id in page
+            ],
+            last_id=page[-1] if page else None,
+            has_more=len(target_ids) > limit,
         )
