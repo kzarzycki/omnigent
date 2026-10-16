@@ -832,6 +832,8 @@ _SESSION_SUBSCRIPTION_DELETE_BATCH = 500
 # Delivery outbox states.
 _DELIVERY_PENDING = 0
 _DELIVERY_SETTLED = 1
+# The attempts column is a SmallInteger; retries go on past it uncounted.
+_MAX_ATTEMPTS_COUNTED = 32767
 
 
 class SqlAlchemyConversationStore(ConversationStore):
@@ -5402,7 +5404,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         subscriber_id: str,
         target_id: str,
         event_key: str,
-        notice: str,
+        outcome: int,
         *,
         due_at: int,
     ) -> bool:
@@ -5421,7 +5423,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     state=_DELIVERY_PENDING,
                     due_at=due_at,
                     attempts=1,
-                    notice=notice,
+                    outcome=outcome,
                 )
             )
             return True
@@ -5449,7 +5451,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     row.event_key,
                     row.due_at,
                     row.attempts,
-                    row.notice,
+                    row.outcome,
                 )
                 .where(row.state == _DELIVERY_PENDING, row.due_at <= now)
                 .order_by(
@@ -5469,7 +5471,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                         row.state == _DELIVERY_PENDING,
                         row.due_at == item.due_at,
                     )
-                    .values(due_at=lease_until, attempts=item.attempts + 1)
+                    .values(
+                        due_at=lease_until, attempts=min(item.attempts + 1, _MAX_ATTEMPTS_COUNTED)
+                    )
                 )
                 if cast(Any, result).rowcount:
                     claimed.append(
@@ -5478,8 +5482,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                             subscriber_id=item.subscriber_id,
                             target_id=item.target_id,
                             event_key=item.event_key,
-                            attempts=item.attempts + 1,
-                            notice=item.notice,
+                            attempts=min(item.attempts + 1, _MAX_ATTEMPTS_COUNTED),
+                            outcome=item.outcome,
                         )
                     )
             return claimed
@@ -5533,33 +5537,90 @@ class SqlAlchemyConversationStore(ConversationStore):
             due_at=due_at,
         )
 
-    def prune_subscription_deliveries(self, *, settled_before: int, limit: int) -> int:
-        """Delete old settled deliveries. See base class."""
+    def list_settled_subscription_deliveries(
+        self, *, settled_before: int, limit: int
+    ) -> list[SubscriptionDelivery]:
+        """Old settled deliveries, oldest first. See base class."""
         row = SqlSessionSubscriptionDelivery
+        with self._session("list_settled_subscription_deliveries") as session:
+            return [
+                SubscriptionDelivery(
+                    workspace_id=item.workspace_id,
+                    subscriber_id=item.subscriber_id,
+                    target_id=item.target_id,
+                    event_key=item.event_key,
+                    attempts=item.attempts,
+                    outcome=item.outcome,
+                )
+                for item in session.execute(
+                    select(
+                        row.workspace_id,
+                        row.subscriber_id,
+                        row.target_id,
+                        row.event_key,
+                        row.attempts,
+                        row.outcome,
+                    )
+                    .where(row.state == _DELIVERY_SETTLED, row.due_at < settled_before)
+                    .order_by(
+                        row.due_at,
+                        row.workspace_id,
+                        row.subscriber_id,
+                        row.target_id,
+                        row.event_key,
+                    )
+                    .limit(limit)
+                ).all()
+            ]
+
+    def _delivery_keys_clause(self, delivery: SubscriptionDelivery) -> Any:
+        row = SqlSessionSubscriptionDelivery
+        return and_(
+            row.workspace_id == delivery.workspace_id,
+            row.subscriber_id == delivery.subscriber_id,
+            row.target_id == delivery.target_id,
+            row.event_key == delivery.event_key,
+        )
+
+    def delete_subscription_deliveries(self, deliveries: list[SubscriptionDelivery]) -> int:
+        """Delete deliveries by full key. See base class."""
+        if not deliveries:
+            return 0
 
         def write(session: Session) -> int:
-            old = session.execute(
-                select(row.workspace_id, row.subscriber_id, row.target_id, row.event_key)
-                .where(row.state == _DELIVERY_SETTLED, row.due_at < settled_before)
-                .order_by(
-                    row.due_at, row.workspace_id, row.subscriber_id, row.target_id, row.event_key
-                )
-                .limit(limit)
-            ).all()
-            for item in old:
-                session.execute(
-                    delete(row).where(
-                        row.workspace_id == item.workspace_id,
-                        row.subscriber_id == item.subscriber_id,
-                        row.target_id == item.target_id,
-                        row.event_key == item.event_key,
+            removed = 0
+            for delivery in deliveries:
+                result = session.execute(
+                    delete(SqlSessionSubscriptionDelivery).where(
+                        self._delivery_keys_clause(delivery)
                     )
                 )
-            return len(old)
+                removed += cast(Any, result).rowcount or 0
+            return removed
 
         return run_write_transaction(
-            self._session_immediate, "prune_subscription_deliveries", write
+            self._session_immediate, "delete_subscription_deliveries", write
         )
+
+    def touch_subscription_deliveries(
+        self, deliveries: list[SubscriptionDelivery], *, settled_at: int
+    ) -> None:
+        """Push settled deliveries' prune time forward. See base class."""
+        if not deliveries:
+            return
+
+        def write(session: Session) -> None:
+            for delivery in deliveries:
+                session.execute(
+                    update(SqlSessionSubscriptionDelivery)
+                    .where(
+                        self._delivery_keys_clause(delivery),
+                        SqlSessionSubscriptionDelivery.state == _DELIVERY_SETTLED,
+                    )
+                    .values(due_at=settled_at)
+                )
+
+        run_write_transaction(self._session_immediate, "touch_subscription_deliveries", write)
 
     async def delete_conversation(self, conversation_id: str) -> bool:
         """
