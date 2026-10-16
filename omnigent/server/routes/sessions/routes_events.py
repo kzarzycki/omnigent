@@ -2284,6 +2284,9 @@ def register_events_routes(
                 background_tasks=bg_tasks,
                 blocked_on=blocked_on,
             )
+            # Recorded before this edge is acknowledged: a failure fails the
+            # request, and the forwarder's retry records it again.
+            await session_subscriptions.record_status(session_id, blocked_on, response_id)
             if status in {"idle", "failed"}:
                 notify_parent = (
                     conv.parent_conversation_id is not None
@@ -2313,7 +2316,7 @@ def register_events_routes(
                                 turn_id=response_id,
                                 status=outcome,
                             )
-                        session_subscriptions.notify_turn_end(
+                        await session_subscriptions.record_turn_end(
                             session_id,
                             cast(session_subscriptions.TurnOutcome, outcome),
                             response_id,
