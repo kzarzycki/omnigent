@@ -70,26 +70,26 @@ def test_a_delivery_is_recorded_once_per_subscriber_and_event(
     enqueue = conversation_store.enqueue_subscription_delivery
     watcher, target = f"{1:032x}", f"{2:032x}"
 
-    assert enqueue(watcher, target, "p1", "n", due_at=100) is True
-    assert enqueue(watcher, target, "p2", "n", due_at=100) is True
+    assert enqueue(watcher, target, "p1", 1, due_at=100) is True
+    assert enqueue(watcher, target, "p2", 1, due_at=100) is True
     # A replay of the older event is still a duplicate once a newer one landed.
-    assert enqueue(watcher, target, "p1", "n", due_at=100) is False
+    assert enqueue(watcher, target, "p1", 1, due_at=100) is False
     conversation_store.settle_subscription_delivery(watcher, target, "p1", settled_at=100)
-    assert enqueue(watcher, target, "p1", "n", due_at=100) is False
-    assert enqueue(f"{3:032x}", target, "p1", "n", due_at=100) is True
+    assert enqueue(watcher, target, "p1", 1, due_at=100) is False
+    assert enqueue(f"{3:032x}", target, "p1", 1, due_at=100) is True
 
 
-def test_due_deliveries_are_claimed_once_and_settled_ones_pruned(
+def test_due_deliveries_are_claimed_once_and_only_settled_ones_listed_for_the_prune(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     watcher, target = f"{1:032x}", f"{2:032x}"
-    conversation_store.enqueue_subscription_delivery(watcher, target, "due", "hi", due_at=10)
-    conversation_store.enqueue_subscription_delivery(watcher, target, "later", "hi", due_at=50)
+    conversation_store.enqueue_subscription_delivery(watcher, target, "due", 1, due_at=10)
+    conversation_store.enqueue_subscription_delivery(watcher, target, "later", 0, due_at=50)
 
     claimed = conversation_store.claim_due_subscription_deliveries(
         now=20, lease_until=80, limit=10
     )
-    assert [(d.event_key, d.attempts, d.notice) for d in claimed] == [("due", 2, "hi")]
+    assert [(d.event_key, d.attempts, d.outcome) for d in claimed] == [("due", 2, 1)]
     # Leased until 80: another sweep at 30 does not take it again.
     assert (
         conversation_store.claim_due_subscription_deliveries(now=30, lease_until=90, limit=10)
@@ -104,10 +104,19 @@ def test_due_deliveries_are_claimed_once_and_settled_ones_pruned(
     ] == ["due", "later"]
 
     conversation_store.settle_subscription_delivery(watcher, target, "due", settled_at=70)
-    assert conversation_store.prune_subscription_deliveries(settled_before=70, limit=10) == 0
-    assert conversation_store.prune_subscription_deliveries(settled_before=71, limit=10) == 1
-    # Pending rows are never pruned.
-    assert conversation_store.prune_subscription_deliveries(settled_before=10**9, limit=10) == 0
+    old = conversation_store.list_settled_subscription_deliveries
+    assert old(settled_before=70, limit=10) == []
+    [settled] = old(settled_before=71, limit=10)
+    assert (settled.event_key, settled.outcome) == ("due", 1)
+
+    # A kept row is skipped until its new settle time ages out.
+    conversation_store.touch_subscription_deliveries([settled], settled_at=500)
+    assert old(settled_before=71, limit=10) == []
+    assert [d.event_key for d in old(settled_before=501, limit=10)] == ["due"]
+
+    assert conversation_store.delete_subscription_deliveries([settled]) == 1
+    # Pending rows are never listed for the prune.
+    assert old(settled_before=10**9, limit=10) == []
 
 
 def test_deleting_either_session_drops_its_subscriptions(
