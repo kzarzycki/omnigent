@@ -2125,6 +2125,74 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def add_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """
+        Subscribe one session to another's turn ends and prompts.
+
+        :param subscriber_id: Session that receives the notices.
+        :param target_id: Session being watched.
+        :returns: ``True`` when the row was created, ``False`` when it existed.
+        """
+        ...
+
+    @abstractmethod
+    def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+        """
+        Remove one subscription.
+
+        :returns: ``True`` when a row was removed.
+        """
+        ...
+
+    @abstractmethod
+    def list_session_subscriptions(self, subscriber_id: str) -> list[str]:
+        """
+        Return the ids of the sessions *subscriber_id* watches, sorted.
+        """
+        ...
+
+    @abstractmethod
+    def list_session_subscribers(self, target_id: str) -> list[str]:
+        """
+        Return the ids of the sessions watching *target_id*, sorted.
+        """
+        ...
+
+    @abstractmethod
+    def delete_session_subscriptions_for(self, conversation_id: str) -> int:
+        """
+        Drop every subscription the session holds or is the target of.
+
+        :returns: Number of rows removed.
+        """
+        ...
+
+    @abstractmethod
+    def claim_session_subscription_event(
+        self, subscriber_id: str, target_id: str, kind: str, key: str
+    ) -> bool:
+        """
+        Claim delivery of one event to one subscriber, once.
+
+        :param kind: ``"turn"`` (key = the turn's response id) or ``"prompt"``
+            (key = the elicitation id).
+        :param key: Identity of the event; a repeat of the last claimed key
+            for this *kind* is refused.
+        :returns: ``True`` when this caller should deliver; ``False`` when the
+            subscription is gone or the event was already claimed.
+        """
+        ...
+
+    @abstractmethod
+    def release_session_subscription_event(
+        self, subscriber_id: str, target_id: str, kind: str, key: str
+    ) -> None:
+        """
+        Undo a claim whose delivery failed, so a repeated edge can retry it.
+        """
+        ...
+
+    @abstractmethod
     async def delete_conversation(self, conversation_id: str) -> bool:
         """
         Delete a conversation and all its items.
