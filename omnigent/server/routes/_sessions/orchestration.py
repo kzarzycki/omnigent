@@ -124,7 +124,7 @@ from omnigent.runtime.policies.builder import (
 )
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.workflow import _find_spec_by_name
-from omnigent.server import session_live_state, shutdown_state
+from omnigent.server import session_live_state, session_subscriptions, shutdown_state
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -960,6 +960,15 @@ async def _archive_stop(
     # possibly on another replica) — it's live again, so leave its runner alone.
     if conv is None or not conv.archived:
         return
+    try:
+        await asyncio.to_thread(conversation_store.delete_session_subscriptions_for, session_id)
+    except Exception:  # noqa: BLE001 — delivery skips archived sessions anyway
+        _logger.warning(
+            "Archive couldn't drop subscriptions of %s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
     # Past the point of no return: unregister so a late cancel (an Undo racing
     # this teardown) can't interrupt it mid-stop and strand the intentional-
     # stop marker below, which would exclude the session from child recovery.
@@ -3817,9 +3826,14 @@ async def _notify_parent_of_lost_subagent(
     conversation_store: ConversationStore,
     *,
     snapshot: Conversation | None = None,
+    turn_id: str | None = None,
+    notify_subscribers: bool = True,
 ) -> None:
     """
     Tell a sub-agent's parent that the child stopped mid-turn with its runner.
+
+    Also tells the session's subscribers: ``cancelled`` for an intentional
+    stop, ``failed`` for a lost runner.
 
     The child never reports a turn-end, so without this the parent waits on
     it with no result. The notice is sent as status ``lost`` with the child's
@@ -3838,10 +3852,17 @@ async def _notify_parent_of_lost_subagent(
         :data:`_RUNNER_STOPPED_MID_TURN`.
     :param conversation_store: Store used to look up the session and parent.
     :param snapshot: The session row when the caller already holds it.
+    :param turn_id: The interrupted turn's response id, when known.
+    :param notify_subscribers: ``False`` for a re-send of a notice already
+        given to subscribers.
     :returns: None.
     """
     from omnigent.runtime import get_runner_router
 
+    if notify_subscribers:
+        session_subscriptions.notify_turn_end(
+            session_id, "cancelled" if error is _RUNNER_STOPPED_MID_TURN else "failed", turn_id
+        )
     try:
         conv = snapshot or await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if (
@@ -3907,6 +3928,7 @@ async def _resend_lost_subagent_notice(
         ErrorDetail(code=error["code"], message=error["message"]),
         conversation_store,
         snapshot=conv,
+        notify_subscribers=False,
     )
 
 
@@ -4195,7 +4217,9 @@ async def _mark_runner_sessions_offline_once(
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
         )
-        await _notify_parent_of_lost_subagent(conv.id, error, conversation_store, snapshot=conv)
+        await _notify_parent_of_lost_subagent(
+            conv.id, error, conversation_store, snapshot=conv, turn_id=turn_id
+        )
         await _persist_session_status_error_labels(
             conv.id, error, conversation_store, owner_runner_id=conv.runner_id
         )
@@ -8532,7 +8556,7 @@ async def _relay_runner_stream(
                     session_id, "returned", conversation_store, turn_id=turn_id, status="failed"
                 )
                 await _notify_parent_of_lost_subagent(
-                    session_id, disconnect_error, conversation_store
+                    session_id, disconnect_error, conversation_store, turn_id=turn_id
                 )
                 # Persist the disconnect cause as durable labels so the
                 # distinction survives into snapshots and child-session
@@ -8744,16 +8768,21 @@ async def _relay_runner_stream_once(
                     if evt_type == "session.status":
                         status = event.get("status", "")
                         if status in {"idle", "failed"} and pending_subagent_return_id is not None:
+                            turn_outcome = (
+                                "failed" if status == "failed" else pending_subagent_return_status
+                            )
                             await record_subagent_activity(
                                 session_id,
                                 "returned",
                                 conversation_store,
                                 turn_id=pending_subagent_return_id,
-                                status=(
-                                    "failed"
-                                    if status == "failed"
-                                    else pending_subagent_return_status
-                                ),
+                                status=turn_outcome,
+                                from_runner=True,
+                            )
+                            session_subscriptions.notify_turn_end(
+                                session_id,
+                                cast(session_subscriptions.TurnOutcome, turn_outcome),
+                                pending_subagent_return_id,
                                 from_runner=True,
                             )
                             pending_subagent_return_id = None

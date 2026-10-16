@@ -8321,6 +8321,61 @@
         "title": "SessionStatusEvent",
         "type": "object"
       },
+      "SessionSubscriptionList": {
+        "description": "Response of `GET /v1/sessions/{id}/subscriptions`, sorted by session id.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSubscriptionObject"
+            },
+            "title": "Data",
+            "type": "array"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "SessionSubscriptionList",
+        "type": "object"
+      },
+      "SessionSubscriptionObject": {
+        "description": "One subscription: `subscriber_id` is told when `session_id` ends a\nturn (completed, cancelled or failed) or blocks on a prompt.",
+        "properties": {
+          "session_id": {
+            "description": "The watched session.",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "subscriber_id": {
+            "description": "The session that receives the notices.",
+            "title": "Subscriber Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subscriber_id",
+          "session_id"
+        ],
+        "title": "SessionSubscriptionObject",
+        "type": "object"
+      },
+      "SessionSubscriptionRequest": {
+        "description": "Request body for `POST /v1/sessions/{id}/subscriptions`.",
+        "properties": {
+          "session_id": {
+            "description": "The session to watch, e.g. `\"conv_abc123\"`.",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionSubscriptionRequest",
+        "type": "object"
+      },
       "SessionSupersededEvent": {
         "description": "This conversation was superseded by another and clients should\nfollow to it.\n\nEmitted by `_publish_session_superseded` in\n`omnigent/server/routes/sessions.py` when the claude-native\nforwarder rotates a session away on a Claude `/clear` (the old\nconversation keeps its history but the live terminal moves to a\nfresh conversation \u2014 see `_post_clear_supersession` in\n`omnigent/claude_native_forwarder.py`). A client actively viewing\nthe superseded conversation auto-redirects to `target_conversation_id`.\n\nCategory: **transient** (SSE-only), live-only by design. There is no\nSSE replay: a client that connects after the rotation does not get\nthis event. The durable counterpart is the persisted notice message\nappended to the old conversation (a `message` item linking to the\nnew conversation), which a reloading client renders instead of being\nforce-redirected.\n\nThe wire shape is FLAT (not enveloped):\n`{\"type\": \"session.superseded\", \"conversation_id\": <old>, \"target_conversation_id\": <new>, \"reason\": \"clear\"}`.",
         "properties": {
@@ -16874,6 +16929,145 @@
           }
         },
         "summary": "Stream Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/subscriptions": {
+      "get": {
+        "description": "List the sessions this session is subscribed to.\n\nRequires read access to this session.",
+        "operationId": "list_session_subscriptions_v1_sessions__session_id__subscriptions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSubscriptionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Session Subscriptions",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "description": "Subscribe this session to another session's turn ends and prompts.\n\nFrom now on this session gets a `[System: \u2026]` message whenever the\nwatched session ends a turn (completed, cancelled or failed) or blocks\non a prompt; a prompt it is already blocked on is delivered at once.\nSubscribing twice is a no-op. The watched session is unchanged: no\nparent link, runner or lifecycle coupling.\n\nRequires edit access to this session and read access to the watched one.\n\n**Raises**\n\n- `OmnigentError` \u2014 400 for a self-subscription, 404 for an unknown or unreadable session, 409 when either session is archived or the watched session already subscribes to this one (the two would wake each other forever).",
+        "operationId": "subscribe_session_v1_sessions__session_id__subscriptions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionSubscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSubscriptionObject"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subscribe Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/subscriptions/{target_id}": {
+      "delete": {
+        "description": "Stop this session hearing about another session. Idempotent.\n\nRequires edit access to this session.",
+        "operationId": "unsubscribe_session_v1_sessions__session_id__subscriptions__target_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "title": "Target Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unsubscribe Session",
         "tags": [
           "sessions"
         ]
