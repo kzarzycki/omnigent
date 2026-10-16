@@ -91,3 +91,27 @@ def test_the_subscription_tables_declare_no_column_defaults(tmp_path: Path) -> N
     finally:
         engine.dispose()
         clear_engine_cache()
+
+
+def test_the_delivery_outbox_stores_no_notice_text(tmp_path: Path) -> None:
+    uri = f"sqlite:///{tmp_path / 'outbox-columns.db'}"
+    engine = sa.create_engine(uri)
+    try:
+        _run(uri, engine, "upgrade", "oo1a2b3c4d5e")
+        columns = {
+            column["name"]
+            for column in sa.inspect(engine).get_columns("session_subscription_deliveries")
+        }
+        assert columns == {
+            "workspace_id",
+            "subscriber_id",
+            "target_id",
+            "event_key",
+            "state",
+            "due_at",
+            "attempts",
+            "outcome",
+        }
+    finally:
+        engine.dispose()
+        clear_engine_cache()

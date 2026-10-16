@@ -6,7 +6,9 @@ Create Date: 2026-10-16 00:00:00.000000
 
 Adds ``session_subscription_deliveries``: the outbox of subscription notices,
 one row per ``(subscriber, target, event)``. The primary key makes each event
-deliverable once per subscriber; pending rows are retried until posted.
+deliverable once per subscriber; pending rows are retried until posted. Rows
+hold only the event's identity and an outcome code, never user content: the
+notice text is built when it is posted.
 
 Deployment: additive, new table only; older application code ignores it.
 Apply before the application change that writes it. Roll back by downgrading
@@ -39,7 +41,7 @@ def upgrade() -> None:
         sa.Column("state", sa.SmallInteger(), nullable=False),
         sa.Column("due_at", sa.Integer(), nullable=False),
         sa.Column("attempts", sa.SmallInteger(), nullable=False),
-        sa.Column("notice", sa.String(1024), nullable=False),
+        sa.Column("outcome", sa.SmallInteger(), nullable=False),
         sa.PrimaryKeyConstraint("workspace_id", "subscriber_id", "target_id", "event_key"),
     )
     op.create_index(
