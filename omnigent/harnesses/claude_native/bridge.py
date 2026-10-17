@@ -6853,6 +6853,7 @@ def _tool_relay_handler_factory(
             import httpx
 
             from omnigent.native.native_policy_hook import (
+                _EVALUATE_POLICY_HELD_POLL_FLOOR_S,
                 _EVALUATE_POLICY_RETRY_BUDGET_S,
                 _EVALUATE_POLICY_RETRY_INITIAL_BACKOFF_S,
                 _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S,
@@ -6897,6 +6898,7 @@ def _tool_relay_handler_factory(
                     time.sleep(retry_delay)
                 attempts += 1
                 retry_delay = 0.4
+                attempt_started = time.monotonic()
                 future = asyncio.run_coroutine_threadsafe(
                     policy_client.post(url, json=request_body), loop
                 )
@@ -6904,24 +6906,33 @@ def _tool_relay_handler_factory(
                     resp = future.result(timeout=86400.0)
                 except Exception as exc:  # noqa: BLE001 — shaped fail-closed below
                     last_error = str(exc).strip() or type(exc).__name__
-                    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
-                        # Resolver failures can outlast three quick attempts.
-                        if time.monotonic() + backoff_s >= deadline:
-                            break
-                        retry_delay = backoff_s
-                        backoff_s = min(backoff_s * 2, _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S)
-                    else:
-                        non_connect_failures += 1
-                    continue
-                if resp.status_code != HTTPStatus.OK:
+                    transient = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+                    # A connection torn down fast is a restarting server; one
+                    # torn down after a held poll is a gateway sever.
+                    torn = isinstance(exc, (httpx.ReadError, httpx.RemoteProtocolError))
+                else:
+                    if resp.status_code == HTTPStatus.OK:
+                        try:
+                            verdict = json.loads(resp.content)
+                        except (ValueError, TypeError):
+                            last_error = "malformed EvaluationResponse body"
+                        break
                     last_error = f"server returned HTTP {resp.status_code}"
+                    transient = False
+                    torn = resp.status_code == 429 or resp.status_code >= 500
+                if (
+                    torn
+                    and time.monotonic() - attempt_started < _EVALUATE_POLICY_HELD_POLL_FLOOR_S
+                ):
+                    transient = True
+                if not transient:
                     non_connect_failures += 1
                     continue
-                try:
-                    verdict = json.loads(resp.content)
-                except (ValueError, TypeError):
-                    last_error = "malformed EvaluationResponse body"
-                break
+                # Resolver failures and server restarts outlast three quick attempts.
+                if time.monotonic() + backoff_s >= deadline:
+                    break
+                retry_delay = backoff_s
+                backoff_s = min(backoff_s * 2, _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S)
             if not isinstance(verdict, dict) or not verdict.get("result"):
                 _logger.warning(
                     "policy_eval_relay_failure: session=%s hook_event=%s "
