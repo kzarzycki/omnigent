@@ -66,9 +66,12 @@ def _start_host_sessions(
 
 
 def _open_sessions(  # type: ignore[no-untyped-def]
-    count: int, daemon, http_client: httpx.Client, tmp_path: Path
+    count: int, daemon, http_client: httpx.Client, tmp_path: Path, *, lanes_of_first: bool = False
 ):
-    """Open *count* sessions on *daemon* and wait until each runner is online."""
+    """Open *count* sessions on *daemon* and wait until each runner is online.
+
+    With *lanes_of_first*, every session after the first is its sub-agent on its runner.
+    """
     _wait_for_host_online(http_client, daemon.host_id, timeout=30.0)
     agent_id = lookup_agent_id(
         http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
@@ -77,17 +80,17 @@ def _open_sessions(  # type: ignore[no-untyped-def]
     for n in range(count):
         ws = tmp_path / f"ws{n}"
         ws.mkdir()
-        resp = http_client.post(
-            "/v1/sessions",
-            json={"agent_id": agent_id, "host_id": daemon.host_id, "workspace": str(ws)},
-            timeout=90.0,
-        )
+        body = {"agent_id": agent_id, "host_id": daemon.host_id, "workspace": str(ws)}
+        if lanes_of_first and session_ids:
+            body["parent_session_id"] = session_ids[0]
+        resp = http_client.post("/v1/sessions", json=body, timeout=90.0)
         resp.raise_for_status()
         session_ids.append(resp.json()["id"])
+    expected = 1 if lanes_of_first else count
     runners = _wait_for(
-        lambda: (lambda ls: ls if len(ls) == count else None)(_launches(daemon.daemon_log)),
+        lambda: (lambda ls: ls if len(ls) == expected else None)(_launches(daemon.daemon_log)),
         timeout=60.0,
-        what=f"{count} runner launches",
+        what=f"{expected} runner launches",
     )
     for rid, _pid in runners:
         _wait_for(lambda rid=rid: _runner_online(http_client, rid), timeout=90.0, what=rid)
@@ -175,6 +178,116 @@ def test_failure_notice_revives_a_subscriber_whose_runner_died(
             p for _r, p in _launches(daemon.daemon_log) if p not in dict(runners).values()
         ]
         assert relaunched, "the lead answered without a relaunched runner"
+    finally:
+        daemon.proc.terminate()
+        daemon.proc.wait(timeout=30)
+
+
+def _send(http_client: httpx.Client, session_id: str, text: str) -> None:
+    http_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
+        },
+        timeout=60.0,
+    ).raise_for_status()
+
+
+def test_lanes_lost_with_every_runner_wake_their_idle_lead(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every runner SIGTERMed while an idle lead waits on its lanes: the lanes' loss wakes it."""
+    configure_mock_llm(
+        mock_llm_server_url, [{"text": "never finishes", "delay": 300}] * 2, match="LANE_SLOW"
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "LEAD_WOKE"}] * 3,
+        match="waiting in inbox. Call sys_read_inbox to collect.",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / ".omnigent"))
+    daemon = _spawn_host_daemon(
+        tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
+    )
+    try:
+        (lead, *lanes), runners = _open_sessions(
+            3, daemon, http_client, tmp_path, lanes_of_first=True
+        )
+        for lane in lanes:
+            _send(http_client, lane, "LANE_SLOW")
+        _wait_for(
+            lambda: (
+                all(
+                    http_client.get(f"/v1/sessions/{lane}").json().get("status") == "running"
+                    for lane in lanes
+                )
+                or None
+            ),
+            timeout=60.0,
+            what="both lanes to be mid-turn",
+        )
+        assert http_client.get(f"/v1/sessions/{lead}").json()["status"] == "idle"
+        for _rid, pid in runners:
+            assert psutil.Process(pid).ppid() == _zygote_pid(daemon.proc.pid)
+            os.kill(pid, signal.SIGTERM)
+
+        def _lead_woke() -> bool | None:
+            items = http_client.get(f"/v1/sessions/{lead}/items").json().get("data", [])
+            return "LEAD_WOKE" in str(items) or None
+
+        _wait_for(_lead_woke, timeout=180.0, what="the lanes' loss to wake the lead")
+        lead_runner = http_client.get(f"/v1/sessions/{lead}").json()["runner_id"]
+        assert lead_runner not in dict(runners), "the lead answered without a relaunched runner"
+        relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
+        assert relaunches.count(lead_runner) == 1, f"lead relaunched more than once: {relaunches}"
+    finally:
+        daemon.proc.terminate()
+        daemon.proc.wait(timeout=30)
+
+
+def test_session_mid_turn_when_every_runner_dies_is_relaunched_to_continue(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A top-level session's runner SIGTERMed mid-turn: it comes back and continues unasked."""
+    configure_mock_llm(
+        mock_llm_server_url, [{"text": "never finishes", "delay": 300}], match="SOLO_SLOW"
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "SOLO_CONTINUED"}],
+        match="Your runner was interrupted while this task was active.",
+    )
+    daemon, (solo,), runners = _start_host_sessions(
+        1, live_server, http_client, tmp_path, mock_llm_server_url, monkeypatch
+    )
+    try:
+        _send(http_client, solo, "SOLO_SLOW")
+        _wait_for(
+            lambda: (
+                http_client.get(f"/v1/sessions/{solo}").json().get("status") == "running" or None
+            ),
+            timeout=60.0,
+            what="the session to be mid-turn",
+        )
+        for _rid, pid in runners:
+            os.kill(pid, signal.SIGTERM)
+
+        def _continued() -> bool | None:
+            items = http_client.get(f"/v1/sessions/{solo}/items").json().get("data", [])
+            return "SOLO_CONTINUED" in str(items) or None
+
+        _wait_for(_continued, timeout=180.0, what="the session to continue its turn")
+        relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
+        assert len(relaunches) == 1, f"expected one relaunch, got {relaunches}"
     finally:
         daemon.proc.terminate()
         daemon.proc.wait(timeout=30)
