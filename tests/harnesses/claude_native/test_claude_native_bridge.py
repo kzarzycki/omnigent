@@ -11944,12 +11944,19 @@ async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
     [
         httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known"),
         httpx.ConnectTimeout("connect timed out"),
+        502,
+        429,
+        httpx.ReadError("[Errno 54] Connection reset by peer"),
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
     ],
 )
 async def test_hook_evaluate_endpoint_retries_connect_failures_within_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _policy_retry_clock: Mock, error: Exception
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _policy_retry_clock: Mock,
+    error: int | Exception,
 ) -> None:
-    """A prompt survives a connection failure lasting beyond three attempts."""
+    """A prompt survives an outage or server restart lasting beyond three attempts."""
     client = _ScriptedPolicyClient(error, error, error, {"result": "POLICY_ACTION_ALLOW"})
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
@@ -12011,17 +12018,32 @@ async def test_hook_evaluate_endpoint_exhausts_connect_retry_budget(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure",
-    [401, 504, httpx.RequestError("no auth token"), httpx.ReadError("torn poll")],
+    ("failure", "held"),
+    [
+        (401, False),
+        (httpx.RequestError("no auth token"), False),
+        (504, True),
+        (httpx.ReadError("torn poll"), True),
+    ],
 )
 async def test_hook_evaluate_endpoint_preserves_non_connect_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _policy_retry_clock: Mock,
     failure: int | Exception,
+    held: bool,
 ) -> None:
-    """HTTP, auth, and held-poll failures retain the existing three attempts."""
+    """Auth, request, and held-poll failures retain the existing three attempts."""
     client = _ScriptedPolicyClient(failure)
+    if held:
+        scripted_post = client.post
+
+        async def held_post(url: str, json: dict[str, object] | None = None) -> SimpleNamespace:
+            """Hold the poll past the floor before the gateway severs it."""
+            _policy_retry_clock.monotonic.return_value += 300.0
+            return await scripted_post(url, json=json)
+
+        client.post = held_post  # type: ignore[method-assign]
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
         body = await asyncio.to_thread(
