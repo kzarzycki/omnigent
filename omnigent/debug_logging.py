@@ -59,6 +59,9 @@ ENDPOINT_ENV_VAR = "OMNIGENT_DEBUG_LOG_ENDPOINT"
 # so this is the primary session, not the only one — pass it explicitly at
 # runner-level log callsites that have no per-request session id in scope.
 PRIMARY_SESSION_ID_ENV_VAR = "OMNIGENT_RUNNER_PRIMARY_SESSION_ID"
+# A native agent's shell also gets both for its tools: the primary is the session
+# a new sub-agent files under; the session's own id names the caller itself.
+SESSION_ID_ENV_VAR = "OMNIGENT_SESSION_ID"
 
 # Authenticated user id (email) attribution. The multi-tenant server sets a
 # request-scoped ContextVar per request; the single-user runner/host set the
