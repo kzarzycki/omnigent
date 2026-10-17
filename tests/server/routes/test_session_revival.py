@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -29,14 +30,37 @@ def store(db_uri: str) -> SqlAlchemyConversationStore:
 def relaunches(
     store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[list[tuple[str, bool]]]:
-    """Revival on, with the relaunch itself recorded instead of run."""
+    """Revival on, recording each runner init as (session, resumes its turn).
+
+    The ``retry_session`` ladder is faked: a session still bound to a dead runner
+    gets a new one and an init; one already relaunched only gets the direct init.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes.sessions import routes_events
+
     calls: list[tuple[str, bool]] = []
 
-    async def _relaunch(session_id: str, resume_interrupted_turn: bool) -> None:
-        calls.append((session_id, resume_interrupted_turn))
+    async def _retry(
+        *, session_id: str, resume_interrupted_turn: bool | Callable[[], bool], **_: Any
+    ) -> None:
+        if store.get_conversation(session_id).runner_id.startswith("relaunched-"):
+            return  # already connected: the ladder sends no resume
+        store.replace_runner_id(session_id, f"relaunched-{len(calls)}")
+        resume = resume_interrupted_turn
+        calls.append((session_id, resume() if callable(resume) else resume))
 
-    monkeypatch.setattr(session_revival, "_relaunch", _relaunch)
-    session_revival.configure(object(), store)
+    async def _client(session_id: str, *_: Any) -> object | None:
+        live = store.get_conversation(session_id).runner_id.startswith("relaunched-")
+        return object() if live else None
+
+    async def _init(session_id: str, *_: Any, resume_interrupted_turn: bool, **__: Any) -> bool:
+        calls.append((session_id, resume_interrupted_turn))
+        return False
+
+    monkeypatch.setattr(routes_events, "_retry_session_single_flight", _retry)
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _client)
+    monkeypatch.setattr(sessions_module, "_ensure_runner_session_initialized", _init)
+    session_revival.configure(SimpleNamespace(state=SimpleNamespace()), store)
     yield calls
     session_revival.configure(None, None)
 
@@ -263,3 +287,101 @@ async def test_a_lane_of_a_deleted_lead_relaunches_nothing(
 
     assert not await orchestration._revive_subagent_parent(snapshot, None, store)
     assert relaunches == []
+
+
+@pytest.mark.asyncio
+async def test_a_lane_lost_first_does_not_cost_its_running_lead_the_resume(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    lead, lanes = _lead_with_lanes(store, 1)
+    store.set_session_live_status(lead, "running")
+
+    # The lane's loss relaunches the lead; the lead's own loss then owes it a resume.
+    await _sweep(store, [*lanes, lead])
+
+    assert relaunches == [(lead, False), (lead, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_joins_a_relaunch_before_its_init_rides_along(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    conv = store.create_conversation(host_id=_HOST, workspace="/ws", runner_id="runner-0")
+
+    assert session_revival.revive(conv, why="result")
+    assert session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
+    await asyncio.gather(*session_revival._tasks.values())
+    assert not session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
+
+    assert relaunches == [(conv.id, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_asked_after_a_delivery_relaunch_finished_still_runs_once(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    conv = store.create_conversation(host_id=_HOST, workspace="/ws", runner_id="runner-0")
+
+    assert session_revival.revive(conv, why="result")
+    await asyncio.gather(*session_revival._tasks.values())
+    assert session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
+    await asyncio.gather(*session_revival._tasks.values())
+    assert not session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
+
+    assert relaunches == [(conv.id, False), (conv.id, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_lane_on_its_own_runner_never_relaunches_a_stopped_lead(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import orchestration
+
+    lead, [lane] = _lead_with_lanes(store, 1)
+    store.replace_runner_id(lane, "runner-lane")
+    sessions_module._intentional_stop_sessions[lead] = "runner-shared"
+    try:
+        await orchestration._revive_subagent_parent(store.get_conversation(lane), None, store)
+        await asyncio.gather(*session_revival._tasks.values())
+    finally:
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert relaunches == []
+
+
+@pytest.mark.asyncio
+async def test_a_lead_stopped_while_its_relaunch_waits_is_not_launched(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+
+    lead, _ = _lead_with_lanes(store, 0)
+    assert session_revival.revive(store.get_conversation(lead), why="result")
+    sessions_module._intentional_stop_sessions[lead] = "runner-shared"
+    try:
+        await asyncio.gather(*session_revival._tasks.values())
+    finally:
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert relaunches == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_the_person_cancelled_is_not_resumed(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+
+    lead, lanes = _lead_with_lanes(store, 1)
+    store.set_session_live_status(lead, "running")
+    sessions_module._interrupt_fenced_sessions.add(lead)
+    try:
+        await _sweep(store, [lead])
+        assert relaunches == []
+        # A lane's result still brings the lead back, but not to continue its turn.
+        await _sweep(store, [lead, *lanes])
+    finally:
+        sessions_module._interrupt_fenced_sessions.discard(lead)
+
+    assert relaunches == [(lead, False)]
