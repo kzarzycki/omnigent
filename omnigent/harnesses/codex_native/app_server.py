@@ -36,12 +36,7 @@ if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
 
 from omnigent.cli_invocation import cli_invocation
-from omnigent.debug_logging import (
-    PRIMARY_SESSION_ID_ENV_VAR,
-    SESSION_ID_ENV_VAR,
-    debug_event,
-    runner_primary_session_id,
-)
+from omnigent.debug_logging import PRIMARY_SESSION_ID_ENV_VAR, SESSION_ID_ENV_VAR, debug_event
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_egress import CertificateFailure, detect_certificate_failure
 from omnigent.harnesses.codex_native.bridge import (
@@ -3688,6 +3683,7 @@ def build_codex_native_server(
     profile: str | None,
     bridge_dir: Path,
     session_id: str | None = None,
+    primary_session_id: str | None = None,
     ap_server_url: str | None = None,
     ap_auth_headers: dict[str, str] | None = None,
     python_executable: str | None = None,
@@ -3714,6 +3710,8 @@ def build_codex_native_server(
     :param bridge_dir: Native Codex bridge directory; the policy hook is
         pointed at it and reads the session id + Omnigent coordinates from it.
     :param session_id: Owning session for diagnostics before bridge state exists.
+    :param primary_session_id: Primary session of the process that owns this
+        app-server, given to the agent's shell. ``None`` omits it.
     :param ap_server_url: Omnigent server base URL the policy hook POSTs tool
         calls to, e.g. ``"http://127.0.0.1:8787"``. ``None`` registers
         the hook but writes no Omnigent coordinates (hook no-ops).
@@ -3775,7 +3773,9 @@ def build_codex_native_server(
         )
     env = _clean_codex_env()
     # The app-server runs the agent's shell; its tools read which session called them.
-    if primary_session_id := runner_primary_session_id():
+    # ponytail: fixed at app-server launch, so a native /clear rotation keeps the old
+    # session's names; per-thread env (Codex shell_environment_policy.set) lifts it.
+    if primary_session_id:
         env[PRIMARY_SESSION_ID_ENV_VAR] = primary_session_id
     if session_id:
         env[SESSION_ID_ENV_VAR] = session_id
