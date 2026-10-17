@@ -540,7 +540,6 @@ async def test_a_runner_launched_as_its_session_is_archived_is_torn_down_by_the_
     monkeypatch.setattr(session_revival, "check_launch", _armed_check)
     monkeypatch.setattr(sessions_module, "_stop_session_host_runner", _stop_host_runner)
     monkeypatch.setattr(sessions_module, "_best_effort_stop", _nothing)
-    monkeypatch.setattr(sessions_module, "_ARCHIVE_STOP_UNDO_GRACE_S", 0)
     token = session_revival._reviving.set(lead)
     launch = asyncio.create_task(
         helpers._launch_runner_on_host_impl(conv, store, host, host[_HOST])
@@ -550,6 +549,8 @@ async def test_a_runner_launched_as_its_session_is_archived_is_torn_down_by_the_
         await asyncio.to_thread(store.update_conversation, lead, archived=True)
         archived.set()
         attempt = await launch
+        # Skip the undo grace the launch read was bounded by.
+        monkeypatch.setattr(sessions_module, "_ARCHIVE_STOP_UNDO_GRACE_S", 0)
         orchestration._spawn_archive_stop(lead, store, None, host)
         await orchestration._pending_archive_stops[lead]
     finally:
@@ -561,3 +562,67 @@ async def test_a_runner_launched_as_its_session_is_archived_is_torn_down_by_the_
     launched = token_bound_runner_id(decode_host_frame(frame).binding_token)
     assert attempt.runner_id == launched == store.get_conversation(lead).runner_id
     assert stopped == [launched]
+
+
+@pytest.mark.asyncio
+async def test_a_veto_read_slower_than_the_archive_grace_withdraws_the_launch(
+    store: SqlAlchemyConversationStore, host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive's deferred stop fires, finds no runner, and only then does the read return."""
+    import threading
+
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import helpers, orchestration
+
+    lead, _ = _lead_with_lanes(store, 0)
+    conv = store.get_conversation(lead)
+    reading, release = threading.Event(), threading.Event()
+    armed = False
+    get_meta = store._get_meta
+
+    def _meta(session_id: str) -> Any:
+        nonlocal armed
+        if armed and session_id == lead:
+            armed = False
+            reading.set()
+            assert release.wait(10)
+        return get_meta(session_id)
+
+    check_launch = session_revival.check_launch
+
+    async def _armed_check(*args: Any) -> None:
+        nonlocal armed
+        armed = True
+        await check_launch(*args)
+
+    async def _unknown_runner(*_: Any, attempt: Any, **__: Any) -> bool:
+        attempt.dispatched = attempt.rejected = True  # the host has no such runner yet
+        return False
+
+    async def _nothing(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(store, "_get_meta", _meta)
+    monkeypatch.setattr(session_revival, "check_launch", _armed_check)
+    monkeypatch.setattr(sessions_module, "_stop_session_host_runner", _unknown_runner)
+    monkeypatch.setattr(sessions_module, "_best_effort_stop", _nothing)
+    monkeypatch.setattr(sessions_module, "_ARCHIVE_STOP_UNDO_GRACE_S", 0.4)
+    token = session_revival._reviving.set(lead)
+    launch = asyncio.create_task(
+        helpers._launch_runner_on_host_impl(conv, store, host, host[_HOST])
+    )
+    try:
+        assert await asyncio.to_thread(reading.wait, 10)
+        await asyncio.to_thread(store.update_conversation, lead, archived=True)
+        orchestration._spawn_archive_stop(lead, store, None, host)
+        await orchestration._pending_archive_stops[lead]
+        release.set()
+        with pytest.raises(session_revival.RevivalWithdrawn):
+            await launch
+    finally:
+        release.set()
+        await asyncio.gather(launch, return_exceptions=True)
+        session_revival._reviving.reset(token)
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert host.sent == []
