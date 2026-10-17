@@ -553,6 +553,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    monkeypatch.setenv("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", "runner-primary")
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
     session_reap_calls: list[Path] = []
     monkeypatch.setattr(
@@ -892,6 +893,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert build_calls[0]["cwd"] == tmp_path / "workspace"
     assert build_calls[0]["trust_project"] is True
     assert build_calls[0]["reconcile_process_registry"] is False
+    assert build_calls[0]["primary_session_id"] == "runner-primary"
     assert build_calls[0]["developer_instructions"] == "Be a concise, careful coding assistant."
     # Persisted pass-through args must reach launch resolution (--profile layering).
     assert resolve_calls and all(
