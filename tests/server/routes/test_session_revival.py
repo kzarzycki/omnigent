@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,37 +30,26 @@ def store(db_uri: str) -> SqlAlchemyConversationStore:
 def relaunches(
     store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[list[tuple[str, bool]]]:
-    """Revival on, recording each runner init as (session, resumes its turn).
+    """Revival on, recording each relaunch as (session, its init resumes the turn).
 
-    The ``retry_session`` ladder is faked: a session still bound to a dead runner
-    gets a new one and an init; one already relaunched only gets the direct init.
+    The ``retry_session`` ladder is faked down to the two calls that decide:
+    the host-launch helper's veto and the runner init's resume.
     """
-    from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes.sessions import routes_events
 
     calls: list[tuple[str, bool]] = []
 
-    async def _retry(
-        *, session_id: str, resume_interrupted_turn: bool | Callable[[], bool], **_: Any
-    ) -> None:
-        if store.get_conversation(session_id).runner_id.startswith("relaunched-"):
-            return  # already connected: the ladder sends no resume
+    async def _retry(*, session_id: str, **_: Any) -> None:
+        row = store.get_conversation(session_id)
+        if row.runner_id.startswith("relaunched-"):
+            return  # already connected: nothing to launch or initialize
+        session_revival.check_launch(row)
         store.replace_runner_id(session_id, f"relaunched-{len(calls)}")
-        resume = resume_interrupted_turn
-        calls.append((session_id, resume() if callable(resume) else resume))
-
-    async def _client(session_id: str, *_: Any) -> object | None:
-        live = store.get_conversation(session_id).runner_id.startswith("relaunched-")
-        return object() if live else None
-
-    async def _init(session_id: str, *_: Any, resume_interrupted_turn: bool, **__: Any) -> bool:
-        calls.append((session_id, resume_interrupted_turn))
-        return False
+        resumed = session_revival.take_resume(session_id, suppressed=False) is not None
+        calls.append((session_id, resumed))
 
     monkeypatch.setattr(routes_events, "_retry_session_single_flight", _retry)
-    monkeypatch.setattr(sessions_module, "_get_runner_client", _client)
-    monkeypatch.setattr(sessions_module, "_ensure_runner_session_initialized", _init)
-    session_revival.configure(SimpleNamespace(state=SimpleNamespace()), store)
+    session_revival.configure(object(), store)
     yield calls
     session_revival.configure(None, None)
 
@@ -296,42 +285,10 @@ async def test_a_lane_lost_first_does_not_cost_its_running_lead_the_resume(
     lead, lanes = _lead_with_lanes(store, 1)
     store.set_session_live_status(lead, "running")
 
-    # The lane's loss relaunches the lead; the lead's own loss then owes it a resume.
+    # The lane's loss relaunches the lead before the lead's own loss is processed.
     await _sweep(store, [*lanes, lead])
 
-    assert relaunches == [(lead, False), (lead, True)]
-
-
-@pytest.mark.asyncio
-async def test_a_resume_that_joins_a_relaunch_before_its_init_rides_along(
-    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
-) -> None:
-    conv = store.create_conversation(host_id=_HOST, workspace="/ws", runner_id="runner-0")
-
-    assert session_revival.revive(conv, why="result")
-    assert not session_revival.wants_resume(conv.id)
-    assert session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
-    # The runner-connect hook's own init asks this, so it can't start the session bare.
-    assert session_revival.wants_resume(conv.id)
-    await asyncio.gather(*session_revival._tasks.values())
-    assert not session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
-
-    assert relaunches == [(conv.id, True)]
-
-
-@pytest.mark.asyncio
-async def test_a_resume_asked_after_a_delivery_relaunch_finished_still_runs_once(
-    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
-) -> None:
-    conv = store.create_conversation(host_id=_HOST, workspace="/ws", runner_id="runner-0")
-
-    assert session_revival.revive(conv, why="result")
-    await asyncio.gather(*session_revival._tasks.values())
-    assert session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
-    await asyncio.gather(*session_revival._tasks.values())
-    assert not session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
-
-    assert relaunches == [(conv.id, False), (conv.id, True)]
+    assert relaunches == [(lead, True)]
 
 
 @pytest.mark.asyncio
@@ -388,3 +345,47 @@ async def test_a_turn_the_person_cancelled_is_not_resumed(
         sessions_module._interrupt_fenced_sessions.discard(lead)
 
     assert relaunches == [(lead, False)]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_retry_ladder_prevents_the_launch(
+    store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real ladder runs; the stop lands while it resolves the runner client."""
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import helpers, orchestration
+    from omnigent.server.routes.sessions import routes_events
+
+    lead, _ = _lead_with_lanes(store, 0)
+    conv = store.get_conversation(lead)
+    launched: list[str] = []
+
+    async def _client(*_: Any, **__: Any) -> None:
+        sessions_module._intentional_stop_sessions[lead] = conv.runner_id
+
+    async def _local(*_: Any, **__: Any) -> None:
+        return None
+
+    async def _launch(fresh: Any, *_: Any) -> Any:
+        launched.append(fresh.id)
+        raise RuntimeError("launched")
+
+    async def _no_wake(**_: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(routes_events, "_get_runner_client", _client)
+    monkeypatch.setattr(orchestration, "_get_runner_client", _local)
+    monkeypatch.setattr(routes_events, "_raise_if_runner_on_another_replica", _local)
+    monkeypatch.setattr(orchestration, "_maybe_wake_stale_resumable_managed_sandbox", _no_wake)
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0)
+    monkeypatch.setattr(helpers, "_launch_runner_on_host_locked", _launch)
+    app = SimpleNamespace(state=SimpleNamespace(host_registry={_HOST: object()}))
+    session_revival.configure(app, store)
+    try:
+        assert session_revival.revive(conv, why="result")
+        await asyncio.gather(*session_revival._tasks.values())
+    finally:
+        session_revival.configure(None, None)
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert launched == []

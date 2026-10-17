@@ -3855,7 +3855,6 @@ def create_app(
                             conv,
                             client,
                             timeout=10.0,
-                            resume_interrupted_turn=session_revival.wants_resume(conv.id),
                             generation=connection.generation,
                             store_slots=store_slots,
                         )
