@@ -249,3 +249,17 @@ def test_revival_is_one_attempt_per_dead_runner_and_capped_per_hour(
 
     assert started.count(True) == 2 * session_revival.MAX_REVIVES_PER_HOUR
     assert len(relaunches) == session_revival.MAX_REVIVES_PER_HOUR
+
+
+@pytest.mark.asyncio
+async def test_a_lane_of_a_deleted_lead_relaunches_nothing(
+    store: SqlAlchemyConversationStore, relaunches: list[tuple[str, bool]]
+) -> None:
+    from omnigent.server.routes._sessions import orchestration
+
+    lead, [lane] = _lead_with_lanes(store, 1)
+    snapshot = store.get_conversation(lane)
+    await store.delete_conversation(lead)
+
+    assert not await orchestration._revive_subagent_parent(snapshot, None, store)
+    assert relaunches == []

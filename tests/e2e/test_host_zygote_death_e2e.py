@@ -21,6 +21,7 @@ from pathlib import Path
 import httpx
 import psutil
 import pytest
+import yaml
 
 from tests.e2e.conftest import configure_mock_llm, lookup_agent_id, upload_agent
 from tests.e2e.test_host_e2e import (
@@ -288,6 +289,69 @@ def test_session_mid_turn_when_every_runner_dies_is_relaunched_to_continue(
         _wait_for(_continued, timeout=180.0, what="the session to continue its turn")
         relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
         assert len(relaunches) == 1, f"expected one relaunch, got {relaunches}"
+    finally:
+        daemon.proc.terminate()
+        daemon.proc.wait(timeout=30)
+
+
+def test_lane_finishing_after_its_lead_was_idle_reaped_wakes_the_lead(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lead's runner idle-reaped, then a lane's turn-end arrives: the lead comes back for it.
+
+    The lane's turn-end is posted the way a native forwarder posts it, retrying
+    a 503 until it lands.
+    """
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "LEAD_WOKE"}] * 3,
+        match="waiting in inbox. Call sys_read_inbox to collect.",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / ".omnigent"))
+    daemon = _spawn_host_daemon(
+        tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
+    )
+    try:
+        config = tmp_path / ".omnigent" / "config.yaml"
+        settings = yaml.safe_load(config.read_text())
+        settings["runner"] = {"idle_timeout_s": 15}
+        staged = config.with_suffix(".tmp")
+        staged.write_text(yaml.safe_dump(settings))
+        staged.replace(config)
+        (lead, lane), runners = _open_sessions(
+            2, daemon, http_client, tmp_path, lanes_of_first=True
+        )
+        [(_rid, pid)] = runners
+        _wait_for(lambda: not _pid_alive(pid) or None, timeout=120.0, what="the idle reap")
+
+        def _turn_end_landed() -> bool | None:
+            resp = http_client.post(
+                f"/v1/sessions/{lane}/events",
+                json={
+                    "type": "external_session_status",
+                    "data": {"status": "idle", "turn_outcome": "completed", "output": "LANE_DONE"},
+                },
+                timeout=60.0,
+            )
+            assert resp.status_code in (202, 503), resp.text
+            return resp.status_code == 202 or None
+
+        _wait_for(_turn_end_landed, timeout=120.0, what="the lane's turn-end to land")
+
+        def _lead_woke() -> bool | None:
+            items = http_client.get(f"/v1/sessions/{lead}/items").json().get("data", [])
+            return "LEAD_WOKE" in str(items) or None
+
+        _wait_for(_lead_woke, timeout=120.0, what="the lane's result to wake the reaped lead")
+        items = http_client.get(f"/v1/sessions/{lead}/items").json()["data"]
+        wakes = [i for i in items if "waiting in inbox" in str(i.get("content"))]
+        assert len(wakes) == 1, f"the lane's result was announced {len(wakes)} times"
+        relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
+        assert len(relaunches) == 1, f"expected one relaunch of the lead, got {relaunches}"
     finally:
         daemon.proc.terminate()
         daemon.proc.wait(timeout=30)
