@@ -133,6 +133,10 @@ class RunnerSessionInitializer:
         agent_id = conversation.agent_id
         if runner_id is None or agent_id is None:
             raise ValueError("runner session initialization requires runner_id and agent_id")
+        if suppress_recovery_turn:
+            # A message is about to run; it replaces an interrupted turn, even
+            # one a shared init this call joins is resuming.
+            session_revival.supersede(conversation.id)
         if generation is None:
             generation = self.generation_for(runner_id, runner_client)
         self.require_generation(runner_id, runner_client, generation)
@@ -193,10 +197,8 @@ class RunnerSessionInitializer:
                 self.require_generation(runner_id, runner_client, generation)
                 # Decided here, with no await before the post: a session whose
                 # runner died mid-turn continues unless a person cancelled since.
-                dead_runner = session_revival.take_resume(
-                    conversation.id, suppressed=suppress_recovery_turn
-                )
-                resume = dead_runner is not None or resume_interrupted_turn
+                taken = session_revival.take_resume(conversation)
+                resume = taken is not None or resume_interrupted_turn
                 recovery_id = self._recovery_ids.setdefault(key, uuid4().hex) if resume else None
                 payload = build_runner_session_init_payload(
                     conversation,
@@ -218,11 +220,13 @@ class RunnerSessionInitializer:
                         generation=generation,
                     )
                 except BaseException:
-                    # Not delivered: the next init of this session carries it.
-                    session_revival.note_interrupted(conversation.id, dead_runner)
+                    if taken is not None:
+                        session_revival.settle_resume(conversation.id, taken, delivered=False)
                     raise
-                if response.status_code >= 400:
-                    session_revival.note_interrupted(conversation.id, dead_runner)
+                if taken is not None:
+                    session_revival.settle_resume(
+                        conversation.id, taken, delivered=response.status_code < 400
+                    )
                 return response
 
             task = asyncio.create_task(

@@ -6070,8 +6070,6 @@ async def _launch_runner_on_host_impl(
                 error_code="session_not_found",
                 error="session was deleted while its relaunch was in flight",
             )
-        # An automatic relaunch yields to a stop or archive that landed meanwhile.
-        session_revival.check_launch(fresh)
         if fresh.runner_id and fresh.runner_id != conv.runner_id:
             last = _relaunch_last_attempt.get(conv.id)
             if last is not None and last.runner_id == fresh.runner_id:
@@ -6157,6 +6155,11 @@ async def _launch_runner_on_host_locked(
                 ),
             )
             return _HostLaunchAttempt(runner_id=new_runner_id)
+        # An automatic relaunch yields to a stop or archive that landed meanwhile;
+        # nothing awaits between this check and the frame going out.
+        await session_revival.check_launch(
+            conv.id, (superseded_runner_id, new_runner_id), conversation_store
+        )
         request_id = secrets.token_hex(8)
         launch_future: asyncio.Future[dict[str, str | None]] = (
             asyncio.get_running_loop().create_future()
