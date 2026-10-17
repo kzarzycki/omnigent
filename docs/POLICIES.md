@@ -222,6 +222,20 @@ Session-level policies let you customize agent behavior for your current task. T
 
 Session policies evaluate before agent spec and admin policies, so they can enforce stricter rules or add additional gates for your specific workflow.
 
+### When the server can't be reached
+
+Native Claude and Codex sessions check every tool call with the Omnigent server before it runs. A connection reset, a connect failure, a 429 or a 5xx is retried for up to 30 seconds, which covers a server restart. If no verdict arrives by then, nothing runs without one, and `policy_unavailable_fallback` in `~/.omnigent/config.yaml` picks what happens instead:
+
+```yaml
+# ~/.omnigent/config.yaml
+policy_unavailable_fallback: deny   # ask (default) | deny
+```
+
+- `ask` (the default): the harness shows its approval prompt and the session waits for you.
+- `deny`: the call is denied with a reason telling the agent the server is unavailable and to retry the same call shortly. Use it for sessions that run with nobody at the keyboard, where a prompt would stall the work until someone answers it.
+
+An unknown value counts as `ask`. A new user prompt (`UserPromptSubmit`) is blocked in both modes until the server answers again.
+
 ---
 
 ## Builtin policies
