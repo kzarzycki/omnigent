@@ -2168,15 +2168,14 @@ class HostProcess:
 
         Runs on a worker thread (blocking log open + first-launch zygote import).
         When the zygote is enabled it forks the runner there — sharing the import
-        graph copy-on-write — and rewrites ``RUNNER_PARENT_PID`` to the zygote's
-        pid so the runner's orphan watchdog (which compares ``os.getppid()``)
-        stays correct across the extra process hop. A zygote start failure, or a
+        graph copy-on-write. The runner's orphan watchdog keeps watching this
+        daemon (``RUNNER_PARENT_PID``), not the zygote. A zygote start failure, or a
         channel failure while the zygote is still alive, disables it for the
         daemon's life; a zygote that died is reaped so the next launch respawns
         a fresh one. Either way this launch falls back to a direct Popen.
 
         :param env: Runner environment from :func:`_build_runner_env` (its
-            ``RUNNER_PARENT_PID`` is the daemon pid; overridden on the zygote path).
+            ``RUNNER_PARENT_PID`` is the daemon pid on both paths).
         :param session_slug: Sanitized session id fragment for the log filename.
         :param workspace: Existing session workspace to use as the runner's cwd.
         :returns: ``(process_handle, log_path)`` — the handle quacks like Popen.
@@ -2191,11 +2190,10 @@ class HostProcess:
             zygote = self._ensure_zygote_started()
             if zygote is not None:
                 try:
-                    # The runner's OS parent will be the zygote, so its
-                    # getppid()-based orphan check must watch the zygote pid.
-                    zygote_env = dict(env)
-                    zygote_env[RUNNER_PARENT_PID_ENV_VAR] = str(zygote.pid)
-                    proc = zygote.fork_runner(zygote_env, str(log_path), str(workspace))
+                    # RUNNER_PARENT_PID stays this daemon's pid: a forked
+                    # runner watches the host, not the zygote that forked it,
+                    # so a dead zygote leaves every runner serving.
+                    proc = zygote.fork_runner(env, str(log_path), str(workspace))
                     _logger.info(
                         "Forked runner via zygote (zygote pid=%s, runner pid=%s)",
                         zygote.pid,
@@ -2204,10 +2202,8 @@ class HostProcess:
                     return proc, log_path
                 except ZygoteUnavailable as exc:
                     if zygote.is_running():
-                        # Alive but its control channel failed. Do NOT stop
-                        # it: healthy runners already forked from it would
-                        # see their parent die and self-terminate via the
-                        # orphan watchdog. Disable for future launches; the
+                        # Alive but its control channel failed: it is
+                        # wedged, so disable it for future launches. The
                         # still-running zygote is reaped on daemon shutdown
                         # (see run()'s finally).
                         _logger.warning(
@@ -2217,12 +2213,11 @@ class HostProcess:
                         )
                         self._zygote_disabled = True
                     else:
-                        # The zygote process died — its forked runners are
-                        # already self-terminating via their own orphan
-                        # watchdogs, so nothing depends on this instance.
-                        # Reap it and let the next launch's start() respawn
-                        # a fresh one instead of losing copy-on-write
-                        # forking for the rest of the daemon's life.
+                        # The zygote process died; its runners keep serving
+                        # (they watch this daemon, not the zygote). Reap it
+                        # and let the next launch's start() respawn a fresh
+                        # one instead of losing copy-on-write forking for
+                        # the rest of the daemon's life.
                         _logger.warning(
                             "Runner zygote died (%s); falling back to "
                             "direct spawn and respawning the zygote on "

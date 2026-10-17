@@ -37,6 +37,7 @@ from omnigent.runner._entry import (
     _mint_managed_owner_token,
     _parent_is_orphaned,
     _parent_process_is_alive,
+    _parent_start_time,
     _resolve_agent_spec_from_server,
     _run_inactivity_monitor,
     _run_parent_death_killer,
@@ -2317,6 +2318,25 @@ def test_parent_is_orphaned_true_when_reparented() -> None:
     # A pid that is definitely not our real parent (simulates having been
     # reparented away from the launcher after it died).
     assert _parent_is_orphaned(os.getppid() + 100000) is True
+
+
+def test_a_zygote_forked_runner_watches_the_host_not_the_zygote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forked runner's OS parent is the zygote; only the host's death orphans it.
+
+    The host pid here is a live process that is not our OS parent, as the
+    daemon is for a zygote-forked runner. A recycled pid (a different start
+    time) still reads as orphaned.
+    """
+    monkeypatch.setenv("OMNIGENT_RUNNER_ZYGOTE_FORKED", "1")
+    host_pid = os.getpid()
+    assert host_pid != os.getppid()
+    started_at = _parent_start_time(host_pid)
+    assert started_at is not None
+    assert _parent_is_orphaned(host_pid, started_at=started_at) is False
+    assert _parent_is_orphaned(host_pid, started_at=started_at - 1.0) is True
+    assert _parent_is_orphaned(2_000_000_000, started_at=started_at) is True
 
 
 def test_run_parent_death_killer_requests_shutdown_then_hard_exits() -> None:

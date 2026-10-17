@@ -264,8 +264,7 @@ class ZygoteManager:
         """Ask the zygote to fork a runner with *env*, returning its handle.
 
         :param env: Full runner environment (the child replaces ``os.environ``
-            with it). Must already carry ``RUNNER_PARENT_PID`` set to the
-            zygote's pid so the runner's orphan watchdog stays correct.
+            with it), with ``RUNNER_PARENT_PID`` set to the daemon's pid.
         :param log_path: Session log path the child points stdout/stderr at.
         :param workspace: Existing session workspace to use as the child's cwd.
             Required: a daemon may outlive the checkout it started from, so
@@ -316,8 +315,8 @@ class ZygoteManager:
     def stop(self) -> None:
         """Terminate the zygote and close the control socket.
 
-        Its forked runner children reparent and self-terminate via their orphan
-        watchdog, so no runner is left stranded.
+        Its forked runners keep serving: their orphan watchdog watches the
+        daemon, so they exit when the daemon does, not when the zygote does.
         """
         with self._lock:
             if self._sock is not None:
