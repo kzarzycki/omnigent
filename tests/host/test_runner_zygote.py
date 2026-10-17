@@ -1079,7 +1079,10 @@ def test_fork_refused_after_source_change_with_stale_build_info(
         build=(1000.0, "stale-sha"),
         sources=_source_file_stamps([source]),
     )
+    before = source.stat().st_mtime_ns
     source.write_text("new = True\n")
+    # Same size and inode: a coarse clock (Linux) can leave the mtime unchanged too.
+    os.utime(source, ns=(before + 1_000_000_000, before + 1_000_000_000))
 
     daemon, daemon_peer = socket.socketpair()
     conn, peer = socket.socketpair()
