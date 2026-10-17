@@ -6471,8 +6471,6 @@ async def _launch_runner_on_host_impl(
                 error_code="session_not_found",
                 error="session was deleted while its relaunch was in flight",
             )
-        # An automatic relaunch yields to a stop or archive that landed meanwhile.
-        session_revival.check_launch(fresh)
         last = _relaunch_last_attempt.get(conv.id)
         # A waiter may already have read the active flight's replacement binding.
         if last is not None and last is not previous_attempt and last.runner_id == fresh.runner_id:
@@ -6557,6 +6555,11 @@ async def _launch_runner_on_host_locked(
                 ),
             )
             return _HostLaunchAttempt(runner_id=new_runner_id)
+        # An automatic relaunch yields to a stop or archive that landed meanwhile;
+        # nothing awaits between this check and the frame going out.
+        await session_revival.check_launch(
+            conv.id, (superseded_runner_id, new_runner_id), conversation_store
+        )
         request_id = secrets.token_hex(8)
         launch_frame = encode_host_frame(
             HostLaunchRunnerFrame(
@@ -6597,6 +6600,10 @@ async def _launch_runner_on_host_locked(
                     # send_text rejected before enqueue; reuse this binding and frame once.
                     await host_registry.admit_launch(replacement, conv.id)
                     host_conn = replacement
+                    # Admission awaited, so re-run the veto before the resend.
+                    await session_revival.check_launch(
+                        conv.id, (superseded_runner_id, new_runner_id), conversation_store
+                    )
                     continue
                 _logger.warning(
                     "Host %s connection lost while launching runner for %s",
