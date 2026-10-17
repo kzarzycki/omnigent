@@ -56,6 +56,19 @@ def _start_host_sessions(
     daemon = _spawn_host_daemon(
         tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
     )
+    try:
+        return daemon, *_open_sessions(count, daemon, http_client, tmp_path)
+    except BaseException:
+        # Callers own the daemon only once this returns.
+        daemon.proc.terminate()
+        daemon.proc.wait(timeout=30)
+        raise
+
+
+def _open_sessions(  # type: ignore[no-untyped-def]
+    count: int, daemon, http_client: httpx.Client, tmp_path: Path
+):
+    """Open *count* sessions on *daemon* and wait until each runner is online."""
     _wait_for_host_online(http_client, daemon.host_id, timeout=30.0)
     agent_id = lookup_agent_id(
         http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
@@ -78,7 +91,7 @@ def _start_host_sessions(
     )
     for rid, _pid in runners:
         _wait_for(lambda rid=rid: _runner_online(http_client, rid), timeout=90.0, what=rid)
-    return daemon, session_ids, runners
+    return session_ids, runners
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL], ids=["TERM", "KILL"])
@@ -90,7 +103,7 @@ def test_runners_outlive_their_zygote(
     mock_llm_server_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dead zygote leaves its runners connected; the next launch gets a new zygote."""
+    """A dead zygote leaves its runners alive and connected to the server."""
     configure_mock_llm(mock_llm_server_url, [{"text": "OK"}])
     daemon, _sessions, runners = _start_host_sessions(
         2, live_server, http_client, tmp_path, mock_llm_server_url, monkeypatch
