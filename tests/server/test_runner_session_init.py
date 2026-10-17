@@ -777,7 +777,7 @@ def interrupted() -> Iterator[str]:
 
     session_revival.note_interrupted("conv_init", "runner_dead")
     yield "conv_init"
-    session_revival._interrupted.clear()
+    session_revival.configure(None, None)
 
 
 @pytest.mark.asyncio
@@ -842,3 +842,41 @@ async def test_a_resume_whose_init_failed_rides_the_next_init(interrupted: str) 
     await initializer.initialize(_conversation(), client, timeout=10)  # type: ignore[arg-type]
 
     assert [c["session_init"]["resume_interrupted_turn"] for c in client.calls] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_a_message_joining_a_resume_init_that_failed_leaves_no_resume_behind(
+    interrupted: str,
+) -> None:
+    """The runner took the init but its answer was lost; the person's message still runs."""
+    from unittest.mock import Mock
+
+    from omnigent.server.routes._sessions import orchestration
+
+    class _LostAnswer(_Client):
+        async def post(self, path: str, **kwargs: Any) -> Any:
+            response = await super().post(path, **kwargs)
+            if len(self.calls) == 1:
+                raise httpx.ReadTimeout("the runner accepted the init; its answer was lost")
+            return response
+
+    client = _LostAnswer()
+    initializer = RunnerSessionInitializer(_Registry(), server_version="test")  # type: ignore[arg-type]
+    conv = _conversation()
+    hook = asyncio.create_task(initializer.initialize(conv, client, timeout=10))  # type: ignore[arg-type]
+    await client.entered.wait()
+    # The message-forward handshake joins the connect hook's init in flight.
+    forward = asyncio.create_task(
+        orchestration._ensure_runner_session_initialized(
+            conv.id, conv, client, Mock(), initializer, suppress_recovery_turn=True
+        )
+    )
+    await asyncio.sleep(0)
+    client.release.set()
+    with pytest.raises(httpx.ReadTimeout):
+        await hook
+    assert await forward is False  # the message is forwarded anyway
+    initializer.invalidate_session(conv.id)
+    await initializer.initialize(conv, client, timeout=10)  # type: ignore[arg-type]
+
+    assert [c["session_init"]["resume_interrupted_turn"] for c in client.calls] == [True, False]

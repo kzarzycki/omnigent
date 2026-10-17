@@ -8,8 +8,9 @@ re-queues undelivered sub-agent results and wakes the parent.
 
 Whether the session continues an interrupted turn is decided once, from current
 state, as its runner session init is posted (:func:`take_resume`): it does when
-its runner was recorded dying mid-turn (:func:`note_interrupted`) and no person
-has cancelled that turn since. Every init path (this relaunch, the runner
+its runner was recorded dying mid-turn (:func:`note_interrupted`, before the
+failure is published) and no person has cancelled that turn or sent a message
+since (:func:`supersede`). Every init path (this relaunch, the runner
 connect hook, a person's retry) asks the same question, so their order doesn't
 matter.
 
@@ -28,6 +29,7 @@ import asyncio
 import contextvars
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from omnigent.entities import Conversation
@@ -37,6 +39,14 @@ from omnigent.stores.permission_store import PermissionStore
 _logger = logging.getLogger(__name__)
 
 MAX_REVIVES_PER_HOUR = 3
+
+
+@dataclass(eq=False)
+class _Resume:
+    """One interrupted turn being resumed by an init in flight."""
+
+    runner_id: str
+
 
 _app: Any = None
 _store: ConversationStore | None = None
@@ -56,6 +66,12 @@ _attempts: dict[str, list[float]] = {}
 # Session → the runner that died while its turn was running.
 # custom-lint: disable-next=workspace-scoped-cache -- keys are globally unique session ids
 _interrupted: dict[str, str] = {}
+# Session → the resume an init is posting now; identity tells a superseded one apart.
+# custom-lint: disable-next=workspace-scoped-cache -- keys are globally unique session ids
+_taken: dict[str, _Resume] = {}
+# ponytail: grows by one pair per runner death; persist on the row to bound it.
+# custom-lint: disable-next=workspace-scoped-cache -- keys are globally unique session ids
+_noted: set[tuple[str, str]] = set()
 
 
 class RevivalWithdrawn(Exception):
@@ -72,6 +88,8 @@ def configure(
     _tried_runners.clear()
     _attempts.clear()
     _interrupted.clear()
+    _taken.clear()
+    _noted.clear()
 
 
 def _stopped(session_id: str, runner_id: str | None) -> bool:
@@ -83,42 +101,74 @@ def _stopped(session_id: str, runner_id: str | None) -> bool:
 
 def note_interrupted(session_id: str, runner_id: str | None) -> None:
     """Record that *runner_id* died while *session_id*'s turn was running."""
-    if runner_id:
+    if runner_id and (session_id, runner_id) not in _noted:
+        # One record per dead runner: a second sighting must not resume twice.
+        _noted.add((session_id, runner_id))
         _interrupted[session_id] = runner_id
 
 
-def take_resume(session_id: str, *, suppressed: bool) -> str | None:
+def supersede(session_id: str) -> None:
+    """A person's message replaces the interrupted turn: forget it, taken or not."""
+    _interrupted.pop(session_id, None)
+    _taken.pop(session_id, None)
+
+
+def take_resume(conv: Conversation) -> _Resume | None:
     """
-    Whether the init being posted now should continue an interrupted turn.
+    Take the interrupted turn the init being posted now should continue.
 
-    Consumes the record: one init carries it, and a failed post puts it back
-    (:func:`note_interrupted`). A message forward (*suppressed*) or a person's
-    cancel supersedes the interrupted turn, so the record is dropped.
+    A sub-agent's continuation belongs to its parent's recovery, and a turn a
+    person cancelled is not continued; both drop the record.
 
-    :param session_id: The session being initialized.
-    :param suppressed: The init precedes a message forward.
-    :returns: The runner that died mid-turn when the init should resume, else ``None``.
+    :param conv: The session being initialized.
+    :returns: A token for :func:`settle_resume` when the init should resume, else ``None``.
     """
     from omnigent.server.routes._sessions.common import _interrupt_fenced_sessions
 
-    dead_runner = _interrupted.pop(session_id, None)
-    if suppressed or session_id in _interrupt_fenced_sessions:
+    runner_id = _interrupted.pop(conv.id, None)
+    if runner_id is None or conv.parent_conversation_id is not None:
         return None
-    return dead_runner
+    if conv.id in _interrupt_fenced_sessions:
+        return None
+    _taken[conv.id] = token = _Resume(runner_id)
+    return token
 
 
-def check_launch(conv: Conversation) -> None:
+def settle_resume(session_id: str, token: _Resume, *, delivered: bool) -> None:
+    """
+    Finish a taken resume; an undelivered one waits for the session's next init.
+
+    Nothing is put back once a message superseded it (:func:`supersede`) or a
+    person cancelled the turn.
+    """
+    from omnigent.server.routes._sessions.common import _interrupt_fenced_sessions
+
+    if _taken.get(session_id) is not token:
+        return
+    del _taken[session_id]
+    if not delivered and session_id not in _interrupt_fenced_sessions:
+        _interrupted.setdefault(session_id, token.runner_id)
+
+
+async def check_launch(
+    session_id: str, runner_ids: tuple[str | None, ...], store: ConversationStore
+) -> None:
     """
     Veto an automatic relaunch's host launch for a session stopped or archived since.
 
-    Called by the host-launch helper with the row it just re-read; a launch a
-    person asked for isn't vetoed.
+    Called right before the launch frame is sent; a launch a person asked for
+    isn't vetoed.
 
-    :param conv: The session row as re-read under the launch lock.
+    :param session_id: The session being launched.
+    :param runner_ids: The runners a stop may name: the one replaced and its successor.
+    :param store: Store to re-read the row from.
     :raises RevivalWithdrawn: The relaunch must not launch.
     """
-    if _reviving.get() == conv.id and (conv.archived or _stopped(conv.id, conv.runner_id)):
-        raise RevivalWithdrawn(conv.id)
+    if _reviving.get() != session_id:
+        return
+    row = await asyncio.to_thread(store.get_conversation, session_id)
+    if row is None or row.archived or any(_stopped(session_id, r) for r in runner_ids):
+        raise RevivalWithdrawn(session_id)
 
 
 def revive(conv: Conversation, *, why: str) -> bool:
