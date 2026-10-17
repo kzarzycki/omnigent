@@ -43,10 +43,9 @@ def relaunches(
         row = store.get_conversation(session_id)
         if row.runner_id.startswith("relaunched-"):
             return  # already connected: nothing to launch or initialize
-        session_revival.check_launch(row)
-        store.replace_runner_id(session_id, f"relaunched-{len(calls)}")
-        resumed = session_revival.take_resume(session_id, suppressed=False) is not None
-        calls.append((session_id, resumed))
+        await session_revival.check_launch(session_id, (row.runner_id,), store)
+        relaunched = store.replace_runner_id(session_id, f"relaunched-{len(calls)}")
+        calls.append((session_id, session_revival.take_resume(relaunched) is not None))
 
     monkeypatch.setattr(routes_events, "_retry_session_single_flight", _retry)
     session_revival.configure(object(), store)
@@ -347,28 +346,53 @@ async def test_a_turn_the_person_cancelled_is_not_resumed(
     assert relaunches == [(lead, False)]
 
 
+class _Host(dict[str, Any]):
+    """A host registry that launches nothing: it records each launch frame it is sent."""
+
+    def __init__(self, on_admit: Any = None) -> None:
+        super().__init__({_HOST: SimpleNamespace(pending_launches={})})
+        self.on_admit = on_admit
+        self.sent: list[str] = []
+
+    async def admit_launch(self, conn: Any, session_id: str) -> None:
+        if self.on_admit is not None:
+            self.on_admit()
+
+    def send_text(self, conn: Any, frame: str) -> None:
+        self.sent.append(frame)
+        raise ConnectionError("no host here")
+
+
+@pytest.fixture
+def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
+    """The real host-launch body down to the frame, with nothing launched."""
+    from omnigent.server.routes._sessions import helpers
+
+    async def _not_shared(*_: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(helpers, "_ancestor_shares_runner", _not_shared)
+    monkeypatch.setattr(helpers, "_resolve_harness", lambda conv: None)
+    return _Host()
+
+
 @pytest.mark.asyncio
 async def test_a_stop_during_the_retry_ladder_prevents_the_launch(
-    store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
+    store: SqlAlchemyConversationStore, host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real ladder runs; the stop lands while it resolves the runner client."""
     from omnigent.server.routes import sessions as sessions_module
-    from omnigent.server.routes._sessions import helpers, orchestration
+    from omnigent.server.routes._sessions import orchestration
     from omnigent.server.routes.sessions import routes_events
 
     lead, _ = _lead_with_lanes(store, 0)
     conv = store.get_conversation(lead)
-    launched: list[str] = []
 
     async def _client(*_: Any, **__: Any) -> None:
         sessions_module._intentional_stop_sessions[lead] = conv.runner_id
 
     async def _local(*_: Any, **__: Any) -> None:
         return None
-
-    async def _launch(fresh: Any, *_: Any) -> Any:
-        launched.append(fresh.id)
-        raise RuntimeError("launched")
 
     async def _no_wake(**_: Any) -> bool:
         return False
@@ -378,9 +402,7 @@ async def test_a_stop_during_the_retry_ladder_prevents_the_launch(
     monkeypatch.setattr(routes_events, "_raise_if_runner_on_another_replica", _local)
     monkeypatch.setattr(orchestration, "_maybe_wake_stale_resumable_managed_sandbox", _no_wake)
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0)
-    monkeypatch.setattr(helpers, "_launch_runner_on_host_locked", _launch)
-    app = SimpleNamespace(state=SimpleNamespace(host_registry={_HOST: object()}))
-    session_revival.configure(app, store)
+    session_revival.configure(SimpleNamespace(state=SimpleNamespace(host_registry=host)), store)
     try:
         assert session_revival.revive(conv, why="result")
         await asyncio.gather(*session_revival._tasks.values())
@@ -388,4 +410,85 @@ async def test_a_stop_during_the_retry_ladder_prevents_the_launch(
         session_revival.configure(None, None)
         sessions_module._intentional_stop_sessions.pop(lead, None)
 
-    assert launched == []
+    assert host.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdrawal", ["stop", "archive"])
+async def test_a_stop_or_archive_during_host_admission_prevents_the_launch(
+    store: SqlAlchemyConversationStore, host: _Host, withdrawal: str
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import helpers
+
+    lead, _ = _lead_with_lanes(store, 0)
+    conv = store.get_conversation(lead)
+
+    def _withdraw() -> None:
+        if withdrawal == "stop":
+            sessions_module._intentional_stop_sessions[lead] = conv.runner_id
+        else:
+            store.update_conversation(lead, archived=True)
+
+    host.on_admit = _withdraw
+    token = session_revival._reviving.set(lead)
+    try:
+        with pytest.raises(session_revival.RevivalWithdrawn):
+            await helpers._launch_runner_on_host_impl(conv, store, host, host[_HOST])
+    finally:
+        session_revival._reviving.reset(token)
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert host.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_launch_a_person_asked_for_is_never_vetoed(
+    store: SqlAlchemyConversationStore, host: _Host
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import helpers
+
+    lead, _ = _lead_with_lanes(store, 0)
+    conv = store.get_conversation(lead)
+    sessions_module._intentional_stop_sessions[lead] = conv.runner_id
+    try:
+        await helpers._launch_runner_on_host_impl(conv, store, host, host[_HOST])
+    finally:
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    assert len(host.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lane_s_result_during_its_lead_s_failure_bookkeeping_keeps_the_resume(
+    store: SqlAlchemyConversationStore,
+    relaunches: list[tuple[str, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lead's sweep has published ``failed`` and awaits its labels when the lane reports."""
+    from omnigent.server.routes._sessions import orchestration
+
+    lead, [lane] = _lead_with_lanes(store, 1)
+    store.replace_runner_id(lane, "runner-lane")
+    store.set_session_live_status(lead, "running")
+    entered, release = asyncio.Event(), asyncio.Event()
+    persist = orchestration._persist_session_status_error_labels
+
+    async def _paused(session_id: str, *args: Any, **kwargs: Any) -> None:
+        if session_id == lead:
+            entered.set()
+            await release.wait()
+        await persist(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(orchestration, "_persist_session_status_error_labels", _paused)
+    sweep = asyncio.create_task(_sweep(store, [lead]))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await orchestration._revive_subagent_parent(store.get_conversation(lane), None, store)
+        await asyncio.gather(*session_revival._tasks.values())
+    finally:
+        release.set()
+        await sweep
+
+    assert relaunches == [(lead, True)]
