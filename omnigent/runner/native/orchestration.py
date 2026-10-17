@@ -5917,6 +5917,7 @@ async def _auto_create_codex_terminal(
         build_codex_native_server,
         active_harnesses=runner_mcp_disabled_servers_active_harnesses(),
         session_id=session_id,
+        primary_session_id=runner_primary_session_id(),
         socket_path=socket_path,
         codex_home=codex_home,
         cwd=Path(workspace),
