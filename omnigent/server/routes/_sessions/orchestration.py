@@ -130,7 +130,12 @@ from omnigent.runtime.policies.builder import (
 )
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.workflow import _find_spec_by_name
-from omnigent.server import session_live_state, session_subscriptions, shutdown_state
+from omnigent.server import (
+    session_live_state,
+    session_revival,
+    session_subscriptions,
+    shutdown_state,
+)
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -4074,7 +4079,10 @@ async def _revive_interrupted_session(
     runner_id: str | None,
 ) -> None:
     """
-    Record that a top-level session's runner died mid-turn, and relaunch it to continue.
+    Relaunch a top-level session whose runner died mid-turn, so it continues.
+
+    The caller recorded the interruption (:func:`session_revival.note_interrupted`)
+    before publishing the failure; the relaunched runner's init reads it.
 
     A sub-agent is left to its parent, which gets the loss notice. Best-effort:
     never raises.
@@ -4084,8 +4092,6 @@ async def _revive_interrupted_session(
     :param runner_id: The departed runner; the row may already name its successor.
     :returns: None.
     """
-    from omnigent.server import session_revival
-
     try:
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         dead = runner_id or (conv.runner_id if conv is not None else None)
@@ -4098,7 +4104,9 @@ async def _revive_interrupted_session(
             or conv.id in _interrupt_fenced_sessions
         ):
             return
-        session_revival.note_interrupted(conv.id, dead)
+        if runner_id is None:
+            # A relay that didn't know its runner couldn't record it up front.
+            session_revival.note_interrupted(conv.id, dead)
         session_revival.revive(conv, why="its runner died mid-turn")
     except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
         _logger.warning(
@@ -4552,6 +4560,9 @@ async def _mark_runner_sessions_offline_once(
             continue
         # A session failed before its runner ever started has no turn to continue.
         mid_turn = _session_status_cache.get(conv.id, conv.live_status) in _MID_TURN_STATUSES
+        if mid_turn:
+            # Before anything awaits: a child's result may relaunch it meanwhile.
+            session_revival.note_interrupted(conv.id, conv.runner_id)
         _publish_status(
             conv.id,
             "failed",
@@ -9330,6 +9341,8 @@ async def _relay_runner_stream(
                     message="Runner disconnected unexpectedly.",
                 )
                 turn_id = _session_active_response_cache.get(session_id)
+                # Before anything awaits: a child's result may relaunch it meanwhile.
+                session_revival.note_interrupted(session_id, runner_id)
                 _publish_status(
                     session_id,
                     "failed",
