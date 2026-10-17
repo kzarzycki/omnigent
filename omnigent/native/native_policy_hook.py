@@ -540,6 +540,33 @@ _EVAL_UNAVAILABLE_ASK_REASON = (
 )
 
 
+_EVAL_UNAVAILABLE_DENY_REASON = (
+    "Omnigent server unavailable, so this tool call could not be checked against "
+    "policy; retry the same call shortly."
+)
+
+_UNAVAILABLE_FALLBACK_KEY = "policy_unavailable_fallback"
+
+
+def _unavailable_fallback() -> str:
+    """
+    Return the user's ``policy_unavailable_fallback`` setting: ``"ask"`` or ``"deny"``.
+
+    Read from the user config on each call, which only happens once a verdict
+    could not be obtained. A missing, unreadable or unknown value is ``"ask"``.
+    """
+    import yaml
+
+    from omnigent.config import load_global_config
+
+    try:
+        cfg = load_global_config()
+    except (OSError, yaml.YAMLError):
+        return "ask"
+    value = cfg.get(_UNAVAILABLE_FALLBACK_KEY) if isinstance(cfg, dict) else None
+    return "deny" if value == "deny" else "ask"
+
+
 def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str, object] | None:
     """
     Build the fail-ask hook output for an unobtainable policy verdict.
@@ -565,9 +592,28 @@ def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str
     :param detail: Optional diagnostic string appended to the ask reason
         shown in the UI. Forwarded to :func:`fail_closed_hook_output` for
         non-PreToolUse events.
-    :returns: ``permissionDecision: "ask"`` hook output for ``PreToolUse``;
-        delegates to :func:`fail_closed_hook_output` for all other events.
+    Unattended sessions can set ``policy_unavailable_fallback: deny`` in the
+    user config (``~/.omnigent/config.yaml``). ``PreToolUse`` is then denied
+    with a reason telling the agent to retry the call shortly, so the session
+    keeps working instead of waiting on a prompt nobody will answer.
+
+    :returns: ``permissionDecision: "ask"`` hook output for ``PreToolUse``
+        (``"deny"`` under ``policy_unavailable_fallback: deny``); delegates to
+        :func:`fail_closed_hook_output` for all other events.
     """
+    if hook_event == _PRE_TOOL_USE and _unavailable_fallback() == "deny":
+        deny_reason = (
+            f"{_EVAL_UNAVAILABLE_DENY_REASON} Detail: {detail}"
+            if detail
+            else _EVAL_UNAVAILABLE_DENY_REASON
+        )
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": _PRE_TOOL_USE,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": deny_reason,
+            },
+        }
     if hook_event == _PRE_TOOL_USE:
         ask_reason = (
             f"{_EVAL_UNAVAILABLE_ASK_REASON} Detail: {detail}"
@@ -596,7 +642,9 @@ def post_evaluate_with_retry(
     POST to the Omnigent policy evaluate endpoint, retrying on transient errors.
 
     Retries on explicit 429 and 5xx HTTP responses and connection-level errors
-    (:class:`httpx.ConnectError`, :class:`httpx.ConnectTimeout`) within
+    (:class:`httpx.ConnectError`, :class:`httpx.ConnectTimeout`, and a
+    connection torn down before the held-poll floor, e.g. a restarting
+    server resetting it) within
     :data:`_EVALUATE_POLICY_RETRY_BUDGET_S`. Returns the successful response,
     or ``None`` if the budget is exhausted or a non-retryable error occurs.
     A 429 ``Retry-After`` hint takes precedence over exponential backoff but
@@ -749,25 +797,32 @@ def post_evaluate_with_retry(
                 f"omnigent {hook_label}: Omnigent request failed; retrying: {exc}",
                 file=sys.stderr,
             )
-        except httpx.HTTPError as exc:
+        except _HELD_POLL_SEVER_ERRORS as exc:
             last_error = f"request error: {exc}"
-            # A connection the gateway tore down after holding the poll is a
-            # sever: the same id re-parks the elicitation. Anything else
-            # mid-stream (a ReadTimeout means the ask itself timed out) is final.
+            # Torn down after a held poll: the gateway severed it, so the same
+            # id re-parks. Torn down fast: a restarting server, so retry it.
             held_poll_severed = (
-                isinstance(exc, _HELD_POLL_SEVER_ERRORS)
-                and time.monotonic() - attempt_started >= _EVALUATE_POLICY_HELD_POLL_FLOOR_S
+                time.monotonic() - attempt_started >= _EVALUATE_POLICY_HELD_POLL_FLOOR_S
             )
-            if not held_poll_severed:
-                print(
-                    f"omnigent {hook_label}: Omnigent request failed: {exc}",
-                    file=sys.stderr,
-                )
-                return None, last_error
             print(
-                f"omnigent {hook_label}: held poll severed by the gateway; re-parking: {exc}",
+                f"omnigent {hook_label}: "
+                + (
+                    "held poll severed by the gateway; re-parking"
+                    if held_poll_severed
+                    else "Omnigent connection torn down; retrying"
+                )
+                + f": {exc}",
                 file=sys.stderr,
             )
+        except httpx.HTTPError as exc:
+            # A ReadTimeout means the ask itself timed out; it and any other
+            # transport error are final.
+            last_error = f"request error: {exc}"
+            print(
+                f"omnigent {hook_label}: Omnigent request failed: {exc}",
+                file=sys.stderr,
+            )
+            return None, last_error
         if held_poll_severed:
             # The re-park mechanism working as intended, not a transient fault:
             # the budget and backoff are for fast failures, and the accepted
