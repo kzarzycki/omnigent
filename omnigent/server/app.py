@@ -81,6 +81,7 @@ from omnigent.server import (
     managed_host_keepalive,
     session_live_state,
     session_pull_requests,
+    session_revival,
     session_subscriptions,
     shutdown_state,
 )
@@ -1787,6 +1788,8 @@ def create_app(
         )
         # Prompts can be published off the loop; subscription notices hop back onto it.
         session_subscriptions.set_loop(asyncio.get_running_loop())
+        # Relaunches sessions whose runner died while the server holds work for them.
+        session_revival.configure(app_inst, conversation_store, permission_store)
         # Retries notices left pending by a failed post or a restart.
         subscription_retry_task = asyncio.create_task(session_subscriptions.run_retry_loop())
 
@@ -2025,6 +2028,7 @@ def create_app(
                 await startup_inputs.shutdown()
             await background_title_coordinator.shutdown()
             _uninstall_subagent_block_notifier()
+            session_revival.configure(None, None)
             subscription_retry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await subscription_retry_task

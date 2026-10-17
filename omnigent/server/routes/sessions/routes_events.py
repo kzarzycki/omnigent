@@ -607,8 +607,13 @@ async def _recover_retry_session(
     runner_router: RunnerRouter | None,
     user_id: str | None,
     permission_store: PermissionStore | None,
+    resume_interrupted_turn: bool = False,
 ) -> dict[str, bool | str]:
-    """Recover runner/terminal readiness without creating transcript input."""
+    """Recover runner/terminal readiness without creating transcript input.
+
+    ``resume_interrupted_turn`` asks a relaunched runner to continue the turn its
+    predecessor died in.
+    """
     conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     if conv is None:
         raise _session_not_found()
@@ -650,13 +655,16 @@ async def _recover_retry_session(
         if startup
         else []
     )
+    # A resumed turn and a suppressed recovery turn are mutually exclusive.
+    suppress_recovery_turn = was_connected or bool(saved_inputs)
     terminal_ready_from_init = await _ensure_runner_session_initialized(
         session_id,
         conv,
         runner_client,
         conversation_store,
         initializer=getattr(request.app.state, "runner_session_initializer", None),
-        suppress_recovery_turn=was_connected or bool(saved_inputs),
+        suppress_recovery_turn=suppress_recovery_turn,
+        resume_interrupted_turn=resume_interrupted_turn and not suppress_recovery_turn,
         require_success=True,
         trigger="retry_session",
     )
@@ -711,6 +719,7 @@ async def _retry_session_single_flight(
     runner_router: RunnerRouter | None,
     user_id: str | None,
     permission_store: PermissionStore | None,
+    resume_interrupted_turn: bool = False,
 ) -> dict[str, bool | str]:
     """Share one in-flight recovery attempt across concurrent callers.
 
@@ -732,6 +741,7 @@ async def _retry_session_single_flight(
                     runner_router=runner_router,
                     user_id=user_id,
                     permission_store=permission_store,
+                    resume_interrupted_turn=resume_interrupted_turn,
                 )
             )
             _retry_recovery_tasks[flight] = task
@@ -2548,6 +2558,14 @@ def register_events_routes(
                     )
                     if via_parent is not None:
                         runner_result = via_parent
+                if runner_result is None or runner_result.status_code >= 400:
+                    from omnigent.server.routes import sessions as _sf
+
+                    if not await _sf._revive_subagent_parent(
+                        conv, runner_router, conversation_store
+                    ):
+                        # No parent will ever take it: a retry can't land.
+                        return {"queued": False}
                 _require_external_status_forward(
                     session_id,
                     status,
