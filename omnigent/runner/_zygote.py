@@ -26,13 +26,12 @@ file, applies the request's env into ``os.environ``, and calls the unchanged
 ``omnigent.runner._entry.main()`` — so it behaves exactly like a cold
 ``python -m omnigent.runner._entry``.
 
-**Parent-pid contract:** the runner's parent-death watchdog treats
-``os.getppid() != RUNNER_PARENT_PID`` as "orphaned" (see
-``omnigent/runner/_entry.py``). A zygote-forked runner's OS parent is the
-*zygote*, so the daemon MUST set ``RUNNER_PARENT_PID`` to the zygote's pid, not
-its own. When the daemon dies, the control socket hits EOF, the zygote exits,
-its runner children reparent, ``getppid()`` changes, and each runner tears
-itself down — preserving today's parent-death semantics through one extra hop.
+**Parent-pid contract:** ``RUNNER_PARENT_PID`` is the *daemon's* pid on both
+launch paths. A zygote-forked runner's OS parent is the zygote, so the zygote
+marks it (``OMNIGENT_RUNNER_ZYGOTE_FORKED``) and its parent-death watchdog
+probes the daemon pid instead of comparing ``os.getppid()`` (see
+``omnigent/runner/_entry.py``). Runners therefore die with the daemon, never
+with the zygote: one forkserver's death must not take every session down.
 
 POSIX (the gate is ``IS_POSIX``): the fork path runs on macOS too, though the
 copy-on-write savings are Linux-specific. On by default; set
@@ -70,6 +69,10 @@ ZYGOTE_ENABLED_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE"
 # zygote to fork its harness children (which then share the harness import
 # graph copy-on-write), instead of exec'ing a fresh interpreter per harness.
 ZYGOTE_HARNESS_FD_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_HARNESS_FD"
+# Env var the zygote sets on each forked RUNNER child so its parent-death
+# watchdog probes RUNNER_PARENT_PID (the daemon) rather than trusting
+# os.getppid() (the zygote).
+ZYGOTE_RUNNER_FORKED_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_FORKED"
 # Env var the zygote sets on each forked HARNESS child so its parent-death
 # watchdog probes the runner pid explicitly rather than trusting os.getppid()
 # (which is the zygote, not the runner, for a zygote-forked harness).
@@ -314,6 +317,7 @@ def _run_child(request: dict[str, Any], harness_fd: int) -> None:
     # Tell the runner its harness-fork channel fd (set after the env replace so
     # it survives the clear).
     os.environ[ZYGOTE_HARNESS_FD_ENV_VAR] = str(harness_fd)
+    os.environ[ZYGOTE_RUNNER_FORKED_ENV_VAR] = "1"
 
     _wire_child_stdio(request.get("log_path"))
 

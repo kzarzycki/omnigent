@@ -25,11 +25,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import httpx
+import psutil
 from fastapi import FastAPI
 
 from omnigent._platform import IS_WINDOWS, normalize_interactive_shells
 from omnigent.debug_logging import debug_event, runner_primary_session_id
 from omnigent.inner import _proc
+from omnigent.process_logging import env_truthy
 from omnigent.runner.transports.ws_tunnel.serve import RUNNER_TUNNEL_REJECTION_PREFIX
 from omnigent.util.threaded_auth import ThreadedAuth
 from omnigent.version import VERSION
@@ -1132,8 +1134,21 @@ def _parent_process_is_alive(parent_pid: int) -> bool:
     return _proc.process_alive(parent_pid)
 
 
-def _parent_is_orphaned(parent_pid: int) -> bool:
+def _parent_start_time(parent_pid: int) -> float | None:
+    """Return *parent_pid*'s creation time, or ``None`` when it cannot be read."""
+    try:
+        return float(psutil.Process(parent_pid).create_time())
+    except (psutil.Error, OSError):
+        return None
+
+
+def _parent_is_orphaned(parent_pid: int, *, started_at: float | None = None) -> bool:
     """Return whether this process has been orphaned by *parent_pid*.
+
+    A zygote-forked runner (``OMNIGENT_RUNNER_ZYGOTE_FORKED``) is the zygote's
+    OS child, not the daemon's, so ``getppid()`` says nothing about the daemon.
+    It probes the daemon pid instead and, given *started_at*, treats a process
+    with a different creation time as a recycled pid, i.e. the daemon is gone.
 
     The runner is launched as a direct child of ``parent_pid``, so on POSIX
     ``getppid()`` equals it until the parent dies — at which point the OS
@@ -1149,11 +1164,22 @@ def _parent_is_orphaned(parent_pid: int) -> bool:
     rely solely on an explicit liveness probe of the passed-in ``parent_pid``.
 
     :param parent_pid: The launcher's process id, e.g. ``12345``.
+    :param started_at: The parent's creation time read at startup, used as
+        the pid-reuse guard when ``getppid()`` cannot be trusted.
     :returns: ``True`` once the parent is gone, otherwise ``False``.
     """
-    if not IS_WINDOWS and os.getppid() != parent_pid:
+    from omnigent.runner._zygote import ZYGOTE_RUNNER_FORKED_ENV_VAR
+
+    forked = env_truthy(os.environ.get(ZYGOTE_RUNNER_FORKED_ENV_VAR))
+    if not IS_WINDOWS and not forked and os.getppid() != parent_pid:
         return True
-    return not _parent_process_is_alive(parent_pid)
+    if not _parent_process_is_alive(parent_pid):
+        return True
+    if started_at is None:
+        return False
+    current = _parent_start_time(parent_pid)
+    # An unreadable start time is not proof of death; the next poll re-checks.
+    return current is not None and current != started_at
 
 
 def _run_parent_death_killer(
@@ -1198,7 +1224,8 @@ def _run_parent_death_killer(
         injectable so tests can observe it without killing the runner.
     :returns: None.
     """
-    while not _parent_is_orphaned(parent_pid):
+    started_at = _parent_start_time(parent_pid)
+    while not _parent_is_orphaned(parent_pid, started_at=started_at):
         if adopted is not None and adopted.is_set():
             return
         time.sleep(poll_interval_s)
