@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -415,6 +417,37 @@ def test_fail_ask_post_tool_use_fails_open() -> None:
     assert fail_ask_hook_output("PostToolUse") is None
 
 
+@pytest.mark.parametrize(
+    ("config_text", "decision"),
+    [
+        (None, "ask"),
+        ("policy_unavailable_fallback: ask\n", "ask"),
+        ("policy_unavailable_fallback: deny\n", "deny"),
+        ("policy_unavailable_fallback: allow\n", "ask"),
+        ("policy_unavailable_fallback: [deny\n", "ask"),
+        ("- deny\n", "ask"),
+    ],
+)
+def test_fail_ask_follows_the_unavailable_fallback_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_text: str | None,
+    decision: str,
+) -> None:
+    """``deny`` turns the unavailable-verdict prompt into a retry-shortly denial."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    if config_text is not None:
+        (tmp_path / "config.yaml").write_text(config_text)
+
+    hook = fail_ask_hook_output("PreToolUse", "HTTP 502")["hookSpecificOutput"]
+
+    assert hook["permissionDecision"] == decision
+    assert "HTTP 502" in hook["permissionDecisionReason"]
+    if decision == "deny":
+        assert "retry the same call shortly" in hook["permissionDecisionReason"]
+    assert fail_ask_hook_output("UserPromptSubmit")["decision"] == "block"
+
+
 def test_fail_ask_unknown_event_fails_open() -> None:
     """Unknown events fail open under fail-ask."""
     assert fail_ask_hook_output("SomeNewEvent") is None
@@ -483,10 +516,10 @@ def _make_redirect_then_ok_client(
 
 
 def _make_sequence_client(
-    responses: list[httpx.Response],
+    responses: list[httpx.Response | Exception],
     request_bodies: list[dict[str, object]],
 ) -> type:
-    """Build an httpx.Client stub that returns responses in order."""
+    """Build an httpx.Client stub that returns (or raises) responses in order."""
 
     class _Client:
         def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
@@ -501,8 +534,10 @@ def _make_sequence_client(
         def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
             del url
             request_bodies.append(dict(json))
-            index = min(len(request_bodies) - 1, len(responses) - 1)
-            return responses[index]
+            response = responses[min(len(request_bodies) - 1, len(responses) - 1)]
+            if isinstance(response, Exception):
+                raise response
+            return response
 
     return _Client
 
@@ -618,6 +653,54 @@ def test_post_evaluate_with_retry_keeps_non_429_4xx_single_attempt(
     assert resp is None
     assert error == "server returned 422: invalid request"
     assert sleeps == []
+    assert len(request_bodies) == 1
+
+
+@pytest.mark.parametrize(
+    "torn",
+    [
+        httpx.ReadError("[Errno 54] Connection reset by peer"),
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    ],
+)
+def test_post_evaluate_with_retry_retries_a_fast_torn_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    torn: Exception,
+) -> None:
+    """A connection a restarting server tears down at once is retried, same id."""
+    request = httpx.Request("POST", "https://ap/x")
+    ok = httpx.Response(200, json={"result": "POLICY_ACTION_ALLOW"}, request=request)
+    request_bodies: list[dict[str, object]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        native_policy_hook.httpx, "Client", _make_sequence_client([torn, ok], request_bodies)
+    )
+    monkeypatch.setattr(native_policy_hook.time, "sleep", sleeps.append)
+
+    resp, error = post_evaluate_with_retry("https://ap/x", {}, {"event": {}}, 5.0, "hook")
+
+    assert resp is ok
+    assert error is None
+    assert sleeps == [native_policy_hook._EVALUATE_POLICY_RETRY_INITIAL_BACKOFF_S]
+    assert len(request_bodies) == 2
+    assert len({body["_omnigent_elicitation_id"] for body in request_bodies}) == 1
+
+
+def test_post_evaluate_with_retry_keeps_a_read_timeout_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read timeout means the ask itself timed out, so it is not retried."""
+    request_bodies: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        native_policy_hook.httpx,
+        "Client",
+        _make_sequence_client([httpx.ReadTimeout("timed out")], request_bodies),
+    )
+
+    resp, error = post_evaluate_with_retry("https://ap/x", {}, {"event": {}}, 5.0, "hook")
+
+    assert resp is None
+    assert error == "request error: timed out"
     assert len(request_bodies) == 1
 
 
