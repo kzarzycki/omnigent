@@ -309,7 +309,10 @@ async def test_a_resume_that_joins_a_relaunch_before_its_init_rides_along(
     conv = store.create_conversation(host_id=_HOST, workspace="/ws", runner_id="runner-0")
 
     assert session_revival.revive(conv, why="result")
+    assert not session_revival.wants_resume(conv.id)
     assert session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
+    # The runner-connect hook's own init asks this, so it can't start the session bare.
+    assert session_revival.wants_resume(conv.id)
     await asyncio.gather(*session_revival._tasks.values())
     assert not session_revival.revive(conv, why="turn", resume_interrupted_turn=True)
 
