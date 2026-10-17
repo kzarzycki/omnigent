@@ -15,6 +15,7 @@ from omnigent.debug_logging import debug_event, runner_log_scope
 from omnigent.entities import Conversation
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory, ErrorCode, ErrorImpact
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
+from omnigent.server import session_revival
 from omnigent.update_check import _read_build_info
 
 if TYPE_CHECKING:
@@ -254,18 +255,6 @@ class RunnerSessionInitializer:
         if task is None:
             decision = "start"
             init_attempt_id = uuid4().hex
-            recovery_id = (
-                self._recovery_ids.setdefault(key, uuid4().hex)
-                if resume_interrupted_turn
-                else None
-            )
-            payload = build_runner_session_init_payload(
-                conversation,
-                server_version=self._server_version,
-                suppress_recovery_turn=suppress_recovery_turn,
-                resume_interrupted_turn=resume_interrupted_turn,
-                recovery_id=recovery_id,
-            )
 
             async def post_session_init() -> httpx.Response:
                 if self._conversation_store is not None and self._file_store is not None:
@@ -289,19 +278,41 @@ class RunnerSessionInitializer:
                             tunnel_registry=self._registry,
                         )
                 self.require_generation(runner_id, runner_client, generation)
-                return await self._post_initialize(
-                    runner_client,
-                    session_id=conversation.id,
-                    runner_id=runner_id,
-                    payload=payload,
-                    timeout=timeout,
-                    resume_interrupted_turn=resume_interrupted_turn,
-                    suppress_recovery_turn=suppress_recovery_turn,
-                    recovery_id=recovery_id,
-                    generation=generation,
-                    trigger=trigger,
-                    init_attempt_id=init_attempt_id,
+                # Decided here, with no await before the post: a session whose
+                # runner died mid-turn continues unless a person cancelled since.
+                dead_runner = session_revival.take_resume(
+                    conversation.id, suppressed=suppress_recovery_turn
                 )
+                resume = dead_runner is not None or resume_interrupted_turn
+                recovery_id = self._recovery_ids.setdefault(key, uuid4().hex) if resume else None
+                payload = build_runner_session_init_payload(
+                    conversation,
+                    server_version=self._server_version,
+                    suppress_recovery_turn=suppress_recovery_turn,
+                    resume_interrupted_turn=resume,
+                    recovery_id=recovery_id,
+                )
+                try:
+                    response = await self._post_initialize(
+                        runner_client,
+                        session_id=conversation.id,
+                        runner_id=runner_id,
+                        payload=payload,
+                        timeout=timeout,
+                        resume_interrupted_turn=resume,
+                        suppress_recovery_turn=suppress_recovery_turn,
+                        recovery_id=recovery_id,
+                        generation=generation,
+                        trigger=trigger,
+                        init_attempt_id=init_attempt_id,
+                    )
+                except BaseException:
+                    # Not delivered: the next init of this session carries it.
+                    session_revival.note_interrupted(conversation.id, dead_runner)
+                    raise
+                if response.status_code >= 400:
+                    session_revival.note_interrupted(conversation.id, dead_runner)
+                return response
 
             task = asyncio.create_task(
                 post_session_init(),

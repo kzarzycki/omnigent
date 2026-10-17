@@ -2912,7 +2912,8 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
                 assert sessions_module._session_status_cache[session_id] == "failed"
                 return
             await asyncio.wait_for(recovery_finished.wait(), timeout=budget(5.0))
-            assert executed_turns == []
+            # The relaunch resumes the interrupted turn once (session revival).
+            await poll_until_async(lambda: len(executed_turns) == 1, timeout_s=budget(5.0))
             assert store.get_item(session_id, original_input.id) == original_input
 
             # A queued follow-up keeps its identity and runs once on the replacement.
@@ -2942,7 +2943,7 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
 
             await poll_until_async(completed_followup, timeout_s=budget(5.0))
             assert store.get_item(session_id, "b" * 32) is not None
-            assert len(executed_turns) == 1
+            assert len(executed_turns) == 2
             assert store.get_item(session_id, original_input.id) == original_input
             return
         assert error["code"] == "runner_disconnected"
