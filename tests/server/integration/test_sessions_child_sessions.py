@@ -2116,6 +2116,59 @@ async def test_subagent_idle_on_own_runner_delivers_via_parent_runner(
     assert child_row is not None and child_row.runner_id == "runner_child"
 
 
+@pytest.mark.parametrize("parent_state", ["runnerless", "archived"])
+async def test_subagent_result_for_a_parent_with_no_runner_relaunches_it(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_state: str,
+) -> None:
+    """
+    A child's turn-end that finds no parent runner relaunches the parent, then retries.
+
+    The forwarder keeps its 503 while the parent comes back, and its retry lands
+    on the relaunched runner. An archived parent never takes the result, so the
+    turn-end is accepted rather than retried forever.
+    """
+    from omnigent.server import session_revival
+
+    child = await _create_native_child(client, name=f"orch-runnerless-{parent_state}")
+    parent_id = child["parent_session_id"]
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv_store.replace_runner_id(child["id"], "runner_child")
+    conv_store.replace_runner_id(parent_id, "runner_parent")
+    if parent_state == "archived":
+        conv_store.update_conversation(parent_id, archived=True)
+    revived: list[str] = []
+
+    def _revive(conv: Any, **_kwargs: Any) -> bool:
+        revived.append(conv.id)
+        return True
+
+    async def _missing_parent_inbox(*_args: Any, **_kwargs: Any) -> Any:
+        body = {"error": "subagent_delivery_not_confirmed", "reason": "missing_parent_inbox"}
+        return sessions_module._RunnerForwardResult(status_code=503, body=json.dumps(body))
+
+    async def _no_runner(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(session_revival, "revive", _revive)
+    monkeypatch.setattr(
+        sessions_module, "_forward_session_change_to_runner", _missing_parent_inbox
+    )
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _no_runner)
+
+    resp = await client.post(
+        f"/v1/sessions/{child['id']}/events",
+        json={"type": "external_session_status", "data": {"status": "idle"}},
+    )
+
+    if parent_state == "archived":
+        assert (resp.status_code, revived) == (202, []), resp.text
+    else:
+        assert (resp.status_code, revived) == (503, [parent_id]), resp.text
+
+
 # ── message-send stale-runner heal (issue #3067) ─────────────────────────────
 
 
