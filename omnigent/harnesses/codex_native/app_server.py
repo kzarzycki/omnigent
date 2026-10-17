@@ -36,6 +36,11 @@ if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
 
 from omnigent.cli_invocation import cli_invocation
+from omnigent.debug_logging import (
+    PRIMARY_SESSION_ID_ENV_VAR,
+    SESSION_ID_ENV_VAR,
+    runner_primary_session_id,
+)
 from omnigent.harnesses.codex_egress import CertificateFailure, detect_certificate_failure
 from omnigent.harnesses.codex_native.bridge import (
     clear_certificate_failure,
@@ -3439,6 +3444,11 @@ def build_codex_native_server(
             "nvm-managed bin dir), set OMNIGENT_CODEX_PATH=/path/to/codex."
         )
     env = _clean_codex_env()
+    # The app-server runs the agent's shell; its tools read which session called them.
+    if primary_session_id := runner_primary_session_id():
+        env[PRIMARY_SESSION_ID_ENV_VAR] = primary_session_id
+    if session_id:
+        env[SESSION_ID_ENV_VAR] = session_id
     config_overrides: list[str] = []
     pinned_model = model
     if profile is not None:
