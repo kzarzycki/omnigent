@@ -1237,3 +1237,71 @@ async def test_recovered_pending_child_outlives_launch_timeout_and_delivers_orig
     assert late.delivered and not late.delivered_now
     assert inbox.empty()
     assert child["runner_id"] == "other-live-runner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forwarder_first", [False, True], ids=["init-first", "forwarder-first"])
+async def test_relaunched_parent_gets_a_result_once_from_init_and_forwarder_retry(
+    _clean_subagent_registry: None,
+    forwarder_first: bool,
+) -> None:
+    """A parent relaunched for its child's result receives it once.
+
+    The child ran on its own runner and finished while the parent's runner was
+    reaped. The relaunched parent's init recovers the undrained dispatch from the
+    server, and the forwarder's retry of the same turn-end lands on it too.
+    """
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    child_body = _child_snapshot(sub_agent_name="reviewer", parent_session_id=PARENT_SESSION_ID)
+
+    class _Server(_RecoveryServerClient):
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            if url.rstrip("/").endswith(CHILD_SESSION_ID):
+                return self._Resp({**child_body, "labels": _child_summary()["labels"]})
+            return await super().get(url, **kwargs)
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id
+        if session_id == PARENT_SESSION_ID:
+            return AgentSpec(spec_version=1, name="orchestrator")
+        return AgentSpec(
+            spec_version=1,
+            name="reviewer",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+        )
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_Server([_child_summary()]),  # type: ignore[arg-type]
+    )
+    turn_end = {
+        "type": "external_session_status",
+        "data": {"status": "idle", "turn_outcome": "completed", "output": "review complete: LGTM"},
+    }
+    async with _runner_client(app) as client:
+
+        async def _init() -> None:
+            resp = await client.post(
+                "/v1/sessions",
+                json={"session_id": PARENT_SESSION_ID, "agent_id": "ag_orchestrator"},
+            )
+            assert resp.status_code == 201
+
+        async def _forward() -> int:
+            resp = await client.post(f"/v1/sessions/{CHILD_SESSION_ID}/events", json=turn_end)
+            return resp.status_code
+
+        if forwarder_first:
+            # Before the parent's session is initialized there's no inbox to take it.
+            assert await _forward() == 503
+        await _init()
+        # The forwarder's retries of the same turn-end.
+        assert await _forward() == 204
+        assert await _forward() == 204
+
+    inbox = subagent_work._session_inboxes_ref[PARENT_SESSION_ID]
+    results = [inbox.get_nowait() for _ in range(inbox.qsize())]
+    assert [(r["conversation_id"], r["output"]) for r in results] == [
+        (CHILD_SESSION_ID, "review complete: LGTM")
+    ]
