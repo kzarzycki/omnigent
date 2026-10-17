@@ -4015,6 +4015,8 @@ async def _revive_subagent_parent(
 async def _revive_interrupted_session(
     session_id: str,
     conversation_store: ConversationStore,
+    *,
+    runner_id: str | None,
 ) -> None:
     """
     Relaunch a top-level session whose runner died mid-turn, and have it continue.
@@ -4024,6 +4026,7 @@ async def _revive_interrupted_session(
 
     :param session_id: The session the departed runner interrupted.
     :param conversation_store: Store used to read the session.
+    :param runner_id: The departed runner; the row may already name its successor.
     :returns: None.
     """
     from omnigent.server import session_revival
@@ -4032,7 +4035,10 @@ async def _revive_interrupted_session(
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is not None and conv.parent_conversation_id is None:
             session_revival.revive(
-                conv, why="its runner died mid-turn", resume_interrupted_turn=True
+                conv,
+                why="its runner died mid-turn",
+                resume_interrupted_turn=True,
+                dead_runner_id=runner_id,
             )
     except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
         _logger.warning(
@@ -4464,7 +4470,9 @@ async def _mark_runner_sessions_offline_once(
             conv.id, error, conversation_store, owner_runner_id=conv.runner_id
         )
         if mid_turn:
-            await _revive_interrupted_session(conv.id, conversation_store)
+            await _revive_interrupted_session(
+                conv.id, conversation_store, runner_id=conv.runner_id
+            )
     return retry
 
 
@@ -9174,7 +9182,9 @@ async def _relay_runner_stream(
                     conversation_store,
                     owner_runner_id=runner_id,
                 )
-                await _revive_interrupted_session(session_id, conversation_store)
+                await _revive_interrupted_session(
+                    session_id, conversation_store, runner_id=runner_id
+                )
             return
 
 
