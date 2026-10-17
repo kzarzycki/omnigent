@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -767,3 +768,77 @@ async def test_init_rejection_level_by_status(status: int, level: str) -> None:
     assert rejected["level"] == level
     assert rejected["attributes"]["response_body"] == "nope"
     assert "finished" not in rejected["message"]
+
+
+@pytest.fixture
+def interrupted() -> Iterator[str]:
+    """``conv_init``'s runner recorded dying mid-turn; the record is cleared after."""
+    from omnigent.server import session_revival
+
+    session_revival.note_interrupted("conv_init", "runner_dead")
+    yield "conv_init"
+    session_revival._interrupted.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_first_init_after_a_mid_turn_death_resumes_the_turn_once(
+    interrupted: str,
+) -> None:
+    """The connect hook and a relaunch both initialize; whichever posts carries the resume."""
+    registry, client = _Registry(), _Client()
+    initializer = RunnerSessionInitializer(registry, server_version="test")  # type: ignore[arg-type]
+    conv = _conversation()
+
+    hook = asyncio.create_task(initializer.initialize(conv, client, timeout=10))  # type: ignore[arg-type]
+    await client.entered.wait()
+    relaunch = asyncio.create_task(initializer.initialize(conv, client, timeout=10))  # type: ignore[arg-type]
+    client.release.set()
+    await asyncio.gather(hook, relaunch)
+    initializer.invalidate_session(conv.id)
+    await initializer.initialize(conv, client, timeout=10)  # type: ignore[arg-type]
+
+    resumes = [c["session_init"]["resume_interrupted_turn"] for c in client.calls]
+    assert resumes == [True, False]
+    assert client.calls[0]["session_init"]["recovery_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("superseded_by", ["cancel", "message"])
+async def test_a_cancel_or_message_before_the_init_posts_drops_the_resume(
+    interrupted: str, superseded_by: str
+) -> None:
+    from omnigent.server.routes._sessions.common import _interrupt_fenced_sessions
+
+    registry, client = _Registry(), _Client()
+    client.release.set()
+    initializer = RunnerSessionInitializer(registry, server_version="test")  # type: ignore[arg-type]
+    if superseded_by == "cancel":
+        _interrupt_fenced_sessions.add(interrupted)
+    try:
+        await initializer.initialize(  # type: ignore[arg-type]
+            _conversation(),
+            client,
+            timeout=10,
+            suppress_recovery_turn=superseded_by == "message",
+        )
+        initializer.invalidate_session(interrupted)
+        _interrupt_fenced_sessions.discard(interrupted)
+        await initializer.initialize(_conversation(), client, timeout=10)  # type: ignore[arg-type]
+    finally:
+        _interrupt_fenced_sessions.discard(interrupted)
+
+    assert [c["session_init"]["resume_interrupted_turn"] for c in client.calls] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_whose_init_failed_rides_the_next_init(interrupted: str) -> None:
+    registry, client = _Registry(), _Client()
+    client.release.set()
+    client.status_code = 503
+    initializer = RunnerSessionInitializer(registry, server_version="test")  # type: ignore[arg-type]
+
+    await initializer.initialize(_conversation(), client, timeout=10)  # type: ignore[arg-type]
+    client.status_code = 201
+    await initializer.initialize(_conversation(), client, timeout=10)  # type: ignore[arg-type]
+
+    assert [c["session_init"]["resume_interrupted_turn"] for c in client.calls] == [True, True]
