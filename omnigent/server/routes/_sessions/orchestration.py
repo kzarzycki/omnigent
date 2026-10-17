@@ -3745,6 +3745,90 @@ async def _forward_subagent_status_to_parent_runner(
     return _RunnerForwardResult(status_code=resp.status_code, body=resp.text)
 
 
+# (parent, child) pairs already logged as waiting for a parent that can't be relaunched.
+# custom-lint: disable-next=workspace-scoped-cache -- keys are globally unique session ids
+_unwoken_parent_logged: set[tuple[str, str]] = set()
+
+
+async def _revive_subagent_parent(
+    child_conv: Conversation,
+    runner_router: RunnerRouter | None,
+    conversation_store: ConversationStore,
+) -> bool:
+    """
+    Relaunch a sub-agent's parent whose runner is gone, so the child's result reaches it.
+
+    Nothing is delivered here: the relaunched runner's connect re-sends a loss
+    notice and its init re-queues an undelivered dispatch, and a forwarder's
+    retry lands on it. A parent that can't be relaunched (not host-bound, host
+    offline, out of attempts) is logged once per child.
+
+    :param child_conv: The sub-agent whose result or notice found no parent runner.
+    :param runner_router: Router used to check the parent's runner.
+    :param conversation_store: Store used to read the parent.
+    :returns: ``False`` when no parent will ever take the result (deleted or
+        archived); ``True`` otherwise.
+    """
+    from omnigent.server import session_revival
+
+    parent_id = child_conv.parent_conversation_id
+    if not parent_id or parent_id == child_conv.id:
+        return False
+    parent = await asyncio.to_thread(conversation_store.get_conversation, parent_id)
+    if parent is None or parent.archived:
+        return False
+    # A client resolves for a runner whose tunnel already dropped; ask the registry.
+    if (
+        parent.runner_id is not None
+        and runner_router is not None
+        and runner_router.runner_is_online(parent.runner_id)
+    ):
+        return True
+    if session_revival.revive(parent, why=f"sub-agent {child_conv.id} has a result for it"):
+        return True
+    if (parent_id, child_conv.id) not in _unwoken_parent_logged:
+        _unwoken_parent_logged.add((parent_id, child_conv.id))
+        _logger.warning(
+            "Parent %s of sub-agent %s has no runner and can't be relaunched; "
+            "the result waits until the parent runs again",
+            parent_id,
+            child_conv.id,
+            extra={"session_id": child_conv.id},
+        )
+    return True
+
+
+async def _revive_interrupted_session(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> None:
+    """
+    Relaunch a top-level session whose runner died mid-turn, and have it continue.
+
+    A sub-agent is left to its parent, which gets the loss notice. Best-effort:
+    never raises.
+
+    :param session_id: The session the departed runner interrupted.
+    :param conversation_store: Store used to read the session.
+    :returns: None.
+    """
+    from omnigent.server import session_revival
+
+    try:
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is not None and conv.parent_conversation_id is None:
+            session_revival.revive(
+                conv, why="its runner died mid-turn", resume_interrupted_turn=True
+            )
+    except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
+        _logger.warning(
+            "Could not relaunch interrupted session %s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
 async def _notify_parent_of_lost_subagent(
     session_id: str,
     error: ErrorDetail,
@@ -3761,15 +3845,16 @@ async def _notify_parent_of_lost_subagent(
     stop, ``failed`` for a lost runner.
 
     The child never reports a turn-end, so without this the parent waits on
-    it with no result. The notice is sent as status ``lost`` with the child's
-    stamped dispatch id, which the parent's runner delivers as a ``failed``
-    result only while that same dispatch is still in flight, keeping the
-    dispatch open: if the child is relaunched
+    it with no result. A child with no stamped dispatch id is reported as a
+    failed turn. Otherwise the notice is sent as status ``lost`` with that id,
+    which the parent's runner delivers as a ``failed`` result only while that
+    same dispatch is still in flight, keeping the dispatch open: if the child
+    is relaunched
     (``restore_active_children``) and finishes, its real result replaces this
     one and is delivered again. A runner that predates ``lost`` ignores it, so
-    it never closes a dispatch for good. A parent on the same, now departed
-    runner gets nothing here; its own restart recovers the child instead.
-    Best-effort: never raises.
+    it never closes a dispatch for good. A parent with no reachable runner,
+    including one on the same departed runner, is relaunched unless the stop
+    was deliberate; its restart recovers the child. Best-effort: never raises.
 
     :param session_id: The session the departed runner interrupted.
     :param error: The cause the sweep or relay recorded, e.g.
@@ -3797,9 +3882,13 @@ async def _notify_parent_of_lost_subagent(
             or _is_devin_native_subagent(conv)
         ):
             return
-        data: dict[str, Any] = {"status": _SUBAGENT_LOST_STATUS}
+        data: dict[str, Any]
         if dispatch_id := conv.labels.get(SUBAGENT_DISPATCH_ID_LABEL_KEY):
-            data["work_id"] = dispatch_id
+            data = {"status": _SUBAGENT_LOST_STATUS, "work_id": dispatch_id}
+        else:
+            # A child briefed by plain messages has no dispatch to keep open, and the
+            # runner ignores a ``lost`` notice naming none: report the failed turn.
+            data = {"status": "failed", "turn_outcome": "failed"}
         forward_body: dict[str, Any] = {
             "type": _EXTERNAL_SESSION_STATUS_TYPE,
             "data": {
@@ -3811,8 +3900,13 @@ async def _notify_parent_of_lost_subagent(
                 ),
             },
         }
+        router = get_runner_router()
+        # Before the forward, which can outlast this relay: a parent with no runner is
+        # relaunched, and its connect re-sends this notice. A deliberate stop is left down.
+        if error is not _RUNNER_STOPPED_MID_TURN:
+            await _revive_subagent_parent(conv, router, conversation_store)
         await _forward_subagent_status_to_parent_runner(
-            conv, get_runner_router(), conversation_store, forward_body, None
+            conv, router, conversation_store, forward_body, None
         )
     except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
         _logger.warning(
@@ -4138,6 +4232,8 @@ async def _mark_runner_sessions_offline_once(
             await _resend_lost_subagent_notice(conv, conversation_store)
             continue
         turn_id = _session_active_response_cache.get(conv.id)
+        # A session failed before its runner ever started has no turn to continue.
+        mid_turn = _session_status_cache.get(conv.id, conv.live_status) in _MID_TURN_STATUSES
         _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -4146,6 +4242,8 @@ async def _mark_runner_sessions_offline_once(
             conv.id, error, conversation_store, snapshot=conv, turn_id=turn_id
         )
         await _persist_session_status_error_labels(conv.id, error, conversation_store)
+        if mid_turn:
+            await _revive_interrupted_session(conv.id, conversation_store)
     return retry
 
 
@@ -5388,6 +5486,7 @@ async def _ensure_runner_session_initialized(
     initializer: RunnerSessionInitializer | None = None,
     *,
     suppress_recovery_turn: bool = False,
+    resume_interrupted_turn: bool = False,
     require_success: bool = False,
 ) -> bool:
     """
@@ -5437,6 +5536,8 @@ async def _ensure_runner_session_initialized(
         forward then arrives to an active turn, is buffered, and is
         processed a second time once the (redundant) recovery turn
         finishes.
+    :param resume_interrupted_turn: Ask the runner to continue the turn its
+        predecessor died in. Only the initializer path carries it.
     :param require_success: Raise ``runner_unavailable`` when the handshake
         fails instead of using the message path's best-effort fallback.
     :returns: ``True`` when a current runner explicitly confirmed its native
@@ -5449,6 +5550,7 @@ async def _ensure_runner_session_initialized(
                 runner_client,
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
                 suppress_recovery_turn=suppress_recovery_turn,
+                resume_interrupted_turn=resume_interrupted_turn,
             )
         else:
             from omnigent.version import VERSION
@@ -8389,6 +8491,7 @@ async def _relay_runner_stream(
                     disconnect_error,
                     conversation_store,
                 )
+                await _revive_interrupted_session(session_id, conversation_store)
             return
 
 

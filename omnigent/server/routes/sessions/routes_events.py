@@ -545,8 +545,13 @@ async def _recover_retry_session(
     session_id: str,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
+    resume_interrupted_turn: bool = False,
 ) -> dict[str, bool | str]:
-    """Recover runner/terminal readiness without creating transcript input."""
+    """Recover runner/terminal readiness without creating transcript input.
+
+    ``resume_interrupted_turn`` asks a relaunched runner to continue the turn its
+    predecessor died in.
+    """
     conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     if conv is None:
         raise _session_not_found()
@@ -579,6 +584,7 @@ async def _recover_retry_session(
         conversation_store,
         initializer=getattr(request.app.state, "runner_session_initializer", None),
         suppress_recovery_turn=was_connected,
+        resume_interrupted_turn=resume_interrupted_turn and not was_connected,
         require_success=True,
     )
 
@@ -629,6 +635,7 @@ async def _retry_session_single_flight(
     session_id: str,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
+    resume_interrupted_turn: bool = False,
 ) -> dict[str, bool | str]:
     """Share one in-flight recovery attempt across concurrent callers."""
     lock = _retry_recovery_lock(session_id)
@@ -641,6 +648,7 @@ async def _retry_session_single_flight(
                     session_id=session_id,
                     conversation_store=conversation_store,
                     runner_router=runner_router,
+                    resume_interrupted_turn=resume_interrupted_turn,
                 )
             )
             _retry_recovery_tasks[session_id] = task
@@ -2166,6 +2174,14 @@ def register_events_routes(
                     )
                     if via_parent is not None:
                         runner_result = via_parent
+                if runner_result is None or runner_result.status_code >= 400:
+                    from omnigent.server.routes import sessions as _sf
+
+                    if not await _sf._revive_subagent_parent(
+                        conv, runner_router, conversation_store
+                    ):
+                        # No parent will ever take it: a retry can't land.
+                        return {"queued": False}
                 _require_external_status_forward(
                     session_id,
                     status,
