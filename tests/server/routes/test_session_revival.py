@@ -492,3 +492,72 @@ async def test_a_lane_s_result_during_its_lead_s_failure_bookkeeping_keeps_the_r
         await sweep
 
     assert relaunches == [(lead, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_runner_launched_as_its_session_is_archived_is_torn_down_by_the_archive(
+    store: SqlAlchemyConversationStore, host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive commits during the launch veto's own row read, so the frame goes out."""
+    import threading
+
+    from omnigent.host.frames import decode_host_frame
+    from omnigent.runner.identity import token_bound_runner_id
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import helpers, orchestration
+
+    lead, _ = _lead_with_lanes(store, 0)
+    conv = store.get_conversation(lead)
+    reading, archived = threading.Event(), threading.Event()
+    armed = False
+    get_meta = store._get_meta
+
+    def _meta(session_id: str) -> Any:
+        nonlocal armed
+        if armed and session_id == lead:
+            armed = False
+            reading.set()
+            assert archived.wait(10)
+        return get_meta(session_id)
+
+    check_launch = session_revival.check_launch
+
+    async def _armed_check(*args: Any) -> None:
+        nonlocal armed
+        armed = True
+        await check_launch(*args)
+
+    stopped: list[str] = []
+
+    async def _stop_host_runner(_sid: str, _host: str, runner_id: str, *_: Any, **__: Any) -> bool:
+        stopped.append(runner_id)
+        return True
+
+    async def _nothing(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(store, "_get_meta", _meta)
+    monkeypatch.setattr(session_revival, "check_launch", _armed_check)
+    monkeypatch.setattr(sessions_module, "_stop_session_host_runner", _stop_host_runner)
+    monkeypatch.setattr(sessions_module, "_best_effort_stop", _nothing)
+    monkeypatch.setattr(sessions_module, "_ARCHIVE_STOP_UNDO_GRACE_S", 0)
+    token = session_revival._reviving.set(lead)
+    launch = asyncio.create_task(
+        helpers._launch_runner_on_host_impl(conv, store, host, host[_HOST])
+    )
+    try:
+        assert await asyncio.to_thread(reading.wait, 10)
+        await asyncio.to_thread(store.update_conversation, lead, archived=True)
+        archived.set()
+        attempt = await launch
+        orchestration._spawn_archive_stop(lead, store, None, host)
+        await orchestration._pending_archive_stops[lead]
+    finally:
+        archived.set()
+        session_revival._reviving.reset(token)
+        sessions_module._intentional_stop_sessions.pop(lead, None)
+
+    [frame] = host.sent
+    launched = token_bound_runner_id(decode_host_frame(frame).binding_token)
+    assert attempt.runner_id == launched == store.get_conversation(lead).runner_id
+    assert stopped == [launched]
