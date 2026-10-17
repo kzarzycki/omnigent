@@ -1266,6 +1266,8 @@ async def _prepare_codex_terminal(
             codex_ws_url = f"ws://127.0.0.1:{_probe.getsockname()[1]}"
         app_server = build_codex_native_server(
             session_id=session_id,
+            # This process owns the session, so it is top-level: its own primary.
+            primary_session_id=session_id,
             socket_path=socket_path,
             codex_home=codex_home,
             cwd=Path.cwd(),
