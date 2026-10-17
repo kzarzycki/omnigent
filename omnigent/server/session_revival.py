@@ -75,6 +75,15 @@ def _cancelled(session_id: str) -> bool:
     return session_id in _interrupt_fenced_sessions
 
 
+def wants_resume(session_id: str) -> bool:
+    """Whether a running relaunch owes *session_id* its interrupted turn.
+
+    The runner-connect hook initializes the session too; asking here keeps it
+    from starting the session without the resume first.
+    """
+    return session_id in _tasks and _resume.get(session_id, False) and not _cancelled(session_id)
+
+
 def revive(
     conv: Conversation,
     *,
@@ -153,7 +162,7 @@ async def _relaunch(session_id: str, dead_runner_id: str) -> None:
     def _resume_now() -> bool:
         # Read as the new runner initializes, so a caller that joined meanwhile counts.
         nonlocal resumed
-        resumed = _resume.get(session_id, False) and not _cancelled(session_id)
+        resumed = wants_resume(session_id)
         return resumed
 
     try:
