@@ -547,14 +547,8 @@ async def _recover_retry_session(
     session_id: str,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
-    resume_interrupted_turn: bool | Callable[[], bool] = False,
 ) -> dict[str, bool | str]:
-    """Recover runner/terminal readiness without creating transcript input.
-
-    ``resume_interrupted_turn`` asks a relaunched runner to continue the turn its
-    predecessor died in; a callable is read only then, as the runner session
-    initializes.
-    """
+    """Recover runner/terminal readiness without creating transcript input."""
     conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
     if conv is None:
         raise _session_not_found()
@@ -580,9 +574,6 @@ async def _recover_retry_session(
                 code=ErrorCode.RUNNER_UNAVAILABLE,
             )
         runner_relaunched = conv.runner_id != original_runner_id
-    resume = not was_connected and (
-        resume_interrupted_turn() if callable(resume_interrupted_turn) else resume_interrupted_turn
-    )
     terminal_ready_from_init = await _ensure_runner_session_initialized(
         session_id,
         conv,
@@ -590,7 +581,6 @@ async def _recover_retry_session(
         conversation_store,
         initializer=getattr(request.app.state, "runner_session_initializer", None),
         suppress_recovery_turn=was_connected,
-        resume_interrupted_turn=resume,
         require_success=True,
     )
 
@@ -641,7 +631,6 @@ async def _retry_session_single_flight(
     session_id: str,
     conversation_store: ConversationStore,
     runner_router: RunnerRouter | None,
-    resume_interrupted_turn: bool | Callable[[], bool] = False,
 ) -> dict[str, bool | str]:
     """Share one in-flight recovery attempt across concurrent callers."""
     lock = _retry_recovery_lock(session_id)
@@ -654,7 +643,6 @@ async def _retry_session_single_flight(
                     session_id=session_id,
                     conversation_store=conversation_store,
                     runner_router=runner_router,
-                    resume_interrupted_turn=resume_interrupted_turn,
                 )
             )
             _retry_recovery_tasks[session_id] = task
