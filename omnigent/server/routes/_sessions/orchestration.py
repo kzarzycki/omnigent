@@ -4008,6 +4008,12 @@ async def _revive_subagent_parent(
         and runner_router.runner_is_online(parent.runner_id)
     ):
         return True
+    if (
+        parent.parent_conversation_id is None
+        and _session_status_cache.get(parent.id, parent.live_status) in _MID_TURN_STATUSES
+    ):
+        # Its own loss may be processed after this relaunch initializes it.
+        session_revival.note_interrupted(parent.id, parent.runner_id)
     if session_revival.revive(parent, why=f"sub-agent {child_conv.id} has a result for it"):
         return True
     if (parent_id, child_conv.id) not in _unwoken_parent_logged:
@@ -4029,7 +4035,7 @@ async def _revive_interrupted_session(
     runner_id: str | None,
 ) -> None:
     """
-    Relaunch a top-level session whose runner died mid-turn, and have it continue.
+    Record that a top-level session's runner died mid-turn, and relaunch it to continue.
 
     A sub-agent is left to its parent, which gets the loss notice. Best-effort:
     never raises.
@@ -4043,13 +4049,18 @@ async def _revive_interrupted_session(
 
     try:
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-        if conv is not None and conv.parent_conversation_id is None:
-            session_revival.revive(
-                conv,
-                why="its runner died mid-turn",
-                resume_interrupted_turn=True,
-                dead_runner_id=runner_id,
-            )
+        dead = runner_id or (conv.runner_id if conv is not None else None)
+        # A row already on another runner was relaunched and initialized since;
+        # a turn a person cancelled has nothing to continue.
+        if (
+            conv is None
+            or conv.parent_conversation_id is not None
+            or conv.runner_id != dead
+            or conv.id in _interrupt_fenced_sessions
+        ):
+            return
+        session_revival.note_interrupted(conv.id, dead)
+        session_revival.revive(conv, why="its runner died mid-turn")
     except Exception:  # noqa: BLE001 - the disconnect bookkeeping must still finish
         _logger.warning(
             "Could not relaunch interrupted session %s",
@@ -6033,7 +6044,6 @@ async def _ensure_runner_session_initialized(
     initializer: RunnerSessionInitializer | None = None,
     *,
     suppress_recovery_turn: bool = False,
-    resume_interrupted_turn: bool = False,
     require_success: bool = False,
     trigger: str = "session_ensure",
 ) -> bool:
@@ -6084,8 +6094,6 @@ async def _ensure_runner_session_initialized(
         forward then arrives to an active turn, is buffered, and is
         processed a second time once the (redundant) recovery turn
         finishes.
-    :param resume_interrupted_turn: Ask the runner to continue the turn its
-        predecessor died in. Only the initializer path carries it.
     :param require_success: Raise ``runner_unavailable`` when the handshake
         fails instead of using the message path's best-effort fallback.
     :returns: ``True`` when a current runner explicitly confirmed its native
@@ -6099,7 +6107,6 @@ async def _ensure_runner_session_initialized(
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
                 suppress_recovery_turn=suppress_recovery_turn,
                 trigger=trigger,
-                resume_interrupted_turn=resume_interrupted_turn,
             )
         else:
             from omnigent.version import VERSION
