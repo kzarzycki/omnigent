@@ -153,16 +153,33 @@ async def check_launch(
     Veto an automatic relaunch's host launch for a session stopped or archived since.
 
     Called right before the launch frame is sent; a launch a person asked for
-    isn't vetoed.
+    isn't vetoed. A read too slow to trust withdraws the relaunch; the session's
+    next message launches it.
 
     :param session_id: The session being launched.
     :param runner_ids: The runners a stop may name: the one replaced and its successor.
     :param store: Store to re-read the row from.
     :raises RevivalWithdrawn: The relaunch must not launch.
     """
+    from omnigent.server.routes import sessions as _facade
+
     if _reviving.get() != session_id:
         return
-    row = await asyncio.to_thread(store.get_conversation, session_id)
+    # Well inside the archive undo grace: an archive that commits during the read
+    # either is seen, or its deferred stop fires after this frame and reaps it.
+    bound = min(2.0, _facade._ARCHIVE_STOP_UNDO_GRACE_S / 4)
+    try:
+        row = await asyncio.wait_for(
+            asyncio.to_thread(store.get_conversation, session_id), timeout=bound
+        )
+    except TimeoutError:
+        _logger.warning(
+            "Not relaunching session %s: its row didn't read back within %.1fs",
+            session_id,
+            bound,
+            extra={"session_id": session_id},
+        )
+        raise RevivalWithdrawn(session_id) from None
     if row is None or row.archived or any(_stopped(session_id, r) for r in runner_ids):
         raise RevivalWithdrawn(session_id)
 
