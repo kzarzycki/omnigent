@@ -14,6 +14,7 @@ server + host daemon + zygote + runners and the mock LLM:
 from __future__ import annotations
 
 import os
+import re
 import signal
 import time
 from pathlib import Path
@@ -74,9 +75,12 @@ def _open_sessions(  # type: ignore[no-untyped-def]
     With *lanes_of_first*, every session after the first is its sub-agent on its runner.
     """
     _wait_for_host_online(http_client, daemon.host_id, timeout=30.0)
-    agent_id = lookup_agent_id(
-        http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
-    )
+    agent_dir = _write_smoke_agent_yaml(tmp_path)
+    if lanes_of_first:
+        # The lead drains its lanes' results with sys_read_inbox.
+        spec = agent_dir / f"{agent_dir.name}.yaml"
+        spec.write_text(spec.read_text() + "async: true\n")
+    agent_id = lookup_agent_id(http_client, upload_agent(http_client, agent_dir))
     session_ids = []
     for n in range(count):
         ws = tmp_path / f"ws{n}"
@@ -184,6 +188,23 @@ def test_failure_notice_revives_a_subscriber_whose_runner_died(
         daemon.proc.wait(timeout=30)
 
 
+_WAKE = "waiting in inbox. Call sys_read_inbox to collect."
+# The woken lead drains its inbox, then answers.
+_DRAIN_THEN_WAKE = [
+    {"tool_calls": [{"call_id": "call_drain", "name": "sys_read_inbox", "arguments": "{}"}]},
+    {"text": "LEAD_WOKE"},
+]
+
+
+def _drained_results(http_client: httpx.Client, lead: str) -> list[str]:
+    """Each sub-agent result line the lead read from its inbox, in order."""
+    items = http_client.get(f"/v1/sessions/{lead}/items", params={"limit": 100}).json()["data"]
+    outputs = [str(i.get("output")) for i in items if i.get("type") == "function_call_output"]
+    return [
+        line for out in outputs for line in re.findall(r"\[System: sub-agent task [^\]]*", out)
+    ]
+
+
 def _send(http_client: httpx.Client, session_id: str, text: str) -> None:
     http_client.post(
         f"/v1/sessions/{session_id}/events",
@@ -206,11 +227,7 @@ def test_lanes_lost_with_every_runner_wake_their_idle_lead(
     configure_mock_llm(
         mock_llm_server_url, [{"text": "never finishes", "delay": 300}] * 2, match="LANE_SLOW"
     )
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": "LEAD_WOKE"}] * 3,
-        match="waiting in inbox. Call sys_read_inbox to collect.",
-    )
+    configure_mock_llm(mock_llm_server_url, _DRAIN_THEN_WAKE * 3, match=_WAKE)
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / ".omnigent"))
     daemon = _spawn_host_daemon(
         tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
@@ -246,6 +263,20 @@ def test_lanes_lost_with_every_runner_wake_their_idle_lead(
         assert lead_runner not in dict(runners), "the lead answered without a relaunched runner"
         relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
         assert relaunches.count(lead_runner) == 1, f"lead relaunched more than once: {relaunches}"
+        # Both lanes' losses reach the lead, each once; give a split wake time to drain.
+        _wait_for(
+            lambda: (lambda r: r if len(r) >= len(lanes) else None)(
+                _drained_results(http_client, lead)
+            ),
+            timeout=60.0,
+            what="the lead to read both lanes' results",
+        )
+        time.sleep(10)
+        results = _drained_results(http_client, lead)
+        assert len(results) == len(lanes), results
+        assert all(" failed " in r for r in results), results
+        handles = {r.split()[3] for r in results}
+        assert len(handles) == len(lanes), f"a lane's result arrived twice: {results}"
     finally:
         daemon.proc.terminate()
         daemon.proc.wait(timeout=30)
@@ -306,11 +337,7 @@ def test_lane_finishing_after_its_lead_was_idle_reaped_wakes_the_lead(
     The lane's turn-end is posted the way a native forwarder posts it, retrying
     a 503 until it lands.
     """
-    configure_mock_llm(
-        mock_llm_server_url,
-        [{"text": "LEAD_WOKE"}] * 3,
-        match="waiting in inbox. Call sys_read_inbox to collect.",
-    )
+    configure_mock_llm(mock_llm_server_url, _DRAIN_THEN_WAKE * 3, match=_WAKE)
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / ".omnigent"))
     daemon = _spawn_host_daemon(
         tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
@@ -350,6 +377,12 @@ def test_lane_finishing_after_its_lead_was_idle_reaped_wakes_the_lead(
         items = http_client.get(f"/v1/sessions/{lead}/items").json()["data"]
         wakes = [i for i in items if "waiting in inbox" in str(i.get("content"))]
         assert len(wakes) == 1, f"the lane's result was announced {len(wakes)} times"
+        results = _wait_for(
+            lambda: _drained_results(http_client, lead) or None,
+            timeout=60.0,
+            what="the lead to read the lane's result",
+        )
+        assert len(results) == 1 and "LANE_DONE" in results[0], results
         relaunches = [r for r, _p in _launches(daemon.daemon_log) if r not in dict(runners)]
         assert len(relaunches) == 1, f"expected one relaunch of the lead, got {relaunches}"
     finally:
