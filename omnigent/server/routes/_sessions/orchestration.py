@@ -110,6 +110,7 @@ from omnigent.runtime import (
     inflight_text,
     pending_elicitations,
     pending_inputs,
+    usage_metrics,
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import (
@@ -259,6 +260,7 @@ from omnigent.server.routes._sessions.helpers import (
     _child_session_summary_from_conversation,
     _codex_subagent_labels_from_body,
     _coerce_cumulative_field,
+    _coerce_rate_limits,
     _collect_descendant_conversation_ids,
     _consume_pre_resolved_harness_elicitation,
     _create_and_publish_antigravity_child,
@@ -1743,6 +1745,7 @@ def _accumulate_session_usage(
         delta["by_model"] = {llm_model: model_delta}
 
     new_current = conversation_store.increment_session_usage(session_id, delta)
+    usage_metrics.record_usage_growth(delta, model=llm_model or None)
     # Per-user daily rollup (policy-gated; this is the per-turn delta).
     _record_daily_cost(conv, cost_delta, conversation_store)
     return _priced_cost_for_display(new_current)
@@ -1845,7 +1848,17 @@ def _persist_native_cumulative_usage(
     cin = _coerce_cumulative_field(data, "cumulative_input_tokens", numeric=False)
     cout = _coerce_cumulative_field(data, "cumulative_output_tokens", numeric=False)
     ccache = _coerce_cumulative_field(data, "cumulative_cache_read_input_tokens", numeric=False)
-    if cost is None and policy_cost is None and cin is None and cout is None:
+    ccreate = _coerce_cumulative_field(
+        data, "cumulative_cache_creation_input_tokens", numeric=False
+    )
+    rate_limits = _coerce_rate_limits(data)
+    if (
+        cost is None
+        and policy_cost is None
+        and cin is None
+        and cout is None
+        and rate_limits is None
+    ):
         return None
 
     # Deliberately a FRESH read — never a caller-supplied row. This row is the
@@ -1897,7 +1910,14 @@ def _persist_native_cumulative_usage(
                 session_id,
             )
         current["cache_read_input_tokens"] = cached
-        current["input_tokens"] = int(cin) - cached
+        # Cache writes (claude-native) are also inside the input total; split
+        # them out the same way. Absent for harnesses that don't report them.
+        if ccreate is None:
+            ccreate = current.get("cache_creation_input_tokens")
+        created = min(int(ccreate or 0), int(cin) - cached)
+        if ccreate is not None:
+            current["cache_creation_input_tokens"] = created
+        current["input_tokens"] = int(cin) - cached - created
     if cout is not None:
         current["output_tokens"] = cout
     if cin is not None or cout is not None:
@@ -1906,6 +1926,7 @@ def _persist_native_cumulative_usage(
         current["total_tokens"] = (
             int(current.get("input_tokens", 0))
             + int(current.get("cache_read_input_tokens", 0))
+            + int(current.get("cache_creation_input_tokens", 0))
             + int(current.get("output_tokens", 0))
         )
 
@@ -1990,7 +2011,26 @@ def _persist_native_cumulative_usage(
     if policy_cost is not None:
         current["policy_cost_usd"] = max(old_policy_cost, float(policy_cost))
 
+    # Account-level subscription windows (codex-native), merged per limit and
+    # window: Codex sends sparse updates, so an omitted window keeps its value.
+    if rate_limits is not None:
+        limit = dict(current.get("rate_limits", {}).get(rate_limits["limit_id"], {}))
+        limit.update({k: v for k, v in rate_limits.items() if k != "limit_id"})
+        limit["captured_at"] = int(time.time())
+        current["rate_limits"] = {
+            **current.get("rate_limits", {}),
+            rate_limits["limit_id"]: limit,
+        }
+        usage_metrics.record_rate_limits(rate_limits)
+
     conversation_store.set_session_usage(session_id, current)
+    growth: dict[str, Any] = {
+        key: int(current[key]) - old_tokens[key] for key in _MODEL_TOKEN_KEYS if key in current
+    }
+    growth["total_cost_usd"] = float(current.get("total_cost_usd", 0.0) or 0.0) - old_cost
+    usage_metrics.record_usage_growth(
+        growth, model=model_name if isinstance(model_name, str) else None
+    )
     # Per-user daily rollup. Native reports cumulative totals, so the turn's
     # delta is the increase in cumulative cost. Uses the authoritative
     # ``total_cost_usd`` (= statusLine S), NOT ``policy_cost_usd`` — the
@@ -2056,6 +2096,8 @@ async def _persist_external_session_usage(
         "policy_cost_usd",
         "cumulative_input_tokens",
         "cumulative_output_tokens",
+        # A rate-limit snapshot alone is valid: Codex sends it separately.
+        "rate_limits",
     )
     has_cumulative = any(body.data.get(k) is not None for k in _CUMULATIVE_USAGE_KEYS)
     if raw_tokens is None and raw_window is None and not has_cumulative:

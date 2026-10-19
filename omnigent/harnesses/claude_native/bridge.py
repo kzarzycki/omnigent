@@ -3530,6 +3530,25 @@ def compute_transcript_cumulative_cost(
     """
     Sum the USD cost of every assistant message in a Claude transcript.
 
+    The cost half of :func:`compute_transcript_cumulative_usage`.
+
+    :param transcript_path: Path to a Claude transcript JSONL.
+    :param include_sidechains: See :func:`compute_transcript_cumulative_usage`.
+    :returns: Total USD cost, or ``None`` when nothing could be priced.
+    """
+    return compute_transcript_cumulative_usage(
+        transcript_path, include_sidechains=include_sidechains
+    )[0]
+
+
+def compute_transcript_cumulative_usage(
+    transcript_path: Path,
+    *,
+    include_sidechains: bool,
+) -> tuple[float | None, dict[str, int]]:
+    """
+    Sum the USD cost and token counts of every assistant message in a transcript.
+
     Reads the whole transcript and prices each assistant record's
     ``message.usage`` by that record's ``message.model`` (so a
     mid-session ``/model`` switch is billed at the right rate), summing
@@ -3546,8 +3565,8 @@ def compute_transcript_cumulative_cost(
     Claude can write several records per API response, each repeating its
     usage. ``requestId`` may be absent without an Anthropic ``request-id``
     response header. Deduplicate by ``message.id``, falling back to
-    ``requestId`` for records without one. Priceable records carrying both IDs
-    link request-only fragments to the same response. The last priceable record
+    ``requestId`` for records without one. Records carrying both IDs link
+    request-only fragments to the same response. The last record with usage
     wins; records with neither ID remain separate.
 
     :param transcript_path: Path to a Claude transcript JSONL, e.g.
@@ -3558,11 +3577,15 @@ def compute_transcript_cumulative_cost(
         skipped here (they are counted via the sub-agent's own
         transcript) to avoid double-billing. ``True`` for a sub-agent's
         own ``agent-<id>.jsonl``, where every record is a sidechain.
-    :returns: Total USD cost across priced assistant messages, or
-        ``None`` when the transcript has no assistant message that could
-        be priced (missing/empty file, no usage, or pricing unavailable
-        for every model present) — distinct from ``0.0``, which means
-        priced messages summed to zero.
+    :returns: ``(cost, tokens)``. ``cost`` is the total USD cost across
+        priced assistant messages, or ``None`` when the transcript has no
+        assistant message that could be priced (missing/empty file, no usage,
+        or pricing unavailable for every model present) — distinct from
+        ``0.0``, which means priced messages summed to zero. ``tokens`` sums
+        every response's usage, priced or not, in Anthropic's additive
+        buckets, e.g. ``{"input_tokens": 12, "cache_read_input_tokens": 9000,
+        "cache_creation_input_tokens": 400, "output_tokens": 350}``; empty
+        when no record carries usage.
     """
     read_result = _read_complete_jsonl_records(
         transcript_path,
@@ -3575,7 +3598,12 @@ def compute_transcript_cumulative_cost(
     provider_config = load_config()
     provider_config_fingerprint = hashlib.sha256(repr(provider_config).encode("utf-8")).digest()
 
-    cost_by_response: dict[tuple[str, str | int], float] = {}
+    # Per response: its last usage (for tokens) and its last priceable usage
+    # with pricing (for cost), so an unpriced fragment never drops a priced one.
+    usage_by_response: dict[
+        tuple[str, str | int],
+        tuple[dict[str, int], tuple[dict[str, int], ModelPricing] | None],
+    ] = {}
     message_keys_by_request: dict[str, tuple[str, str | int]] = {}
     for index, record in enumerate(read_result.records):
         if record.text is None:
@@ -3592,15 +3620,15 @@ def compute_transcript_cumulative_cost(
         if usage is None:
             continue
         model = _model_from_transcript_entry(entry)
-        if model is None:
-            continue
-        pricing = _transcript_model_pricing(
-            model,
-            provider_config=provider_config,
-            provider_config_fingerprint=provider_config_fingerprint,
+        pricing = (
+            _transcript_model_pricing(
+                model,
+                provider_config=provider_config,
+                provider_config_fingerprint=provider_config_fingerprint,
+            )
+            if model is not None
+            else None
         )
-        if pricing is None:
-            continue
         message = entry.get("message")
         message_id = message.get("id") if isinstance(message, dict) else None
         if not isinstance(message_id, str) or not message_id:
@@ -3608,20 +3636,35 @@ def compute_transcript_cumulative_cost(
         request_id = entry.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             request_id = None
+        prior = None
         if message_id is not None:
             key = ("message", message_id)
             if request_id is not None:
                 # A later fragment can supply the identity missing from earlier ones.
-                cost_by_response.pop(("request", request_id), None)
+                prior = usage_by_response.pop(("request", request_id), None)
                 message_keys_by_request[request_id] = key
         elif request_id is not None:
             key = message_keys_by_request.get(request_id, ("request", request_id))
         else:
             key = ("record", index)
-        cost_by_response[key] = compute_llm_cost(usage, pricing)
-    if not cost_by_response:
-        return None
-    return sum(cost_by_response.values())
+        prior = prior or usage_by_response.get(key)
+        priced = (usage, pricing) if pricing is not None else (prior[1] if prior else None)
+        usage_by_response[key] = (usage, priced)
+    costs = [compute_llm_cost(*priced) for _usage, priced in usage_by_response.values() if priced]
+    tokens: dict[str, int] = {}
+    for usage, _priced in usage_by_response.values():
+        for token_key in _TRANSCRIPT_TOKEN_KEYS:
+            tokens[token_key] = tokens.get(token_key, 0) + usage.get(token_key, 0)
+    return (sum(costs) if costs else None), tokens
+
+
+# Additive Anthropic usage buckets summed by :func:`compute_transcript_cumulative_usage`.
+_TRANSCRIPT_TOKEN_KEYS = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+)
 
 
 def count_hook_events(bridge_dir: Path) -> int:

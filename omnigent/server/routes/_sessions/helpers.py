@@ -2317,6 +2317,64 @@ def _coerce_cumulative_field(
     return value
 
 
+def _coerce_rate_limits(data: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Read and validate an optional ``rate_limits`` snapshot from event data.
+
+    codex-native forwards Codex's ``account/rateLimits/updated`` windows,
+    already stripped to the fields below on the host. Only those fields are
+    kept, so a client can't stash anything else in ``session_usage``.
+
+    :param data: The ``external_session_usage`` event ``data`` dict, e.g.
+        ``{"rate_limits": {"limit_id": "codex", "primary": {"used_percent":
+        80.0, "window_minutes": 10080, "resets_at": 1792874497}}}``.
+    :returns: ``{"limit_id": str, "<window>": {...}}`` with at least one of
+        ``primary`` / ``secondary``, or ``None`` when the key is absent.
+    :raises OmnigentError: When present but malformed.
+    """
+    raw = data.get("rate_limits")
+    if raw is None:
+        return None
+
+    def _invalid(detail: str) -> OmnigentError:
+        return OmnigentError(
+            f"external_session_usage data.rate_limits {detail}", code=ErrorCode.INVALID_INPUT
+        )
+
+    if not isinstance(raw, dict):
+        raise _invalid("must be an object")
+    limit_id = raw.get("limit_id")
+    if not isinstance(limit_id, str) or not 0 < len(limit_id) <= 64:
+        raise _invalid("limit_id must be a 1-64 character string")
+    result: dict[str, Any] = {"limit_id": limit_id}
+    for name in ("primary", "secondary"):
+        window = raw.get(name)
+        if window is None:
+            continue
+        if not isinstance(window, dict):
+            raise _invalid(f"{name} must be an object")
+        used = window.get("used_percent")
+        if (
+            isinstance(used, bool)
+            or not isinstance(used, (int, float))
+            or not math.isfinite(used)
+            or not 0 <= used <= 1000
+        ):
+            raise _invalid(f"{name}.used_percent must be a number in [0, 1000]")
+        clean: dict[str, Any] = {"used_percent": float(used)}
+        for key in ("window_minutes", "resets_at"):
+            value = window.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise _invalid(f"{name}.{key} must be a non-negative int")
+            clean[key] = value
+        result[name] = clean
+    if len(result) == 1:
+        raise _invalid("needs a primary or secondary window")
+    return result
+
+
 async def _persist_external_model_change(
     session_id: str,
     conv: Conversation,
@@ -11895,6 +11953,7 @@ __all__ = [
     "_codex_subagent_display_tool",
     "_codex_subagent_labels_from_body",
     "_coerce_cumulative_field",
+    "_coerce_rate_limits",
     "_collect_descendant_conversation_ids",
     "_consume_pre_resolved_harness_elicitation",
     "_create_and_publish_antigravity_child",
