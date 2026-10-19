@@ -848,6 +848,9 @@ class _ForwardDedupeState:
         from ``posted_cost`` because it advances mid-turn (with in-flight
         sub-agent spend) while ``S`` stays frozen. ``None`` until first
         post.
+    :param posted_tokens: Last cumulative token fields POSTed alongside
+        ``cumulative_cost_usd``; growth re-posts S with the fresh totals.
+        ``None`` until the first cost post.
     :param observed_title: Last ``custom-title`` seen in the transcript,
         sticky across polls, e.g. ``"auth-refactor"``. ``None`` until the
         operator runs ``/rename``.
@@ -881,6 +884,10 @@ class _ForwardDedupeState:
     # sub-agent spend so the gate can block mid-turn. Separate baseline
     # because it can advance while ``posted_cost`` (S) is frozen.
     posted_policy_cost: float | None = None
+    # Last cumulative token fields POSTed with ``cumulative_cost_usd``. A
+    # transcript can grow after S settles (late flush, a sub-agent's child
+    # conversation minted later), so growth here re-posts S with fresh tokens.
+    posted_tokens: dict[str, int] | None = None
     # Last permission mode POSTed as ``external_permission_mode_change`` —
     # mirrors the launch mode and any in-pane shift+tab switch, neither of
     # which the web UI can observe on its own.
@@ -3152,9 +3159,20 @@ async def _forward_session_cost(
     # lower transcript read (e.g. just after a rotation) and suppresses
     # steady-state churn. The two fields advance independently (policy_cost
     # moves mid-turn while display_cost/S is frozen).
+    tokens: dict[str, int] = {}
+    if display_cost is not None:
+        # Size-keyed cache: a poll re-parses only transcripts that grew.
+        tokens = await asyncio.to_thread(
+            _session_token_fields,
+            parent_transcript_path=parent_transcript_path,
+            active_subagents=active_subagents,
+            cost_cache=cost_cache,
+        )
+    posted_tokens = dedupe.posted_tokens or {}
+    tokens_advanced = any(value > posted_tokens.get(key, -1) for key, value in tokens.items())
     payload: dict[str, float | str] = {}
     if display_cost is not None and (
-        dedupe.posted_cost is None or display_cost > dedupe.posted_cost
+        dedupe.posted_cost is None or display_cost > dedupe.posted_cost or tokens_advanced
     ):
         payload["cumulative_cost_usd"] = display_cost
     if policy_cost is not None and (
@@ -3166,14 +3184,7 @@ async def _forward_session_cost(
     if "cumulative_cost_usd" in payload:
         # Tokens ride only with S: the server then takes its explicit-cost
         # branch and records them without pricing a second, diverging cost.
-        payload.update(
-            await asyncio.to_thread(
-                _session_token_fields,
-                parent_transcript_path=parent_transcript_path,
-                active_subagents=active_subagents,
-                cost_cache=cost_cache,
-            )
-        )
+        payload.update(tokens)
     # Tag a display-cost (S) advance with the active model captured by the
     # statusLine wrapper (``{"model": "claude-opus-4-8", ...}`` in context.json),
     # so the server attributes its cost and token growth per model. Sent
@@ -3210,6 +3221,7 @@ async def _forward_session_cost(
     dedupe.cost_retry_not_before = 0.0
     if "cumulative_cost_usd" in payload:
         dedupe.posted_cost = display_cost
+        dedupe.posted_tokens = tokens
     if "policy_cost_usd" in payload:
         dedupe.posted_policy_cost = policy_cost
 
