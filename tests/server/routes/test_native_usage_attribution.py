@@ -587,6 +587,18 @@ def test_rate_limit_windows_merge_sparse_updates_per_limit(
         {"limit_id": "", "primary": weekly},
         {"limit_id": "codex", "primary": {"used_percent": float("nan")}},
         {"limit_id": "codex", "primary": {"used_percent": 5, "resets_at": -1}},
+        {"limit_id": "codex", "primary": {"used_percent": 10**400}},
+        {"limit_id": "codex", "primary": {"used_percent": 5, "resets_at": 10**30}},
     ):
         with pytest.raises(OmnigentError):
             _persist_native_cumulative_usage(conv.id, {"rate_limits": bad}, store)
+    with pytest.raises(OmnigentError):
+        _persist_native_cumulative_usage(conv.id, {"cumulative_input_tokens": 10**400}, store)
+
+    # The stored ids are capped, so a client can't grow the map or the metric series.
+    for n in range(20):
+        _persist_native_cumulative_usage(
+            conv.id, {"rate_limits": {"limit_id": f"id-{n}", "primary": weekly}}, store
+        )
+    assert len(_usage(store, conv.id)["rate_limits"]) == 8
+    assert len(gauges) == 2 + 7  # the two codex reports above, then id-0..id-6

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import math
 import re
 import secrets
 import time
@@ -2308,7 +2307,8 @@ def _coerce_cumulative_field(
     :returns: The validated value, or ``None`` when the key is absent.
     :raises OmnigentError: When present but the wrong type / negative /
         non-finite (``NaN`` / ``inf`` — which the monotonic ``max(old,
-        new)`` clamp downstream would otherwise latch permanently).
+        new)`` clamp downstream would otherwise latch permanently) / at
+        least ``2**53``.
     """
     value = data.get(key)
     if value is None:
@@ -2319,7 +2319,8 @@ def _coerce_cumulative_field(
             f"{'number' if numeric else 'int'}",
             code=ErrorCode.INVALID_INPUT,
         )
-    if (not numeric and not isinstance(value, int)) or not math.isfinite(value) or value < 0:
+    # The range check also rejects NaN, inf, and ints too large for a float.
+    if (not numeric and not isinstance(value, int)) or not 0 <= value < 2**53:
         raise OmnigentError(
             f"external_session_usage data.{key} must be a finite non-negative "
             f"{'number' if numeric else 'int'}",
@@ -2332,8 +2333,8 @@ def _coerce_rate_limits(data: dict[str, Any]) -> dict[str, Any] | None:
     """
     Read and validate an optional ``rate_limits`` snapshot from event data.
 
-    codex-native forwards Codex's ``account/rateLimits/updated`` windows,
-    already stripped to the fields below on the host. Only those fields are
+    codex-native forwards the windows from Codex's rollout ``token_count``
+    snapshots, already stripped to the fields below on the host. Only those fields are
     kept, so a client can't stash anything else in ``session_usage``.
 
     :param data: The ``external_session_usage`` event ``data`` dict, e.g.
@@ -2368,8 +2369,7 @@ def _coerce_rate_limits(data: dict[str, Any]) -> dict[str, Any] | None:
         if (
             isinstance(used, bool)
             or not isinstance(used, (int, float))
-            or not math.isfinite(used)
-            or not 0 <= used <= 1000
+            or not 0 <= used <= 1000  # also rejects NaN and inf
         ):
             raise _invalid(f"{name}.used_percent must be a number in [0, 1000]")
         clean: dict[str, Any] = {"used_percent": float(used)}
@@ -2377,8 +2377,8 @@ def _coerce_rate_limits(data: dict[str, Any]) -> dict[str, Any] | None:
             value = window.get(key)
             if value is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise _invalid(f"{name}.{key} must be a non-negative int")
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 2**40:
+                raise _invalid(f"{name}.{key} must be a non-negative int below 2**40")
             clean[key] = value
         result[name] = clean
     if len(result) == 1:
