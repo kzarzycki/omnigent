@@ -9381,6 +9381,40 @@ def test_compute_transcript_cumulative_usage_sums_tokens_once_per_response(
     }
 
 
+def test_compute_transcript_cumulative_usage_keeps_the_newest_priced_record_when_ids_merge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A record linking a request-only and a message-only fragment keeps the newer priced one."""
+    from omnigent.llms.context_window import ModelPricing
+
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: ModelPricing(input_per_token=1.0, output_per_token=0.0) if model else None,
+    )
+    monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", dict)
+    claude_native_bridge._TRANSCRIPT_PRICING_CACHE.clear()
+    unpriced_link = _assistant_entry(
+        model="m", input_tokens=30, output_tokens=0, request_id="req", message_id="msg"
+    )
+    del unpriced_link["message"]["model"]
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript_jsonl(
+        path,
+        [
+            _assistant_entry(model="m", input_tokens=10, output_tokens=0, request_id="req"),
+            _assistant_entry(model="m", input_tokens=20, output_tokens=0, message_id="msg"),
+            unpriced_link,
+        ],
+    )
+
+    cost, tokens = claude_native_bridge.compute_transcript_cumulative_usage(
+        path, include_sidechains=True
+    )
+
+    assert cost == pytest.approx(20)
+    assert tokens["input_tokens"] == 30
+
+
 @pytest.mark.parametrize(
     "identities",
     [

@@ -1782,6 +1782,11 @@ async def _persist_relay_reported_model(
     )
 
 
+# Codex reports a handful of limit ids ("codex", "premium"); the cap bounds the
+# stored map and the metric series a client can create.
+_MAX_RATE_LIMIT_IDS = 8
+
+
 def _persist_native_cumulative_usage(
     session_id: str,
     data: dict[str, Any],
@@ -2013,14 +2018,22 @@ def _persist_native_cumulative_usage(
 
     # Account-level subscription windows (codex-native), merged per limit and
     # window: Codex sends sparse updates, so an omitted window keeps its value.
+    known_limits = current.get("rate_limits", {})
+    if rate_limits is not None and (
+        rate_limits["limit_id"] not in known_limits and len(known_limits) >= _MAX_RATE_LIMIT_IDS
+    ):
+        _logger.warning(
+            "Dropping rate-limit id %r for session %r: already tracking %d ids",
+            rate_limits["limit_id"],
+            session_id,
+            len(known_limits),
+        )
+        rate_limits = None
     if rate_limits is not None:
-        limit = dict(current.get("rate_limits", {}).get(rate_limits["limit_id"], {}))
+        limit = dict(known_limits.get(rate_limits["limit_id"], {}))
         limit.update({k: v for k, v in rate_limits.items() if k != "limit_id"})
         limit["captured_at"] = int(time.time())
-        current["rate_limits"] = {
-            **current.get("rate_limits", {}),
-            rate_limits["limit_id"]: limit,
-        }
+        current["rate_limits"] = {**known_limits, rate_limits["limit_id"]: limit}
         usage_metrics.record_rate_limits(rate_limits)
 
     conversation_store.set_session_usage(session_id, current)
