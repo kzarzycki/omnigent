@@ -8011,6 +8011,10 @@ def _transcript_items_from_entry(
             agent_name=agent_name,
             current_response_id=current_response_id,
         )
+    # Other record types can carry a ``message`` too, e.g. ``api-request-blob``
+    # copies of the raw API request; only conversation records are mirrored.
+    if entry.get("type") not in ("user", "assistant"):
+        return current_response_id, []
     message = entry.get("message")
     if not isinstance(message, dict):
         return current_response_id, []

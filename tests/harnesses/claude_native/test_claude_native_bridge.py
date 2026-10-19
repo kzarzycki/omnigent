@@ -1264,6 +1264,36 @@ def test_read_transcript_items_since_marks_task_notifications_meta(tmp_path: Pat
     }
 
 
+def test_api_request_blob_records_are_not_mirrored(tmp_path: Path) -> None:
+    # Claude persists raw API request copies; their tool-loaded notes and
+    # mid-turn system reminders must not render as user bubbles.
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript_line(
+            {
+                "type": "api-request-blob",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Tool loaded."},
+                        {
+                            "type": "text",
+                            "text": "<system-reminder>\nThe user sent a new message"
+                            " while you were working:\nhi\n</system-reminder>",
+                        },
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, response_id, items = read_transcript_items_since(
+        transcript, 0, agent_name="Claude", current_response_id="active"
+    )
+    assert items == []
+    assert response_id == "active"
+
+
 _TEAMMATE_MESSAGE = '<teammate-message teammate_id="reviewer">Done</teammate-message>'
 _TASK_COMPLETION = (
     "<task-notification><task-id>agent-1</task-id><status>completed</status></task-notification>"
