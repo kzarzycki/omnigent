@@ -588,7 +588,25 @@ async def test_forward_session_cost_carries_cumulative_tokens_with_the_display_c
             dedupe=dedupe,
             cost_cache={},
         )
+        # The transcript grows after S settled: S is re-posted with fresh
+        # tokens once, and an unchanged poll posts nothing.
+        with parent.open("a", encoding="utf-8") as handle:
+            handle.write(usage_line("msg_Q", {"input_tokens": 5, "output_tokens": 6}))
+        for _poll in range(2):
+            await forwarder._forward_session_cost(
+                client=client,
+                session_id="conv_parent",
+                bridge_dir=bridge_dir,
+                parent_transcript_path=parent,
+                subagent_state=subagents,
+                dedupe=dedupe,
+                cost_cache={},
+            )
 
+    assert len(posted) == 3
+    assert posted[2]["cumulative_cost_usd"] == pytest.approx(0.25)
+    assert posted[2]["cumulative_input_tokens"] == 2 + 90 + 1 + 8 + 5
+    assert posted[2]["cumulative_output_tokens"] == 7 + 6
     assert posted[0] == {
         "cumulative_cost_usd": pytest.approx(0.25),
         "policy_cost_usd": pytest.approx(0.25),
