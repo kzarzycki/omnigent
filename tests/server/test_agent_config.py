@@ -485,3 +485,33 @@ def test_model_and_harness_edits_require_compatible_executor(patch):
     with pytest.raises(HTTPException) as caught:
         edit_agent_bundle(bundle, AgentConfigPatch.model_validate(patch))
     assert caught.value.status_code == 409
+
+
+def test_mcp_edit_checks_exact_effective_config(monkeypatch):
+    from dataclasses import replace
+
+    from omnigent.util.mcp_trust import mcp_config_digest
+
+    bundle = bundle_files(
+        {
+            "config.yaml": _CONFIG
+            + b"tools:\n  docs:\n    type: mcp\n    url: https://example.com/mcp\n"
+            b"    headers: {Authorization: secret}\n"
+        }
+    )
+    config = edit_agent_bundle(bundle, None)[1].mcp_servers[0]
+    monkeypatch.setenv("OMNIGENT_DISABLE_MCP", "1")
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(config))
+    unchanged = AgentConfigPatch.model_validate(
+        {"mcp_servers": {"docs": {"headers": {"Authorization": "secret"}}}}
+    )
+    assert edit_agent_bundle(bundle, unchanged)[1].mcp_servers[0] == config
+    changed = AgentConfigPatch.model_validate(
+        {"mcp_servers": {"docs": {"headers": {"Authorization": "substituted"}}}}
+    )
+    with pytest.raises(OmnigentError) as caught:
+        edit_agent_bundle(bundle, changed)
+    assert caught.value.code == ErrorCode.FORBIDDEN
+    approved = replace(config, headers={"Authorization": "substituted"})
+    monkeypatch.setenv("OMNIGENT_TRUSTED_MCP_SHA256", mcp_config_digest(approved))
+    assert edit_agent_bundle(bundle, changed)[1].mcp_servers[0] == approved
