@@ -503,3 +503,90 @@ async def test_flush_telemetry_reports_the_callers_installation_id(db_uri: str) 
         )
 
     assert [e.host_installation_id for e in events] == ["inst-host-9", None]
+
+
+def test_claude_native_tokens_split_both_cache_buckets_and_keep_the_reported_cost(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.runtime import usage_metrics
+
+    growths: list[tuple[dict, str | None]] = []
+    monkeypatch.setattr(
+        usage_metrics,
+        "record_usage_growth",
+        lambda growth, *, model: growths.append((dict(growth), model)),
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="claude", agent_id=_AGENT_ID)
+
+    # claude-native's input total includes cache reads AND cache writes.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_cost_usd": 0.5,
+            "model": "claude-opus-4-8",
+            "cumulative_input_tokens": 1210,
+            "cumulative_cache_read_input_tokens": 1000,
+            "cumulative_cache_creation_input_tokens": 200,
+            "cumulative_output_tokens": 40,
+        },
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    assert usage["input_tokens"] == 10
+    assert usage["cache_read_input_tokens"] == 1000
+    assert usage["cache_creation_input_tokens"] == 200
+    assert usage["output_tokens"] == 40
+    assert usage["total_tokens"] == 1250
+    # The reported cost wins; the tokens are not priced into another figure.
+    assert usage["total_cost_usd"] == pytest.approx(0.5)
+    bucket = usage["by_model"]["claude-opus-4-8"]
+    assert bucket["cache_creation_input_tokens"] == 200
+    assert bucket["input_tokens"] == 10
+    growth, model = growths[-1]
+    assert model == "claude-opus-4-8"
+    assert growth["cache_creation_input_tokens"] == 200
+    assert growth["total_cost_usd"] == pytest.approx(0.5)
+
+
+def test_rate_limit_windows_merge_sparse_updates_per_limit(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.errors import OmnigentError
+    from omnigent.runtime import usage_metrics
+
+    gauges: list[dict] = []
+    monkeypatch.setattr(usage_metrics, "record_rate_limits", lambda rl: gauges.append(dict(rl)))
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex", agent_id=_AGENT_ID)
+    weekly = {"used_percent": 80.0, "window_minutes": 10080, "resets_at": 1792874497}
+
+    _persist_native_cumulative_usage(
+        conv.id, {"rate_limits": {"limit_id": "codex", "primary": weekly}}, store
+    )
+    # A sparse update carrying only the other window keeps the first one.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"rate_limits": {"limit_id": "codex", "secondary": {"used_percent": 5}}},
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    limit = usage["rate_limits"]["codex"]
+    assert limit["primary"] == weekly
+    assert limit["secondary"] == {"used_percent": 5.0}
+    assert isinstance(limit["captured_at"], int)
+    # A rate-limit-only report touches no token or cost field.
+    assert "total_cost_usd" not in usage
+    assert "input_tokens" not in usage
+    assert gauges[0] == {"limit_id": "codex", "primary": weekly}
+
+    for bad in (
+        {"limit_id": "codex"},
+        {"limit_id": "", "primary": weekly},
+        {"limit_id": "codex", "primary": {"used_percent": float("nan")}},
+        {"limit_id": "codex", "primary": {"used_percent": 5, "resets_at": -1}},
+    ):
+        with pytest.raises(OmnigentError):
+            _persist_native_cumulative_usage(conv.id, {"rate_limits": bad}, store)

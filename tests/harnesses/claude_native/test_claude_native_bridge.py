@@ -9638,6 +9638,53 @@ def test_compute_transcript_cumulative_cost_dedupes_inference_records(
     assert cost == pytest.approx(110.0)
 
 
+def test_compute_transcript_cumulative_usage_sums_tokens_once_per_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Tokens count each response once, unpriced models included, parent sidechains excluded."""
+    from omnigent.llms.context_window import ModelPricing
+
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: (
+            ModelPricing(input_per_token=1.0, output_per_token=1.0) if model == "m" else None
+        ),
+    )
+    monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", dict)
+    claude_native_bridge._TRANSCRIPT_PRICING_CACHE.clear()
+    cached = _assistant_entry(model="m", input_tokens=3, output_tokens=5, message_id="msg_A")
+    cached["message"]["usage"].update(
+        {"cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200}
+    )
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript_jsonl(
+        path,
+        [
+            # A streamed partial, then the final record of the same response.
+            _assistant_entry(model="m", input_tokens=3, output_tokens=1, message_id="msg_A"),
+            cached,
+            _assistant_entry(
+                model="unpriced", input_tokens=7, output_tokens=11, message_id="msg_B"
+            ),
+            _assistant_entry(
+                model="m", input_tokens=50, output_tokens=50, message_id="msg_C", is_sidechain=True
+            ),
+        ],
+    )
+
+    cost, tokens = claude_native_bridge.compute_transcript_cumulative_usage(
+        path, include_sidechains=False
+    )
+
+    assert cost == pytest.approx(3 + 5 + 1000 * 0.1 + 200 * 1.25)
+    assert tokens == {
+        "input_tokens": 10,
+        "cache_read_input_tokens": 1000,
+        "cache_creation_input_tokens": 200,
+        "output_tokens": 16,
+    }
+
+
 @pytest.mark.parametrize(
     "identities",
     [
