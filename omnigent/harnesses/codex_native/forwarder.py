@@ -1899,8 +1899,9 @@ class _SessionUsageCoalescer:
         """
         self._client = client
         self._session_id = session_id
-        self._pending: dict[str, int] = {}
-        self._last_posted: dict[str, int] = {}
+        # Token counts, plus one ``rate_limits`` snapshot dict.
+        self._pending: dict[str, object] = {}
+        self._last_posted: dict[str, object] = {}
         self._model: str | None = model
         self._baseline = baseline
 
@@ -1927,6 +1928,15 @@ class _SessionUsageCoalescer:
                 if key in data:
                     data[key] = max(0, data[key] - inherited)
         self._pending.update(data)
+
+    def record_rate_limits(self, data: dict[str, object]) -> None:
+        """
+        Record the latest subscription windows, posted only when they change.
+
+        :param data: Snapshot from :func:`_rollout_rate_limits`.
+        :returns: None.
+        """
+        self._pending["rate_limits"] = data
 
     async def flush(self) -> None:
         """
@@ -4338,6 +4348,10 @@ async def _handle_terminal_turn_boundary_inner(
             forwarder_state=forwarder_state,
         )
     if handled:
+        if bridge_dir is not None and bridge_dir != Path():
+            rate_limits = await asyncio.to_thread(_rollout_rate_limits, bridge_dir)
+            if rate_limits is not None:
+                usage_coalescer.record_rate_limits(rate_limits)
         await usage_coalescer.flush()
 
 
@@ -7755,6 +7769,90 @@ async def _post_session_interrupted(
         data=data,
     )
     _log_failed_session_event_post(_EXTERNAL_SESSION_INTERRUPTED_TYPE, response)
+
+
+# Bytes read from a rollout's end when looking for its latest rate-limit snapshot.
+_ROLLOUT_RATE_LIMIT_TAIL_BYTES = 256 * 1024
+
+
+def _rollout_rate_limits(bridge_dir: Path) -> dict[str, object] | None:
+    """
+    Latest subscription windows Codex recorded in this thread's rollout.
+
+    Codex writes a ``rate_limits`` snapshot on every ``token_count`` event in
+    ``rollout-*.jsonl``. Its ``account/rateLimits/updated`` notification goes
+    only to the client that started the turn, which is never this forwarder,
+    so the rollout is the one source that sees every turn. Synchronous file
+    I/O — call via :func:`asyncio.to_thread`.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: The newest snapshot that has a window, stripped as
+        :func:`_rate_limits_data` does, or ``None`` when none is found.
+    """
+    from omnigent.harnesses.codex_native.main import _find_codex_rollout
+
+    state = read_bridge_state(bridge_dir)
+    if state is None or not state.thread_id:
+        return None
+    path = _find_codex_rollout(Path(state.codex_home), state.thread_id)
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - _ROLLOUT_RATE_LIMIT_TAIL_BYTES))
+            tail = handle.read()
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if b'"token_count"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue  # the first line of the tail is usually cut
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if isinstance(payload, dict) and payload.get("type") == "token_count":
+            data = _rate_limits_data(payload.get("rate_limits"))
+            if data is not None:
+                return data
+    return None
+
+
+def _rate_limits_data(snapshot: object) -> dict[str, object] | None:
+    """
+    Strip a rollout ``rate_limits`` snapshot down to its usage windows.
+
+    Account metadata (plan, credits, spend controls) stays on the host; only
+    each window's used share, length and reset time reach the server.
+
+    :param snapshot: ``payload.rate_limits`` of a rollout ``token_count``
+        event, e.g. ``{"limit_id": "codex", "primary": {"used_percent": 80.0,
+        "window_minutes": 10080, "resets_at": 1792874497}, "secondary": None,
+        "plan_type": "prolite", ...}``.
+    :returns: ``{"limit_id": "codex", "primary": {"used_percent": 80.0,
+        "window_minutes": 10080, "resets_at": 1792874497}}``, or ``None``
+        when the snapshot has no window.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    limit_id = snapshot.get("limit_id")
+    data: dict[str, object] = {
+        "limit_id": limit_id[:64] if isinstance(limit_id, str) and limit_id else "codex"
+    }
+    for name in ("primary", "secondary"):
+        window = snapshot.get(name)
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)):
+            continue
+        clean: dict[str, object] = {"used_percent": used}
+        for key in ("window_minutes", "resets_at"):
+            value = window.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                clean[key] = value
+        data[name] = clean
+    return data if len(data) > 1 else None
 
 
 def _session_usage_data_from_params(params: _JsonObject) -> dict[str, int] | None:
