@@ -60,3 +60,74 @@ async def test_usage_coalescer_unseeded_omits_model() -> None:
     assert len(client.posts) == 1
     _url, body = client.posts[0]
     assert "model" not in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_turn_boundary_posts_the_rollouts_latest_rate_limit_windows(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The newest windowed rollout snapshot reaches the server stripped to its windows.
+
+    A later snapshot with no window (Codex's ``premium`` bucket) does not hide
+    it; plan, credits and spend-control state stay on the host; an unchanged
+    snapshot at the next turn boundary posts nothing.
+    """
+    import json
+    import types
+
+    thread_id = "01a152e9-6688-7573-ad4e-ffc3e8c493e7"
+    codex_home = tmp_path / "codex-home"
+    rollout = codex_home / "sessions/2026/10/19" / f"rollout-2026-10-19T06-46-30-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+
+    def token_count(rate_limits: dict) -> str:
+        payload = {"type": "token_count", "info": None, "rate_limits": rate_limits}
+        return json.dumps({"type": "event_msg", "payload": payload}) + "\n"
+
+    weekly = {"used_percent": 80.0, "window_minutes": 10080, "resets_at": 1792874497}
+    rollout.write_text(
+        token_count({"limit_id": "codex", "primary": {**weekly, "used_percent": 66.0}})
+        + token_count(
+            {
+                "limit_id": "codex",
+                "limit_name": None,
+                "primary": weekly,
+                "secondary": None,
+                "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+                "plan_type": "prolite",
+                "spend_control_reached": None,
+            }
+        )
+        + token_count({"limit_id": "premium", "primary": None, "secondary": None})
+        + json.dumps({"type": "response_item", "payload": {"type": "message"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fwd,
+        "read_bridge_state",
+        lambda _dir: types.SimpleNamespace(thread_id=thread_id, codex_home=str(codex_home)),
+    )
+
+    assert fwd._rollout_rate_limits(tmp_path) == {"limit_id": "codex", "primary": weekly}
+
+    client = _RecordingClient()
+    coalescer = fwd._SessionUsageCoalescer(client, "conv_parent")
+    for turn in ("turn_1", "turn_2"):
+        await fwd._handle_terminal_turn_boundary_inner(
+            client,
+            session_id="conv_parent",
+            bridge_dir=tmp_path,
+            method="turn/completed",
+            params={"threadId": thread_id, "turn": {"id": turn, "status": "completed"}},
+            usage_coalescer=coalescer,
+            delta_coalescer=None,
+            elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+            codex_client=None,
+            forwarder_state=None,
+        )
+
+    usage_posts = [
+        body["data"] for _url, body in client.posts if body["type"] == "external_session_usage"
+    ]
+    assert usage_posts == [{"rate_limits": {"limit_id": "codex", "primary": weekly}}]
