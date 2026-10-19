@@ -42,15 +42,30 @@ the new `origin/mine` head and restarts the host or server when idle.
 
 ## When the rebase conflicts
 
-The script stops mid-rebase and the EXIT trap can't pop the stash. Recover by hand:
+Resolve conflicts as part of the sync job. For each conflict, inspect the fork
+commit's purpose and upstream's change. Prefer upstream and drop the fork
+change when upstream provides the same result differently. Keep or combine
+fork code only when upstream provides less of the intended behaviour; record
+one line per conflict with the file, choice, and reason. Preserve every sandbox
+and authentication check from either side.
+
+The script stops mid-rebase and its EXIT trap cannot restore the starting
+branch or pop the stash until conflicts are resolved. Continue manually:
 
 ```bash
-# resolve conflicts, then:
-git cherry-pick --continue     # if it stopped taking origin/mine commits
-git rebase --continue          # repeat until done, or: git rebase --abort
-git push --force-with-lease origin mine
-git checkout mine && git stash pop   # your WIP is in `git stash list`
+# Resolve and stage conflicts, then repeat as needed:
+git cherry-pick --continue     # if taking origin/mine commits stopped
+git rebase --continue          # or git rebase --skip for a superseded commit
 ```
+
+Run focused tests for resolved files before pushing. Finish the interrupted
+script's remaining steps manually: push `mine` with `--force-with-lease`, return
+to the original starting branch, and restore its autostash. Do not rerun before
+pushing: conflict resolutions change patch equivalence, so the script can try
+to import the old remote commits again. Verify the branch and working files. Report
+conflict decisions, test commands and exits, script exit, push result, and
+`mine` before and after. Do not treat a zero script exit as proof of a push:
+the script deliberately reports push failures without failing the run.
 
 ## Notes
 

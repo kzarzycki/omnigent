@@ -21,7 +21,7 @@ from omnigent.server.routes.session_mcp_servers import (
     _find_mcp_location,
     _McpLocation,
     _tar_gz_dir,
-    assert_mcp_server_request_safe,
+    assert_mcp_server_config_safe,
 )
 from omnigent.server.schemas import (
     _MCP_SERVER_NAME_RE,
@@ -239,15 +239,14 @@ def _edit_agent_bundle(bundle: bytes, patch: AgentConfigPatch | None) -> tuple[b
             raise OmnigentError("Agent identity cannot change", code=ErrorCode.INVALID_INPUT)
         for server in updated.mcp_servers:
             if server.name in touched:
-                assert_mcp_server_request_safe(
-                    UpsertMCPServerRequest(
-                        name=server.name,
-                        transport=server.transport,
-                        url=server.url,
-                        command=server.command,
-                        args=server.args,
-                    )
+                UpsertMCPServerRequest(
+                    name=server.name,
+                    transport=server.transport,
+                    url=server.url,
+                    command=server.command,
+                    args=server.args,
                 )
+                assert_mcp_server_config_safe(server)
         return result, updated
 
 
