@@ -3687,10 +3687,11 @@ def compute_transcript_cumulative_usage(
     provider_config_fingerprint = hashlib.sha256(repr(provider_config).encode("utf-8")).digest()
 
     # Per response: its last usage (for tokens) and its last priceable usage
-    # with pricing (for cost), so an unpriced fragment never drops a priced one.
+    # with pricing and record index (for cost), so an unpriced fragment never
+    # drops a priced one and merged identities keep the newest priced record.
     usage_by_response: dict[
         tuple[str, str | int],
-        tuple[dict[str, int], tuple[dict[str, int], ModelPricing] | None],
+        tuple[dict[str, int], tuple[int, dict[str, int], ModelPricing] | None],
     ] = {}
     message_keys_by_request: dict[str, tuple[str, str | int]] = {}
     for index, record in enumerate(read_result.records):
@@ -3724,21 +3725,25 @@ def compute_transcript_cumulative_usage(
         request_id = entry.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             request_id = None
-        prior = None
+        request_prior = None
         if message_id is not None:
             key = ("message", message_id)
             if request_id is not None:
                 # A later fragment can supply the identity missing from earlier ones.
-                prior = usage_by_response.pop(("request", request_id), None)
+                request_prior = usage_by_response.pop(("request", request_id), None)
                 message_keys_by_request[request_id] = key
         elif request_id is not None:
             key = message_keys_by_request.get(request_id, ("request", request_id))
         else:
             key = ("record", index)
-        prior = prior or usage_by_response.get(key)
-        priced = (usage, pricing) if pricing is not None else (prior[1] if prior else None)
+        priors = [p[1] for p in (request_prior, usage_by_response.get(key)) if p and p[1]]
+        priced = (
+            (index, usage, pricing)
+            if pricing is not None
+            else max(priors, key=lambda p: p[0], default=None)
+        )
         usage_by_response[key] = (usage, priced)
-    costs = [compute_llm_cost(*priced) for _usage, priced in usage_by_response.values() if priced]
+    costs = [compute_llm_cost(p[1], p[2]) for _usage, p in usage_by_response.values() if p]
     tokens: dict[str, int] = {}
     for usage, _priced in usage_by_response.values():
         for token_key in _TRANSCRIPT_TOKEN_KEYS:
