@@ -24,6 +24,6 @@ def test_no_inherited_runner_identity() -> None:
 
 
 def test_harness_root_is_owned_by_the_test_suite() -> None:
-    import conftest
+    from tests import conftest
 
     assert Path(os.environ["OMNIGENT_HARNESS_TMP_PARENT"]) == conftest._TEST_HARNESS_TMP_PARENT
