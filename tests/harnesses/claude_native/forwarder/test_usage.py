@@ -330,31 +330,34 @@ def test_transcript_cost_size_cached_recomputes_only_on_growth(
     """
     calls: list[Path] = []
 
-    def fake_compute(path: Path, *, include_sidechains: bool) -> float | None:
+    def fake_compute(path: Path, *, include_sidechains: bool) -> tuple[float, dict[str, int]]:
         calls.append(path)
-        return float(path.stat().st_size)
+        size = path.stat().st_size
+        return float(size), {"output_tokens": size}
 
-    monkeypatch.setattr(forwarder, "compute_transcript_cumulative_cost", fake_compute)
-    cache: dict[Path, forwarder._TranscriptCostCacheEntry] = {}
+    monkeypatch.setattr(forwarder, "compute_transcript_cumulative_usage", fake_compute)
+    cache: dict[Path, forwarder._TranscriptUsageCacheEntry] = {}
     path = tmp_path / "t.jsonl"
     path.write_text("abc", encoding="utf-8")  # 3 bytes
-    assert forwarder._transcript_cost_size_cached(
-        path, include_sidechains=True, cache=cache
-    ) == pytest.approx(3.0)
+    first = forwarder._transcript_usage_size_cached(path, include_sidechains=True, cache=cache)
+    assert first is not None
+    assert first.cost_usd == pytest.approx(3.0)
+    assert first.tokens == {"output_tokens": 3}
     # Second call at the same size → served from cache, no recompute.
-    assert forwarder._transcript_cost_size_cached(
-        path, include_sidechains=True, cache=cache
-    ) == pytest.approx(3.0)
+    assert (
+        forwarder._transcript_usage_size_cached(path, include_sidechains=True, cache=cache)
+        is first
+    )
     assert len(calls) == 1
     # File grows → recompute.
     path.write_text("abcdef", encoding="utf-8")  # 6 bytes
-    assert forwarder._transcript_cost_size_cached(
-        path, include_sidechains=True, cache=cache
-    ) == pytest.approx(6.0)
+    grown = forwarder._transcript_usage_size_cached(path, include_sidechains=True, cache=cache)
+    assert grown is not None
+    assert grown.cost_usd == pytest.approx(6.0)
     assert len(calls) == 2
     # Missing file → None, no recompute attempt recorded as a priced call.
     assert (
-        forwarder._transcript_cost_size_cached(
+        forwarder._transcript_usage_size_cached(
             tmp_path / "missing.jsonl", include_sidechains=True, cache=cache
         )
         is None
@@ -381,10 +384,12 @@ def test_session_cost_estimate_takes_max_of_status_and_transcript_sum(
 
     per_path_cost = {parent: 0.10, sub_path: 0.55}
 
-    def fake_compute(path: Path, *, include_sidechains: bool) -> float | None:
-        return per_path_cost.get(path)
+    def fake_compute(
+        path: Path, *, include_sidechains: bool
+    ) -> tuple[float | None, dict[str, int]]:
+        return per_path_cost.get(path), {}
 
-    monkeypatch.setattr(forwarder, "compute_transcript_cumulative_cost", fake_compute)
+    monkeypatch.setattr(forwarder, "compute_transcript_cumulative_usage", fake_compute)
     entries = [forwarder.SubagentEntry(subagent_id="aaa", child_conversation_id="conv_child")]
 
     # S stale ($0.005) < C (0.10 + 0.55 = 0.65) → C wins (mid-run).
@@ -513,6 +518,87 @@ async def test_forward_session_cost_splits_display_and_policy(
         }
         assert dedupe.posted_cost == pytest.approx(0.95)
         assert dedupe.posted_policy_cost == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_forward_session_cost_carries_cumulative_tokens_with_the_display_cost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    A display-cost post carries the session's token totals, parent plus sub-agents.
+
+    The tokens ride only with ``cumulative_cost_usd``, so the server never
+    prices them into a cost of its own; a policy-only post carries none.
+    """
+    monkeypatch.setattr("omnigent.onboarding.provider_config.load_config", dict)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    parent = tmp_path / "sess.jsonl"
+    sub_path = forwarder._subagents_dir_for_transcript(parent) / "agent-aaa.jsonl"
+    sub_path.parent.mkdir(parents=True)
+
+    def usage_line(message_id: str, usage: dict[str, int]) -> str:
+        message = {"id": message_id, "role": "assistant", "model": "x", "usage": usage}
+        return json.dumps({"message": message}) + "\n"
+
+    parent.write_text(
+        usage_line(
+            "msg_P", {"input_tokens": 2, "cache_read_input_tokens": 90, "output_tokens": 4}
+        ),
+        encoding="utf-8",
+    )
+    sub_path.write_text(
+        usage_line(
+            "msg_S", {"input_tokens": 1, "cache_creation_input_tokens": 8, "output_tokens": 3}
+        ),
+        encoding="utf-8",
+    )
+    status = {"total_cost_usd": 0.25, "model": "claude-x"}
+    monkeypatch.setattr(forwarder, "read_claude_context_state", lambda _bridge: dict(status))
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content)["data"])
+        return httpx.Response(200, json={})
+
+    dedupe = forwarder._ForwardDedupeState()
+    subagents = forwarder.SubagentForwardState(
+        subagents={"aaa": forwarder.SubagentEntry(subagent_id="aaa", child_conversation_id="c")}
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ap"
+    ) as client:
+        await forwarder._forward_session_cost(
+            client=client,
+            session_id="conv_parent",
+            bridge_dir=bridge_dir,
+            parent_transcript_path=parent,
+            subagent_state=subagents,
+            dedupe=dedupe,
+            cost_cache={},
+        )
+        # S frozen while the policy cost moves: no tokens on that post.
+        monkeypatch.setattr(forwarder, "_session_cost_estimate", lambda **_kw: 0.4)
+        await forwarder._forward_session_cost(
+            client=client,
+            session_id="conv_parent",
+            bridge_dir=bridge_dir,
+            parent_transcript_path=parent,
+            subagent_state=subagents,
+            dedupe=dedupe,
+            cost_cache={},
+        )
+
+    assert posted[0] == {
+        "cumulative_cost_usd": pytest.approx(0.25),
+        "policy_cost_usd": pytest.approx(0.25),
+        "model": "claude-x",
+        "cumulative_input_tokens": 2 + 90 + 1 + 8,
+        "cumulative_cache_read_input_tokens": 90,
+        "cumulative_cache_creation_input_tokens": 8,
+        "cumulative_output_tokens": 7,
+    }
+    assert posted[1] == {"policy_cost_usd": pytest.approx(0.4)}
 
 
 @pytest.mark.asyncio

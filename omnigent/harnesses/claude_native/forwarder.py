@@ -34,7 +34,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _display_text,
     _transcript_items_from_entry,
     _transcript_timestamp,
-    compute_transcript_cumulative_cost,
+    compute_transcript_cumulative_usage,
     read_active_session_id,
     read_bridge_id,
     read_claude_context_state,
@@ -952,22 +952,25 @@ class _ForwardDedupeState:
 
 
 @dataclass(frozen=True)
-class _TranscriptCostCacheEntry:
+class _TranscriptUsageCacheEntry:
     """
-    Cached cumulative-cost computation for one transcript file.
+    Cached cumulative cost and token computation for one transcript file.
 
-    The cost is recomputed only when the file's byte size changes, so the
-    forwarder doesn't re-parse an unchanged transcript on every (0.25s)
-    poll. Append-only JSONL makes byte size a sound cache key.
+    Recomputed only when the file's byte size changes, so the forwarder
+    doesn't re-parse an unchanged transcript on every (0.25s) poll.
+    Append-only JSONL makes byte size a sound cache key.
 
-    :param size: File size in bytes when ``cost_usd`` was computed,
+    :param size: File size in bytes when the totals were computed,
         e.g. ``81920``.
     :param cost_usd: Cumulative USD cost computed from the transcript at
         that size, or ``None`` when nothing could be priced.
+    :param tokens: Cumulative token counts at that size, e.g.
+        ``{"input_tokens": 12, "output_tokens": 350}``.
     """
 
     size: int
     cost_usd: float | None
+    tokens: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -1344,7 +1347,7 @@ async def forward_claude_transcript_to_session(
     # Size-keyed transcript cost cache for ``_forward_session_cost`` — keeps
     # the per-poll cost reconciliation from re-parsing unchanged transcripts.
     # Reset on /clear and /fork rotations alongside ``dedupe``.
-    cost_cache: dict[Path, _TranscriptCostCacheEntry] = {}
+    cost_cache: dict[Path, _TranscriptUsageCacheEntry] = {}
     # (mtime_ns, size) of the statusLine shim's raw capture last normalized
     # into context.json (see claude_native_status.sync_raw_status_context).
     status_raw_sig: tuple[int, int] | None = None
@@ -3047,16 +3050,16 @@ def _cumulative_cost_from_status_state(state: dict[str, object] | None) -> float
     return float(raw)
 
 
-def _transcript_cost_size_cached(
+def _transcript_usage_size_cached(
     transcript_path: Path,
     *,
     include_sidechains: bool,
-    cache: dict[Path, _TranscriptCostCacheEntry],
-) -> float | None:
+    cache: dict[Path, _TranscriptUsageCacheEntry],
+) -> _TranscriptUsageCacheEntry | None:
     """
-    Cumulative transcript cost, recomputed only when the file grows.
+    Cumulative transcript cost and tokens, recomputed only when the file grows.
 
-    Wraps :func:`compute_transcript_cumulative_cost` with a per-process
+    Wraps :func:`compute_transcript_cumulative_usage` with a per-process
     size-keyed cache so an unchanged transcript isn't re-parsed every
     poll. On a forwarder restart the cache starts empty and the first
     call recomputes from the full file, so the estimate is correct across
@@ -3065,13 +3068,13 @@ def _transcript_cost_size_cached(
 
     :param transcript_path: Transcript JSONL path.
     :param include_sidechains: Forwarded to
-        :func:`compute_transcript_cumulative_cost` — ``False`` for a
+        :func:`compute_transcript_cumulative_usage` — ``False`` for a
         parent transcript (sub-agent records are sidechains counted
         elsewhere), ``True`` for a sub-agent's own transcript.
     :param cache: Per-session cache mapping transcript path to its last
-        computed :class:`_TranscriptCostCacheEntry`. Mutated in place.
-    :returns: Cumulative USD cost, or ``None`` when nothing is priceable
-        (missing file included).
+        computed :class:`_TranscriptUsageCacheEntry`. Mutated in place.
+    :returns: The transcript's cached totals, or ``None`` when the file is
+        missing.
     """
     try:
         size = transcript_path.stat().st_size
@@ -3079,12 +3082,13 @@ def _transcript_cost_size_cached(
         return None
     cached = cache.get(transcript_path)
     if cached is not None and cached.size == size:
-        return cached.cost_usd
-    cost = compute_transcript_cumulative_cost(
+        return cached
+    cost, tokens = compute_transcript_cumulative_usage(
         transcript_path, include_sidechains=include_sidechains
     )
-    cache[transcript_path] = _TranscriptCostCacheEntry(size=size, cost_usd=cost)
-    return cost
+    entry = _TranscriptUsageCacheEntry(size=size, cost_usd=cost, tokens=tokens)
+    cache[transcript_path] = entry
+    return entry
 
 
 def _session_cost_estimate(
@@ -3092,7 +3096,7 @@ def _session_cost_estimate(
     parent_transcript_path: Path,
     active_subagents: list[SubagentEntry],
     status_cost: float | None,
-    cost_cache: dict[Path, _TranscriptCostCacheEntry],
+    cost_cache: dict[Path, _TranscriptUsageCacheEntry],
 ) -> float | None:
     """
     Compute ``max(S, C)`` for the parent session's POLICY/budget cost.
@@ -3120,14 +3124,14 @@ def _session_cost_estimate(
         yields a priceable cost.
     """
     subagents_dir = _subagents_dir_for_transcript(parent_transcript_path)
-    estimate: float | None = _transcript_cost_size_cached(
+    parent = _transcript_usage_size_cached(
         parent_transcript_path, include_sidechains=False, cache=cost_cache
     )
+    estimate = parent.cost_usd if parent is not None else None
     for entry in active_subagents:
         jsonl_path = subagents_dir / f"agent-{entry.subagent_id}.jsonl"
-        sub_cost = _transcript_cost_size_cached(
-            jsonl_path, include_sidechains=True, cache=cost_cache
-        )
+        sub = _transcript_usage_size_cached(jsonl_path, include_sidechains=True, cache=cost_cache)
+        sub_cost = sub.cost_usd if sub is not None else None
         if sub_cost is not None:
             # Seed the accumulator from the parent cost, or 0.0 when the parent
             # had nothing priceable — so sub-agent cost still contributes to C.
@@ -3138,6 +3142,53 @@ def _session_cost_estimate(
     return max(candidates)
 
 
+def _session_token_fields(
+    *,
+    parent_transcript_path: Path,
+    active_subagents: list[SubagentEntry],
+    cost_cache: dict[Path, _TranscriptUsageCacheEntry],
+) -> dict[str, int]:
+    """
+    Cumulative token counts for the parent session, as ``cumulative_*`` fields.
+
+    Sums the parent transcript (sidechains excluded) and each tracked
+    sub-agent's own transcript, the same spend the statusLine total ``S``
+    covers once it settles. Synchronous file I/O — call via
+    :func:`asyncio.to_thread`.
+
+    :param parent_transcript_path: Parent transcript JSONL path.
+    :param active_subagents: Sub-agents with a minted child conversation.
+    :param cost_cache: Per-session size-keyed transcript cache, mutated in place.
+    :returns: ``cumulative_input_tokens`` (inclusive of both cache buckets, the
+        server's contract), ``cumulative_cache_read_input_tokens``,
+        ``cumulative_cache_creation_input_tokens`` and
+        ``cumulative_output_tokens``; empty when no transcript carries usage.
+    """
+    subagents_dir = _subagents_dir_for_transcript(parent_transcript_path)
+    sources = [(parent_transcript_path, False)] + [
+        (subagents_dir / f"agent-{entry.subagent_id}.jsonl", True) for entry in active_subagents
+    ]
+    totals: dict[str, int] = {}
+    for path, include_sidechains in sources:
+        cached = _transcript_usage_size_cached(
+            path, include_sidechains=include_sidechains, cache=cost_cache
+        )
+        if cached is None:
+            continue
+        for key, value in cached.tokens.items():
+            totals[key] = totals.get(key, 0) + value
+    if not totals:
+        return {}
+    cache_read = totals.get("cache_read_input_tokens", 0)
+    cache_creation = totals.get("cache_creation_input_tokens", 0)
+    return {
+        "cumulative_input_tokens": totals.get("input_tokens", 0) + cache_read + cache_creation,
+        "cumulative_cache_read_input_tokens": cache_read,
+        "cumulative_cache_creation_input_tokens": cache_creation,
+        "cumulative_output_tokens": totals.get("output_tokens", 0),
+    }
+
+
 async def _forward_session_cost(
     *,
     client: httpx.AsyncClient,
@@ -3146,7 +3197,7 @@ async def _forward_session_cost(
     parent_transcript_path: Path,
     subagent_state: SubagentForwardState,
     dedupe: _ForwardDedupeState,
-    cost_cache: dict[Path, _TranscriptCostCacheEntry],
+    cost_cache: dict[Path, _TranscriptUsageCacheEntry],
 ) -> None:
     """
     POST the parent session's cost as TWO values: display and policy.
@@ -3237,11 +3288,20 @@ async def _forward_session_cost(
         payload["policy_cost_usd"] = policy_cost
     if not payload:
         return
+    if "cumulative_cost_usd" in payload:
+        # Tokens ride only with S: the server then takes its explicit-cost
+        # branch and records them without pricing a second, diverging cost.
+        payload.update(
+            await asyncio.to_thread(
+                _session_token_fields,
+                parent_transcript_path=parent_transcript_path,
+                active_subagents=active_subagents,
+                cost_cache=cost_cache,
+            )
+        )
     # Tag a display-cost (S) advance with the active model captured by the
-    # statusLine wrapper (``{"model": "claude-opus-4-8", ...}`` in context.json).
-    # claude-native sends no token counts with its cost, so the server has
-    # nothing to attribute the cost to per-model without this — leaving it out
-    # of the TOKEN USAGE breakdown while the session total still counts it. Sent
+    # statusLine wrapper (``{"model": "claude-opus-4-8", ...}`` in context.json),
+    # so the server attributes its cost and token growth per model. Sent
     # only when the display cost moves: that is the value being attributed
     # (``policy_cost_usd``-only mid-turn posts carry no new display cost).
     if "cumulative_cost_usd" in payload and isinstance(status_state, dict):
