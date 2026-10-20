@@ -187,6 +187,50 @@ export function sessionBelongsToProject(
   );
 }
 
+/**
+ * Label an orchestrator (a supervisor, a chief-of-staff agent) writes to say
+ * where a session stands, in one line: "waits on CI · PR #252". Any writer with
+ * access to the session sets it with `PATCH /v1/sessions/{id}` `labels`; an
+ * empty value clears it, since labels are upsert-only.
+ */
+export const STATUS_LINE_LABEL_KEY = "status.line";
+
+/** The session's status line, trimmed, or null when none is set. */
+export function sessionStatusLine(conversation: Pick<Conversation, "labels">): string | null {
+  const line = conversation.labels?.[STATUS_LINE_LABEL_KEY]?.trim();
+  return line ? line : null;
+}
+
+/** Unix seconds the writer last refreshed the status line; the browser ages it. */
+export const STATUS_AT_LABEL_KEY = "status.at";
+
+/** A status line older than this reads as stale: its writer may be gone. */
+export const STATUS_STALE_AFTER_MS = 10 * 60_000;
+
+/** Status line with its age from `nowMs`, or null when no line is set. Age and stale are absent without a valid `status.at`. */
+export function sessionStatusAge(
+  conversation: Pick<Conversation, "labels">,
+  nowMs: number,
+): { line: string; age: string | null; stale: boolean } | null {
+  const line = sessionStatusLine(conversation);
+  if (!line) return null;
+  const at = Number(conversation.labels?.[STATUS_AT_LABEL_KEY]);
+  if (!conversation.labels?.[STATUS_AT_LABEL_KEY]?.trim() || !Number.isFinite(at)) {
+    return { line, age: null, stale: false };
+  }
+  const ms = Math.max(0, nowMs - at * 1000);
+  const minutes = Math.floor(ms / 60_000);
+  const age =
+    minutes < 1
+      ? "<1m"
+      : minutes < 60
+        ? `${minutes}m`
+        : minutes < 1440
+          ? `${Math.floor(minutes / 60)}h`
+          : `${Math.floor(minutes / 1440)}d`;
+  return { line, age, stale: ms > STATUS_STALE_AFTER_MS };
+}
+
 export function conversationDisplayLabel(conversation: Conversation): string {
   if (conversation.title) return conversation.title;
   // Just-created session: its first prompt stands in until a real title lands.

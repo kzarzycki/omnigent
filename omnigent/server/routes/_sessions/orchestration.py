@@ -129,6 +129,7 @@ from omnigent.runtime.policies.builder import (
     load_session_usage,
 )
 from omnigent.runtime.policies.engine import PolicyEngine
+from omnigent.runtime.telemetry import telemetry_guarded
 from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.server import (
     session_live_state,
@@ -1646,6 +1647,39 @@ def _sane_relay_token_count(value: object) -> int:
     return int(value)
 
 
+@telemetry_guarded
+def _record_usage_metrics(
+    growth: dict[str, Any], *, model: str | None, conv: Conversation | None
+) -> None:
+    """
+    Record a usage write on the counters, split by the session's harness, host,
+    agent and project names.
+
+    Skipped entirely when telemetry is off. Otherwise costs one indexed lookup
+    each for the host, agent and project, plus the harness resolution (agent row
+    and cached spec) the callers already do.
+
+    :param growth: Increase per ``session_usage`` key.
+    :param model: Model the growth is attributed to.
+    :param conv: The session row, or ``None``.
+    """
+    from omnigent.runtime import _globals
+
+    names: dict[str, str | None] = {}
+    if conv is not None:
+        names["harness"] = _resolve_harness(conv)
+        if conv.host_id and _globals._host_store is not None:
+            host = _globals._host_store.get_host(conv.host_id)
+            names["host_name"] = host.name if host else None
+        if conv.agent_id and _globals._agent_store is not None:
+            names["agent_name"] = _globals._agent_store.get_names([conv.agent_id]).get(
+                conv.agent_id
+            )
+        if conv.project_id and _globals._project_store is not None:
+            names["project_name"] = _globals._project_store.get_name(conv.project_id)
+    usage_metrics.record_usage_growth(growth, model=model, **names)
+
+
 def _accumulate_session_usage(
     resp_obj: dict[str, Any],
     session_id: str,
@@ -1806,7 +1840,7 @@ def _accumulate_session_usage(
         delta["by_model"] = {llm_model: model_delta}
 
     new_current = conversation_store.increment_session_usage(session_id, delta)
-    usage_metrics.record_usage_growth(delta, model=llm_model or None)
+    _record_usage_metrics(delta, model=llm_model or None, conv=conv)
     # Per-user daily rollup (policy-gated; this is the per-turn delta).
     _record_daily_cost(conv, cost_delta, conversation_store)
     return _priced_cost_for_display(new_current)
@@ -2102,8 +2136,8 @@ def _persist_native_cumulative_usage(
         key: int(current[key]) - old_tokens[key] for key in _MODEL_TOKEN_KEYS if key in current
     }
     growth["total_cost_usd"] = float(current.get("total_cost_usd", 0.0) or 0.0) - old_cost
-    usage_metrics.record_usage_growth(
-        growth, model=model_name if isinstance(model_name, str) else None
+    _record_usage_metrics(
+        growth, model=model_name if isinstance(model_name, str) else None, conv=conv
     )
     # Per-user daily rollup. Native reports cumulative totals, so the turn's
     # delta is the increase in cumulative cost. Uses the authoritative

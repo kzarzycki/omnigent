@@ -25,7 +25,9 @@ if TYPE_CHECKING:
         FileStore,
     )
     from omnigent.stores.comment_store import CommentStore
+    from omnigent.stores.host_store import HostStore
     from omnigent.stores.policy_store import PolicyStore
+    from omnigent.stores.project_store import ProjectStore
     from omnigent.terminals import TerminalRegistry
     from omnigent.tools import ToolManager
     from omnigent.tools.base import ToolContext
@@ -37,6 +39,9 @@ _file_store: FileStore | None = None
 _artifact_store: ArtifactStore | None = None
 _comment_store: CommentStore | None = None
 _policy_store: PolicyStore | None = None
+# Set by the server app; read for usage-metric attribution names.
+_host_store: HostStore | None = None
+_project_store: ProjectStore | None = None
 # Hosts import runtime helpers but do not need server routing configuration.
 _caps: RuntimeCaps | None = None
 _caps_lock = Lock()
