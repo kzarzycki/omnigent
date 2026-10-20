@@ -859,7 +859,7 @@ class _ForwardDedupeState:
         from ``posted_cost`` because it advances mid-turn (with in-flight
         sub-agent spend) while ``S`` stays frozen. ``None`` until first
         post.
-    :param posted_tokens: Last cumulative token fields POSTed alongside
+    :param posted_tokens: Last per-bucket token totals POSTed alongside
         ``cumulative_cost_usd``; growth re-posts S with the fresh totals.
         ``None`` until the first cost post.
     :param observed_title: Last ``custom-title`` seen in the transcript,
@@ -895,7 +895,7 @@ class _ForwardDedupeState:
     # sub-agent spend so the gate can block mid-turn. Separate baseline
     # because it can advance while ``posted_cost`` (S) is frozen.
     posted_policy_cost: float | None = None
-    # Last cumulative token fields POSTed with ``cumulative_cost_usd``. A
+    # Last per-bucket token totals POSTed with ``cumulative_cost_usd``. A
     # transcript can grow after S settles (late flush, a sub-agent's child
     # conversation minted later), so growth here re-posts S with fresh tokens.
     posted_tokens: dict[str, int] | None = None
@@ -3156,7 +3156,7 @@ def _session_token_fields(
     cost_cache: dict[Path, _TranscriptUsageCacheEntry],
 ) -> dict[str, int]:
     """
-    Cumulative token counts for the parent session, as ``cumulative_*`` fields.
+    Cumulative token counts for the parent session, per Anthropic usage bucket.
 
     Sums the parent transcript (sidechains excluded) and each tracked
     sub-agent's own transcript, the same spend the statusLine total ``S``
@@ -3166,10 +3166,9 @@ def _session_token_fields(
     :param parent_transcript_path: Parent transcript JSONL path.
     :param active_subagents: Sub-agents with a minted child conversation.
     :param cost_cache: Per-session size-keyed transcript cache, mutated in place.
-    :returns: ``cumulative_input_tokens`` (inclusive of both cache buckets, the
-        server's contract), ``cumulative_cache_read_input_tokens``,
-        ``cumulative_cache_creation_input_tokens`` and
-        ``cumulative_output_tokens``; empty when no transcript carries usage.
+    :returns: ``input_tokens`` (uncached), ``cache_read_input_tokens``,
+        ``cache_creation_input_tokens`` and ``output_tokens``; empty when no
+        transcript carries usage.
     """
     subagents_dir = _subagents_dir_for_transcript(parent_transcript_path)
     sources = [(parent_transcript_path, False)] + [
@@ -3184,15 +3183,23 @@ def _session_token_fields(
             continue
         for key, value in cached.tokens.items():
             totals[key] = totals.get(key, 0) + value
-    if not totals:
-        return {}
-    cache_read = totals.get("cache_read_input_tokens", 0)
-    cache_creation = totals.get("cache_creation_input_tokens", 0)
+    return totals
+
+
+def _cumulative_token_fields(tokens: dict[str, int]) -> dict[str, int]:
+    """
+    Wire fields for per-bucket token totals; the input total includes both caches.
+
+    :param tokens: Totals from :func:`_session_token_fields`.
+    :returns: The ``cumulative_*`` token fields of ``external_session_usage``.
+    """
+    cache_read = tokens.get("cache_read_input_tokens", 0)
+    cache_creation = tokens.get("cache_creation_input_tokens", 0)
     return {
-        "cumulative_input_tokens": totals.get("input_tokens", 0) + cache_read + cache_creation,
+        "cumulative_input_tokens": tokens.get("input_tokens", 0) + cache_read + cache_creation,
         "cumulative_cache_read_input_tokens": cache_read,
         "cumulative_cache_creation_input_tokens": cache_creation,
-        "cumulative_output_tokens": totals.get("output_tokens", 0),
+        "cumulative_output_tokens": tokens.get("output_tokens", 0),
     }
 
 
@@ -3294,9 +3301,10 @@ async def _forward_session_cost(
             cost_cache=cost_cache,
         )
     posted_tokens = dedupe.posted_tokens or {}
-    # Monotonic per field, like the costs: merging a response's fragments can
-    # lower one total while another grows, and the server would count the
-    # lowered field's recovery as new usage.
+    # Monotonic per bucket, like the costs: merging a response's fragments can
+    # lower one bucket while another grows, and the server would count the
+    # lowered bucket's recovery as new usage. Clamped before the input total
+    # is rebuilt, so the server's uncached remainder never drops either.
     tokens = {key: max(value, posted_tokens.get(key, 0)) for key, value in tokens.items()}
     tokens_advanced = any(value > posted_tokens.get(key, -1) for key, value in tokens.items())
     payload: dict[str, float | str] = {}
@@ -3313,7 +3321,7 @@ async def _forward_session_cost(
     if "cumulative_cost_usd" in payload:
         # Tokens ride only with S: the server then takes its explicit-cost
         # branch and records them without pricing a second, diverging cost.
-        payload.update(tokens)
+        payload.update(_cumulative_token_fields(tokens))
     # Tag a display-cost (S) advance with the active model captured by the
     # statusLine wrapper (``{"model": "claude-opus-4-8", ...}`` in context.json),
     # so the server attributes its cost and token growth per model. Sent
