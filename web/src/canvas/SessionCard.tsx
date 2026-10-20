@@ -1,6 +1,7 @@
 // One session as a draggable card on the Canvas. Mirrors the sidebar row: the
 // same state badge (approval tag / running spinner / unread dot), the display
-// label, the working directory, the worktree branch, and the open PR.
+// label, the orchestrator's status line, the working directory, the worktree
+// branch, and the open PR.
 
 import { memo, type KeyboardEvent, type MouseEvent } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
@@ -11,7 +12,7 @@ import { getSessionState, type SessionState } from "@/hooks/useSessionState";
 import { useConversationReadState } from "@/hooks/useUnseenConversations";
 import { useOptimisticTitle } from "@/lib/optimisticTitles";
 import { cn } from "@/lib/utils";
-import { conversationDisplayLabel } from "@/shell/sidebarNav";
+import { conversationDisplayLabel, sessionStatusLine } from "@/shell/sidebarNav";
 import type { CanvasPullRequest } from "./pullRequests";
 
 export type SessionCardData = {
@@ -50,6 +51,7 @@ function SessionCardComponent({ data, selected }: NodeProps<SessionCardNode>) {
   const titleProvisional = !conversation.title && optimisticTitle !== undefined;
   const label = stateLabel(state, conversation.status);
   const workspace = conversation.workspace?.trim() || "No working directory";
+  const statusLine = sessionStatusLine(conversation);
 
   const openFromKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -93,6 +95,11 @@ function SessionCardComponent({ data, selected }: NodeProps<SessionCardNode>) {
         </strong>
       </div>
       <span className="text-xs text-muted-foreground">{label}</span>
+      {statusLine && (
+        <span data-testid="session-card-status" className="line-clamp-2 text-xs" title={statusLine}>
+          {statusLine}
+        </span>
+      )}
       <span
         className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground"
         title={workspace}

@@ -211,6 +211,7 @@ import {
   COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY,
   computeNextActiveOverride,
   conversationDisplayLabel,
+  sessionStatusLine,
   dedupeConversationsById,
   EXPANDED_PROJECT_SECTIONS_STORAGE_KEY,
   orderByPinnedTimestamp,
@@ -3672,6 +3673,11 @@ function SessionTooltipContent({
         <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="truncate">{locationLabel}</span>
       </p>
+      {sessionStatusLine(conversation) && (
+        <p data-testid="session-tooltip-status" className="mt-1 text-sm text-muted-foreground">
+          {sessionStatusLine(conversation)}
+        </p>
+      )}
       {conversation.git_branch && (
         <p
           data-testid="session-tooltip-branch"
@@ -3840,6 +3846,7 @@ function ConversationRowImpl({
   }, [conversation.title, pendingTitle, rename.isSuccess, rename.isError]);
 
   const label = pendingTitle ?? conversationDisplayLabel(conversation);
+  const statusLine = sessionStatusLine(conversation);
   // Subscribed so the just-recorded optimistic label flips the row
   // immediately instead of at the next conversations poll.
   const optimisticTitle = useOptimisticTitle(conversation.id);
@@ -4146,6 +4153,14 @@ function ConversationRowImpl({
           {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
         </span>
       </div>
+      {statusLine && (
+        <div
+          data-testid="session-status-line"
+          className="sidebar-compact-text w-full truncate text-xs text-muted-foreground"
+        >
+          {statusLine}
+        </div>
+      )}
     </Link>
   );
 

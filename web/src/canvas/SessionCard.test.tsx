@@ -45,6 +45,18 @@ afterEach(() => {
 });
 
 describe("SessionCard", () => {
+  it("shows the status line an orchestrator set, and nothing when it is cleared", () => {
+    renderCard({
+      conversation: conversation({ labels: { "status.line": "waits on CI · PR #252" } }),
+    });
+    expect(screen.getByTestId("session-card-status")).toHaveTextContent("waits on CI · PR #252");
+  });
+
+  it("hides an empty status line", () => {
+    renderCard({ conversation: conversation({ labels: { "status.line": "  " } }) });
+    expect(screen.queryByTestId("session-card-status")).toBeNull();
+  });
+
   it("shows the title, state text, working directory, and the sidebar's running spinner", () => {
     const { card } = renderCard({ conversation: conversation() });
     expect(screen.getByText("Fix authentication")).toBeInTheDocument();

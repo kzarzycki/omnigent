@@ -1416,6 +1416,26 @@ describe("Sidebar session list", () => {
     expect(useHostsMock).toHaveBeenCalledWith({ includeSandbox: true });
   });
 
+  it("shows an orchestrator's status line under the row title and in its tooltip", async () => {
+    mockConversations([
+      conv("conv_status", "Codex", {
+        title: "Android lead",
+        labels: { "status.line": "waits on CI · PR #252" },
+      }),
+    ]);
+    renderSidebar();
+
+    expect(screen.getByTestId("session-status-line")).toHaveTextContent("waits on CI · PR #252");
+    fireEvent.pointerMove(screen.getByRole("link", { name: /Android lead/ }), {
+      pointerType: "mouse",
+    });
+    await waitFor(() => {
+      expect(screen.getAllByTestId("session-tooltip-status")[0]).toHaveTextContent(
+        "waits on CI · PR #252",
+      );
+    });
+  });
+
   it.each([
     {
       title: "resolved remote host name",

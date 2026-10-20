@@ -187,6 +187,20 @@ export function sessionBelongsToProject(
   );
 }
 
+/**
+ * Label an orchestrator (a supervisor, a chief-of-staff agent) writes to say
+ * where a session stands, in one line: "waits on CI · PR #252". Any writer with
+ * access to the session sets it with `PATCH /v1/sessions/{id}` `labels`; an
+ * empty value clears it, since labels are upsert-only.
+ */
+export const STATUS_LINE_LABEL_KEY = "status.line";
+
+/** The session's status line, trimmed, or null when none is set. */
+export function sessionStatusLine(conversation: Pick<Conversation, "labels">): string | null {
+  const line = conversation.labels?.[STATUS_LINE_LABEL_KEY]?.trim();
+  return line ? line : null;
+}
+
 export function conversationDisplayLabel(conversation: Conversation): string {
   if (conversation.title) return conversation.title;
   // Just-created session: its first prompt stands in until a real title lands.
