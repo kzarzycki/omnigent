@@ -602,10 +602,14 @@ async def test_forward_session_cost_carries_cumulative_tokens_with_the_display_c
                 dedupe=dedupe,
                 cost_cache={},
             )
-        # A later fragment of msg_Q lowers its input while its output grows:
-        # the post never walks the input total back.
+        # A later fragment of msg_Q lowers its uncached input while its cache
+        # reads and output grow: no bucket the server derives walks back.
         with parent.open("a", encoding="utf-8") as handle:
-            handle.write(usage_line("msg_Q", {"input_tokens": 1, "output_tokens": 9}))
+            handle.write(
+                usage_line(
+                    "msg_Q", {"input_tokens": 1, "cache_read_input_tokens": 50, "output_tokens": 9}
+                )
+            )
         await forwarder._forward_session_cost(
             client=client,
             session_id="conv_parent",
@@ -620,8 +624,15 @@ async def test_forward_session_cost_carries_cumulative_tokens_with_the_display_c
     assert posted[2]["cumulative_cost_usd"] == pytest.approx(0.25)
     assert posted[2]["cumulative_input_tokens"] == 2 + 90 + 1 + 8 + 5
     assert posted[2]["cumulative_output_tokens"] == 7 + 6
-    assert posted[3]["cumulative_input_tokens"] == 2 + 90 + 1 + 8 + 5
-    assert posted[3]["cumulative_output_tokens"] == 7 + 9
+    last = posted[3]
+    assert last["cumulative_cache_read_input_tokens"] == 90 + 50
+    uncached = (
+        last["cumulative_input_tokens"]
+        - last["cumulative_cache_read_input_tokens"]
+        - last["cumulative_cache_creation_input_tokens"]
+    )
+    assert uncached == 2 + 1 + 5
+    assert last["cumulative_output_tokens"] == 7 + 9
     assert posted[0] == {
         "cumulative_cost_usd": pytest.approx(0.25),
         "policy_cost_usd": pytest.approx(0.25),
