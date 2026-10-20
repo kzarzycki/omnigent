@@ -1908,6 +1908,10 @@ def create_app(
     )
     app.state.startup_inputs = startup_inputs
     app.state.host_store = host_store
+    from omnigent.runtime import _globals as runtime_globals
+
+    runtime_globals._host_store = host_store
+    runtime_globals._project_store = project_store
     app.state.mcp_gateway_backend = mcp_gateway_backend
     app.state.mcp_registry = mcp_registry
     app.state.mcp_registry_auth = auth_provider

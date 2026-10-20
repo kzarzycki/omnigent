@@ -6,6 +6,7 @@ import { useSidebarWorkingIds } from "@/hooks/useSidebarWorkingIds";
 import { useSidebarData, useSidebarView, type SidebarListQuery } from "@/hooks/useSidebarData";
 import { useArchivedSessions } from "@/hooks/useScopeCache";
 import { InfiniteScrollSentinel, type AutoLoadBudget } from "@/components/InfiniteScrollSentinel";
+import { SessionStatusLine } from "@/components/SessionStatusLine";
 import {
   type ComponentType,
   type CSSProperties,
@@ -4447,6 +4448,11 @@ function LegacySessionTooltipContent({
         <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
       </p>
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-tooltip-status"
+        className="mt-1 block text-sm text-muted-foreground"
+      />
       {conversation.git_branch && (
         <p
           data-testid="session-tooltip-branch"
@@ -4523,6 +4529,11 @@ function SessionTooltipContent({
           <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
         </span>
       </p>
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-tooltip-status"
+        className="mt-1 block text-sm text-muted-foreground"
+      />
       <SessionTooltipDetails conversation={conversation} />
       {hasError && <SessionErrorHint />}
     </TooltipContent>
@@ -5048,6 +5059,11 @@ function ConversationRowImpl({
       </div>
       {/* Row 2: the "Show" metadata, each part omitted when it has no value. */}
       <SessionMetaLine environment={metaEnvironment} repo={metaRepo} branch={metaBranch} />
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-status-line"
+        className="sidebar-compact-text block w-full truncate text-xs text-muted-foreground"
+      />
     </Link>
   );
 

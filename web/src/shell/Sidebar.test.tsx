@@ -1474,6 +1474,32 @@ describe("Sidebar session list", () => {
   });
 
   it.each([
+    { flag: "off", renderWithFlag: renderSidebar },
+    { flag: "on", renderWithFlag: renderGroupingSidebar },
+  ])(
+    "shows an orchestrator's status line in the row and tooltip (grouping $flag)",
+    async ({ renderWithFlag }) => {
+      mockConversations([
+        conv("conv_status", "Codex", {
+          title: "Android lead",
+          labels: { "status.line": "waits on CI · PR #252" },
+        }),
+      ]);
+      renderWithFlag();
+
+      expect(screen.getByTestId("session-status-line")).toHaveTextContent("waits on CI · PR #252");
+      fireEvent.pointerMove(screen.getByRole("link", { name: /Android lead/ }), {
+        pointerType: "mouse",
+      });
+      await waitFor(() => {
+        expect(screen.getAllByTestId("session-tooltip-status")[0]).toHaveTextContent(
+          "waits on CI · PR #252",
+        );
+      });
+    },
+  );
+
+  it.each([
     {
       title: "resolved remote host name",
       hostId: "host_remote",
