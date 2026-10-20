@@ -145,8 +145,8 @@ class SqlAlchemyProjectStore(ProjectStore):
     SQLAlchemy-backed implementation of :class:`ProjectStore`.
 
     Persists projects in a relational database via the SQLAlchemy ORM. Every
-    query is scoped by ``workspace_id`` (tenant partition) and ``user_id``
-    (projects are owner-private).
+    query is scoped by ``workspace_id`` (tenant partition) and, except
+    :meth:`get_name`, by ``user_id`` (projects are owner-private).
     """
 
     def __init__(self, storage_location: str) -> None:
@@ -246,6 +246,12 @@ class SqlAlchemyProjectStore(ProjectStore):
             if row is None or row.user_id != user_id:
                 return None
             return _to_entity(row)
+
+    def get_name(self, project_id: str) -> str | None:
+        """Return a project's name by id regardless of owner, or ``None``."""
+        with self._session("select_project_name_by_id") as session:
+            row = session.get(SqlProject, (current_workspace_id(), project_id))
+            return row.name if row is not None else None
 
     def list(self, *, user_id: str | None) -> list[Project]:
         """List the owner's projects ordered by ``created_at ASC, id ASC``."""
