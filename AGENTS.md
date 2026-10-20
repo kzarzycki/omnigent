@@ -139,3 +139,11 @@ instructions:
   not duplicate policy across adapters or add lifecycle metadata to `AgentSpec`.
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
+
+## This fork: landing PRs into `mine`
+
+Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
+commit with its own key, so every machine's `omnigent-update` refuses to install
+the head and the nightly sync refuses to take it. Land a PR from this checkout on
+the VPS with `bash ~/dev/homelab/automations/omnigent-fork-sync/land-pr.sh <pr>`,
+which squashes it into one commit signed with a key in `allowed_signers`.
