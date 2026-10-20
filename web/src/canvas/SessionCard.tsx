@@ -1,6 +1,7 @@
 // One session as a draggable card on the Canvas. Mirrors the sidebar row: the
 // same state badge (approval tag / running spinner / unread dot), the display
-// label, the working directory, the worktree branch, and the open PR.
+// label, the orchestrator's status line, the working directory, the worktree
+// branch, and the open PR.
 
 import { memo, type KeyboardEvent, type MouseEvent } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
@@ -12,6 +13,7 @@ import { useConversationReadState } from "@/hooks/useUnseenConversations";
 import { gitProviderCopy } from "@/lib/gitProviders";
 import { useOptimisticTitle } from "@/lib/optimisticTitles";
 import { cn } from "@/lib/utils";
+import { SessionStatusLine } from "@/components/SessionStatusLine";
 import { conversationDisplayLabel } from "@/shell/sidebarNav";
 import type { CanvasPullRequest } from "./pullRequests";
 
@@ -101,6 +103,11 @@ function SessionCardComponent({ data, selected }: NodeProps<SessionCardNode>) {
         </strong>
       </div>
       <span className="text-xs text-muted-foreground">{label}</span>
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-card-status"
+        className="line-clamp-2 text-xs"
+      />
       <span
         className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground"
         title={workspace}
