@@ -602,11 +602,26 @@ async def test_forward_session_cost_carries_cumulative_tokens_with_the_display_c
                 dedupe=dedupe,
                 cost_cache={},
             )
+        # A later fragment of msg_Q lowers its input while its output grows:
+        # the post never walks the input total back.
+        with parent.open("a", encoding="utf-8") as handle:
+            handle.write(usage_line("msg_Q", {"input_tokens": 1, "output_tokens": 9}))
+        await forwarder._forward_session_cost(
+            client=client,
+            session_id="conv_parent",
+            bridge_dir=bridge_dir,
+            parent_transcript_path=parent,
+            subagent_state=subagents,
+            dedupe=dedupe,
+            cost_cache={},
+        )
 
-    assert len(posted) == 3
+    assert len(posted) == 4
     assert posted[2]["cumulative_cost_usd"] == pytest.approx(0.25)
     assert posted[2]["cumulative_input_tokens"] == 2 + 90 + 1 + 8 + 5
     assert posted[2]["cumulative_output_tokens"] == 7 + 6
+    assert posted[3]["cumulative_input_tokens"] == 2 + 90 + 1 + 8 + 5
+    assert posted[3]["cumulative_output_tokens"] == 7 + 9
     assert posted[0] == {
         "cumulative_cost_usd": pytest.approx(0.25),
         "policy_cost_usd": pytest.approx(0.25),
