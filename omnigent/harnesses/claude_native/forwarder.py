@@ -3318,7 +3318,7 @@ async def _forward_session_cost(
         payload["policy_cost_usd"] = policy_cost
     if not payload:
         return
-    if "cumulative_cost_usd" in payload:
+    if "cumulative_cost_usd" in payload and tokens:
         # Tokens ride only with S: the server then takes its explicit-cost
         # branch and records them without pricing a second, diverging cost.
         payload.update(_cumulative_token_fields(tokens))
