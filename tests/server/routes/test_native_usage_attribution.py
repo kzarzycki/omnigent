@@ -11,9 +11,12 @@ double-counted the shared baseline once the active model changed).
 from __future__ import annotations
 
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from omnigent.errors import OmnigentError
 from omnigent.llms.context_window import ModelPricing
+from omnigent.runtime import _globals, usage_metrics
 from omnigent.server.routes._sessions.orchestration import (
     _persist_native_cumulative_usage,
 )
@@ -556,8 +559,9 @@ def test_claude_native_tokens_split_both_cache_buckets_and_keep_the_reported_cos
     monkeypatch.setattr(
         usage_metrics,
         "record_usage_growth",
-        lambda growth, *, model: growths.append((dict(growth), model)),
+        lambda growth, *, model, **_names: growths.append((dict(growth), model)),
     )
+    monkeypatch.setenv("OMNIGENT_TELEMETRY_ENABLED", "true")
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="claude", agent_id=_AGENT_ID)
 
@@ -644,3 +648,85 @@ def test_rate_limit_windows_merge_sparse_updates_per_limit(
         )
     assert len(_usage(store, conv.id)["rate_limits"]) == 8
     assert len(gauges) == 2 + 7  # the two codex reports above, then id-0..id-6
+
+
+class _Named:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _usage_series(
+    monkeypatch: pytest.MonkeyPatch, store: SqlAlchemyConversationStore, conv_id: str
+) -> dict[str, list[dict]]:
+    reader = InMemoryMetricReader()
+    monkeypatch.setenv("OMNIGENT_TELEMETRY_ENABLED", "true")
+    monkeypatch.setattr(
+        usage_metrics.otel_metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter
+    )
+    usage_metrics._instruments.cache_clear()
+    try:
+        _persist_native_cumulative_usage(
+            conv_id, {"cumulative_cost_usd": 2.0, "model": "claude-opus-4-8"}, store
+        )
+        data = reader.get_metrics_data()
+    finally:
+        usage_metrics._instruments.cache_clear()
+    assert data is not None
+    return {
+        metric.name: [dict(p.attributes or {}) for p in metric.data.data_points]
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+def test_usage_metrics_carry_harness_host_agent_and_project(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(
+        agent_id=_AGENT_ID,
+        host_id="0123456789abcdef0123456789abcd01",
+        workspace="/work",
+        project_id="0123456789abcdef0123456789abcd02",
+        harness_override="claude-native",
+    )
+    monkeypatch.setattr(
+        _globals, "_host_store", type("H", (), {"get_host": lambda self, i: _Named("macbook")})()
+    )
+    monkeypatch.setattr(
+        _globals,
+        "_agent_store",
+        type("A", (), {"get_names": lambda self, ids: {ids[0]: "claude"}})(),
+    )
+    monkeypatch.setattr(
+        _globals, "_project_store", type("P", (), {"get_name": lambda self, i: "homelab"})()
+    )
+
+    cost = _usage_series(monkeypatch, store, conv.id)[usage_metrics.COST_METRIC_NAME]
+
+    assert cost == [
+        {
+            "model": "claude-opus-4-8",
+            "omnigent.harness": "claude-native",
+            "omnigent.host.name": "macbook",
+            "omnigent.agent.name": "claude",
+            "omnigent.project.name": "homelab",
+        }
+    ]
+
+
+def test_usage_metrics_for_session_without_host_or_project(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(harness_override="codex-native")
+    for name in ("_host_store", "_agent_store", "_project_store"):
+        monkeypatch.setattr(_globals, name, None)
+
+    cost = _usage_series(monkeypatch, store, conv.id)[usage_metrics.COST_METRIC_NAME]
+
+    assert cost[0]["omnigent.harness"] == "codex-native"
+    assert cost[0]["omnigent.host.name"] == "unknown"
+    assert cost[0]["omnigent.agent.name"] == "unknown"
+    assert cost[0]["omnigent.project.name"] == ""

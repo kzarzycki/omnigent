@@ -2,7 +2,8 @@
 
 The counters take each write's growth, so a metrics backend can chart tokens
 and USD over time without reading the database. Labels stay low-cardinality:
-model, token type and rate-limit window, never a session or user id.
+model, token type, rate-limit window and the session's harness, host, agent and
+project names, never a session or user id.
 """
 
 from __future__ import annotations
@@ -53,7 +54,15 @@ def _instruments() -> tuple[Any, Any, Any, Any]:
 
 
 @telemetry_guarded
-def record_usage_growth(growth: Mapping[str, Any], *, model: str | None) -> None:
+def record_usage_growth(
+    growth: Mapping[str, Any],
+    *,
+    model: str | None,
+    harness: str | None = None,
+    host_name: str | None = None,
+    agent_name: str | None = None,
+    project_name: str | None = None,
+) -> None:
     """
     Add one ``session_usage`` write's growth to the token and cost counters.
 
@@ -61,9 +70,19 @@ def record_usage_growth(growth: Mapping[str, Any], *, model: str | None) -> None
         ``{"input_tokens": 12, "output_tokens": 350, "total_cost_usd": 0.02}``.
         Missing, zero and negative entries are skipped.
     :param model: Model the growth is attributed to, e.g. ``"claude-opus-4-8"``.
+    :param harness: The session's canonical harness, e.g. ``"claude-native"``.
+    :param host_name: Name of the host the session runs on, e.g. ``"macbook"``.
+    :param agent_name: Name of the session's agent, e.g. ``"claude"``.
+    :param project_name: Name of the session's project; empty when it has none.
     """
     tokens, cost, _, _ = _instruments()
-    labels = {"model": model or "unknown"}
+    labels = {
+        "model": model or "unknown",
+        "omnigent.harness": harness or "unknown",
+        "omnigent.host.name": host_name or "unknown",
+        "omnigent.agent.name": agent_name or "unknown",
+        "omnigent.project.name": project_name or "",
+    }
     for key, token_type in _TOKEN_TYPES.items():
         amount = growth.get(key)
         if isinstance(amount, (int, float)) and amount > 0:

@@ -78,6 +78,18 @@ class ProjectStore(ABC):
         ...
 
     @abstractmethod
+    def get_name(self, project_id: str) -> str | None:
+        """
+        Return a project's name by id regardless of owner, or ``None``.
+
+        For server-side attribution (e.g. metric labels), never user-facing
+        reads, which go through :meth:`get`.
+
+        :param project_id: Opaque project identifier.
+        """
+        ...
+
+    @abstractmethod
     def list(self, *, user_id: str | None) -> list[Project]:
         """
         List the owner's projects ordered by ``created_at ASC, id ASC``.
