@@ -932,6 +932,10 @@ class _ForwardDedupeState:
     # whose ``PreCompact`` was missed from later hijacking an unrelated
     # genuine compaction's token.
     pending_compaction_dismiss_seq: int | None = None
+    # Hook ``event_cursor`` whose compaction status was last POSTed. A held
+    # boundary persist re-reads that record every poll; each repost would add
+    # another "Conversation compacted" marker in the web UI.
+    announced_compaction_cursor: int | None = None
     # /btw side-chat relay. The overlay is never persisted (transcript,
     # deltas and hooks are all empty for it), so it is scraped read-only from
     # the shared pane capture. ``posted_btw_keys`` rings the (question, answer)
@@ -4258,11 +4262,13 @@ async def _forward_available_status_events(
             compaction_status = _compaction_status_for_record(record)
             if compaction_status is not None:
                 try:
-                    await _post_external_compaction_status(
-                        client,
-                        session_id=session_id,
-                        status=compaction_status,
-                    )
+                    if dedupe.announced_compaction_cursor != record.event_cursor:
+                        dedupe.announced_compaction_cursor = record.event_cursor
+                        await _post_external_compaction_status(
+                            client,
+                            session_id=session_id,
+                            status=compaction_status,
+                        )
                 except httpx.HTTPError:
                     _logger.warning(
                         "Failed to forward Claude compaction status; "
