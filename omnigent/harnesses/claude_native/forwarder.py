@@ -3241,6 +3241,10 @@ async def _forward_session_cost(
             cost_cache=cost_cache,
         )
     posted_tokens = dedupe.posted_tokens or {}
+    # Monotonic per field, like the costs: merging a response's fragments can
+    # lower one total while another grows, and the server would count the
+    # lowered field's recovery as new usage.
+    tokens = {key: max(value, posted_tokens.get(key, 0)) for key, value in tokens.items()}
     tokens_advanced = any(value > posted_tokens.get(key, -1) for key, value in tokens.items())
     payload: dict[str, float | str] = {}
     if display_cost is not None and (
