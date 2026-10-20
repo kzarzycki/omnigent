@@ -65,6 +65,28 @@ def test_get_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
     assert store.get(_uid("p1"), user_id="bob@example.com") is None
 
 
+def test_get_name_returns_name_regardless_of_owner(store: SqlAlchemyProjectStore) -> None:
+    """``get_name`` is a by-id lookup that ignores the project's owner."""
+    store.create(_uid("p1"), "Alice Project", "alice@example.com")
+    assert store.get_name(_uid("p1")) == "Alice Project"
+
+
+def test_get_name_missing_returns_none(store: SqlAlchemyProjectStore) -> None:
+    """``get_name`` returns ``None`` for an unknown id."""
+    assert store.get_name(_uid("nope")) is None
+
+
+def test_get_name_stays_inside_its_workspace(store: SqlAlchemyProjectStore) -> None:
+    """A project of one workspace has no name in another."""
+    from omnigent.db.db_models import workspace_scope
+
+    with workspace_scope(101):
+        store.create(_uid("p1"), "Tenant A", "alice@example.com")
+        assert store.get_name(_uid("p1")) == "Tenant A"
+    with workspace_scope(102):
+        assert store.get_name(_uid("p1")) is None
+
+
 # ── list ──────────────────────────────────────────────────────────────────
 
 
