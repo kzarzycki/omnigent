@@ -933,7 +933,8 @@ async def test_standalone_hook_persist_failure_holds_cursor_for_retry(
     hook cursor and retries next poll, mirroring the transcript path. The
     pending token minted by ``_claim_standalone_completion`` makes the retry
     idempotent: the re-seen hook re-consumes the same seq. A later successful
-    POST persists exactly one boundary.
+    POST persists exactly one boundary, and the web UI hears ``completed``
+    once — a held poll that re-announced it would stack another marker.
     """
     bridge_dir = tmp_path / "bridge"
     # A lone compact SessionStart (no preceding PreCompact) — standalone.
@@ -953,12 +954,13 @@ async def test_standalone_hook_persist_failure_holds_cursor_for_retry(
         side_effect=httpx.HTTPStatusError("boom", request=request, response=response)
     )
 
+    status_post = AsyncMock(return_value=None)
+    dedupe = forwarder._ForwardDedupeState()  # carried across polls, as in the run loop
+
     async def _run_once(state: forwarder.HookForwardState) -> forwarder.HookForwardState:
-        # The best-effort spinner status post is orthogonal to the durable
-        # persist under test; stub it so the client mock stays quiet.
         with patch(
             "omnigent.harnesses.claude_native.forwarder._post_external_compaction_status",
-            AsyncMock(return_value=None),
+            status_post,
         ):
             return await forwarder._forward_available_status_events(
                 client=AsyncMock(),
@@ -966,7 +968,7 @@ async def test_standalone_hook_persist_failure_holds_cursor_for_retry(
                 bridge_dir=bridge_dir,
                 state=state,
                 retry_tracker=forwarder._PostRetryTracker(),
-                dedupe=forwarder._ForwardDedupeState(),
+                dedupe=dedupe,
                 task_subjects={},
                 task_statuses={},
                 task_order=[],
@@ -984,6 +986,7 @@ async def test_standalone_hook_persist_failure_holds_cursor_for_retry(
     assert held.pending is not None  # token minted, awaiting a durable persist
     assert not held.persisted_seqs  # nothing marked persisted on failure
     minted_seq = held.pending.seq
+    assert [c.kwargs["status"] for c in status_post.await_args_list] == ["completed"]
 
     # Poll 2 (retry): the same hook record is re-seen; the persist succeeds and
     # re-consumes the SAME seq (idempotent), marking exactly one boundary.
@@ -995,6 +998,7 @@ async def test_standalone_hook_persist_failure_holds_cursor_for_retry(
     assert persisted.persisted_seqs == (minted_seq,)  # exactly one boundary
     assert persisted.pending is None
     assert after_ok.event_cursor > after_fail.event_cursor  # cursor advanced
+    assert [c.kwargs["status"] for c in status_post.await_args_list] == ["completed"]
 
 
 @pytest.mark.asyncio
