@@ -39,7 +39,7 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 | The session is archived | `failed` | `reused_conversation_archived` |
 | The task now uses a different agent, or pins a different host or workspace | `failed` | `reused_conversation_incompatible` |
 
-Unarchive the session, or send `reset_conversation: true` in a `PATCH` (**Start a new conversation on the next run** in the edit dialog), so the next firing creates a new session. A `running` run older than the stale-run limit is failed first and no longer blocks the session.
+Unarchive the session, or send `reset_conversation: true` in a `PATCH` (**Start a new conversation on the next run** in the edit dialog), so the next firing creates a new session. A `running` run fired more than 10 minutes ago, on a session that is not mid-turn, lost its prompt or its completion (for example to a server restart). It is failed as `incomplete` and no longer blocks the session.
 
 **Agent tools.** An agent can manage automations itself with `sys_scheduled_task_create`, `sys_scheduled_task_list`, `sys_scheduled_task_update`, and `sys_scheduled_task_delete` -- so an agent can schedule its own follow-up work. The create and update tools expose the same `permission_mode`, `max_cost_usd`, `reuse_conversation`, and `execution_target` controls, and the update tool also takes `reset_conversation`.
 
