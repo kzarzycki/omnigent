@@ -30,6 +30,7 @@ from tests.harnesses.codex_native.app_server._support import (
 
 _ROUTED_TOOL_APPROVALS = {
     "sys_session_rename": {"approval_mode": "approve"},
+    "sys_session_keep": {"approval_mode": "approve"},
     "sys_session_create": {"approval_mode": "approve"},
     "sys_agent_list": {"approval_mode": "approve"},
     "sys_session_send": {"approval_mode": "approve"},

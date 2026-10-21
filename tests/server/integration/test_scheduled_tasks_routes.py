@@ -31,6 +31,7 @@ from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
     SqlAlchemyScheduledTaskStore,
 )
@@ -76,6 +77,7 @@ def auth_app(
         agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
         permission_store=SqlAlchemyPermissionStore(db_uri),
         scheduled_task_store=SqlAlchemyScheduledTaskStore(db_uri),
+        project_store=SqlAlchemyProjectStore(db_uri),
         # A real host store so pinned-host create authorization (existence +
         # ownership) resolves against actual host rows. Without it,
         # ``app.state.host_store`` is None and the route skips the check.
@@ -1653,6 +1655,55 @@ async def test_publish_status_idle_after_waiting_completes_run(db_uri: str) -> N
     assert row.status == "succeeded"
 
 
+@pytest.mark.parametrize(
+    ("harness", "relayed_idle_completes"),
+    [("claude-native", False), ("codex-native", False), ("claude-sdk", True)],
+)
+async def test_a_native_run_completes_on_its_forwarders_idle_not_the_runners(
+    db_uri: str, harness: str, relayed_idle_completes: bool
+) -> None:
+    """A native runner's idle follows prompt delivery; the forwarder reports the turn end."""
+    import asyncio
+    import threading
+
+    from omnigent.server import session_live_state
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
+    from omnigent.server.routes.sessions import _publish_status, _session_status_cache
+    from tests.server.routes.test_sessions_runner_relay import _ScriptedRunnerClient
+
+    conversations = SqlAlchemyConversationStore(db_uri)
+    conv = conversations.create_conversation(harness_override=harness)
+    task_id, run_id = _seed_running_run_for_conv(db_uri, conv.id)
+    tasks = SqlAlchemyScheduledTaskStore(db_uri)
+    session_live_state.configure(conversations, tasks)
+    release = asyncio.Event()
+    release.set()
+    turn = [
+        {"type": "response.in_progress", "response": {"id": "turn"}},
+        {"type": "response.completed", "response": {"id": "turn"}},
+        {"type": "session.status", "status": "running"},
+        {"type": "session.status", "status": "idle"},
+    ]
+    try:
+        await _relay_runner_stream_once(
+            conv.id,
+            _ScriptedRunnerClient(release, turn),  # type: ignore[arg-type]
+            conversations,
+        )
+        flushed = threading.Event()
+        session_live_state.submit("test_barrier", flushed.set)
+        assert await asyncio.to_thread(flushed.wait, 10)
+        after_relay = next(r for r in tasks.list_runs(task_id)[0] if r.id == run_id).status
+        _publish_status(conv.id, "idle")
+        final = _wait_for_run_status(db_uri, task_id, run_id, "succeeded")
+    finally:
+        session_live_state.configure(None)
+        _session_status_cache.pop(conv.id, None)
+
+    assert after_relay == ("succeeded" if relayed_idle_completes else "running")
+    assert final is not None and final.status == "succeeded"
+
+
 async def test_patch_pinning_host_on_managed_task_is_rejected(
     auth_app: FastAPI, auth_client: httpx.AsyncClient, db_uri: str
 ) -> None:
@@ -2092,3 +2143,75 @@ async def test_legacy_retry_keeps_tasks_created_and_edited_during_load(
         assert scheduler.job_count == 2
         assert scheduler.next_run_at(created.json()["id"]) == created.json()["next_run_at"]
         assert scheduler.next_run_at(existing.id) == edited.json()["next_run_at"]
+
+
+async def test_project_and_archive_when_done_are_set_cleared_and_owner_checked(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """Both settings round-trip; an unknown or foreign project is a 404."""
+    _make_user(db_uri, "bob@example.com")
+
+    async def project(owner: str) -> str:
+        resp = await auth_client.post(
+            "/v1/projects", json={"name": f"{owner} runs"}, headers=_headers(owner)
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["id"]
+
+    mine = await project("alice@example.com")
+    foreign = await project("bob@example.com")
+    unknown = "0" * 32
+
+    plain = await auth_client.post("/v1/scheduled-tasks", json=_create_body(), headers=_headers())
+    assert (plain.json()["project_id"], plain.json()["archive_when_done"]) == (None, False)
+    for project_id in (foreign, unknown):
+        refused = await auth_client.post(
+            "/v1/scheduled-tasks", json=_create_body(project_id=project_id), headers=_headers()
+        )
+        assert refused.status_code == 404, refused.text
+
+    created = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(project_id=mine, archive_when_done=True),
+        headers=_headers(),
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    got = (await auth_client.get(f"/v1/scheduled-tasks/{task_id}", headers=_headers())).json()
+    assert (got["project_id"], got["archive_when_done"]) == (mine, True)
+
+    url = f"/v1/scheduled-tasks/{task_id}"
+    refused = await auth_client.patch(url, json={"project_id": foreign}, headers=_headers())
+    assert refused.status_code == 404, refused.text
+    for clear in ("", None):
+        await auth_client.patch(url, json={"project_id": mine}, headers=_headers())
+        cleared = await auth_client.patch(
+            url, json={"project_id": clear, "archive_when_done": False}, headers=_headers()
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert (cleared.json()["project_id"], cleared.json()["archive_when_done"]) == (None, False)
+
+
+@pytest.fixture()
+def _single_user_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+
+
+async def test_a_single_user_runtime_files_a_task_into_its_own_project(
+    _single_user_runtime: None, auth_client: httpx.AsyncClient
+) -> None:
+    """The local user's projects are owned by ``"local"``, the task's owner by None."""
+    project = await auth_client.post("/v1/projects", json={"name": "local runs"})
+    assert project.status_code == 200, project.text
+    project_id = project.json()["id"]
+    body = _create_body(project_id=project_id)
+    del body["workspace"]
+    del body["host_id"]
+
+    created = await auth_client.post("/v1/scheduled-tasks", json=body)
+    assert created.status_code == 200, created.text
+    assert created.json()["project_id"] == project_id
+    patched = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created.json()['id']}", json={"project_id": project_id}
+    )
+    assert patched.status_code == 200, patched.text

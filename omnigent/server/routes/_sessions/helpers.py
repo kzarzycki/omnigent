@@ -5040,6 +5040,7 @@ def _publish_status(
     failure_intake: Mapping[str, str] | None = None,
     disconnect_evidence: Mapping[str, str] | None = None,
     turn_completed: bool = False,
+    from_runner: bool = False,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -5080,6 +5081,8 @@ def _publish_status(
     :param turn_completed: Whether an ``"idle"`` edge reports a turn the harness
         confirmed finished (e.g. claude-native's ``Stop`` hook), which clears a
         sticky ``failed`` like a ``running`` edge would.
+    :param from_runner: The edge is the runner's relayed status. A native
+        harness's relayed ``idle`` is pane activity, not the end of its turn.
     """
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
@@ -5136,7 +5139,9 @@ def _publish_status(
             error="runner disappeared before the turn reached a terminal state",
         )
     elif status == "idle":
-        session_live_state.persist_scheduled_run_completion(session_id, "succeeded")
+        session_live_state.persist_scheduled_run_completion(
+            session_id, "succeeded", from_runner=from_runner
+        )
     elif status == "failed":
         # Canonical server-side broken-turn signal: every server-originated
         # failed turn (runner disconnect mid-turn, setup/dispatch failure,

@@ -87,6 +87,7 @@ from omnigent.tools.builtins.os_env import (
     SysOsWriteTool,
 )
 from omnigent.tools.builtins.session_message import SysSessionMessageTool
+from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY, SysSessionKeepTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.session_subscriptions import (
     SysSessionSubscribeTool,
@@ -330,6 +331,8 @@ _SESSION_QUERY_TOOLS = frozenset(
 _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
 _UI_TOOLS = frozenset({UiOpenFileTool.name()})
 
+_SESSION_KEEP_TOOLS = frozenset({SysSessionKeepTool.name()})
+
 _SESSION_SUBSCRIPTION_TOOLS = frozenset(
     {
         SysSessionSubscribeTool.name(),
@@ -497,6 +500,7 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
     | _UI_TOOLS
+    | _SESSION_KEEP_TOOLS
     | _SESSION_SUBSCRIPTION_TOOLS
     | _ASYNC_INBOX_TOOLS
     | _SUBAGENT_TOOLS
@@ -620,6 +624,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
+            SysSessionKeepTool,
             SysSessionSubscribeTool,
             SysSessionUnsubscribeTool,
             SysSessionSubscriptionsTool,
@@ -902,6 +907,7 @@ _ALL_LOCAL_TOOLS = (
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
     | _UI_TOOLS
+    | _SESSION_KEEP_TOOLS
     | _SESSION_SUBSCRIPTION_TOOLS
     | _WEB_FETCH_TOOLS
     | _WEB_SEARCH_TOOLS
@@ -4777,6 +4783,8 @@ _SCHEDULED_TASK_CREATE_FIELDS = (
     "model_override",
     "reasoning_effort",
     "permission_mode",
+    "project_id",
+    "archive_when_done",
     "workspace",
     "host_id",
     "execution_target",
@@ -4791,6 +4799,8 @@ _SCHEDULED_TASK_UPDATE_FIELDS = (
     "model_override",
     "reasoning_effort",
     "permission_mode",
+    "project_id",
+    "archive_when_done",
     "max_cost_usd",
     "workspace",
     "host_id",
@@ -6132,6 +6142,36 @@ async def _session_subscription_via_rest(
         return json.dumps({"error": f"{tool_name} returned invalid JSON: {exc}"})
 
 
+async def _keep_current_session_via_rest(
+    args: _JsonObject,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """Label the calling session to stay visible through the server API."""
+    tool_name = SysSessionKeepTool.name()
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": f"{tool_name} requires a session id"})
+    reason = args.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return json.dumps({"error": f"{tool_name} requires a string 'reason'"})
+    reason = " ".join(reason.split())
+    try:
+        response = await server_client.patch(
+            f"/v1/sessions/{conversation_id}",
+            json={"labels": {KEEP_LABEL_KEY: reason}},
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if response.status_code >= 400:
+        return json.dumps(
+            {"error": f"{tool_name} returned {response.status_code}: {response.text[:500]}"}
+        )
+    return json.dumps({"kept": True, "reason": reason})
+
+
 async def _rename_current_session_via_rest(
     args: _JsonObject,
     conversation_id: str | None,
@@ -6921,6 +6961,8 @@ async def execute_tool(
                 conversation_id,
                 server_client,
             )
+        elif tool_name in _SESSION_KEEP_TOOLS:
+            output = await _keep_current_session_via_rest(args, conversation_id, server_client)
         elif tool_name in _SESSION_SUBSCRIPTION_TOOLS:
             output = await _session_subscription_via_rest(
                 tool_name,

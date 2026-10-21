@@ -51,6 +51,8 @@ class ScheduledTaskStore(ABC):
         model_override: str | None = None,
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
+        project_id: str | None = None,
+        archive_when_done: bool = False,
         max_cost_usd: float | None = None,
         workspace: str | None = None,
         host_id: str | None = None,
@@ -73,6 +75,9 @@ class ScheduledTaskStore(ABC):
         :param reasoning_effort: Optional reasoning-effort hint.
         :param permission_mode: Optional native-harness permission mode
             (Claude Code), e.g. ``"acceptEdits"``.
+        :param project_id: Project each fired run is filed into.
+        :param archive_when_done: Archive a run that ends ``succeeded`` unless
+            it carries the ``omnigent.keep`` label.
         :param max_cost_usd: Optional per-firing cost budget in USD.
         :param workspace: Runner start path (source repo / working dir).
         :param host_id: The connected host to pin the run to.
@@ -142,6 +147,8 @@ class ScheduledTaskStore(ABC):
         model_override: str | None = _UNSET,
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
+        project_id: str | None = _UNSET,
+        archive_when_done: bool | None = None,
         max_cost_usd: float | None = _UNSET,
         workspace: str | None = _UNSET,
         host_id: str | None = _UNSET,
@@ -155,7 +162,7 @@ class ScheduledTaskStore(ABC):
 
         Most parameters use ``None`` to mean "leave unchanged". For the per-task
         overrides (``model_override``, ``reasoning_effort``,
-        ``permission_mode``), ``host_id``, ``max_cost_usd``, and
+        ``permission_mode``), ``project_id``, ``host_id``, ``max_cost_usd``, and
         ``last_run_conversation_id``, the sentinel default means "not provided /
         leave unchanged"; passing ``None`` explicitly sets the column to NULL —
         so resetting an override to the agent default actually clears it (e.g.
