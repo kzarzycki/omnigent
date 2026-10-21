@@ -1650,7 +1650,7 @@ def _record_usage_metrics(
 ) -> None:
     """
     Record a usage write on the counters, split by the session's harness, host,
-    agent and project names.
+    agent and project names and its ``omni.role`` label.
 
     Skipped entirely when telemetry is off. Otherwise costs one indexed lookup
     each for the host, agent and project, plus the harness resolution (agent row
@@ -1665,6 +1665,7 @@ def _record_usage_metrics(
     names: dict[str, str | None] = {}
     if conv is not None:
         names["harness"] = _resolve_harness(conv)
+        names["role"] = (conv.labels or {}).get("omni.role")
         if conv.host_id and _globals._host_store is not None:
             host = _globals._host_store.get_host(conv.host_id)
             names["host_name"] = host.name if host else None
