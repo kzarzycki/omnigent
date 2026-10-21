@@ -77,7 +77,7 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_model_metadata,
     validate_session_permission_mode,
 )
-from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
+from omnigent.server.scheduled.run_reconciler import STALE_RUN_ERROR_CODE
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.conversation_store import (
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
@@ -708,12 +708,19 @@ def _reuse_unavailable_reason(
     return None
 
 
+# A dispatched turn shows up as a running live status within seconds. A run
+# still ``running`` this long after firing, on a conversation that is not
+# mid-turn, lost its prompt or its completion (a server restart, a dead host).
+_ORPHANED_RUN_GRACE_SECONDS = 10 * 60
+
+
 async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
     """True while an earlier run, or a turn someone started by hand, is in progress.
 
-    An orphaned ``running`` run past the stale age is force-failed first, and a
-    ``running``/``waiting`` live status counts only while the runner heartbeat
-    is fresh, so a host that died mid-turn cannot block the conversation forever.
+    A ``running``/``waiting`` live status counts only while the runner heartbeat
+    is fresh. An earlier ``running`` run counts only within the grace period;
+    after it, on a conversation that is not mid-turn, it is failed as orphaned
+    so one lost prompt cannot block every later firing.
     """
     if conv.live_status in ("running", "waiting") and runner_seen_is_fresh(conv.runner_last_seen):
         return True
@@ -721,8 +728,18 @@ async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
     previous = await asyncio.to_thread(store.get_running_run_by_conversation, conv.id)
     if previous is None:
         return False
-    [previous] = await asyncio.to_thread(force_fail_stale_runs, store, [previous])
-    return previous.status == "running"
+    now = int(time.time())
+    if now - (previous.fired_at or previous.scheduled_at) < _ORPHANED_RUN_GRACE_SECONDS:
+        return True
+    await asyncio.to_thread(
+        store.update_run,
+        previous.id,
+        status="failed",
+        finished_at=now,
+        error="the run's turn never started or never reported completion",
+        error_code=STALE_RUN_ERROR_CODE,
+    )
+    return False
 
 
 def _session_cost_usd(deps: FireDeps, conversation_id: str) -> float:
