@@ -2282,3 +2282,22 @@ async def test_reuse_dispatch_failure_fails_the_recorded_run() -> None:
     assert [(u["id"], u["status"], u["error_code"]) for u in store.run_updates] == [
         (store.runs[0]["run_id"], "failed", "launch_failed")
     ]
+
+
+@pytest.mark.asyncio
+async def test_reuse_skips_when_only_the_live_status_cache_shows_a_turn() -> None:
+    """The persisted status lags the in-memory one, so a just-started turn still blocks."""
+    from omnigent.server.routes._sessions.common import _session_status_cache
+
+    conv_store = _ExistingConversationStore(_previous_conversation(live_status="idle"))
+    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+    _session_status_cache["conv_prev"] = "running"
+    try:
+        launched = await _fire_once(_deps(store, conversation_store=conv_store))
+    finally:
+        _session_status_cache.pop("conv_prev", None)
+
+    assert launched == []
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("skipped", "reused_conversation_busy")
+    ]
