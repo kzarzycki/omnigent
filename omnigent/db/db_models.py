@@ -1610,6 +1610,11 @@ class SqlScheduledTask(OmnigentBase):
     # Per-firing cost budget in USD. When set, the fire path attaches a
     # cost_budget policy to each spawned session. NULL = no per-firing cap.
     max_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Unused: session_mode="continue" replaced it. Kept because deployed
+    # databases applied rc7d1e2f3a4b, which added it.
+    reuse_conversation: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false()
+    )
     workspace: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # Git base ref a firing branches from when it creates a worktree at fire
     # time (mirrors session-create's git.base_branch input). None when unset.
