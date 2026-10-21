@@ -41,6 +41,8 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 Unarchive the session, or send `reset_conversation: true` in a `PATCH` (**Start a new conversation on the next run** in the edit dialog), so the next firing creates a new session. A `running` run fired more than 10 minutes ago, on a session that is not mid-turn, lost its prompt or its completion (for example to a server restart). It is failed as `incomplete` and no longer blocks the session.
 
+With `archive_when_done` the archived case is not an error: a quiet run archives the session it continues, so the next run unarchives it, drops its `sys_session_keep` reason and carries on. A session a run kept is still visible, so it keeps its reason and stays visible until you archive it.
+
 **Agent tools.** An agent can manage automations itself with `sys_scheduled_task_create`, `sys_scheduled_task_list`, `sys_scheduled_task_update`, and `sys_scheduled_task_delete` -- so an agent can schedule its own follow-up work. The create and update tools expose the same `permission_mode`, `max_cost_usd`, `reuse_conversation`, and `execution_target` controls, and the update tool also takes `reset_conversation`.
 
 Agent calls to `sys_scheduled_task_create` and `sys_scheduled_task_update`
