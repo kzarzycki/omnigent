@@ -112,6 +112,13 @@ class SysScheduledTaskCreateTool(Tool):
                                 "the user can review the effective task setting."
                             ),
                         },
+                        "archive_when_done": {
+                            "type": "boolean",
+                            "description": (
+                                "Archive a run that succeeds unless it called "
+                                "sys_session_keep. Say in the prompt what is worth keeping."
+                            ),
+                        },
                         "max_cost_usd": {
                             "type": "number",
                             "description": (
@@ -293,6 +300,10 @@ class SysScheduledTaskUpdateTool(Tool):
                                 "when it is unchanged. When switching to a harness "
                                 "without permission-mode support, send null."
                             ),
+                        },
+                        "archive_when_done": {
+                            "type": "boolean",
+                            "description": "Archive a run that succeeds unless it kept itself.",
                         },
                         "max_cost_usd": {
                             "type": "number",

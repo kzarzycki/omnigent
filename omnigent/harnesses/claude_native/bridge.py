@@ -2916,6 +2916,10 @@ def url_component(value: str) -> str:
 # as an approve/reject card.
 _OMNIGENT_DISALLOWED_TOOLS: tuple[str, ...] = ()
 
+# Omnigent tools every session may call without a prompt. A scheduled run that
+# marks itself worth reading has nobody to answer one.
+_OMNIGENT_ALLOWED_TOOLS: tuple[str, ...] = ("mcp__omnigent__sys_session_keep",)
+
 
 def augment_claude_args(
     claude_args: tuple[str, ...],
@@ -3011,7 +3015,7 @@ def augment_claude_args(
         hook_settings, executor="claude-native", active_harnesses=active_harnesses
     )
     args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
-    args = _merge_allowed_tools(args, allowed_tools)
+    args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
     settings_path = bridge_dir / _INVOCATION_SETTINGS_FILE
     _write_json_file(settings_path, hook_settings)
     from omnigent.onboarding.ambient import claude_code_managed_mcp_present

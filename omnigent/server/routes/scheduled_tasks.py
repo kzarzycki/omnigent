@@ -112,6 +112,8 @@ class CreateScheduledTaskRequest(BaseModel):
     reasoning_effort: str | None = None
     # Native-harness permission or execution mode; validated against the agent.
     permission_mode: str | None = None
+    # Archive a run that ends succeeded unless it set the omnigent.keep label.
+    archive_when_done: bool = False
     max_cost_usd: float | None = Field(default=None, gt=0)
     # "continue" sends every run's prompt into one session: ``session_id`` when
     # given, else the session the first run creates.
@@ -163,6 +165,7 @@ class UpdateScheduledTaskRequest(BaseModel):
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
+    archive_when_done: bool | None = None
     max_cost_usd: float | None = Field(default=None, gt=0)  # null clears the cap
     session_mode: Literal["new", "continue"] | None = None
     # Null makes a continue-mode task's next run start a new session.
@@ -244,6 +247,7 @@ def _to_response(
         "model_override": task.model_override,
         "reasoning_effort": task.reasoning_effort,
         "permission_mode": task.permission_mode,
+        "archive_when_done": task.archive_when_done,
         "max_cost_usd": task.max_cost_usd,
         "session_mode": task.session_mode,
         "session_id": task.session_id,
@@ -926,6 +930,7 @@ def create_scheduled_tasks_router(
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
+                archive_when_done=body.archive_when_done,
                 max_cost_usd=body.max_cost_usd,
                 session_mode=body.session_mode,
                 session_id=body.session_id,

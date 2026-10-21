@@ -68,6 +68,7 @@ class ScheduledTaskStore(ABC):
         model_override: str | None = None,
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
+        archive_when_done: bool = False,
         max_cost_usd: float | None = None,
         session_mode: str = "new",
         session_id: str | None = None,
@@ -96,6 +97,8 @@ class ScheduledTaskStore(ABC):
         :param reasoning_effort: Optional reasoning-effort hint.
         :param permission_mode: Optional native-harness permission mode
             (Claude Code), e.g. ``"acceptEdits"``.
+        :param archive_when_done: Archive a run that ends ``succeeded`` unless
+            it carries the ``omnigent.keep`` label.
         :param max_cost_usd: Optional per-firing cost budget in USD.
         :param session_mode: ``"new"`` (default) starts a new session per
             firing; ``"continue"`` sends each firing's prompt into one session.
@@ -192,6 +195,7 @@ class ScheduledTaskStore(ABC):
         model_override: str | None = _UNSET,
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
+        archive_when_done: bool | None = None,
         max_cost_usd: float | None = _UNSET,
         session_mode: str | None = None,
         session_id: str | None = _UNSET,

@@ -64,6 +64,8 @@ class ScheduledTask:
     :param permission_mode: Harness-specific permission or execution mode.
         The fire path translates it into that harness's launch options.
         ``None`` means use the agent's configured default.
+    :param archive_when_done: Archive a run's session when its turn ends
+        ``succeeded`` and it has no ``omnigent.keep`` label.
     :param max_cost_usd: Optional per-firing cost budget in USD. When set, the
         fire path attaches a ``cost_budget`` policy to each spawned session that
         blocks all models once cumulative spend reaches this limit. ``None``
@@ -108,6 +110,7 @@ class ScheduledTask:
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
+    archive_when_done: bool = False
     max_cost_usd: float | None = None
     session_mode: str = "new"
     session_id: str | None = None

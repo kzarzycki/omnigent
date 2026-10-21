@@ -134,6 +134,7 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
         model_override=row.model_override,
         reasoning_effort=row.reasoning_effort,
         permission_mode=row.permission_mode,
+        archive_when_done=row.archive_when_done,
         max_cost_usd=row.max_cost_usd,
         session_mode=decode_scheduled_task_session_mode(row.session_mode),
         session_id=row.session_id,
@@ -245,6 +246,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         model_override: str | None = None,
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
+        archive_when_done: bool = False,
         max_cost_usd: float | None = None,
         session_mode: str = "new",
         session_id: str | None = None,
@@ -274,6 +276,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
+                archive_when_done=archive_when_done,
                 max_cost_usd=max_cost_usd,
                 session_mode=encode_scheduled_task_session_mode(session_mode),
                 session_id=session_id,
@@ -389,6 +392,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         model_override: str | None = _UNSET,
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
+        archive_when_done: bool | None = None,
         max_cost_usd: float | None = _UNSET,
         session_mode: str | None = None,
         session_id: str | None = _UNSET,
@@ -464,6 +468,9 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 changed = True
             if permission_mode is not _UNSET and row.permission_mode != permission_mode:
                 row.permission_mode = permission_mode
+                changed = True
+            if archive_when_done is not None and row.archive_when_done != archive_when_done:
+                row.archive_when_done = archive_when_done
                 changed = True
             if max_cost_usd is not _UNSET and row.max_cost_usd != max_cost_usd:
                 row.max_cost_usd = max_cost_usd

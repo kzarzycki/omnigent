@@ -2608,3 +2608,35 @@ def test_inbox_mysql_deep_page_seeks_to_cursor(store):
         float(value) for value in re.findall(r"actual time=[^)]*? rows=([\d.]+)", plans[0])
     ]
     assert examined and max(examined) <= 51, plans[0]
+
+
+def test_project_and_archive_when_done_round_trip_and_project_clears(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    """Both settings default off, persist on create, and ``project_id=None`` clears."""
+    common = {
+        "name": "n",
+        "prompt": "p",
+        "rrule": "FREQ=MINUTELY",
+        "user_id": "u",
+        "agent_id": _uid("ag"),
+        "timezone": "UTC",
+    }
+    plain = store.create(scheduled_task_id=_uid("st_plain"), **common)
+    assert (plain.project_id, plain.archive_when_done) == (None, False)
+
+    store.create(
+        scheduled_task_id=_uid("st_filed"),
+        project_id=_uid("proj"),
+        archive_when_done=True,
+        **common,
+    )
+    fetched = store.get(_uid("st_filed"))
+    assert fetched is not None
+    assert (fetched.project_id, fetched.archive_when_done) == (_uid("proj"), True)
+
+    unchanged = store.update(_uid("st_filed"), name="renamed")
+    assert unchanged is not None and unchanged.project_id == _uid("proj")
+    cleared = store.update(_uid("st_filed"), project_id=None, archive_when_done=False)
+    assert cleared is not None
+    assert (cleared.project_id, cleared.archive_when_done) == (None, False)
