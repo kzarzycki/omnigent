@@ -97,6 +97,7 @@ def test_scheduled_tasks_columns(db_engine: Engine) -> None:
         "permission_mode",
         "project_id",
         "archive_when_done",
+        "reuse_conversation",
         "max_cost_usd",
         "workspace",
         "base_branch",
