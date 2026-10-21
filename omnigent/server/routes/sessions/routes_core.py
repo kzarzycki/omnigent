@@ -102,6 +102,7 @@ from omnigent.server.routes._errors import (
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.routes._session_create_validation import file_session_by_workspace
 from omnigent.server.routes._sessions.common import (
     _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
     _CLAUDE_NATIVE_PERMISSION_MODES,
@@ -923,6 +924,7 @@ def register_core_routes(
         form = await request.form(max_files=21) if content_type == "multipart/form-data" else None
         if form is not None and (form.get("bundle") is not None or "initial_files" not in form):
             result = await _create_bundled_session_from_multipart(request, user_id)
+            await file_session_by_workspace(conversation_store, result.session_id, user_id)
             # Surface the freshly-minted session id (the request path has no
             # {session_id} on create); the middleware promotes a bag session_id
             # to the audit row's session_id column.
@@ -1060,6 +1062,11 @@ def register_core_routes(
             background_title_coordinator=background_title_coordinator,
             project_store=project_store,
         )
+        if body.project_id is None:
+            resp.project_id = (
+                await file_session_by_workspace(conversation_store, resp.id, user_id)
+                or resp.project_id
+            )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
         # Without this, the runner doesn't know this session exists
