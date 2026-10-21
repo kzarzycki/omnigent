@@ -638,7 +638,7 @@ def _usage_series(
     }
 
 
-def test_usage_metrics_carry_harness_host_agent_and_project(
+def test_usage_metrics_carry_harness_host_agent_project_and_role(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
@@ -649,6 +649,7 @@ def test_usage_metrics_carry_harness_host_agent_and_project(
         project_id="0123456789abcdef0123456789abcd02",
         harness_override="claude-native",
     )
+    store.set_labels(conv.id, {"omni.role": "verifier"})
     monkeypatch.setattr(
         _globals, "_host_store", type("H", (), {"get_host": lambda self, i: _Named("macbook")})()
     )
@@ -670,6 +671,7 @@ def test_usage_metrics_carry_harness_host_agent_and_project(
             "omnigent.host.name": "macbook",
             "omnigent.agent.name": "claude",
             "omnigent.project.name": "homelab",
+            "omnigent.role": "verifier",
         }
     ]
 
@@ -688,3 +690,4 @@ def test_usage_metrics_for_session_without_host_or_project(
     assert cost[0]["omnigent.host.name"] == "unknown"
     assert cost[0]["omnigent.agent.name"] == "unknown"
     assert cost[0]["omnigent.project.name"] == ""
+    assert cost[0]["omnigent.role"] == "other"
