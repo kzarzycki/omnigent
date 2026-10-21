@@ -34,10 +34,10 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 | Situation | Run | `error_code` |
 | --- | --- | --- |
-| The previous run is still `running` | `skipped` | `reused_conversation_busy` |
+| The previous run is still `running`, or the session is mid-turn or waiting on an approval | `skipped` | `reused_conversation_busy` |
 | The session was deleted | `failed` | `reused_conversation_missing` |
 | The session is archived | `failed` | `reused_conversation_archived` |
-| The task now uses a different agent | `failed` | `reused_conversation_incompatible` |
+| The task now uses a different agent, or pins a different host or workspace | `failed` | `reused_conversation_incompatible` |
 
 Unarchive the session, or send `reset_conversation: true` in a `PATCH` (**Start a new conversation on the next run** in the edit dialog), so the next firing creates a new session. A `running` run older than the stale-run limit is failed first and no longer blocks the session.
 

@@ -74,6 +74,7 @@ from omnigent.server.routes._session_create_validation import (
 )
 from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
 from omnigent.server.schemas import SessionEventInput
+from omnigent.stores.conversation_store import runner_seen_is_fresh
 
 _logger = logging.getLogger(__name__)
 
@@ -597,7 +598,7 @@ async def _continue_conversation(
         return
     assert conv is not None
 
-    if await _previous_run_still_running(deps, conversation_id):
+    if await _conversation_busy(deps, conv):
         _logger.info("scheduled fire: task %s conversation is still busy — skipping", task.id)
         await _record_run(
             deps,
@@ -605,7 +606,7 @@ async def _continue_conversation(
             conversation_id,
             scheduled_at,
             status="skipped",
-            error="the previous run is still using the conversation",
+            error="the conversation is still busy with a previous turn",
             error_code="reused_conversation_busy",
         )
         return
@@ -657,17 +658,30 @@ def _reuse_unavailable_reason(
             f"the conversation this automation continues runs a different agent; {_RESET_HINT}",
             "reused_conversation_incompatible",
         )
+    # A pin the task changed since the conversation started would otherwise be
+    # ignored silently: the conversation keeps running where it was created.
+    if (task.host_id is not None and task.host_id != conv.host_id) or (
+        task.workspace is not None and task.workspace != conv.workspace
+    ):
+        return (
+            "the conversation this automation continues runs on a different host or "
+            f"workspace than the automation now pins; {_RESET_HINT}",
+            "reused_conversation_incompatible",
+        )
     return None
 
 
-async def _previous_run_still_running(deps: FireDeps, conversation_id: str) -> bool:
-    """True while an earlier run is active in the conversation.
+async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
+    """True while an earlier run, or a turn someone started by hand, is in progress.
 
-    An orphaned ``running`` row past the stale age is force-failed first, so a
-    run whose host died mid-turn cannot block the conversation forever.
+    An orphaned ``running`` run past the stale age is force-failed first, and a
+    ``running``/``waiting`` live status counts only while the runner heartbeat
+    is fresh, so a host that died mid-turn cannot block the conversation forever.
     """
+    if conv.live_status in ("running", "waiting") and runner_seen_is_fresh(conv.runner_last_seen):
+        return True
     store = deps.scheduled_task_store
-    previous = await asyncio.to_thread(store.get_running_run_by_conversation, conversation_id)
+    previous = await asyncio.to_thread(store.get_running_run_by_conversation, conv.id)
     if previous is None:
         return False
     [previous] = await asyncio.to_thread(force_fail_stale_runs, store, [previous])

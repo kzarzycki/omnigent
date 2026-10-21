@@ -53,6 +53,8 @@ class _FakeConversation:
     runner_id: str | None = None
     archived: bool = False
     session_usage: dict[str, Any] = field(default_factory=dict)
+    live_status: str | None = None
+    runner_last_seen: int | None = None
 
 
 @dataclass
@@ -2023,6 +2025,18 @@ def _reusing_task(**overrides: Any) -> ScheduledTask:
     return _task(reuse_conversation=True, last_run_conversation_id="conv_prev", **overrides)
 
 
+def _previous_conversation(**overrides: Any) -> _FakeConversation:
+    """The conversation a reusing ``_task()`` continues: same agent, host and workspace."""
+    fields: dict[str, Any] = {
+        "id": "conv_prev",
+        "agent_id": "ag_1",
+        "host_id": "host_1",
+        "workspace": "/repo",
+    }
+    fields.update(overrides)
+    return _FakeConversation(**fields)
+
+
 async def _fire_once(deps: FireDeps) -> list[Any]:
     """Fire task_1 once and return the conversations the launch seam received."""
     launched: list[Any] = []
@@ -2037,7 +2051,7 @@ async def _fire_once(deps: FireDeps) -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_reuse_sends_prompt_into_previous_conversation() -> None:
-    conv_store = _ExistingConversationStore(_FakeConversation(id="conv_prev", agent_id="ag_1"))
+    conv_store = _ExistingConversationStore(_previous_conversation())
     perm = FakePermissionStore()
     store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
 
@@ -2067,14 +2081,10 @@ async def test_reuse_without_previous_conversation_creates_one() -> None:
     ("existing", "error_code"),
     [
         (None, "reused_conversation_missing"),
-        (
-            _FakeConversation(id="conv_prev", agent_id="ag_1", archived=True),
-            "reused_conversation_archived",
-        ),
-        (
-            _FakeConversation(id="conv_prev", agent_id="ag_other"),
-            "reused_conversation_incompatible",
-        ),
+        (_previous_conversation(archived=True), "reused_conversation_archived"),
+        (_previous_conversation(agent_id="ag_other"), "reused_conversation_incompatible"),
+        (_previous_conversation(host_id="host_2"), "reused_conversation_incompatible"),
+        (_previous_conversation(workspace="/elsewhere"), "reused_conversation_incompatible"),
     ],
 )
 async def test_reuse_never_replaces_an_unusable_conversation(
@@ -2104,7 +2114,7 @@ def _running_run(fired_at: int) -> ScheduledTaskRun:
 
 @pytest.mark.asyncio
 async def test_reuse_skips_while_previous_run_is_still_running() -> None:
-    conv_store = _ExistingConversationStore(_FakeConversation(id="conv_prev", agent_id="ag_1"))
+    conv_store = _ExistingConversationStore(_previous_conversation())
     store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
     store.running_runs["conv_prev"] = _running_run(fired_at=int(time.time()))
 
@@ -2118,7 +2128,7 @@ async def test_reuse_skips_while_previous_run_is_still_running() -> None:
 
 @pytest.mark.asyncio
 async def test_reuse_fails_a_stale_previous_run_and_continues() -> None:
-    conv_store = _ExistingConversationStore(_FakeConversation(id="conv_prev", agent_id="ag_1"))
+    conv_store = _ExistingConversationStore(_previous_conversation())
     store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
     stale = int(time.time()) - STALE_RUN_MAX_AGE_SECONDS - 1
     store.running_runs["conv_prev"] = _running_run(fired_at=stale)
@@ -2133,7 +2143,7 @@ async def test_reuse_fails_a_stale_previous_run_and_continues() -> None:
 @pytest.mark.asyncio
 async def test_reuse_budget_is_per_fire_on_top_of_session_spend() -> None:
     conv_store = _ExistingConversationStore(
-        _FakeConversation(id="conv_prev", agent_id="ag_1", session_usage={"total_cost_usd": 3.25})
+        _previous_conversation(session_usage={"total_cost_usd": 3.25})
     )
     policy_store = FakePolicyStore()
     policy_store.create(
@@ -2150,3 +2160,30 @@ async def test_reuse_budget_is_per_fire_on_top_of_session_spend() -> None:
 
     assert policy_store.deleted == ["pol_prev"]
     assert policy_store.created[-1]["factory_params"] == {"max_cost_usd": 5.25}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_status", "heartbeat_age_s", "skipped"),
+    [
+        ("running", 0, True),
+        ("waiting", 0, True),
+        ("running", 3600, False),
+        ("idle", 0, False),
+    ],
+)
+async def test_reuse_skips_while_someone_else_is_mid_turn(
+    live_status: str, heartbeat_age_s: int, skipped: bool
+) -> None:
+    """A turn started by hand blocks the fire; a status left by a dead runner does not."""
+    conv_store = _ExistingConversationStore(
+        _previous_conversation(
+            live_status=live_status, runner_last_seen=int(time.time()) - heartbeat_age_s
+        )
+    )
+    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store))
+
+    assert (launched == []) is skipped
+    assert [run["status"] for run in store.runs] == ["skipped" if skipped else "running"]
