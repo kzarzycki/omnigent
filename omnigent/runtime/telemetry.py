@@ -430,6 +430,10 @@ def instrument_fastapi_app(app: FastAPI) -> None:
     Installing it on the server, runner, and harness ASGI apps is what
     continues an incoming ``traceparent`` across each HTTP boundary.
 
+    Per-message ``send``/``receive`` spans are excluded: a long-lived
+    websocket (terminal attach) otherwise adds one span per frame to a
+    single trace, which grows past the backend's per-trace size limit.
+
     :param app: FastAPI app instance to instrument.
     """
     if not _fastapi_instrumentation_enabled():
@@ -437,7 +441,11 @@ def instrument_fastapi_app(app: FastAPI) -> None:
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-        FastAPIInstrumentor.instrument_app(app, server_request_hook=_fastapi_session_id_hook)
+        FastAPIInstrumentor.instrument_app(
+            app,
+            server_request_hook=_fastapi_session_id_hook,
+            exclude_spans=["send", "receive"],
+        )
     except Exception:
         _logger.exception("failed to initialize FastAPI OpenTelemetry instrumentation")
 
