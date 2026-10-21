@@ -113,6 +113,7 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
         project_id=row.project_id,
         archive_when_done=row.archive_when_done,
         max_cost_usd=row.max_cost_usd,
+        reuse_conversation=row.reuse_conversation,
         workspace=row.workspace,
         base_branch=row.base_branch,
         execution_target=decode_scheduled_task_execution_target(row.execution_target),
@@ -205,6 +206,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         project_id: str | None = None,
         archive_when_done: bool = False,
         max_cost_usd: float | None = None,
+        reuse_conversation: bool = False,
         workspace: str | None = None,
         host_id: str | None = None,
         execution_target: str = "connected_host",
@@ -230,6 +232,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 project_id=project_id,
                 archive_when_done=archive_when_done,
                 max_cost_usd=max_cost_usd,
+                reuse_conversation=reuse_conversation,
                 workspace=workspace,
                 base_branch=None,
                 execution_target=encode_scheduled_task_execution_target(execution_target),
@@ -343,6 +346,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         project_id: str | None = _UNSET,
         archive_when_done: bool | None = None,
         max_cost_usd: float | None = _UNSET,
+        reuse_conversation: bool | None = None,
         workspace: str | None = _UNSET,
         host_id: str | None = _UNSET,
         execution_target: str | None = None,
@@ -409,6 +413,9 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 changed = True
             if max_cost_usd is not _UNSET and row.max_cost_usd != max_cost_usd:
                 row.max_cost_usd = max_cost_usd
+                changed = True
+            if reuse_conversation is not None and row.reuse_conversation != reuse_conversation:
+                row.reuse_conversation = reuse_conversation
                 changed = True
             if workspace is not _UNSET and row.workspace != workspace:
                 row.workspace = workspace
