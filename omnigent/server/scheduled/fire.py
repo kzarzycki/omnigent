@@ -887,6 +887,7 @@ async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
         host_id=task.host_id,
         workspace=task.workspace,
         terminal_launch_args=await _permission_mode_launch_args(deps, task),
+        project_id=task.project_id,
     )
     reasoning_effort = task.reasoning_effort
     if reasoning_effort is None:

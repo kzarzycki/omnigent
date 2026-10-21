@@ -513,6 +513,22 @@ async def test_active_creates_session_grant_and_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_fired_run_is_filed_into_the_tasks_project() -> None:
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_1")})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    await build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)(
+        0, "task_1"
+    )
+    await _drain()
+
+    assert [created["project_id"] for created in conv_store.created] == ["proj_1"]
+
+
+@pytest.mark.asyncio
 async def test_a_task_saved_on_another_users_agent_moves_to_its_owners_copy(
     db_uri: str, tmp_path: Path
 ) -> None:

@@ -38,6 +38,7 @@ from omnigent.tools.builtins import (
     SysSessionCreateTool,
     SysSessionGetHistoryTool,
     SysSessionGetInfoTool,
+    SysSessionKeepTool,
     SysSessionListTool,
     SysSessionRenameTool,
     SysSessionSendTool,
@@ -508,6 +509,7 @@ class ToolManager:
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
         self._tools[UiOpenFileTool.name()] = UiOpenFileTool()
         for tool in (
+            SysSessionKeepTool(),
             SysSessionSubscribeTool(),
             SysSessionUnsubscribeTool(),
             SysSessionSubscriptionsTool(),

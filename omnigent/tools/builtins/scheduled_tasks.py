@@ -104,6 +104,17 @@ class SysScheduledTaskCreateTool(Tool):
                                 "Omit for the agent default."
                             ),
                         },
+                        "project_id": {
+                            "type": "string",
+                            "description": "Optional project each run is filed into.",
+                        },
+                        "archive_when_done": {
+                            "type": "boolean",
+                            "description": (
+                                "Archive a run that succeeds unless it called "
+                                "sys_session_keep. Say in the prompt what is worth keeping."
+                            ),
+                        },
                         "max_cost_usd": {
                             "type": "number",
                             "description": (
@@ -236,6 +247,14 @@ class SysScheduledTaskUpdateTool(Tool):
                                 "Code): 'default', 'auto', 'acceptEdits', 'plan', "
                                 "'dontAsk', or 'bypassPermissions'."
                             ),
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": "New project each run is filed into; '' clears it.",
+                        },
+                        "archive_when_done": {
+                            "type": "boolean",
+                            "description": "Archive a run that succeeds unless it kept itself.",
                         },
                         "max_cost_usd": {
                             "type": "number",
