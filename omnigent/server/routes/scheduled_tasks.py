@@ -75,6 +75,8 @@ class CreateScheduledTaskRequest(BaseModel):
     # Archive a run that ends succeeded unless it set the omnigent.keep label.
     archive_when_done: bool = False
     max_cost_usd: float | None = Field(default=None, gt=0)
+    # Continue the previous run's conversation on each later fire.
+    reuse_conversation: bool = False
     # Optional: no PINNED host/workspace. When both are unset the fire path
     # resolves the owner's online host at fire time and defaults the workspace to
     # that host's home directory (a failed run is recorded if none is online) —
@@ -118,6 +120,10 @@ class UpdateScheduledTaskRequest(BaseModel):
     project_id: str | None = None  # "" or null clears it
     archive_when_done: bool | None = None
     max_cost_usd: float | None = Field(default=None, gt=0)  # null clears the cap
+    reuse_conversation: bool | None = None
+    # Forget the conversation a reusing task continues, so the next fire starts
+    # a new one (e.g. after that conversation was deleted or archived).
+    reset_conversation: bool = False
     workspace: str | None = Field(default=None, min_length=1)
     host_id: str | None = Field(default=None, min_length=1)
     execution_target: str | None = Field(default=None, min_length=1)
@@ -191,6 +197,7 @@ def _to_response(
         "project_id": task.project_id,
         "archive_when_done": task.archive_when_done,
         "max_cost_usd": task.max_cost_usd,
+        "reuse_conversation": task.reuse_conversation,
         "workspace": task.workspace,
         "host_id": task.host_id,
         "execution_target": task.execution_target,
@@ -445,6 +452,7 @@ def create_scheduled_tasks_router(
                 project_id=project_id,
                 archive_when_done=body.archive_when_done,
                 max_cost_usd=body.max_cost_usd,
+                reuse_conversation=body.reuse_conversation,
                 workspace=workspace,
                 host_id=body.host_id,
                 execution_target=body.execution_target,
@@ -632,6 +640,10 @@ def create_scheduled_tasks_router(
         fields = body.model_dump(exclude_unset=True)
         if "project_id" in fields:
             fields["project_id"] = await _validate_project(fields["project_id"], request)
+        if "reuse_conversation" in fields and fields["reuse_conversation"] is None:
+            del fields["reuse_conversation"]
+        if fields.pop("reset_conversation", False):
+            fields["last_run_conversation_id"] = None
         target_agent_id = fields.get("agent_id") or existing.agent_id
         agent_changed = target_agent_id != existing.agent_id
         new_copy: Agent | None = None
