@@ -56,6 +56,13 @@ on macOS, or `~/.claude/.credentials.json`.
 
 Offline check of the event mapping: `python3 claude_cloud_acp.py --self-check`.
 
+Live scenarios, each starting real cloud sessions: `python3 e2e.py
+turns|restart|cancel|subagent <checkout>` and `python3 e2e.py untrusted`. The
+tapes in `demo/` record them with [VHS](https://github.com/charmbracelet/vhs):
+`vhs demo/omnigent.tape -o "$tmp/omnigent.mp4"`. The tapes expect the spike
+checkout at `~/dev/ccr-spike-repo` and the agent specs at `~/dev/ccr-spike-agent`
+and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
+
 ## Limits
 
 - **Interrupt:** cancelling the turn stops the mirror only. The cloud turn keeps
@@ -67,7 +74,8 @@ Offline check of the event mapping: `python3 claude_cloud_acp.py --self-check`.
   public API, so it can change without notice.
 - **Polling:** updates arrive every `CLAUDE_CLOUD_POLL_S` seconds (default 2),
   not streamed.
-- **Sub-agents:** sub-agent events are dropped.
+- **Sub-agents:** a sub-agent shows as one `Agent` tool call with its final
+  report; its own steps are dropped.
 - **Resume:** the cloud session id lives only in the bridge process, so a
   restarted Omnigent session starts a new cloud session.
 - **Token lifetime:** only the default Claude config dir is supported. A
