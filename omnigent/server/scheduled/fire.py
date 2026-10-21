@@ -594,6 +594,7 @@ async def _continue_conversation(
             status="failed",
             error=error,
             error_code=error_code,
+            update_pointer=False,
         )
         return
     assert conv is not None
@@ -608,10 +609,17 @@ async def _continue_conversation(
             status="skipped",
             error="the conversation is still busy with a previous turn",
             error_code="reused_conversation_busy",
+            update_pointer=False,
         )
         return
 
-    await _attach_cost_budget(deps, task, conversation_id, spent_usd=_session_cost_usd(conv))
+    spent_usd = await asyncio.to_thread(_session_cost_usd, deps, conversation_id)
+    await _attach_cost_budget(deps, task, conversation_id, spent_usd=spent_usd)
+    # The row exists before the prompt goes out, so a turn that ends quickly
+    # still finds a running run to complete.
+    run_id = await _record_run(
+        deps, task, conversation_id, scheduled_at, status="running", update_pointer=False
+    )
     try:
         await dispatch(conv, task)
     except Exception:
@@ -620,18 +628,15 @@ async def _continue_conversation(
             conversation_id,
             task.id,
         )
-        await _record_run(
-            deps,
-            task,
-            conversation_id,
-            scheduled_at,
+        await asyncio.to_thread(
+            deps.scheduled_task_store.update_run,
+            run_id,
             status="failed",
+            finished_at=int(time.time()),
             error="runner launch/dispatch failed",
             error_code="launch_failed",
         )
         return
-
-    await _record_run(deps, task, conversation_id, scheduled_at, status="running")
     _logger.info("scheduled fire: task %s continued session %s", task.id, conversation_id)
 
 
@@ -688,9 +693,11 @@ async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
     return previous.status == "running"
 
 
-def _session_cost_usd(conv: Conversation) -> float:
-    """The conversation's cumulative priced spend so far."""
-    spent = (conv.session_usage or {}).get("total_cost_usd")
+def _session_cost_usd(deps: FireDeps, conversation_id: str) -> float:
+    """The session's spend so far, as the cost-budget policy counts it."""
+    from omnigent.runtime.policies.builder import _policy_usage_seed
+
+    spent = _policy_usage_seed(conversation_id, deps.conversation_store).get("total_cost_usd")
     return float(spent) if isinstance(spent, (int, float)) else 0.0
 
 
@@ -1043,7 +1050,7 @@ async def _attach_cost_budget(
     Non-fatal: a failure logs a warning but does not fail the fire — an
     uncapped session is better than a dead run.
     """
-    if task.max_cost_usd is None or deps.policy_store is None:
+    if deps.policy_store is None:
         return
     from omnigent.runtime.policies.builder import invalidate_session_policy_specs_cache
 
@@ -1053,6 +1060,10 @@ async def _attach_cost_budget(
         ):
             if existing.name == _COST_BUDGET_POLICY_NAME:
                 await asyncio.to_thread(deps.policy_store.delete, existing.id, conversation_id)
+        if task.max_cost_usd is None:
+            # A cleared budget must not leave an earlier fire's cap on a reused session.
+            invalidate_session_policy_specs_cache(conversation_id)
+            return
         await asyncio.to_thread(
             deps.policy_store.create,
             policy_id=_new_id(),
@@ -1124,9 +1135,15 @@ async def _record_run(
     status: str,
     error: str | None = None,
     error_code: str | None = None,
-) -> None:
-    """Stamp last_run_* on the task and write a scheduled_task_runs row."""
-    await asyncio.to_thread(
+    update_pointer: bool = True,
+) -> str:
+    """Stamp last_run_* on the task and write a scheduled_task_runs row.
+
+    ``update_pointer=False`` leaves ``last_run_conversation_id`` alone, so a
+    reused conversation is never written back over a concurrent reset.
+    Returns the new run's id.
+    """
+    return await asyncio.to_thread(
         _record_run_sync,
         deps,
         task,
@@ -1135,6 +1152,7 @@ async def _record_run(
         status,
         error=error,
         error_code=error_code,
+        update_pointer=update_pointer,
     )
 
 
@@ -1147,15 +1165,17 @@ def _record_run_sync(
     *,
     error: str | None = None,
     error_code: str | None = None,
-) -> None:
+    update_pointer: bool = True,
+) -> str:
     """Synchronous run recording body for ``asyncio.to_thread`` callers."""
     now = int(time.time())
     update_fields: dict[str, Any] = {"last_run_at": now}
-    if conversation_id is not None:
+    if conversation_id is not None and update_pointer:
         update_fields["last_run_conversation_id"] = conversation_id
     deps.scheduled_task_store.update(task.id, **update_fields)
+    run_id = _new_id()
     deps.scheduled_task_store.create_run(
-        _new_id(),
+        run_id,
         task.id,
         status,
         scheduled_at,
@@ -1164,6 +1184,7 @@ def _record_run_sync(
         error=error,
         error_code=error_code,
     )
+    return run_id
 
 
 async def _validate_fire_session_inputs(

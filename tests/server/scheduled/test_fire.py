@@ -55,6 +55,11 @@ class _FakeConversation:
     session_usage: dict[str, Any] = field(default_factory=dict)
     live_status: str | None = None
     runner_last_seen: int | None = None
+    parent_conversation_id: str | None = None
+    root_conversation_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.root_conversation_id = self.root_conversation_id or self.id
 
 
 @dataclass
@@ -2020,6 +2025,12 @@ class _ExistingConversationStore(FakeConversationStore):
     def get_conversation(self, conversation_id: str) -> _FakeConversation | None:
         return self.existing.get(conversation_id)
 
+    def list_conversations(self, *, root_conversation_id: str, **_: Any) -> SimpleNamespace:
+        tree = [
+            c for c in self.existing.values() if c.root_conversation_id == root_conversation_id
+        ]
+        return SimpleNamespace(data=tree, has_more=False, last_id=None)
+
 
 def _reusing_task(**overrides: Any) -> ScheduledTask:
     return _task(reuse_conversation=True, last_run_conversation_id="conv_prev", **overrides)
@@ -2142,8 +2153,16 @@ async def test_reuse_fails_a_stale_previous_run_and_continues() -> None:
 
 @pytest.mark.asyncio
 async def test_reuse_budget_is_per_fire_on_top_of_session_spend() -> None:
+    """The baseline is the spend the budget policy enforces, sub-agents included."""
     conv_store = _ExistingConversationStore(
-        _previous_conversation(session_usage={"total_cost_usd": 3.25})
+        _previous_conversation(session_usage={"total_cost_usd": 1.0}),
+        _FakeConversation(
+            id="conv_child",
+            agent_id="ag_1",
+            parent_conversation_id="conv_prev",
+            root_conversation_id="conv_prev",
+            session_usage={"total_cost_usd": 2.25},
+        ),
     )
     policy_store = FakePolicyStore()
     policy_store.create(
@@ -2187,3 +2206,61 @@ async def test_reuse_skips_while_someone_else_is_mid_turn(
 
     assert (launched == []) is skipped
     assert [run["status"] for run in store.runs] == ["skipped" if skipped else "running"]
+
+
+@pytest.mark.asyncio
+async def test_reuse_with_budget_cleared_drops_the_earlier_cap() -> None:
+    conv_store = _ExistingConversationStore(_previous_conversation())
+    policy_store = FakePolicyStore()
+    policy_store.create(
+        policy_id="pol_prev",
+        session_id="conv_prev",
+        name=fire_mod._COST_BUDGET_POLICY_NAME,
+        type="python",
+        handler=fire_mod._COST_BUDGET_HANDLER,
+        factory_params={"max_cost_usd": 2.0},
+    )
+    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task(max_cost_usd=None)})
+
+    await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
+
+    assert policy_store.deleted == ["pol_prev"]
+    assert len(policy_store.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_reuse_records_the_run_before_dispatch_and_keeps_a_concurrent_reset() -> None:
+    """A turn that ends during dispatch finds its run, and a reset made then is not undone."""
+    conv_store = _ExistingConversationStore(_previous_conversation())
+    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+    runs_at_dispatch: list[str] = []
+
+    async def _launch(conv: Any, task: Any) -> None:
+        runs_at_dispatch.extend(run["status"] for run in store.runs)
+
+    await build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)(
+        0, "task_1"
+    )
+    await _drain()
+
+    assert runs_at_dispatch == ["running"]
+    assert all("last_run_conversation_id" not in update for update in store.updates)
+
+
+@pytest.mark.asyncio
+async def test_reuse_dispatch_failure_fails_the_recorded_run() -> None:
+    conv_store = _ExistingConversationStore(_previous_conversation())
+    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        raise RuntimeError("runner never came up")
+
+    await build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)(
+        0, "task_1"
+    )
+    await _drain()
+
+    assert [run["status"] for run in store.runs] == ["running"]
+    assert [(u["id"], u["status"], u["error_code"]) for u in store.run_updates] == [
+        (store.runs[0]["run_id"], "failed", "launch_failed")
+    ]
