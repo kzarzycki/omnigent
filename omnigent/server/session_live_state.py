@@ -45,6 +45,8 @@ from typing import TYPE_CHECKING, Any
 
 from omnigent.db.enum_codecs import SESSION_LIVE_STATUS
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.harness_aliases import is_native_harness
+from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY
 
 if TYPE_CHECKING:
     from omnigent.stores import ConversationStore
@@ -204,6 +206,7 @@ def persist_scheduled_run_completion(
     *,
     error_code: str | None = None,
     error: str | None = None,
+    from_runner: bool = False,
 ) -> None:
     """Transition a scheduled-task run to terminal when its turn ends.
 
@@ -231,12 +234,18 @@ def persist_scheduled_run_completion(
     (startup sweep / lazy-on-read) is the durability guarantee for the rare
     dropped-write or restart-in-flight case.
 
+    A ``succeeded`` run of an ``archive_when_done`` task is archived unless
+    its session carries the ``omnigent.keep`` label.
+
     :param conversation_id: The fired conversation whose turn just ended.
     :param run_status: Terminal run status to set — ``"succeeded"`` (turn
         completed) or ``"failed"`` (turn errored/cancelled/disconnected).
     :param error_code: Short failure classification when ``run_status`` is
         ``"failed"`` (e.g. the conversation's ``last_task_error_code``).
     :param error: Optional human-readable failure detail for ``"failed"``.
+    :param from_runner: The edge is the runner's relayed status. For a native
+        harness a relayed ``idle`` only means the pane went quiet (after prompt
+        delivery, or mid-turn); its forwarder's own edge reports the turn end.
     """
     store = _scheduled_task_store
     if store is None:
@@ -248,13 +257,28 @@ def persist_scheduled_run_completion(
             # Not a scheduled fire, or its run is already terminal — nothing to
             # do. This is the common case (interactive sessions).
             return
-        store.update_run(
+        if from_runner and run_status == "succeeded" and _store is not None:
+            from omnigent.server.routes._sessions.orchestration import _native_pane_harness
+
+            conv = _store.get_conversation(conversation_id)
+            if conv is not None and is_native_harness(_native_pane_harness(conv)):
+                return
+        finished = store.update_run(
             run.id,
             status=run_status,
             finished_at=int(time.time()),
             error=error,
             error_code=error_code,
         )
+        if finished is None or run_status != "succeeded" or _store is None:
+            return
+        task = store.get(run.scheduled_task_id)
+        if task is None or not task.archive_when_done:
+            return
+        conv = _store.get_conversation(conversation_id)
+        if conv is not None and not conv.archived and KEEP_LABEL_KEY not in conv.labels:
+            # The runner is left to the idle reaper; this only hides the run.
+            _store.update_conversation(conversation_id, archived=True)
 
     submit("scheduled_run_completion", _transition)
 

@@ -5027,6 +5027,7 @@ def _publish_status(
     failure_origin: str | None = None,
     failure_context: object = None,
     disconnect_evidence: Mapping[str, str] | None = None,
+    from_runner: bool = False,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -5063,6 +5064,8 @@ def _publish_status(
         the failure-log boundary. Malformed values cannot reject the status edge.
     :param disconnect_evidence: Flat string attributes describing the runner
         drop that caused a ``"failed"`` edge, logged on the failure row only.
+    :param from_runner: The edge is the runner's relayed status. A native
+        harness's relayed ``idle`` is pane activity, not the end of its turn.
     """
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
@@ -5109,7 +5112,9 @@ def _publish_status(
             error="runner disappeared before the turn reached a terminal state",
         )
     elif status == "idle":
-        session_live_state.persist_scheduled_run_completion(session_id, "succeeded")
+        session_live_state.persist_scheduled_run_completion(
+            session_id, "succeeded", from_runner=from_runner
+        )
     elif status == "failed":
         # Canonical server-side broken-turn signal: every server-originated
         # failed turn (runner disconnect mid-turn, setup/dispatch failure,

@@ -41,6 +41,7 @@ from omnigent.server.scheduled.rrule import RRuleSearchError, RRuleValidationErr
 from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
 from omnigent.stores.artifact_store import ArtifactStore
+from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
 _logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ class CreateScheduledTaskRequest(BaseModel):
     # Native-harness permission mode (Claude Code), e.g. "acceptEdits". The fire
     # path derives the runner's --permission-mode launch arg from it.
     permission_mode: str | None = None
+    # Project each fired run is filed into; "" or null leaves runs unfiled.
+    project_id: str | None = None
+    # Archive a run that ends succeeded unless it set the omnigent.keep label.
+    archive_when_done: bool = False
     max_cost_usd: float | None = Field(default=None, gt=0)
     # Optional: no PINNED host/workspace. When both are unset the fire path
     # resolves the owner's online host at fire time and defaults the workspace to
@@ -110,6 +115,8 @@ class UpdateScheduledTaskRequest(BaseModel):
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
+    project_id: str | None = None  # "" or null clears it
+    archive_when_done: bool | None = None
     max_cost_usd: float | None = Field(default=None, gt=0)  # null clears the cap
     workspace: str | None = Field(default=None, min_length=1)
     host_id: str | None = Field(default=None, min_length=1)
@@ -181,6 +188,8 @@ def _to_response(
         "model_override": task.model_override,
         "reasoning_effort": task.reasoning_effort,
         "permission_mode": task.permission_mode,
+        "project_id": task.project_id,
+        "archive_when_done": task.archive_when_done,
         "max_cost_usd": task.max_cost_usd,
         "workspace": task.workspace,
         "host_id": task.host_id,
@@ -240,6 +249,7 @@ def create_scheduled_tasks_router(
     agent_cache: Any | None = None,
     auth_provider: AuthProvider | None = None,
     artifact_store: ArtifactStore | None = None,
+    project_store: ProjectStore | None = None,
 ) -> APIRouter:
     """Build the scheduled-tasks router.
 
@@ -247,6 +257,7 @@ def create_scheduled_tasks_router(
 
     :param store: The shared :class:`ScheduledTaskStore`.
     :param artifact_store: Holds the copy a task gets of another user's agent.
+    :param project_store: Resolves the project a task files its runs into.
     :param auth_provider: Auth provider used to identify the requesting user.
         ``None`` disables auth (owner resolves to ``"local"``).
     :returns: A configured :class:`APIRouter`.
@@ -352,6 +363,22 @@ def create_scheduled_tasks_router(
         )
         return agent, canonical_workspace, validated_model, validated_effort
 
+    async def _validate_project(project_id: str | None, request: Request) -> str | None:
+        """Return the owned project id, ``None`` for ``""``/``None``, or raise 404."""
+        if not project_id:
+            return None
+        # Projects are owned by the raw request identity (``"local"`` on a
+        # single-user runtime), not the task's ``None``-for-local owner id.
+        user_id = require_user(request, auth_provider)
+        project = (
+            None
+            if project_store is None
+            else await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+        )
+        if project is None:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        return project_id
+
     async def _bind_agent(agent: Agent, owner_id: str | None) -> Agent:
         """A task runs another user's agent from its owner's own copy, taken now."""
         return await asyncio.to_thread(
@@ -401,6 +428,7 @@ def create_scheduled_tasks_router(
             execution_target=body.execution_target,
         )
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
+        project_id = await _validate_project(body.project_id, request)
         bound = await _bind_agent(agent, owner_id)
         try:
             task = store.create(
@@ -414,6 +442,8 @@ def create_scheduled_tasks_router(
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
+                project_id=project_id,
+                archive_when_done=body.archive_when_done,
                 max_cost_usd=body.max_cost_usd,
                 workspace=workspace,
                 host_id=body.host_id,
@@ -588,6 +618,8 @@ def create_scheduled_tasks_router(
         if body.timezone is not None:
             _validate_timezone_or_400(body.timezone)
         fields = body.model_dump(exclude_unset=True)
+        if "project_id" in fields:
+            fields["project_id"] = await _validate_project(fields["project_id"], request)
         target_agent_id = fields.get("agent_id") or existing.agent_id
         agent_changed = target_agent_id != existing.agent_id
         new_copy: Agent | None = None
