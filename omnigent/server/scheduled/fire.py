@@ -80,6 +80,7 @@ from omnigent.server.routes._session_create_validation import (
 from omnigent.server.scheduled.run_reconciler import STALE_RUN_ERROR_CODE
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.conversation_store import runner_seen_is_fresh
+from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY
 
 _logger = logging.getLogger(__name__)
 
@@ -627,6 +628,8 @@ async def _continue_conversation(
         )
         return
     assert conv is not None
+    if conv.archived:
+        await asyncio.to_thread(_reopen_quiet_conversation, deps, conversation_id)
 
     if await _conversation_busy(deps, conv):
         _logger.info("scheduled fire: task %s conversation is still busy — skipping", task.id)
@@ -669,6 +672,17 @@ async def _continue_conversation(
     _logger.info("scheduled fire: task %s continued session %s", task.id, conversation_id)
 
 
+def _reopen_quiet_conversation(deps: FireDeps, conversation_id: str) -> None:
+    """Unarchive an archive_when_done conversation so the next run decides afresh.
+
+    An archived one holds nothing unread (its last run was quiet, or the owner
+    dismissed it), so the stale keep reason goes too; a kept one that is still
+    visible keeps its label and stays visible.
+    """
+    deps.conversation_store.delete_label(conversation_id, KEEP_LABEL_KEY)
+    deps.conversation_store.update_conversation(conversation_id, archived=False)
+
+
 _RESET_HINT = "reset the automation's conversation or turn off conversation reuse"
 
 
@@ -681,7 +695,8 @@ def _reuse_unavailable_reason(
             f"the conversation this automation continues no longer exists; {_RESET_HINT}",
             "reused_conversation_missing",
         )
-    if conv.archived:
+    # An archive_when_done task archives its own quiet runs; see _reopen_quiet_conversation.
+    if conv.archived and not task.archive_when_done:
         return (
             f"the conversation this automation continues is archived; unarchive it, or "
             f"{_RESET_HINT}",
