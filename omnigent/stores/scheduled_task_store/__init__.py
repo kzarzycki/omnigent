@@ -54,6 +54,7 @@ class ScheduledTaskStore(ABC):
         project_id: str | None = None,
         archive_when_done: bool = False,
         max_cost_usd: float | None = None,
+        reuse_conversation: bool = False,
         workspace: str | None = None,
         host_id: str | None = None,
         execution_target: str = "connected_host",
@@ -79,6 +80,8 @@ class ScheduledTaskStore(ABC):
         :param archive_when_done: Archive a run that ends ``succeeded`` unless
             it carries the ``omnigent.keep`` label.
         :param max_cost_usd: Optional per-firing cost budget in USD.
+        :param reuse_conversation: Continue the last run's conversation on
+            each later firing instead of creating a new one.
         :param workspace: Runner start path (source repo / working dir).
         :param host_id: The connected host to pin the run to.
         :param execution_target: ``"connected_host"`` (default) or
@@ -149,6 +152,7 @@ class ScheduledTaskStore(ABC):
         project_id: str | None = _UNSET,
         archive_when_done: bool | None = None,
         max_cost_usd: float | None = _UNSET,
+        reuse_conversation: bool | None = None,
         workspace: str | None = _UNSET,
         host_id: str | None = _UNSET,
         execution_target: str | None = None,
