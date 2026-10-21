@@ -38,6 +38,7 @@ from omnigent.tools.builtins import (
     SysSessionCreateTool,
     SysSessionGetHistoryTool,
     SysSessionGetInfoTool,
+    SysSessionKeepTool,
     SysSessionListTool,
     SysSessionRenameTool,
     SysSessionSendTool,
@@ -506,6 +507,7 @@ class ToolManager:
         """Register framework-owned tools for the current session."""
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
         for tool in (
+            SysSessionKeepTool(),
             SysSessionSubscribeTool(),
             SysSessionUnsubscribeTool(),
             SysSessionSubscriptionsTool(),

@@ -159,6 +159,18 @@ async def test_update_forwards_agent_switch_and_cost_cap() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["sys_scheduled_task_create", "sys_scheduled_task_update"])
+async def test_project_and_archive_when_done_reach_the_request(tool: str) -> None:
+    client = _RecordingClient(_Resp(body={"id": "t1"}))
+    fields = {"project_id": "p1", "archive_when_done": True}
+    await _execute_scheduled_task_tool(
+        tool, json.dumps({"scheduled_task_id": _TASK_ID, **fields}), server_client=client
+    )
+    _, _, body = client.calls[0]
+    assert body is not None and {k: body[k] for k in fields} == fields
+
+
+@pytest.mark.asyncio
 async def test_delete_by_id() -> None:
     client = _RecordingClient(_Resp(body={"deleted": True, "id": "t1"}))
     await _execute_scheduled_task_tool(

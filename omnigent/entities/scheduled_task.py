@@ -50,6 +50,9 @@ class ScheduledTask:
         ``"bypassPermissions"``. The fire path turns it into the runner's
         ``["--permission-mode", <value>]`` terminal launch args. ``None`` means
         use the agent's configured default.
+    :param project_id: Project each fired run is filed into, or ``None``.
+    :param archive_when_done: Archive a run's session when its turn ends
+        ``succeeded`` and it has no ``omnigent.keep`` label.
     :param max_cost_usd: Optional per-firing cost budget in USD. When set, the
         fire path attaches a ``cost_budget`` policy to each spawned session that
         blocks all models once cumulative spend reaches this limit. ``None``
@@ -85,6 +88,8 @@ class ScheduledTask:
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
+    project_id: str | None = None
+    archive_when_done: bool = False
     max_cost_usd: float | None = None
     workspace: str | None = None
     base_branch: str | None = None

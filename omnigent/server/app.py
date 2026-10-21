@@ -3568,6 +3568,7 @@ def create_app(
                 agent_cache=agent_cache,
                 auth_provider=auth_provider,
                 artifact_store=artifact_store,
+                project_store=project_store,
             ),
             prefix="/v1",
             tags=["scheduled_tasks"],
