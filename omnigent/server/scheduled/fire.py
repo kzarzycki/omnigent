@@ -685,12 +685,18 @@ _ORPHANED_RUN_GRACE_SECONDS = 10 * 60
 async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
     """True while an earlier run, or a turn someone started by hand, is in progress.
 
-    A ``running``/``waiting`` live status counts only while the runner heartbeat
-    is fresh. An earlier ``running`` run counts only within the grace period;
-    after it, on a conversation that is not mid-turn, it is failed as orphaned
-    so one lost prompt cannot block every later firing.
+    The live status comes from this replica's status cache when it holds the
+    session's tunnel; the persisted copy lags it and counts only while the
+    runner heartbeat is fresh. An earlier ``running`` run counts only within the
+    grace period; after it, on a conversation that is not mid-turn, it is failed
+    as orphaned so one lost prompt cannot block every later firing.
     """
-    if conv.live_status in ("running", "waiting") and runner_seen_is_fresh(conv.runner_last_seen):
+    from omnigent.server.routes._sessions.common import _session_status_cache
+
+    live = _session_status_cache.get(conv.id)
+    if live is None and runner_seen_is_fresh(conv.runner_last_seen):
+        live = conv.live_status
+    if live in ("running", "waiting"):
         return True
     store = deps.scheduled_task_store
     previous = await asyncio.to_thread(store.get_running_run_by_conversation, conv.id)
