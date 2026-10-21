@@ -68,6 +68,7 @@ from omnigent.server.routes._host_launch import (
     resolve_host_launch,
     resolve_launch_timeout_s,
 )
+from omnigent.server.routes._session_create_validation import file_session_by_workspace
 from omnigent.server.routes._workspace_validation import (
     _is_windows_absolute_path,
     restore_host_filesystem_url_path,
@@ -1198,6 +1199,11 @@ def create_hosts_router(
         # path); the middleware promotes a bag session_id to the audit row's
         # session_id column. Host is an attribute.
         add_audit_attrs(session_id=body.session_id, host_id=host_id, runner_id=runner_id)
+        if target.conv.host_id is None:
+            # First launch: the workspace is known only now (a session created
+            # with no host, then launched), so file it by its workspace. After
+            # the host's ack, so a refused launch files nothing.
+            await file_session_by_workspace(conversation_store, body.session_id, user_id)
         return {
             "runner_id": runner_id,
             "status": "launching",

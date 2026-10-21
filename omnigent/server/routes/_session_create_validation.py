@@ -20,6 +20,7 @@ from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_READ, RESERVED_USER_LOCAL, local_single_user_enabled
 from omnigent.server.routes._auth_helpers import require_access
+from omnigent.server.routes._workspace_validation import _is_subpath_of
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.project_store import ProjectStore
@@ -41,6 +42,7 @@ async def resolve_project_session_create(
     body: Any,
     user_id: str | None,
     project_store: ProjectStore | None,
+    default_host: bool = True,
 ) -> ProjectCreateResolution:
     """Apply opt-in project defaults before any create-side validation.
 
@@ -65,9 +67,29 @@ async def resolve_project_session_create(
 
     config = project.config
     updates: dict[str, Any] = {}
-    for field in ("agent_id", "workspace", "git"):
+    for field in ("agent_id", "host_id", "workspace", "git"):
         if field not in fields_set and field in config and field in body.__class__.model_fields:
             updates[field] = config[field]
+    # The project's host is a default only where it can bind: never for a
+    # managed sandbox (its own host) or the web's "__sandbox__" host choice, and
+    # only beside a workspace, which a host-bound session requires. A caller
+    # that doesn't validate the host it stores (imports) opts out.
+    if (
+        not default_host
+        or getattr(body, "host_type", None) == "managed"
+        or updates.get("host_id") == "__sandbox__"
+        or updates.get("workspace", getattr(body, "workspace", None)) is None
+    ):
+        updates.pop("host_id", None)
+    # The project's model is its agent's: a request naming another agent keeps
+    # that harness's own default rather than a model it may not know.
+    if (
+        "model_override" not in fields_set
+        and "model" in config
+        and "model_override" in body.__class__.model_fields
+        and updates.get("agent_id", getattr(body, "agent_id", None)) == config.get("agent_id")
+    ):
+        updates["model_override"] = config["model"]
     resolved_data = body.model_dump()
     resolved_data.update(updates)
     # Re-validate project hints because config is intentionally stored as
@@ -91,6 +113,77 @@ async def resolve_project_session_create(
         )
 
     return ProjectCreateResolution(body=resolved, project_id=project_id)
+
+
+def project_for_workspace(projects: list[Any], host_id: str, workspace: str) -> str | None:
+    """The project whose workspace root holds *workspace* on *host_id*.
+
+    A project's roots are its config's own ``host_id`` + ``workspace`` and each
+    entry of ``config["workspace_roots"]`` (``{"workspace": ..., "host_id": ...}``,
+    ``host_id`` defaulting to the project's). The longest matching root wins; a
+    tie between two projects files nowhere rather than guessing.
+    """
+    best: str | None = None
+    best_len = -1
+    for project in projects:
+        config = project.config
+        extra = config.get("workspace_roots")
+        roots = (
+            [config, *(r for r in extra if isinstance(r, dict))]
+            if isinstance(extra, list)
+            else [config]
+        )
+        for root in roots:
+            path = root.get("workspace")
+            host = root.get("host_id", config.get("host_id"))
+            if host != host_id or not isinstance(path, str) or not path:
+                continue
+            path = path.rstrip("/\\") or "/"
+            if not _is_subpath_of(workspace, path):
+                continue
+            if len(path) > best_len:
+                best, best_len = project.id, len(path)
+            elif len(path) == best_len and best != project.id:
+                best = None
+    return best
+
+
+async def file_session_by_workspace(
+    conversation_store: ConversationStore, session_id: str, user_id: str | None
+) -> str | None:
+    """File a top-level, unfiled, host-bound session into its workspace's project.
+
+    Best-effort: a failure is logged and never fails the create or launch that
+    called it.
+
+    :returns: The project id it was filed into, or ``None``.
+    """
+    from omnigent.runtime import _globals
+
+    project_store = _globals._project_store
+    if project_store is None:
+        return None
+    try:
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if (
+            conv is None
+            or conv.parent_conversation_id is not None
+            or conv.project_id is not None
+            or conv.host_id is None
+            or conv.workspace is None
+        ):
+            return None
+        projects = await asyncio.to_thread(project_store.list, user_id=user_id)
+        project_id = project_for_workspace(projects, conv.host_id, conv.workspace)
+        if project_id is None:
+            return None
+        await asyncio.to_thread(
+            conversation_store.set_conversation_project, session_id, project_id
+        )
+        return project_id
+    except Exception:
+        _logger.exception("Failed to file session %s by workspace", session_id)
+        return None
 
 
 # Claude Code's ``--permission-mode`` launch vocabulary — every value the CLI
