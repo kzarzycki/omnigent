@@ -65,6 +65,7 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_session_list",
         "sys_session_get_info",
         "sys_session_rename",
+        "sys_session_keep",
         # Every session may watch the sessions it can read.
         "sys_session_subscribe",
         "sys_session_unsubscribe",

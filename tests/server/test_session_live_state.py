@@ -16,6 +16,7 @@ short polling deadline — the same shape as the host-tunnel route tests'
 from __future__ import annotations
 
 import time
+import uuid
 
 import pytest
 
@@ -301,7 +302,10 @@ class _FakeScheduledTaskStore:
         if run_id is None:
             return None
         # Minimal object carrying only the ``id`` the hook reads.
-        return type("_Run", (), {"id": run_id})()
+        return type("_Run", (), {"id": run_id, "scheduled_task_id": "task_1"})()
+
+    def get(self, scheduled_task_id: str) -> None:
+        return None
 
     def update_run(
         self,
@@ -435,3 +439,53 @@ async def test_liveness_pass_zeroes_pending_count_for_offline_runner() -> None:
         (False, 0),
         (True, 3),
     ]
+
+
+@pytest.mark.parametrize(
+    ("archive_when_done", "labels", "run_status", "archived"),
+    [
+        (True, {}, "succeeded", True),
+        (True, {"omnigent.keep": "found a reply"}, "succeeded", False),
+        (True, {}, "failed", False),
+        (False, {}, "succeeded", False),
+    ],
+    ids=["quiet-run-archived", "kept-run-stays", "failed-run-stays", "setting-off"],
+)
+def test_scheduled_run_completion_archives_only_a_quiet_succeeded_run(
+    db_uri: str,
+    archive_when_done: bool,
+    labels: dict[str, str],
+    run_status: str,
+    archived: bool,
+) -> None:
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
+        SqlAlchemyScheduledTaskStore,
+    )
+
+    conversations = SqlAlchemyConversationStore(db_uri)
+    tasks = SqlAlchemyScheduledTaskStore(db_uri)
+    task = tasks.create(
+        scheduled_task_id=uuid.uuid4().hex,
+        name="inbox check",
+        prompt="p",
+        rrule="FREQ=HOURLY",
+        user_id=None,
+        agent_id=uuid.uuid4().hex,
+        timezone="UTC",
+        archive_when_done=archive_when_done,
+    )
+    conv = conversations.create_conversation(title="inbox check", labels=labels or None)
+    tasks.create_run(uuid.uuid4().hex, task.id, "running", scheduled_at=0, conversation_id=conv.id)
+    session_live_state.configure(conversations, tasks)
+    try:
+        session_live_state.persist_scheduled_run_completion(conv.id, run_status)
+        session_live_state.submit("drain", lambda: None).result(timeout=10)
+    finally:
+        session_live_state.configure(None)
+
+    reloaded = conversations.get_conversation(conv.id)
+    assert reloaded is not None and reloaded.archived is archived
+    assert tasks.get_running_run_by_conversation(conv.id) is None
