@@ -35,7 +35,6 @@ from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, RESERVED_USER_LOCAL, R
 from omnigent.server.bundles import bundle_location
 from omnigent.server.scheduled import fire as fire_mod
 from omnigent.server.scheduled.fire import FireDeps, build_on_fire, build_run_now
-from omnigent.server.scheduled.run_reconciler import STALE_RUN_MAX_AGE_SECONDS
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
@@ -2248,16 +2247,19 @@ async def test_reuse_skips_while_previous_run_is_still_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reuse_fails_a_stale_previous_run_and_continues() -> None:
-    conv_store = _ExistingConversationStore(_previous_conversation())
+async def test_reuse_fails_an_orphaned_previous_run_and_continues() -> None:
+    """A run whose prompt was lost stops blocking once the grace period is over."""
+    conv_store = _ExistingConversationStore(_previous_conversation(live_status="idle"))
     store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
-    stale = int(time.time()) - STALE_RUN_MAX_AGE_SECONDS - 1
-    store.running_runs["conv_prev"] = _running_run(fired_at=stale)
+    orphaned = int(time.time()) - fire_mod._ORPHANED_RUN_GRACE_SECONDS - 1
+    store.running_runs["conv_prev"] = _running_run(fired_at=orphaned)
 
     launched = await _fire_once(_deps(store, conversation_store=conv_store))
 
     assert [conv.id for conv in launched] == ["conv_prev"]
-    assert store.run_updates[0]["status"] == "failed"
+    assert [(u["status"], u["error_code"]) for u in store.run_updates] == [
+        ("failed", "incomplete")
+    ]
     assert [run["status"] for run in store.runs] == ["running"]
 
 
