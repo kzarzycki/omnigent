@@ -5337,7 +5337,14 @@ class ProjectObject(BaseModel):
         workspace, harness, model, reasoning effort, git base-branch, …). Empty
         when the project stores no defaults. The key vocabulary is owned by the
         client; the server persists and returns it whole. Values are hints the
-        new-chat dialog pre-fills, not enforced requirements.
+        new-chat dialog pre-fills, not enforced requirements. The server reads
+        a few: a create naming the project fills the ``agent_id``, ``host_id``,
+        ``workspace``, ``git`` and ``model`` it leaves out (the model only for
+        the project's own agent), and a new top-level session with no project
+        whose workspace lies under the project's ``host_id`` + ``workspace``,
+        or under an entry of ``workspace_roots`` (``[{"workspace": ...,
+        "host_id": ...}]``, ``host_id`` defaulting to the project's), is filed
+        into the project with the longest such root.
     """
 
     id: str
