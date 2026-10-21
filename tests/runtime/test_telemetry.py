@@ -13,7 +13,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -1369,6 +1369,48 @@ def test_httpx_to_fastapi_propagates_trace_across_http_hop(
         f"not match caller trace {_RESP_HEX!r} — traceparent did not "
         "propagate across the HTTP hop (inject or extract is broken)."
     )
+
+
+def test_fastapi_websocket_emits_no_per_frame_spans(
+    in_memory_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A websocket records one server span, not one span per frame.
+
+    Terminal attach keeps a websocket open for hours; a ``send`` span per
+    frame put tens of thousands of spans in one trace, past Tempo's
+    per-trace limit, and its WAL replay ran out of memory.
+    """
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", "true")
+    app = FastAPI()
+
+    @app.websocket("/ws")
+    async def ws(websocket: WebSocket) -> None:
+        """
+        Echo three frames, then close.
+
+        :param websocket: The accepted client socket.
+        """
+        await websocket.accept()
+        for _ in range(3):
+            await websocket.send_text(await websocket.receive_text())
+        await websocket.close()
+
+    telemetry.instrument_fastapi_app(app)
+    try:
+        with TestClient(app).websocket_connect("/ws") as client:
+            for i in range(3):
+                client.send_text(str(i))
+                assert client.receive_text() == str(i)
+    finally:
+        FastAPIInstrumentor.uninstrument_app(app)
+
+    names = [s.name for s in in_memory_exporter.get_finished_spans()]
+    assert names == ["HTTP /ws"], names
 
 
 def test_instrument_httpx_client_injects_over_custom_transport(
