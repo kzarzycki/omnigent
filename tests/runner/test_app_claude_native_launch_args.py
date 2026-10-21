@@ -621,7 +621,8 @@ def test_pinned_harness_launch_argv_is_unchanged(bridge_dir: Path) -> None:
 
     assert _augmented(bridge_dir, auto_harness=False) == baseline
     assert "--append-system-prompt" not in baseline
-    assert "--allowedTools" not in baseline
+    allowed = baseline[baseline.index("--allowedTools") + 1].split(",")
+    assert not set(_ROUTED_SPAWN_ALLOWED_TOOLS) & set(allowed)
 
 
 def test_routed_spawn_launch_args_gate_is_off_without_auto_harness() -> None:
