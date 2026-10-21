@@ -467,6 +467,39 @@ async def test_inline_launch_binds_runner_and_returns_host(
     assert conv.workspace == _WORKSPACE
 
 
+async def test_inline_launch_files_the_session_by_its_workspace(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The New Chat path: a create on a workspace a project owns lands in it."""
+    import uuid
+
+    from omnigent.runtime import _globals
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    project_store = SqlAlchemyProjectStore(db_uri)
+    monkeypatch.setattr(_globals, "_project_store", project_store)
+    project = project_store.create(
+        uuid.uuid4().hex, "work", None, {"host_id": _HOST_ID, "workspace": "/work"}
+    )
+    comm = await _connect_host(app)
+    agent = await create_test_agent(client)
+
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
+    )
+    await responder
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["project_id"] == project.id
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+    assert conv is not None and conv.project_id == project.id
+
+
 async def test_inline_launch_stamps_terminal_view_label_at_creation(
     client: httpx.AsyncClient,
     app: FastAPI,
