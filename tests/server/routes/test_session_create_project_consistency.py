@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -77,11 +78,15 @@ def _headers(user: str = ALICE) -> dict[str, str]:
 
 
 async def _project(
-    client: httpx.AsyncClient, config: dict[str, object], *, user: str = ALICE
+    client: httpx.AsyncClient,
+    config: dict[str, object],
+    *,
+    user: str = ALICE,
+    name: str | None = None,
 ) -> str:
     response = await client.post(
         "/v1/projects",
-        json={"name": f"project-{user}", "config": config},
+        json={"name": name or f"project-{user}", "config": config},
         headers=_headers(user),
     )
     assert response.status_code == 200, response.text
@@ -565,3 +570,67 @@ async def test_import_with_unowned_or_unknown_project_is_404(
         )
         assert response.status_code == 404, response.text
         assert "Project not found" in response.text
+
+
+async def test_project_host_and_model_are_defaults_a_request_overrides(db_uri: str) -> None:
+    """The project's host and model fill a create that leaves them out; explicit values win."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    host = "487b7cb7ac30abf4debfaa578d052ec6"
+    pinned = project_store.create(
+        "587b7cb7ac30abf4debfaa578d052ec6",
+        "pinned",
+        ALICE,
+        {"agent_id": CUSTOM_AGENT_ID, "host_id": host, "workspace": "/w", "model": "opus"},
+    )
+    bare = project_store.create("687b7cb7ac30abf4debfaa578d052ec6", "bare", ALICE, {})
+
+    async def resolve(project_id: str, **fields: object) -> ProjectSessionCreateRequest:
+        resolved = await resolve_project_session_create(
+            body=ProjectSessionCreateRequest(project_id=project_id, **fields),
+            user_id=ALICE,
+            project_store=project_store,
+        )
+        return resolved.body
+
+    filled = await resolve(pinned.id)
+    assert (filled.host_id, filled.model_override) == (host, "opus")
+    given = await resolve(
+        pinned.id, host_id="787b7cb7ac30abf4debfaa578d052ec6", model_override="x"
+    )
+    assert (given.host_id, given.model_override) == ("787b7cb7ac30abf4debfaa578d052ec6", "x")
+    # Another agent keeps its harness's own model default.
+    other = await resolve(pinned.id, agent_id=OTHER_AGENT_ID)
+    assert (other.host_id, other.model_override) == (host, None)
+    # A managed sandbox is its own host.
+    managed = await resolve(pinned.id, host_type="managed", workspace="https://github.com/o/r")
+    assert managed.host_id is None
+    # The web's sandbox host choice, or a host saved without a workspace, binds nothing.
+    for config in ({"host_id": "__sandbox__", "workspace": "/w"}, {"host_id": host}):
+        hostless = project_store.create(uuid.uuid4().hex, str(config), ALICE, config)
+        assert (await resolve(hostless.id, agent_id=CUSTOM_AGENT_ID)).host_id is None
+    # A project that sets neither leaves them to the host and harness defaults.
+    unset = await resolve(bare.id, agent_id=CUSTOM_AGENT_ID)
+    assert (unset.host_id, unset.workspace, unset.model_override) == (None, None, None)
+
+
+async def test_import_never_takes_the_project_host(
+    project_create_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """An import binds only the host it came from, which the route checks."""
+    _seed_claude_import_agent(db_uri)
+    for n, config in enumerate(
+        (
+            {"host_id": "487b7cb7ac30abf4debfaa578d052ec6"},
+            {"host_id": "487b7cb7ac30abf4debfaa578d052ec6", "workspace": "/w"},
+            {"host_id": "__sandbox__", "workspace": "/w"},
+        )
+    ):
+        project_id = await _project(project_create_client, config, name=f"import-{n}")
+        response = await project_create_client.post(
+            "/v1/imports",
+            json=_import_payload(f"import-host-{n}", project_id=project_id),
+            headers=_headers(),
+        )
+        assert response.status_code == 201, response.text
+        conv = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["session_id"])
+        assert conv is not None and conv.host_id is None

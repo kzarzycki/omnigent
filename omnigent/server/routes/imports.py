@@ -403,6 +403,7 @@ def create_imports_router(
             body=SessionCreateRequest(**create_kwargs),
             user_id=user_id,
             project_store=project_store,
+            default_host=False,
         )
         agent_id = resolved_create.body.agent_id
         workspace = resolved_create.body.workspace

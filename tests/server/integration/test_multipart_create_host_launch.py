@@ -267,6 +267,32 @@ async def test_multipart_create_with_host_id_binds_and_launches(
     assert any(frame.path == _WORKSPACE for frame in cap.stats)
 
 
+async def test_multipart_create_files_the_session_by_its_workspace(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundled create on a workspace a project owns lands in that project."""
+    import uuid
+
+    from omnigent.runtime import _globals
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    project_store = SqlAlchemyProjectStore(db_uri)
+    monkeypatch.setattr(_globals, "_project_store", project_store)
+    project = project_store.create(
+        uuid.uuid4().hex, "alice", None, {"host_id": _HOST_ID, "workspace": "/Users/alice"}
+    )
+    register_host()
+
+    resp = await _multipart_create(client, {"host_id": _HOST_ID, "workspace": _WORKSPACE})
+    assert resp.status_code == 201, resp.text
+    conv = conv_store.get_conversation(resp.json()["session_id"])
+    assert conv is not None and conv.project_id == project.id
+
+
 async def test_multipart_create_launch_failure_keeps_binding(
     register_host: RegisterHost,
     client: httpx.AsyncClient,
