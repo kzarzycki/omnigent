@@ -2,8 +2,8 @@
 
 The counters take each write's growth, so a metrics backend can chart tokens
 and USD over time without reading the database. Labels stay low-cardinality:
-model, token type, rate-limit window and the session's harness, host, agent and
-project names, never a session or user id.
+model, token type, rate-limit window, the session's harness, host, agent and
+project names and its owner, never a session id.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ def record_usage_growth(
     agent_name: str | None = None,
     project_name: str | None = None,
     role: str | None = None,
+    user: str | None = None,
 ) -> None:
     """
     Add one ``session_usage`` write's growth to the token and cost counters.
@@ -77,6 +78,8 @@ def record_usage_growth(
     :param project_name: Name of the session's project; empty when it has none.
     :param role: The session's ``omni.role`` label, e.g. ``"verifier"``; ``other``
         when it has none.
+    :param user: The session owner's user id, e.g. ``"alice"``; ``unknown``
+        when it has none.
     """
     tokens, cost, _, _ = _instruments()
     labels = {
@@ -86,6 +89,7 @@ def record_usage_growth(
         "omnigent.agent.name": agent_name or "unknown",
         "omnigent.project.name": project_name or "",
         "omnigent.role": role or "other",
+        "omnigent.user": user or "unknown",
     }
     for key, token_type in _TOKEN_TYPES.items():
         amount = growth.get(key)
