@@ -45,6 +45,8 @@ git config user.signingkey "$dir/key"
 git config commit.gpgsign true
 git config user.name "omnigent fork sync"
 git config user.email "k.zarzycki@gmail.com"
+# Cloud sessions start from a shallow clone; the delta needs the merge base.
+[ "$(git rev-parse --is-shallow-repository)" = false ] || git fetch -q --unshallow origin
 git fetch -q origin mine
 git rev-parse -q --verify refs/heads/mine >/dev/null || git branch -q mine origin/mine
 echo "==> ready: signing as $(ssh-keygen -lf "$dir/key" | awk '{print $2}')"
