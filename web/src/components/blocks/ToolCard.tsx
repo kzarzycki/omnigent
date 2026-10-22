@@ -14,7 +14,15 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   CodeBlock,
   CodeBlockActions,
@@ -63,6 +71,15 @@ import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
 import { ToolValueView } from "./ToolValueView";
 import { type ToolBodyProps, toolViewFor } from "./toolViews";
+import {
+  ChatFindRevealContext,
+  type FindReveal,
+  useRevealedCollapsible,
+  useRevealedOpen,
+} from "@/components/chat/chatFindReveal";
+
+/** Set inside a tool card that holds a find-in-chat match, so its clipped output expands. */
+const ToolFindRevealedContext = createContext(false);
 
 const OUTPUT_PREVIEW_LINE_LIMIT = 80;
 const OUTPUT_PREVIEW_CHAR_LIMIT = 12_000;
@@ -186,6 +203,8 @@ interface ToolCardProps {
   startedAt?: number | null;
   /** Completed runtime in seconds. Undefined when historical data lacks timing. */
   duration?: number;
+  /** Set while find in chat shows a match inside this call. */
+  findReveal?: FindReveal;
 }
 
 export function ToolCard({
@@ -196,6 +215,7 @@ export function ToolCard({
   state,
   startedAt,
   duration,
+  findReveal,
 }: ToolCardProps) {
   const view = toolViewFor(name);
   const call = useMemo<ToolCall>(
@@ -222,9 +242,10 @@ export function ToolCard({
       : (resolveChatFilePath(title.filePath, root, home)?.path ?? null);
   const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
   const Body = view?.Body ?? DefaultToolBody;
+  const collapsible = useRevealedCollapsible(findReveal !== undefined, findReveal === "current");
 
   return (
-    <Collapsible defaultOpen={false} className="group not-prose w-full">
+    <Collapsible {...collapsible} className="group not-prose w-full">
       <ToolTriggerRow
         title={title}
         displayPath={linkPath}
@@ -236,7 +257,9 @@ export function ToolCard({
         onBodyClick={onBodyClick}
       />
       <CollapsibleContent className="mt-1 ml-2 space-y-2 border-l pl-3 py-1 data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=open]:animate-in">
-        <Body call={call} duration={displayDuration} />
+        <ToolFindRevealedContext.Provider value={findReveal !== undefined}>
+          <Body call={call} duration={displayDuration} />
+        </ToolFindRevealedContext.Provider>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -435,15 +458,22 @@ function RawToggleButton({ pressed, onToggle }: { pressed: boolean; onToggle: ()
  * tools fold here: older tools once the visible tail of the most
  * recent ones has been peeled off.
  */
-export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
+export function ToolGroupSummary({
+  tools,
+  findReveals,
+}: {
+  tools: RenderItem[];
+  findReveals?: ReadonlyMap<RenderItem, FindReveal>;
+}) {
   const label = formatToolRunLabel(tools.map(toolRunCall));
+  const collapsible = useRevealedCollapsible(tools.some((item) => findReveals?.has(item)));
   return (
     // Named `group/tool-summary` so this collapsible only rotates its
     // OWN chevron (line 296 in `ToolTriggerRow` uses an unnamed
     // `group-data-[state=open]:rotate-90` that would otherwise match
     // any ancestor `.group[data-state=open]` and incorrectly rotate
     // chevrons of inner tool cards when this outer group is open).
-    <Collapsible defaultOpen={false} className="group/tool-summary not-prose w-full">
+    <Collapsible {...collapsible} className="group/tool-summary not-prose w-full">
       <CollapsibleTrigger className="flex cursor-pointer items-center gap-1.5 py-0.5 text-left text-muted-foreground text-ui transition-colors hover:text-foreground">
         <span>{label}</span>
         <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]/tool-summary:rotate-90" />
@@ -460,6 +490,7 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
                 state={item.state}
                 startedAt={item.startedAt}
                 duration={item.duration}
+                findReveal={findReveals?.get(item)}
               />
             );
           }
@@ -472,6 +503,7 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
                 arguments={item.data}
                 output={null}
                 state="output-available"
+                findReveal={findReveals?.get(item)}
               />
             );
           }
@@ -920,12 +952,22 @@ function OutputSection({
   /** Highlighting for the default Output panel; JSON unless set. */
   language?: CodeLanguage;
 }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  useEffect(() => setIsExpanded(false), [output]);
+  const [expandedByReader, setExpandedByReader] = useState(false);
+  useEffect(() => setExpandedByReader(false), [output]);
 
   const collapsedPreview = useMemo(() => getOutputPreview(output), [output]);
-  const preview = useMemo(() => getOutputPreview(output, isExpanded), [output, isExpanded]);
   const canExpand = collapsedPreview.isTruncated;
+  // The preview clips its text, so find expands an output that holds the match.
+  // Find in chat has a match in this card.
+  const revealed = useContext(ToolFindRevealedContext);
+  const query = useContext(ChatFindRevealContext)?.query.toLowerCase() ?? "";
+  const holdsMatch = revealed && canExpand && query !== "" && output.toLowerCase().includes(query);
+  const [isExpanded, setIsExpanded] = useRevealedOpen(
+    holdsMatch,
+    expandedByReader,
+    setExpandedByReader,
+  );
+  const preview = useMemo(() => getOutputPreview(output, isExpanded), [output, isExpanded]);
 
   return (
     <div className="space-y-2">
@@ -960,7 +1002,7 @@ function OutputSection({
           </span>
           <Button
             className="w-fit"
-            onClick={() => setIsExpanded((value) => !value)}
+            onClick={() => setIsExpanded(!isExpanded)}
             size="xs"
             type="button"
             variant="outline"

@@ -9,6 +9,7 @@ import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM, findMessageElement } from "@/lib
 import { scrollToMessage } from "@/hooks/useUserMessageNav";
 import { useChatStore } from "@/store/chatStore";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
+import { firstFindRange } from "@/components/chat/chatFindReveal";
 
 /** Select Chat from the surface that stays mounted while Terminal is visible. */
 export function useMessageDeepLinkChatView(conversationId: string | null): void {
@@ -44,6 +45,8 @@ export interface MessageJumpTarget {
   key: string;
   /** Ids tried in order, e.g. a matched item's id, then its response id. */
   candidates: string[];
+  /** Found text: the jump centers its first occurrence instead of the bubble. */
+  query?: string;
 }
 
 interface MessageJumpOptions extends MessageDeepLinkOptions {
@@ -91,7 +94,7 @@ export function useMessageJump(
       appliedKeyRef.current = null;
       return;
     }
-    const { key, candidates } = target;
+    const { key, candidates, query } = target;
     if (appliedKeyRef.current === key) return;
     if (!ready || showTerminal || loadingConversation || loadingMoreHistory) return;
 
@@ -103,7 +106,12 @@ export function useMessageJump(
         appliedKeyRef.current = key;
         // Through the virtualizer first, as the rail does: a bare smooth scroll
         // is cancelled when a row mounting above it corrects scrollTop.
-        scrollToMessage(anchor, flashUserMessage, ensureMessageVisible);
+        scrollToMessage(
+          anchor,
+          flashUserMessage,
+          ensureMessageVisible,
+          query ? (el) => firstFindRange(el, query) : undefined,
+        );
         return;
       }
       // Geometry publishes a new range after this scroll mounts the target.

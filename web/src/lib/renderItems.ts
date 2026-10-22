@@ -82,6 +82,8 @@ export type RenderItem =
   | {
       kind: "reasoning";
       itemId: string | null;
+      /** The settled reasoning item whose text this shows; not a key, so a run keeps its key as it settles. */
+      sourceItemId?: string;
       text: string;
       duration: number | undefined;
     }
@@ -90,6 +92,8 @@ export type RenderItem =
       itemId: string | null;
       execution: ToolExecution;
       output: string | null;
+      /** The output item's id, once the call has a recorded result. */
+      outputItemId?: string;
       state: ToolState;
       startedAt: number | null;
       duration: number | undefined;
@@ -1871,6 +1875,7 @@ function reasoningItem(run: AnyBlock[]): RenderItem {
       return {
         kind: "reasoning",
         itemId: null,
+        sourceItemId: b.ctx.itemId ?? undefined,
         text: parts.join("\n\n"),
         duration,
       };
@@ -1912,7 +1917,8 @@ function toolItem(
     state = "no-output";
   }
 
-  return { kind: "tool", itemId, execution, output, state, startedAt, duration };
+  const outputItemId = result?.ctx.itemId ?? undefined;
+  return { kind: "tool", itemId, execution, output, outputItemId, state, startedAt, duration };
 }
 
 /** Same keys, each value strictly equal. */
