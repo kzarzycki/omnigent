@@ -175,7 +175,14 @@ _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 # estimates every ILIKE at a few rows, so for a word built from common trigrams
 # it also picks the index and rechecks most items, slower than the plan without
 # it. Neither plan can be told apart up front, so both run and the first wins.
-_SEARCH_PLAN_SETUPS: tuple[tuple[str, ...], ...] = ((), ("SET LOCAL enable_bitmapscan = off",))
+# The scan gets 4 parallel workers: beside the index plan it then still beats
+# the scan alone with Postgres' default of 2.
+# ponytail: a fixed 4 suits an 8-core server; make it a setting if smaller hosts need fewer.
+_SEARCH_SCAN_SETUP = (
+    "SET LOCAL enable_bitmapscan = off",
+    "SET LOCAL max_parallel_workers_per_gather = 4",
+)
+_SEARCH_PLAN_SETUPS: tuple[tuple[str, ...], ...] = ((), _SEARCH_SCAN_SETUP)
 
 
 def _sqlstate(error: OperationalError) -> str | None:
@@ -3517,11 +3524,12 @@ class SqlAlchemyConversationStore(ConversationStore):
                     ]
                 else:
                     # Under three characters the trigram index cannot narrow the match.
-                    session.execute(text(_SEARCH_PLAN_SETUPS[1][0]))
+                    for statement in _SEARCH_SCAN_SETUP:
+                        session.execute(text(statement))
                     rows = list(session.execute(stmt).scalars().all())
                 # The snippet probe is scoped to one page of ids: keep it on the
                 # btree (bitmap scans off) within what is left of the deadline.
-                session.execute(text(_SEARCH_PLAN_SETUPS[1][0]))
+                session.execute(text(_SEARCH_SCAN_SETUP[0]))
                 _set_statement_timeout(session, search_deadline)
             else:
                 rows = list(session.execute(stmt).scalars().all())
