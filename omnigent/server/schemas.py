@@ -32,6 +32,7 @@ from omnigent.entities import (
     ConversationItem,
 )
 from omnigent.inner.native_attachments import reject_authored_framework_notices
+from omnigent.util.uuid import normalize_uuid
 
 # ── Shared ──────────────────────────────────────────────────────
 
@@ -3193,6 +3194,12 @@ class SessionSubscriptionRequest(BaseModel):
     """
 
     session_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("session_id")
+    @classmethod
+    def _canonical_session_id(cls, value: str) -> str:
+        # Compared with the canonical path id, so ``conv_<hex>`` must not differ.
+        return normalize_uuid(value) or value
 
 
 class SessionSubscriptionObject(BaseModel):
