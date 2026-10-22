@@ -10,6 +10,7 @@ Each scenario starts real cloud sessions on the signed-in claude.ai account.
     python3 e2e.py cancel   <git checkout>   # cancel interrupts the running cloud turn
     python3 e2e.py teardown <git checkout>   # cancel then kill, as Omnigent's Esc does
     python3 e2e.py subagent <git checkout>   # sub-agent steps are mirrored with a label
+    python3 e2e.py mcp      <git checkout>   # the cloud agent calls an MCP server on this host
     python3 e2e.py untrusted                 # a folder Claude Code has not trusted fails clearly
 
 A scenario that checks an outcome exits non-zero when it doesn't hold.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -49,7 +51,7 @@ def check(ok: bool, what: str) -> None:
 class Client:
     """One bridge process, spoken to over ACP stdio like Omnigent does."""
 
-    def __init__(self, cwd: str, session: str | None = None) -> None:
+    def __init__(self, cwd: str, session: str | None = None, mcp: list | None = None) -> None:
         self.proc = subprocess.Popen(
             [sys.executable, str(HERE / "claude_cloud_acp.py")],
             stdin=subprocess.PIPE,
@@ -65,7 +67,9 @@ class Client:
         self.call("initialize", {"protocolVersion": 1})
         self.session = (
             session
-            or self.call("session/new", {"cwd": cwd, "mcpServers": []})["result"]["sessionId"]
+            or self.call("session/new", {"cwd": cwd, "mcpServers": mcp or []})["result"][
+                "sessionId"
+            ]
         )
 
     def request(self, method: str, params: dict) -> int:
@@ -227,6 +231,30 @@ def scenario_subagent(cwd: str) -> None:
     check(any(t.startswith("[sub-agent] ") for t in client.tools), "sub-agent tool calls shown")
 
 
+def scenario_mcp(cwd: str) -> None:
+    echo = [
+        {"name": "echo", "command": sys.executable, "args": ["-c", bridge.ECHO_MCP], "env": []}
+    ]
+    ask = "Call the echo tool of the echo MCP server with text '{}' and quote its result exactly."
+    first = Client(cwd, mcp=echo)
+    first.prompt("Reply with the single word: ready")
+    first.prompt(ask.format("hello from cloud"))
+    first.close()
+    print("\n-- bridge gone; a new one re-registers the server from this host --")
+    second = Client(cwd, mcp=echo)
+    cloud_id = first.cloud_url.rsplit("/", 1)[1]
+    history = (
+        f"user: Reply with the single word: ready\nassistant: ready\n\n{bridge.MARKER}{cloud_id}\n"
+        f"user: {ask.format('hello from cloud')}\nassistant: {first.answer.strip()}"
+    )
+    second.prompt(REPLAY.format(history=history, latest=ask.format("second bridge")))
+    second.close()
+    host = socket.gethostname()
+    check(f"served by {host}" in first.answer, f"the cloud agent called a tool served by {host}")
+    check(second.cloud_url == first.cloud_url, "the new bridge re-attached to the same session")
+    check("second bridge" in second.answer, "the new bridge serves the tool to that session")
+
+
 def scenario_untrusted() -> None:
     repo = tempfile.mkdtemp(prefix="ccr-untrusted-")
     subprocess.run(["git", "init", "-q", repo], check=True)
@@ -249,5 +277,6 @@ if __name__ == "__main__":
         "cancel": scenario_cancel,
         "teardown": scenario_teardown,
         "subagent": scenario_subagent,
+        "mcp": scenario_mcp,
         "untrusted": scenario_untrusted,
     }[name](*args)

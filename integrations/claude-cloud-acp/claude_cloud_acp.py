@@ -31,6 +31,7 @@ import json
 import os
 import pty
 import pwd
+import queue
 import re
 import select
 import signal
@@ -158,19 +159,21 @@ def post_event(session_id: str, payload: dict) -> int:
     return int(reply["results"][0]["sequence_num"])
 
 
-def send_message(session_id: str, text: str) -> tuple[int, bool]:
-    """Post a user message; return its sequence number and whether the session was unarchived."""
+def post_active(session_id: str, payload: dict) -> tuple[int, bool]:
+    """Post *payload*, unarchiving first if needed; return its sequence number and
+    whether the session was unarchived."""
     try:
-        return _post_user(session_id, text), False
+        return post_event(session_id, payload), False
     except urllib.error.HTTPError as exc:
         if exc.code != 409:  # 409 ``session_not_active``: archived
             raise
     call_api(f"/v1/code/sessions/{session_id}/unarchive", {})
-    return _post_user(session_id, text), True
+    return post_event(session_id, payload), True
 
 
-def _post_user(session_id: str, text: str) -> int:
-    return post_event(
+def send_message(session_id: str, text: str) -> tuple[int, bool]:
+    """Post a user message; return its sequence number and whether the session was unarchived."""
+    return post_active(
         session_id,
         {
             "session_id": session_id,
@@ -281,6 +284,127 @@ def create_cloud_session(text: str, cwd: str) -> str:
         os.close(master)
 
 
+class McpProxy:
+    """A local stdio MCP server, served to the cloud session as an SDK MCP server.
+
+    The cloud CLI sends each MCP message as an ``mcp_message`` control request
+    over the events API; the reply goes back the same way. So the server runs on
+    this host, and the VM never needs a route to it.
+    """
+
+    def __init__(self, spec: dict) -> None:
+        self.name = spec["name"]
+        self.spec = spec
+        self.proc: subprocess.Popen | None = None
+        self.init_result: dict | None = None
+        # ponytail: one request at a time; concurrent tool calls queue here.
+        self.lock = threading.Lock()
+
+    def handle(self, message: dict) -> dict:
+        """Answer one MCP JSON-RPC message from the cloud CLI."""
+        method, mid = message.get("method"), message.get("id")
+        with self.lock:
+            self._start()
+            if method == "initialize":
+                # The proxy did the handshake once; a re-registered server reuses it.
+                return {"jsonrpc": "2.0", "id": mid, "result": self.init_result}
+            if mid is None:
+                if method != "notifications/initialized":
+                    self._write(message)
+                return {"jsonrpc": "2.0", "result": {}}
+            return self._call(message)
+
+    def _start(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        env = {**os.environ, **{e["name"]: e["value"] for e in self.spec.get("env") or []}}
+        self.proc = subprocess.Popen(
+            [self.spec["command"], *self.spec.get("args", [])],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        reply = self._call(
+            {
+                "jsonrpc": "2.0",
+                "id": "bridge-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "claude-cloud-acp", "version": "0"},
+                },
+            }
+        )
+        self.init_result = reply.get("result")
+        self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        log(f"MCP server {self.name} started")
+
+    def _write(self, message: dict) -> None:
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def _call(self, message: dict) -> dict:
+        self._write(message)
+        for line in self.proc.stdout:
+            reply = json.loads(line)
+            if reply.get("id") == message["id"] and "method" not in reply:
+                return reply
+        return {
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "error": {"code": -32000, "message": f"MCP server {self.name} exited"},
+        }
+
+
+def respond(session_id: str, request_id: str, response: dict) -> None:
+    post_event(
+        session_id,
+        {
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": request_id, "response": response},
+        },
+    )
+
+
+def register_mcp(session_id: str, servers: dict[str, McpProxy]) -> tuple[int, bool]:
+    """(Re)register *servers* in the cloud session, like :func:`post_active`.
+
+    Removing them first makes the CLI connect afresh, so it handshakes with this
+    bridge rather than one that has gone.
+    """
+
+    def request(wanted: dict) -> dict:
+        return {
+            "type": "control_request",
+            "request_id": str(uuid.uuid4()),
+            "request": {"subtype": "mcp_set_servers", "servers": wanted},
+        }
+
+    sent = post_active(session_id, request({}))
+    post_event(session_id, request({name: {"type": "sdk", "name": name} for name in servers}))
+    return sent
+
+
+def answer_control(session_id: str, servers: dict[str, McpProxy], payload: dict) -> None:
+    """Answer a control request the cloud CLI sent to this client."""
+    request, request_id = payload.get("request") or {}, payload.get("request_id")
+    subtype = request.get("subtype")
+    if subtype == "mcp_message" and (proxy := servers.get(request.get("server_name", ""))):
+        reply = proxy.handle(request.get("message") or {})
+        respond(session_id, request_id, {"mcp_response": reply})
+    elif subtype == "can_use_tool":
+        tool = request.get("tool_name", "")
+        # Omnigent applies its own policy when its relay runs the tool. Anything
+        # else asking here has no approver, so it fails closed.
+        if any(tool.startswith(f"mcp__{name}__") for name in servers):
+            decision = {"behavior": "allow", "updatedInput": request.get("input") or {}}
+        else:
+            decision = {"behavior": "deny", "message": f"{tool} is not approved by Omnigent"}
+        respond(session_id, request_id, decision)
+
+
 # ── event mapping ──────────────────────────────────────────
 
 
@@ -370,10 +494,40 @@ class Session:
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
         self.cloud_id: str | None = None
+        self.mcp: dict[str, McpProxy] = {}
+        self.mcp_registered = False
+        self.events: queue.Queue[dict] = queue.Queue()
+        self.reader: threading.Thread | None = None
         self.cancelled = threading.Event()
         self.running = False
         self.interrupted = False
         self.lock = threading.RLock()  # re-entered by the SIGTERM handler
+
+    def follow(self, after: int) -> None:
+        """Read the cloud session's stream from *after* for the rest of the bridge's life.
+
+        Control requests are answered as they arrive, between turns too: the CLI
+        handshakes with MCP servers whenever it (re)connects, and gives up quickly.
+        The rest goes to :attr:`events` for the running turn.
+        """
+        if self.reader is not None:
+            return
+
+        def read() -> None:
+            for event in stream_events(self.cloud_id, after):
+                payload = (event or {}).get("payload") or {}
+                if payload.get("type") == "control_request":
+                    # Off the reader: a tool call can outlast the CLI's wait for other events.
+                    threading.Thread(
+                        target=answer_control,
+                        args=(self.cloud_id, self.mcp, payload),
+                        daemon=True,
+                    ).start()
+                elif event is not None:
+                    self.events.put(event)
+
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
 
     def cancel(self) -> None:
         """Interrupt the running cloud turn, once.
@@ -476,9 +630,13 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
             s.cloud_id = create_cloud_session(text, s.cwd)
             log(f"created {s.cloud_id}")
             after = 0
+            # ponytail: the first prompt is already running, so its tools may come late.
+            if s.mcp:
+                register_mcp(s.cloud_id, s.mcp)
+                s.mcp_registered = True
         else:
             log(f"re-attaching to {s.cloud_id}")
-            after, unarchived = send_message(s.cloud_id, text)
+            after, unarchived = _send(s, text)
             if unarchived:
                 thought(
                     acp_id,
@@ -488,21 +646,24 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         thought(acp_id, f"[cloud] https://claude.ai/code/{s.cloud_id}\n")
         announce = True
     else:
-        after, unarchived = send_message(s.cloud_id, text)
+        after, unarchived = _send(s, text)
         if unarchived:
             thought(
                 acp_id, "[cloud] unarchived the session; files from before the archive are gone\n"
             )
+    s.follow(after)
     deadline = time.monotonic() + TURN_TIMEOUT_S
-    for event in stream_events(s.cloud_id, after):
-        if time.monotonic() > deadline:
-            break
+    while time.monotonic() < deadline:
         if s.cancelled.is_set():
             # A cancel that came before the session existed. Keep mirroring after
             # it: the interrupted turn still ends with a ``result`` event.
             s.cancel()
-        if event is None:
+        try:
+            event = s.events.get(timeout=1)
+        except queue.Empty:
             continue
+        if int(event["sequence_num"]) <= after:
+            continue  # from before this turn's message
         updates, done = to_updates(event.get("payload") or {})
         for upd in updates:
             update(acp_id, upd)
@@ -518,6 +679,16 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
                 )
             return "cancelled" if s.interrupted else "end_turn"
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
+
+
+def _send(s: Session, text: str) -> tuple[int, bool]:
+    """Post the prompt, registering MCP servers first when this bridge hasn't yet."""
+    if not s.mcp or s.mcp_registered:
+        return send_message(s.cloud_id, text)
+    sent = register_mcp(s.cloud_id, s.mcp)
+    s.mcp_registered = True
+    send_message(s.cloud_id, text)
+    return sent
 
 
 def handle_prompt(msg: dict) -> None:
@@ -563,6 +734,12 @@ def serve() -> None:
         elif method == "session/new":
             acp_id = f"ccloud-{uuid.uuid4().hex}"
             SESSIONS[acp_id] = Session(params.get("cwd") or os.getcwd())
+            # ponytail: stdio servers only, which is what Omnigent's relay is.
+            SESSIONS[acp_id].mcp = {
+                spec["name"]: McpProxy(spec)
+                for spec in params.get("mcpServers") or []
+                if spec.get("command")
+            }
             log(f"session {acp_id} cwd={SESSIONS[acp_id].cwd}")
             send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": acp_id}})
         elif method == "session/prompt":
@@ -580,6 +757,26 @@ def serve() -> None:
                 }
             )
     stop()  # stdin closed: Omnigent is tearing the bridge down
+
+
+# A stdio MCP server with one ``echo`` tool, for the self-check and ``e2e.py mcp``.
+ECHO_MCP = """
+import json, socket, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+         "serverInfo": {"name": "echo", "version": "0"}}
+    if m["method"] == "tools/list":
+        r = {"tools": [{"name": "echo", "description": "Echo text, tagged with the serving host.",
+             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
+    elif m["method"] == "tools/call":
+        t = m["params"]["arguments"].get("text", "")
+        t = f"echo: {t} (served by {socket.gethostname()})"
+        r = {"content": [{"type": "text", "text": t}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"""
 
 
 def self_check() -> None:
@@ -642,6 +839,23 @@ def self_check() -> None:
     assert to_updates({"type": "user", "message": {"content": "plain prompt echo"}}) == ([], False)
     screen = "\x1b[32m✓\x1b[0m Created cloud session \x1b]8;;x\x07https://claude.ai/code/session_01DiUkqY2kzbUb"
     assert SESSION_ID_RE.search(ANSI_RE.sub("", screen)).group(1) == "session_01DiUkqY2kzbUb"
+    proxy = McpProxy({"name": "echo", "command": sys.executable, "args": ["-c", ECHO_MCP]})
+    init = proxy.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
+    assert init["id"] == 0 and init["result"]["serverInfo"]["name"] == "echo", init
+    assert proxy.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})["result"] == {}
+    call = {"name": "echo", "arguments": {"text": "hi"}}
+    reply = proxy.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": call})
+    assert reply["id"] == 5 and reply["result"]["content"][0]["text"].startswith("echo: hi"), reply
+    proxy.proc.kill()
+    answers: list[tuple] = []
+    globals()["respond"] = lambda *args: answers.append(args[1:])
+    for tool in ("mcp__echo__echo", "Bash"):
+        ask = {"subtype": "can_use_tool", "tool_name": tool, "input": {}}
+        answer_control("s", {"echo": proxy}, {"request_id": tool, "request": ask})
+    assert [(rid, r["behavior"]) for rid, r in answers] == [
+        ("mcp__echo__echo", "allow"),
+        ("Bash", "deny"),
+    ], answers
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")

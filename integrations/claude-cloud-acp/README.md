@@ -15,6 +15,8 @@ while the conversation shows up in Omnigent.
 | Resume | The first answer ends with a `cloud session: https://claude.ai/code/<id>` line. A new bridge process that gets Omnigent's replayed transcript finds that line and sends only the latest message to the same cloud session. A respawned bridge prompted with an old ACP session id finds the cloud session in `$XDG_STATE_HOME/claude-cloud-acp/sessions.json`. A prompt that starts with that line adopts an existing cloud session |
 | Archived session | A send that gets `409 session_not_active` unarchives the session and resends. History comes back, but files and the repo checkout from before the archive are gone. An idle or stopped VM re-provisions by itself on the next send |
 | Transcript | `GET /v1/code/sessions/{id}/events/stream` (server-sent events), from the sequence number of the posted message, reconnecting from the last event seen; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
+| MCP servers | Each stdio server in `session/new.mcpServers`, Omnigent's own tools among them, runs on this host. The bridge registers it in the cloud session as an SDK MCP server (`mcp_set_servers`) and answers the CLI's `mcp_message` requests from that process. The traffic goes VM → Anthropic → bridge, so the VM needs no route to this host or the tailnet. A new bridge re-registers the servers on its first turn |
+| Permission requests | A `can_use_tool` request for a tool of a served MCP server is allowed; Omnigent applies its own policy when its relay runs the tool. Any other is denied, since nothing here can approve it |
 | Provisioning steps | `env_manager_log` lines, shown as thoughts |
 
 The bridge stores no credential. Create goes through the `claude` CLI and its own
@@ -32,7 +34,7 @@ on macOS, or `~/.claude/.credentials.json`.
      agents:
        - name: Claude Cloud
          command: python3 /path/to/integrations/claude-cloud-acp/claude_cloud_acp.py
-         omnigent_mcp: false          # the cloud VM cannot reach the local MCP relay
+         # omnigent_mcp defaults to true: Omnigent's tools are served from this host
          inject_system_prompt: false  # Omnigent's prompt names local tools the VM lacks
    ```
 
@@ -72,13 +74,20 @@ and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
 
 ## Limits
 
-- **Policy:** Omnigent policy and approval cards do not apply, since tools run
-  in the VM. Cloud sessions run under the cloud environment's permission mode
+- **Policy:** Omnigent policy and approval cards do not apply to the VM's
+  built-in tools (Bash, edits): the cloud CLI runs them without asking the
+  client, and it does not apply SDK hooks (`initialize` answers
+  `hooks_applied: false`). Cloud sessions run under the cloud environment's permission mode
   and network policy.
 - **Undocumented API:** the events endpoints are not part of the documented
   public API, so they can change without notice. Sends go out unsigned and
   without a trusted-device token; an account whose sessions require either gets
   the send refused.
+- **MCP on the first turn:** a new cloud session starts its first prompt
+  before the bridge can register servers, so their tools may arrive mid-turn.
+- **Stream reader:** one per cloud session for the bridge's life, so control
+  requests are answered between turns too. MCP requests to one server are
+  handled one at a time.
 - **Sub-agents:** a sub-agent's steps appear inline, its text as thoughts and
   its tool calls titled `[sub-agent] <tool>`, not as a separate Omnigent session.
 - **Forks (untested):** a forked Omnigent conversation carries the marker
