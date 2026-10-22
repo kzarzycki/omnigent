@@ -370,6 +370,8 @@ describe("useConversations search timeout", () => {
     // terminal, so retrying would only re-arm the same slow request.
     const timeoutError = new DOMException("timeout", "TimeoutError");
     expect(retry(0, timeoutError)).toBe(false);
+    // The server's own search deadline is just as terminal: a retry rescans.
+    expect(retry(0, new ApiError("search took too long", 504, "search_timeout"))).toBe(false);
 
     // A genuine server/network error still retries (up to the default cap).
     expect(retry(0, new Error("500 Internal Server Error"))).toBe(true);
