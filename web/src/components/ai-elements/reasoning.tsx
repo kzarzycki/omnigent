@@ -4,7 +4,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { cn } from "@/lib/utils";
 import { ChevronRightIcon, SparklesIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useState } from "react";
+import { useRevealedOpen } from "@/components/chat/chatFindReveal";
 import { Streamdown } from "streamdown";
 import { MERMAID_STREAMDOWN_PROPS } from "@/components/ai-elements/MermaidBlock";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
@@ -72,16 +73,17 @@ export const Reasoning = memo(
     // Resetting on the next stream means a new reasoning section
     // doesn't inherit the user's choice from the previous one.
     const [userOverride, setUserOverride] = useState<boolean | null>(null);
+    const [shownOpen, handleOpenChange] = useRevealedOpen(
+      revealed,
+      userOverride ?? isStreaming,
+      setUserOverride,
+    );
     // A non-expandable section is always closed — there's nothing inside.
-    const isOpen = expandable ? (userOverride ?? (isStreaming || revealed)) : false;
+    const isOpen = expandable ? shownOpen : false;
 
     useEffect(() => {
-      if (isStreaming || revealed) setUserOverride(null);
-    }, [isStreaming, revealed]);
-
-    const handleOpenChange = useCallback((newOpen: boolean) => {
-      setUserOverride(newOpen);
-    }, []);
+      if (isStreaming) setUserOverride(null);
+    }, [isStreaming]);
 
     const contextValue = useMemo(
       () => ({ duration, isOpen, isStreaming, setIsOpen: handleOpenChange, expandable }),

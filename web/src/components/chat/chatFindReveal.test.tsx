@@ -16,6 +16,7 @@ import type { MessageJumpTarget } from "@/hooks/useMessageDeepLink";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useChatStore } from "@/store/chatStore";
 import { useChatFindHighlight } from "./ChatFindBar";
+import { ReasoningView } from "@/components/blocks/ReasoningView";
 import { SlashCommandCard } from "@/components/blocks/SlashCommandCard";
 import { SmartRoutingCard } from "@/components/blocks/SmartRoutingCard";
 import { SystemMessageView } from "@/components/blocks/SystemMessage";
@@ -214,6 +215,41 @@ describe("find in chat reveals each collapsible card", () => {
     expect(view.container.textContent).not.toContain("zorblat out");
     view.rerender(<TooltipProvider>{card("current")}</TooltipProvider>);
     expect(view.container.textContent).toContain("zorblat out");
+  });
+
+  it.each(Object.entries(cards))(
+    "keeps the %s the reader opened before find open after find",
+    (_name, card) => {
+      const view = render(<TooltipProvider>{card()}</TooltipProvider>);
+      fireEvent.click(screen.getAllByRole("button")[0]!);
+      expect(view.container.textContent).toContain("zorblat out");
+      view.rerender(<TooltipProvider>{card("current")}</TooltipProvider>);
+      view.rerender(<TooltipProvider>{card()}</TooltipProvider>);
+      expect(view.container.textContent).toContain("zorblat out");
+    },
+  );
+
+  it("keeps reasoning the reader opened before find open, and reveals it once closed", () => {
+    const reasoning = (reveal?: "current") => (
+      <TooltipProvider>
+        <ReasoningView
+          text="zorblat thought"
+          isStreaming={false}
+          duration={2}
+          findReveal={reveal}
+        />
+      </TooltipProvider>
+    );
+    const view = render(reasoning());
+    fireEvent.click(screen.getByRole("button"));
+    view.rerender(reasoning("current"));
+    view.rerender(reasoning());
+    expect(screen.getByText("zorblat thought")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.queryByText("zorblat thought")).toBeNull();
+    view.rerender(reasoning("current"));
+    expect(screen.getByText("zorblat thought")).toBeTruthy();
   });
 
   it("expands a tool output whose match lies past the preview", () => {
