@@ -25,7 +25,7 @@ import {
 import { useChatStore } from "@/store/chatStore";
 import { TranscriptScrollbar } from "@/pages/TranscriptScrollbar";
 import { TurnRail, type Turn } from "@/pages/TurnRail";
-import { StreamBudgetBanner } from "@/components/StreamBudgetBanner";
+import { FloatingBannerStack, StreamBudgetBanner } from "@/components/StreamBudgetBanner";
 import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
 import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
 import { useSearchParams } from "@/lib/routing";
@@ -479,8 +479,9 @@ function TranscriptImpl({
           scroller={scroller}
           hasMoreHistory={display.hasMoreHistory}
         />
-        {find && conversationId && (
-          <div className="chat-find-bar absolute top-14 right-4 z-20 md:top-12">
+        {/* Find bar first, so the too-many-tabs warning stacks under it. */}
+        <FloatingBannerStack>
+          {find && conversationId && (
             <ChatFindBar
               key={conversationId}
               conversationId={conversationId}
@@ -491,10 +492,9 @@ function TranscriptImpl({
               onTarget={setFindTarget}
               onClose={closeFind}
             />
-          </div>
-        )}
-        {/* Too-many-tabs warning, a sibling of Conversation. */}
-        <StreamBudgetBanner />
+          )}
+          <StreamBudgetBanner />
+        </FloatingBannerStack>
         {/* Left-edge minimap: one tick per turn. Desktop-only. */}
         {!isMobileViewport && (
           <TurnRail

@@ -104,6 +104,7 @@ from omnigent.stores.conversation_store import (
     _INSTANCE_SCOPED_LABEL_KEYS,
     _SANDBOX_REPO_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
+    FIND_WINDOW_ITEMS,
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
     FORK_SOURCE_LABEL_KEY,
@@ -2294,33 +2295,50 @@ class SqlAlchemyConversationStore(ConversationStore):
         self,
         conversation_id: str,
         query: str,
-        limit: int = 500,
-    ) -> tuple[list[tuple[str, str]], bool]:
+        *,
+        before: int | None = None,
+        window: int = FIND_WINDOW_ITEMS,
+    ) -> tuple[list[tuple[str, str]], int | None]:
         """
-        Locate the items in one conversation whose ``search_text`` contains *query*.
+        Locate the matches for *query* among one window of a conversation's items.
 
-        Same ILIKE predicate as :func:`_fetch_search_snippets`, walked on the
-        ``(workspace_id, conversation_id, position)`` index; ``data`` is never read.
+        Same ILIKE predicate as :func:`_fetch_search_snippets`. Both reads walk
+        the ``(workspace_id, conversation_id, position)`` index over at most
+        *window* items; ``data`` is never read.
 
         :param conversation_id: The conversation to look in, e.g. ``"conv_abc123"``.
         :param query: The text to find, e.g. ``"deploy"``.
-        :param limit: Maximum number of matches to return.
-        :returns: ``(matches, has_more)``: ``(item_id, response_id)`` pairs in
-            chat order, and whether more matches exist past *limit*.
+        :param before: Position cursor: scan items before it, or from the
+            newest item when ``None``, e.g. ``4000``.
+        :param window: Maximum number of items to scan.
+        :returns: ``(matches, next_before)``: ``(item_id, response_id)`` pairs
+            in chat order, and the cursor for the next older window, or ``None``
+            once the window reached the conversation's first item.
         """
+        in_scope = [
+            SqlConversationItem.workspace_id == current_workspace_id(),
+            SqlConversationItem.conversation_id == conversation_id,
+        ]
+        if before is not None:
+            in_scope.append(SqlConversationItem.position < before)
         with self._conv_session("find_item_matches") as session:
+            # The window's oldest position, then the next older one if it exists.
+            edges = session.scalars(
+                select(SqlConversationItem.position)
+                .where(*in_scope)
+                .order_by(SqlConversationItem.position.desc())
+                .offset(window - 1)
+                .limit(2)
+            ).all()
+            if edges:
+                in_scope.append(SqlConversationItem.position >= edges[0])
             rows = session.execute(
                 select(SqlConversationItem.id, SqlConversationItem.response_id)
-                .where(
-                    SqlConversationItem.workspace_id == current_workspace_id(),
-                    SqlConversationItem.conversation_id == conversation_id,
-                    SqlConversationItem.search_text.ilike(f"%{query.lower()}%"),
-                )
+                .where(*in_scope, SqlConversationItem.search_text.ilike(f"%{query.lower()}%"))
                 .order_by(SqlConversationItem.position)
-                .limit(limit + 1)
             ).all()
-        matches = [(item_id, response_id) for item_id, response_id in rows[:limit]]
-        return matches, len(rows) > limit
+        matches = [(item_id, response_id) for item_id, response_id in rows]
+        return matches, edges[0] if len(edges) == 2 else None
 
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         """
