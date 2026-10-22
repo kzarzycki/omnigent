@@ -215,6 +215,15 @@ def test_native_find_shortcut_mounts_the_full_loaded_transcript(
     mounted_before = bubbles.count()
     assert mounted_before < 100, mounted_before
 
+    # Last window listener in bubble phase, so it sees each press's final defaultPrevented.
+    page.evaluate(
+        """() => {
+          window.__findPrevented = [];
+          window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'f') window.__findPrevented.push(e.defaultPrevented);
+          });
+        }"""
+    )
     # Virtualized transcript rows; the workspace rail virtualizes its own.
     rows = page.get_by_role("log").locator("[data-index]")
     page.keyboard.press("ControlOrMeta+f")
@@ -224,3 +233,5 @@ def test_native_find_shortcut_mounts_the_full_loaded_transcript(
     page.keyboard.press("ControlOrMeta+f")
     expect(rows).to_have_count(0, timeout=30_000)
     assert bubbles.count() > mounted_before
+    # The chat claims the first press; the second stays the browser's.
+    assert page.evaluate("() => window.__findPrevented") == [True, False]
