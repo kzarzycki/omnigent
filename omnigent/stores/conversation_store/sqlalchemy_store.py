@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager, suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
@@ -165,13 +168,12 @@ def _encode_session_state(
 # the server's answer (504 ``search_timeout``) always arrives first.
 _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 
-# Budget (ms) for the first, index-allowed try of the content-search list query.
-# The pg_trgm index (``sa2b3c4d5e6f``) answers a word with rare trigrams at once,
-# but Postgres estimates every ILIKE at a few rows, so for a word built from
-# common trigrams ("station") it also picks the index and rechecks tens of
-# thousands of items, slower than the scan. Past this budget the query reruns
-# without bitmap scans: early stop for common words, a scan otherwise.
-_SEARCH_INDEX_ATTEMPT_MS = 2_000
+# The two plans a content-search list query races. The pg_trgm index
+# (``sa2b3c4d5e6f``) answers a word with rare trigrams at once, but Postgres
+# estimates every ILIKE at a few rows, so for a word built from common trigrams
+# it also picks the index and rechecks most items, slower than the plan without
+# it. Neither plan can be told apart up front, so both run and the first wins.
+_SEARCH_PLAN_SETUPS: tuple[tuple[str, ...], ...] = ((), ("SET LOCAL enable_bitmapscan = off",))
 
 
 def _sqlstate(error: OperationalError) -> str | None:
@@ -179,50 +181,81 @@ def _sqlstate(error: OperationalError) -> str | None:
     return getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
 
 
-def _set_statement_timeout(session: Session, deadline: float, cap_ms: int | None = None) -> None:
+def _set_statement_timeout(session: Session, deadline: float) -> None:
     """
     Cap the next statements at what is left before ``deadline`` (Postgres).
 
     :param session: The active session; ``SET LOCAL`` reverts at its commit.
     :param deadline: ``time.monotonic()`` value the search must finish by.
-    :param cap_ms: Optional lower cap, e.g. ``_SEARCH_INDEX_ATTEMPT_MS``.
     """
     remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-    if cap_ms is not None:
-        remaining_ms = min(remaining_ms, cap_ms)
     # SET takes no bind parameter; the value is an int computed here.
     session.execute(text(f"SET LOCAL statement_timeout = {remaining_ms}"))
 
 
-def _execute_content_search(
-    session: Session, stmt: Any, deadline: float, try_index: bool = True
+def _first_answer(
+    session_factory: Any,
+    attempts: Sequence[tuple[Sequence[str], Any]],
+    deadline: float,
 ) -> list[Any]:
     """
-    Run a content-search statement on Postgres: index allowed first, within
-    ``_SEARCH_INDEX_ATTEMPT_MS``; past that, again without bitmap scans until
-    ``deadline``. Leaves bitmap scans off for the rest of the transaction.
+    Run each ``(setup, stmt)`` at once, each in its own session, until ``deadline``;
+    return the scalars of the first to answer and cancel the others.
 
-    :param session: The active session, inside its transaction.
-    :param stmt: The select to run; its scalars are returned.
-    :param deadline: ``time.monotonic()`` value the search must finish by.
-    :param try_index: False skips the index try, e.g. for a query shorter than
-        one trigram, which the index cannot narrow.
-    :returns: The statement's scalar rows.
+    :param session_factory: Named session maker; called with an operation name.
+    :param attempts: SET statements to run first, and the select to run.
+    :param deadline: ``time.monotonic()`` value every attempt must finish by.
+    :returns: The winning attempt's scalar rows.
+    :raises OperationalError: The last attempt's error when none answers.
     """
-    rows: list[Any] | None = None
-    if try_index:
-        try:
-            with session.begin_nested():
-                _set_statement_timeout(session, deadline, _SEARCH_INDEX_ATTEMPT_MS)
-                rows = list(session.execute(stmt).scalars().all())
-        except OperationalError as error:
-            if _sqlstate(error) != "57014" or time.monotonic() >= deadline:
-                raise
-    session.execute(text("SET LOCAL enable_bitmapscan = off"))
-    if rows is None:
-        _set_statement_timeout(session, deadline)
-        rows = list(session.execute(stmt).scalars().all())
-    return rows
+    running: dict[int, Any] = {}
+    lock = threading.Lock()
+    decided = threading.Event()
+
+    def run(index: int, setup: Sequence[str], stmt: Any) -> tuple[int, list[Any]]:
+        with session_factory("list_conversations_search") as session:
+            _set_statement_timeout(session, deadline)
+            for statement in setup:
+                session.execute(text(statement))
+            with lock:
+                if decided.is_set():
+                    raise OperationalError("search attempt", {}, Exception("already answered"))
+                running[index] = session.connection().connection.dbapi_connection
+            try:
+                return index, list(session.execute(stmt).scalars().all())
+            finally:
+                with lock:
+                    running.pop(index, None)
+                    cancelled = decided.is_set()
+                if cancelled:
+                    # Postgres signals the backend after the cancel request returns, so it
+                    # may land late: close the connection rather than pool it.
+                    with suppress(Exception):
+                        session.connection().invalidate()
+
+    error: OperationalError | None = None
+    with ThreadPoolExecutor(max_workers=len(attempts)) as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, run, index, setup, stmt)
+            for index, (setup, stmt) in enumerate(attempts)
+        ]
+        for future in as_completed(futures):
+            try:
+                _, rows = future.result()
+            except OperationalError as failure:
+                error = failure
+                continue
+            decided.set()
+            # A cancel sent before a loser's query reaches the server is a no-op,
+            # so repeat it until every loser has stopped.
+            while not all(other.done() for other in futures):
+                with lock:
+                    for connection in running.values():
+                        connection.cancel()
+                wait(futures, timeout=0.05)
+            return rows
+    assert error is not None
+    raise error
 
 
 @contextmanager
@@ -3178,7 +3211,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 # Correlated, a probe can use the (workspace_id, conversation_id)
                 # btree and stop at the first match, or the planner can take the
                 # pg_trgm index on raw ``search_text`` for a rare word; see
-                # _execute_content_search for how a wrong pick is bounded.
+                # _SEARCH_PLAN_SETUPS for how a wrong pick is bounded.
                 # ``ILIKE`` on the raw column, NOT ``lower(search_text) LIKE``:
                 # only the raw column is indexed; see the covering test.
                 content_match = (
@@ -3308,11 +3341,38 @@ class SqlAlchemyConversationStore(ConversationStore):
                 sort_fn(self._tiebreaker_col),  # insertion-order tiebreaker for timestamp ties
             ).limit(limit + 1)
             if search_query and dialect == "postgresql":
-                rows = _execute_content_search(
-                    session, stmt, search_deadline, try_index=len(search_query) >= 3
-                )
+                if len(search_query) >= 3:
+                    # Each plan runs in its own session, so the race reads ids and
+                    # this session loads the winning page.
+                    ids = _first_answer(
+                        self._conv_session,
+                        [
+                            (setup, stmt.with_only_columns(SqlConversation.id))
+                            for setup in _SEARCH_PLAN_SETUPS
+                        ],
+                        search_deadline,
+                    )
+                    by_id = {
+                        conversation.id: conversation
+                        for conversation in session.execute(
+                            select(SqlConversation).where(
+                                SqlConversation.workspace_id == current_workspace_id(),
+                                SqlConversation.id.in_(ids),
+                            )
+                        ).scalars()
+                    }
+                    rows = [
+                        by_id[conversation_id]
+                        for conversation_id in ids
+                        if conversation_id in by_id
+                    ]
+                else:
+                    # Under three characters the trigram index cannot narrow the match.
+                    session.execute(text(_SEARCH_PLAN_SETUPS[1][0]))
+                    rows = list(session.execute(stmt).scalars().all())
                 # The snippet probe is scoped to one page of ids: keep it on the
-                # btree (bitmap scans stay off) within what is left of the deadline.
+                # btree (bitmap scans off) within what is left of the deadline.
+                session.execute(text(_SEARCH_PLAN_SETUPS[1][0]))
                 _set_statement_timeout(session, search_deadline)
             else:
                 rows = list(session.execute(stmt).scalars().all())
