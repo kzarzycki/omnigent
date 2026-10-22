@@ -66,7 +66,12 @@ import {
 import { type Bubble, type RenderItem, bubblesEqual } from "@/lib/renderItems";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { QueryClientContext } from "@tanstack/react-query";
-import { ApiError, continueFailedTurn, retrySession } from "@/lib/sessionsApi";
+import {
+  ApiError,
+  continueFailedTurn,
+  retrySession,
+  SESSION_HISTORY_SEEK_PAGE_SIZE,
+} from "@/lib/sessionsApi";
 import { useChatStore, type PendingUserMessage } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
@@ -2030,7 +2035,7 @@ export function JumpToTopButton({
       // reports done.
       /* oxlint-disable no-await-in-loop */
       for (let i = 0; i < 1000 && useChatStore.getState().hasMoreHistory; i++) {
-        await useChatStore.getState().loadMoreHistory();
+        await useChatStore.getState().loadMoreHistory(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
         // Keep the lock released — a prepend that briefly lands us near the
         // bottom can otherwise re-arm it via the library's scroll handler.
         state.isAtBottom = false;
