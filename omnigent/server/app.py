@@ -2428,7 +2428,10 @@ def create_app(
             error_impact=exc.impact.value,
             error_phase=exc.phase.value,
         )
-        if exc.code == ErrorCode.RUNNER_UNAVAILABLE:
+        if exc.code in (
+            ErrorCode.RUNNER_UNAVAILABLE,
+            ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED,
+        ):
             # A session state, not a fault: the user's machine is asleep or
             # the host disconnected, and clients render it as a reconnect
             # affordance. Through the 5xx arm every poll of an offline
