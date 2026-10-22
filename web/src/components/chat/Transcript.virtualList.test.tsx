@@ -6,11 +6,12 @@ import { Conversation, ConversationContent } from "@/components/ai-elements/conv
 import {
   isNativeFindShortcut,
   findShortcutRoute,
+  useChatFind,
   useChatFindShortcut,
   type TranscriptGeometry,
   VirtualBubbleList,
 } from "./Transcript";
-import { FILE_FIND_OWNER_ATTRIBUTE, isMacPlatform } from "@/lib/hotkeys";
+import { FILE_FIND_OWNER_ATTRIBUTE, isMacPlatform, requestChatFind } from "@/lib/hotkeys";
 
 afterEach(cleanup);
 
@@ -253,6 +254,59 @@ it("claims ⌘F ahead of the side panel's listeners unless an open file owns it"
   unmount();
   window.removeEventListener("keydown", panel);
   document.body.innerHTML = "";
+});
+
+it("opens the chat's find bar when the header asks, outside the terminal view", () => {
+  const onChatFind = vi.fn();
+  const findInputRef = { current: null };
+  const { rerender, unmount } = renderHook(
+    ({ showTerminal }) =>
+      useChatFindShortcut({
+        enabled: true,
+        showTerminal,
+        findInputRef,
+        onChatFind,
+        onNativeFind: vi.fn(),
+      }),
+    { initialProps: { showTerminal: false } },
+  );
+
+  requestChatFind();
+  expect(onChatFind).toHaveBeenCalledTimes(1);
+
+  rerender({ showTerminal: true });
+  requestChatFind();
+  expect(onChatFind).toHaveBeenCalledTimes(1);
+
+  unmount();
+  requestChatFind();
+  expect(onChatFind).toHaveBeenCalledTimes(1);
+});
+
+it("focuses the find input within the tap that opens it", () => {
+  let focusedDuringTap: Element | null = null;
+  function Harness() {
+    const { find, findInputRef, openChatFind } = useChatFind("conv-1", null);
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => {
+            openChatFind();
+            focusedDuringTap = document.activeElement;
+          }}
+        >
+          open
+        </button>
+        {find ? <input aria-label="find" ref={findInputRef} /> : null}
+      </>
+    );
+  }
+  render(<Harness />);
+
+  screen.getByRole("button", { name: "open" }).click();
+
+  expect(focusedDuringTap).toBe(screen.getByRole("textbox", { name: "find" }));
 });
 
 it("renders every bubble in normal flow after native find is detected", () => {
