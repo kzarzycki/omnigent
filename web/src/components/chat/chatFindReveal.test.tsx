@@ -162,6 +162,38 @@ describe("find in chat reveals collapsed content", () => {
     await waitFor(() => expect(paintedRanges()).toHaveLength(0));
   });
 
+  it("opens an error's message and the diagnostic tab that hold the match", () => {
+    const errorTurn = (message: string) =>
+      bubblesOf([
+        {
+          ...turn,
+          id: "err_1",
+          type: "error",
+          source: "execution",
+          code: "workspace_missing",
+          message,
+        },
+      ] as ConversationItem[]);
+    const reveal = { anchor: "resp_1", itemIds: ["err_1"], query: "zorblat" };
+    const view = render(
+      <Transcript
+        bubbles={errorTurn("workspace path does not exist: /home/demo/zorblat")}
+        reveal={reveal}
+      />,
+    );
+    expect(screen.getByTestId("error-message-content").textContent).toContain("zorblat");
+    view.unmount();
+
+    const diagnostics =
+      "it failed\nTerminal diagnostics:\nboot ok\nLast captured output:\nzorblat crash";
+    const second = render(<Transcript bubbles={errorTurn(diagnostics)} reveal={null} />);
+    expect(screen.queryByTestId("error-message-content")).toBeNull();
+    second.rerender(<Transcript bubbles={errorTurn(diagnostics)} reveal={reveal} />);
+    expect(screen.getByTestId("error-diagnostics-content").textContent).toBe("zorblat crash");
+    second.rerender(<Transcript bubbles={errorTurn(diagnostics)} reveal={null} />);
+    expect(screen.queryByTestId("error-message-content")).toBeNull();
+  });
+
   it("keeps a container the reader closed while find revealed it closed", () => {
     const bubbles = bubblesOf(toolTurn);
     const reveal = { anchor: "resp_1", itemIds: ["fco_1"], query: "zorblat" };

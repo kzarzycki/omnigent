@@ -86,16 +86,26 @@ export function useRevealedOpen(
   open: boolean,
   onOpenChange: (open: boolean) => void,
 ): [boolean, (open: boolean) => void] {
-  const [override, setOverride] = useState<boolean | null>(null);
-  const [wasRevealed, setWasRevealed] = useState(revealed);
-  if (revealed !== wasRevealed) {
-    setWasRevealed(revealed);
+  return useRevealedValue(revealed ? true : undefined, open, onOpenChange);
+}
+
+/** {@link useRevealedOpen} for any state: `revealedValue` shows while defined, else `value`. */
+export function useRevealedValue<T>(
+  revealedValue: T | undefined,
+  value: T,
+  onChange: (value: T) => void,
+): [T, (value: T) => void] {
+  const [override, setOverride] = useState<{ value: T } | null>(null);
+  const [wasRevealed, setWasRevealed] = useState(revealedValue);
+  if (revealedValue !== wasRevealed) {
+    setWasRevealed(revealedValue);
     setOverride(null);
   }
-  const shown = revealed ? (override ?? true) : open;
-  const change = (next: boolean) => {
-    if (revealed) setOverride(next);
-    onOpenChange(next);
+  const revealed = revealedValue !== undefined;
+  const shown = revealed ? (override ?? { value: revealedValue }).value : value;
+  const change = (next: T) => {
+    if (revealed) setOverride({ value: next });
+    onChange(next);
   };
   return [shown, change];
 }

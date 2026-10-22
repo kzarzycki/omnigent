@@ -907,6 +907,7 @@ function renderItem(
           remediation={item.remediation}
           level={item.level}
           relatedErrors={item.relatedErrors}
+          findReveal={findReveal}
           onRetry={
             onRetryError
               ? (actionableError) =>
