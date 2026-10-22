@@ -117,6 +117,7 @@ it("recognizes unhandled native find keyboard shortcuts", () => {
       metaKey: true,
       ctrlKey: false,
       altKey: false,
+      shiftKey: false,
       defaultPrevented: false,
     }),
   ).toBe(true);
@@ -126,6 +127,7 @@ it("recognizes unhandled native find keyboard shortcuts", () => {
       metaKey: false,
       ctrlKey: true,
       altKey: false,
+      shiftKey: false,
       defaultPrevented: false,
     }),
   ).toBe(true);
@@ -135,6 +137,7 @@ it("recognizes unhandled native find keyboard shortcuts", () => {
       metaKey: true,
       ctrlKey: false,
       altKey: false,
+      shiftKey: false,
       defaultPrevented: true,
     }),
   ).toBe(false);
@@ -148,6 +151,7 @@ it("routes ⌘F to the chat's find, the browser's find or an open file", () => {
     metaKey: isMacPlatform(),
     ctrlKey: !isMacPlatform(),
     altKey: false,
+    shiftKey: false,
     defaultPrevented: false,
   };
   const options = { showTerminal: false, findInput, fileOwnsFind: false };
@@ -157,6 +161,8 @@ it("routes ⌘F to the chat's find, the browser's find or an open file", () => {
   // An open file that owns ⌘F gets it untouched: no find bar, no native-find render.
   expect(findShortcutRoute(press, { ...options, fileOwnsFind: true })).toBeNull();
   expect(findShortcutRoute({ ...press, key: "g" }, options)).toBeNull();
+  // ⌘⇧F belongs to the workspace's content search.
+  expect(findShortcutRoute({ ...press, shiftKey: true }, options)).toBeNull();
   findInput?.focus();
   expect(findShortcutRoute(press, options)).toBe("native");
   document.body.innerHTML = "";
