@@ -51,6 +51,7 @@ import {
   RoutingDecisionCard,
 } from "@/components/blocks/StatusBlocks";
 import { SystemMessageView } from "@/components/blocks/SystemMessage";
+import { ChatFindRevealContext, useRevealedOpen } from "@/components/chat/chatFindReveal";
 import { SubagentActivityMessage } from "@/components/blocks/SubagentActivityMessage";
 import {
   isSystemUserContent,
@@ -975,16 +976,19 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   // Collapse long prompts by default to avoid expensive Markdown parsing and
   // a large DOM for text the user hasn't asked to read yet.
   const isLong = renderedText.length > COLLAPSE_THRESHOLD;
-  const [isCollapsed, setIsCollapsed] = useState(isLong);
-  const visibleText = isCollapsed
-    ? sliceByCodePoint(renderedText, COLLAPSE_THRESHOLD)
-    : renderedText;
+  const collapsedText = isLong ? sliceByCodePoint(renderedText, COLLAPSE_THRESHOLD) : renderedText;
+  // The collapsed prompt clips its slice too, so find expands it whenever it holds the match.
+  const revealed = useContext(ChatFindRevealContext)?.anchor === bubble.itemId;
+  const [expandedByReader, setExpandedByReader] = useState(!isLong);
+  const [expanded, setExpanded] = useRevealedOpen(revealed, expandedByReader, setExpandedByReader);
+  const isCollapsed = !expanded;
+  const visibleText = isCollapsed ? collapsedText : renderedText;
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
   // the content is a pure system marker, swap in a muted centered indicator.
   // Another session's message is never one: it keeps its sender attribution.
   if (!origin && images.length === 0 && fileChips.length === 0) {
     const parsed = parseSystemMessage(text);
-    if (parsed) return <SystemMessageView message={parsed} />;
+    if (parsed) return <SystemMessageView message={parsed} revealed={revealed} />;
   }
   // Badge OTHER contributors' messages only (never your own).
   const author = bubble.createdBy;
@@ -1132,7 +1136,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                     {isLong && (
                       <button
                         type="button"
-                        onClick={() => setIsCollapsed((c) => !c)}
+                        onClick={() => setExpanded(isCollapsed)}
                         className="mt-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
                       >
                         {isCollapsed
@@ -1255,6 +1259,8 @@ function AssistantBubble({
   const { isLinkCopied, handleCopyLink } = useCopyMessageLink(bubble.responseId);
   const flashing = useChatStore((s) => s.flashItemId === bubble.responseId);
   const foldNarration = useFoldAssistantNarration();
+  const findReveal = useContext(ChatFindRevealContext);
+  const findItemIds = findReveal?.anchor === bubble.responseId ? findReveal.itemIds : undefined;
   // null outside AppShell's provider (isolated tests) → hide the action.
   const forkDialog = useForkDialog();
   const queryClient = useContext(QueryClientContext);
@@ -1394,6 +1400,7 @@ function AssistantBubble({
             defaultExpanded={bubble.defaultExpanded}
             foldNarration={foldNarration}
             onRetryError={recoveryDisabled ? undefined : handleRetryError}
+            findItemIds={findItemIds}
           />
         </MessageContent>
         {bubble.lifecycle === "cancelled" && (

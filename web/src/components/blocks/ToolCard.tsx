@@ -50,11 +50,13 @@ import {
   CopyTextButton,
   OutputSection,
   ToolErrorBox,
+  ToolFindRevealedContext,
   WrapTextButton,
   getOutputPreview,
 } from "./ToolCodePanel";
 import { ToolValueView } from "./ToolValueView";
 import { type ToolBodyProps, type ToolView, toolViewFor } from "./toolViews";
+import { type FindReveal, useRevealedCollapsible } from "@/components/chat/chatFindReveal";
 
 // Longer single-line results go in a wrapping code panel instead of prose.
 const INLINE_RESULT_MAX_CHARS = 500;
@@ -120,6 +122,8 @@ interface ToolCardProps {
   startedAt?: number | null;
   /** Completed runtime in seconds. Undefined when historical data lacks timing. */
   duration?: number;
+  /** Set while find in chat shows a match inside this call. */
+  findReveal?: FindReveal;
 }
 
 export function ToolCard({
@@ -130,6 +134,7 @@ export function ToolCard({
   state,
   startedAt,
   duration,
+  findReveal,
 }: ToolCardProps) {
   const view = toolViewFor(name);
   const call = useMemo<ToolCall>(
@@ -152,9 +157,10 @@ export function ToolCard({
       ? null
       : (resolveChatFilePath(title.filePath, root, home)?.path ?? null);
   const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
+  const collapsible = useRevealedCollapsible(findReveal !== undefined, findReveal === "current");
 
   return (
-    <Collapsible defaultOpen={false} className="group not-prose w-full">
+    <Collapsible {...collapsible} className="group not-prose w-full">
       <ToolTriggerRow
         title={title}
         displayPath={linkPath}
@@ -167,7 +173,9 @@ export function ToolCard({
       />
       {/* The whole body, code panels included, sits on the Interface font's caption step. */}
       <CollapsibleContent className="mt-1 ml-2 space-y-2 border-l pl-3 py-1 text-sm [&_code]:text-sm [&_pre]:text-sm data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=open]:animate-in">
-        <DefaultToolBody call={call} duration={displayDuration} view={view} />
+        <ToolFindRevealedContext.Provider value={findReveal !== undefined}>
+          <DefaultToolBody call={call} duration={displayDuration} view={view} />
+        </ToolFindRevealedContext.Provider>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -405,15 +413,22 @@ function RawToggleButton({ pressed, onToggle }: { pressed: boolean; onToggle: ()
  * tools fold here: older tools once the visible tail of the most
  * recent ones has been peeled off.
  */
-export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
+export function ToolGroupSummary({
+  tools,
+  findReveals,
+}: {
+  tools: RenderItem[];
+  findReveals?: ReadonlyMap<RenderItem, FindReveal>;
+}) {
   const label = formatToolRunLabel(tools.map(toolRunCall));
+  const collapsible = useRevealedCollapsible(tools.some((item) => findReveals?.has(item)));
   return (
     // Named `group/tool-summary` so this collapsible only rotates its
     // OWN chevron (line 296 in `ToolTriggerRow` uses an unnamed
     // `group-data-[state=open]:rotate-90` that would otherwise match
     // any ancestor `.group[data-state=open]` and incorrectly rotate
     // chevrons of inner tool cards when this outer group is open).
-    <Collapsible defaultOpen={false} className="group/tool-summary not-prose w-full">
+    <Collapsible {...collapsible} className="group/tool-summary not-prose w-full">
       <CollapsibleTrigger className="flex cursor-pointer items-center gap-1.5 py-0.5 text-left text-muted-foreground text-ui transition-colors hover:text-foreground mobile-touch-target">
         <span>{label}</span>
         <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]/tool-summary:rotate-90" />
@@ -430,6 +445,7 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
                 state={item.state}
                 startedAt={item.startedAt}
                 duration={item.duration}
+                findReveal={findReveals?.get(item)}
               />
             );
           }
@@ -442,6 +458,7 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
                 arguments={item.data}
                 output={null}
                 state="output-available"
+                findReveal={findReveals?.get(item)}
               />
             );
           }

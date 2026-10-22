@@ -1,7 +1,16 @@
 // Titled code panels, the expandable output preview, and the error box shared by tool-call bodies.
 
 import { CheckIcon, CopyIcon, Maximize2Icon, Minimize2Icon, WrapTextIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   CodeBlock,
   CodeBlockActions,
@@ -12,6 +21,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { ChatFindRevealContext, useRevealedOpen } from "@/components/chat/chatFindReveal";
+
+/** Set inside a tool card that holds a find-in-chat match, so its clipped output expands. */
+export const ToolFindRevealedContext = createContext(false);
 
 /** Diff colors for added and removed line counts, as in the changed-files diffstat. */
 export const DIFF_TONE_CLASS = {
@@ -223,11 +236,20 @@ export function OutputSection({
   /** Highlighting for the default panel; JSON unless set. */
   language?: CodeLanguage;
 }) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [expandedByReader, setExpandedByReader] = useState(false);
 
   const collapsedPreview = useMemo(() => getOutputPreview(output), [output]);
-  const preview = useMemo(() => getOutputPreview(output, isExpanded), [output, isExpanded]);
   const canExpand = collapsedPreview.isTruncated;
+  // The preview clips its text, so find expands an output that holds the match.
+  const revealed = useContext(ToolFindRevealedContext);
+  const query = useContext(ChatFindRevealContext)?.query.toLowerCase() ?? "";
+  const holdsMatch = revealed && canExpand && query !== "" && output.toLowerCase().includes(query);
+  const [isExpanded, setIsExpanded] = useRevealedOpen(
+    holdsMatch,
+    expandedByReader,
+    setExpandedByReader,
+  );
+  const preview = useMemo(() => getOutputPreview(output, isExpanded), [output, isExpanded]);
 
   return (
     <div className="space-y-2">
@@ -262,7 +284,7 @@ export function OutputSection({
           </span>
           <Button
             className="w-fit"
-            onClick={() => setIsExpanded((value) => !value)}
+            onClick={() => setIsExpanded(!isExpanded)}
             size="xs"
             type="button"
             variant="outline"
