@@ -38,6 +38,7 @@ import {
 } from "@/hooks/useMessageDeepLink";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { ChatFindBar, type FindStart, useChatFindHighlight } from "@/components/chat/ChatFindBar";
+import { ChatFindRevealContext, useChatFindReveal } from "@/components/chat/chatFindReveal";
 import { useUserMessageNav } from "@/hooks/useUserMessageNav";
 import { ChatPlanAccordion } from "@/shell/ChatPlanAccordion";
 import {
@@ -317,6 +318,7 @@ function TranscriptImpl({
     rangeNonce: spacerMeasureNonce,
   });
   useChatFindHighlight(find?.query ?? "", scroller?.el ?? null);
+  const findReveal = useChatFindReveal(findTarget, resolveAnchor);
 
   // One rail tick per real user turn, paired with a preview of the reply that
   // followed. Mirrors the transcript's loaded window and grows lazily.
@@ -426,18 +428,20 @@ function TranscriptImpl({
               <>
                 {/* Older pages prepend here while their request is in flight. */}
                 {display.loadingMoreHistory && <HistoryLoadingIndicator />}
-                <VirtualBubbleList
-                  bubbles={display.streamBubbles}
-                  scrollEl={scroller?.el ?? null}
-                  lastAssistantIndex={lastAssistantIndex}
-                  showsWorking={display.showsWorking}
-                  sessionIdle={sessionStatus === "idle"}
-                  conversationId={display.conversationId}
-                  hasTasks={display.hasTasks}
-                  disableVirtualization={disableVirtualization}
-                  messageId={messageId ?? findParam}
-                  onGeometryChange={onGeometryChange}
-                />
+                <ChatFindRevealContext.Provider value={findReveal}>
+                  <VirtualBubbleList
+                    bubbles={display.streamBubbles}
+                    scrollEl={scroller?.el ?? null}
+                    lastAssistantIndex={lastAssistantIndex}
+                    showsWorking={display.showsWorking}
+                    sessionIdle={sessionStatus === "idle"}
+                    conversationId={display.conversationId}
+                    hasTasks={display.hasTasks}
+                    disableVirtualization={disableVirtualization}
+                    messageId={messageId ?? findParam}
+                    onGeometryChange={onGeometryChange}
+                  />
+                </ChatFindRevealContext.Provider>
                 {/* Pending elicitation cards, floated to the bottom of the chat
                 so an outstanding question stays in view. Newest renders last,
                 nearest the composer. Above the Working… indicator. */}

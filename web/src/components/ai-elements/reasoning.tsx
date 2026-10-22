@@ -53,6 +53,8 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
    * non-interactive header (see `ReasoningTrigger` / `ReasoningContent`).
    */
   expandable?: boolean;
+  /** Open while find in chat shows a match inside, unless the reader toggles it. */
+  revealed?: boolean;
 };
 
 export const Reasoning = memo(
@@ -61,6 +63,7 @@ export const Reasoning = memo(
     isStreaming = false,
     duration,
     expandable = true,
+    revealed = false,
     children,
     ...props
   }: ReasoningProps) => {
@@ -70,11 +73,11 @@ export const Reasoning = memo(
     // doesn't inherit the user's choice from the previous one.
     const [userOverride, setUserOverride] = useState<boolean | null>(null);
     // A non-expandable section is always closed — there's nothing inside.
-    const isOpen = expandable ? (userOverride ?? isStreaming) : false;
+    const isOpen = expandable ? (userOverride ?? (isStreaming || revealed)) : false;
 
     useEffect(() => {
-      if (isStreaming) setUserOverride(null);
-    }, [isStreaming]);
+      if (isStreaming || revealed) setUserOverride(null);
+    }, [isStreaming, revealed]);
 
     const handleOpenChange = useCallback((newOpen: boolean) => {
       setUserOverride(newOpen);

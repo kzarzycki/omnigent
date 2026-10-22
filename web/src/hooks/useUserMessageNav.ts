@@ -42,13 +42,34 @@ function getScrollParent(node: Element): Element | null {
 }
 
 /**
+ * Center `range` in each scroller around it, up to `outer`: inner ones (a
+ * tool's output panel) at once, `outer` smoothly.
+ */
+function scrollRangeIntoView(range: Range, outer: Element | null): void {
+  for (let el = range.startContainer.parentElement; el; el = el.parentElement) {
+    const { overflowY } = getComputedStyle(el);
+    if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") continue;
+    const rect = range.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    const top = rect.top - box.top - (box.height - rect.height) / 2;
+    if (el === outer) {
+      el.scrollBy?.({ top, behavior: "smooth" });
+      return;
+    }
+    el.scrollTop += top;
+  }
+}
+
+/**
  * Center a user or assistant message and flash it after scrolling settles.
  * `ensureVisible` mounts a virtualized row before the DOM lookup is retried.
+ * `focus` picks a range inside the message to center instead, e.g. a found word.
  */
 export function scrollToMessage(
   messageId: string,
   flash?: (id: string) => void,
   ensureVisible?: (id: string) => boolean,
+  focus?: (el: Element) => Range | null,
 ): void {
   // The row may be windowed out of the DOM (virtualized transcript). Ask the
   // transcript to scroll it into the mounted range first; its node then mounts
@@ -60,7 +81,7 @@ export function scrollToMessage(
   if (!el) {
     if (scrolledIntoWindow) {
       // Row is being mounted by the virtualizer — center on it next frame.
-      requestAnimationFrame(() => scrollToMessage(messageId, flash));
+      requestAnimationFrame(() => scrollToMessage(messageId, flash, undefined, focus));
       return;
     }
     // Fail loud: id exists in the list but DOM anchor is missing.
@@ -78,7 +99,9 @@ export function scrollToMessage(
   // multi-message sessions (single short transcripts stay in view anyway).
   releaseConversationScrollLock();
 
-  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  const range = focus?.(el) ?? null;
+  if (range) scrollRangeIntoView(range, getScrollParent(el));
+  else el.scrollIntoView({ block: "center", behavior: "smooth" });
 
   // Nothing to defer when there's no flash to fire — the smooth-scroll runs
   // to completion on its own.
