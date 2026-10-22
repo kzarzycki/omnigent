@@ -56,7 +56,10 @@ from omnigent_client._sessions import SessionsNamespace
 
 from omnigent.repl._repl import _SessionsChatReplAdapter
 from omnigent.runner.app import create_runner_app
+from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 from omnigent.runner.transports.ws_tunnel.frames import (
+    TEXT_SEGMENT_CAPABILITY,
+    EventReadyFrame,
     HelloFrame,
     RequestFrame,
     decode_frame,
@@ -247,12 +250,14 @@ async def _send_hello_and_wait(
     runner_id: str,
     *,
     harnesses: list[str],
+    capabilities: list[str] | None = None,
 ) -> None:
     """Send a HelloFrame and wait until the registry lists the runner."""
     hello = HelloFrame(
         runner_version="0.1.0-test",
         frame_protocol_version=1,
         harnesses=list(harnesses),
+        capabilities=list(capabilities or []),
         envs=["os_sandbox"],
     )
     await communicator.send_input(
@@ -317,6 +322,9 @@ async def _forward_requests_to_runner(
                 continue
 
             frame = decode_frame(text)
+            dispatcher = getattr(runner_app.state, "runner_event_dispatcher", None)
+            if isinstance(frame, EventReadyFrame) and dispatcher is not None:
+                dispatcher.ready(_send_text, frame.capabilities)
             if not isinstance(frame, RequestFrame):
                 continue
 
@@ -334,6 +342,40 @@ async def _forward_requests_to_runner(
                 await task
 
 
+async def _open_tunnel(
+    ap_app: FastAPI, runner_app: FastAPI
+) -> tuple[ApplicationCommunicator, asyncio.Task[None]]:
+    """Connect the runner's tunnel, send hello and start forwarding requests."""
+    if getattr(runner_app.state, "runner_event_dispatcher", None) is None:
+        runner_app.state.runner_event_dispatcher = RunnerEventDispatcher()
+    communicator = await _connect_runner_tunnel(ap_app, _RUNNER_ID)
+    await _send_hello_and_wait(
+        communicator,
+        ap_app,
+        _RUNNER_ID,
+        harnesses=[_TEST_HARNESS_NAME],
+        capabilities=[TEXT_SEGMENT_CAPABILITY],
+    )
+    forwarder = asyncio.create_task(
+        _forward_requests_to_runner(communicator, runner_app),
+        name="tunnel-three-layer-forwarder",
+    )
+    return communicator, forwarder
+
+
+async def _close_tunnel(
+    communicator: ApplicationCommunicator, forwarder: asyncio.Task[None], *, code: int
+) -> None:
+    """Close one tunnel; cancelling the forwarder cancels the runner's dispatch tasks."""
+    forwarder.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await forwarder
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await communicator.send_input({"type": "websocket.disconnect", "code": code})
+    with contextlib.suppress(asyncio.TimeoutError, Exception):
+        await communicator.wait(timeout=budget(2.0))
+
+
 # ── Fixture: Omnigent app + tunnel WS + runner app + EchoHarness ────
 
 
@@ -342,6 +384,10 @@ class _TunnelStack:
     ap_client: httpx.AsyncClient
     ap_app: FastAPI
     fake_pm: FakeProcessManager
+    runner_app: FastAPI
+    conv_store: SqlAlchemyConversationStore
+    # Open tunnels as (communicator, forwarder); teardown closes each one.
+    tunnels: list[tuple[ApplicationCommunicator, asyncio.Task[None]]]
 
 
 @pytest_asyncio.fixture()
@@ -417,18 +463,7 @@ async def tunnel_three_layer_stack(tmp_path: Path) -> AsyncIterator[_TunnelStack
     )
     set_runner_router(ap_app.state.runner_router)
 
-    communicator = await _connect_runner_tunnel(ap_app, _RUNNER_ID)
-    await _send_hello_and_wait(
-        communicator,
-        ap_app,
-        _RUNNER_ID,
-        harnesses=[_TEST_HARNESS_NAME],
-    )
-
-    forwarder_task = asyncio.create_task(
-        _forward_requests_to_runner(communicator, runner_app),
-        name="tunnel-three-layer-forwarder",
-    )
+    communicator, forwarder_task = await _open_tunnel(ap_app, runner_app)
 
     ap_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=ap_app),
@@ -436,8 +471,16 @@ async def tunnel_three_layer_stack(tmp_path: Path) -> AsyncIterator[_TunnelStack
         timeout=httpx.Timeout(10.0, read=None),
     )
 
+    tunnels = [(communicator, forwarder_task)]
     try:
-        yield _TunnelStack(ap_client=ap_client, ap_app=ap_app, fake_pm=fake_pm)
+        yield _TunnelStack(
+            ap_client=ap_client,
+            ap_app=ap_app,
+            fake_pm=fake_pm,
+            runner_app=runner_app,
+            conv_store=conv_store,
+            tunnels=tunnels,
+        )
     finally:
         # Cancel any AP-side background tasks (SSE relays, etc.) the
         # production lifespan would have owned. ``create_app`` does not
@@ -466,16 +509,8 @@ async def tunnel_three_layer_stack(tmp_path: Path) -> AsyncIterator[_TunnelStack
 
         await ap_client.aclose()
 
-        forwarder_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await forwarder_task
-
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await communicator.send_input(
-                {"type": "websocket.disconnect", "code": 1000},
-            )
-        with contextlib.suppress(asyncio.TimeoutError, Exception):
-            await communicator.wait(timeout=budget(2.0))
+        for communicator, forwarder_task in tunnels:
+            await _close_tunnel(communicator, forwarder_task, code=1000)
 
         # Close any cached WSTunnelTransport-backed clients before
         # we tear the registry down so they can flush in-flight
@@ -2438,3 +2473,238 @@ async def test_parent_reconnect_restores_interrupted_child_on_old_runner(
         )
         assert store.get_conversation(child.id).runner_id == _RUNNER_ID
         assert store.get_conversation(finished.id).runner_id == child_runner
+
+
+# ── SDK turn text across a relay drop or server restart ─────────────
+
+_SDK_TURN_RESPONSE = {"id": "resp_sdk_turn", "model": "test-model"}
+_SDK_TURN_ITEMS = [
+    "text:looking ",
+    "function_call:call_step_1",
+    "function_call_output:call_step_1",
+    "text:done 1",
+    "function_call:call_step_2",
+    "function_call_output:call_step_2",
+    "text:all done",
+]
+
+
+def _sdk_tool_step(step: int) -> list[dict[str, Any]]:
+    """Build one completed tool call and its output, as an SDK turn publishes them."""
+    call_id = f"call_step_{step}"
+    return [
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "id": f"fc_{step}",
+                "type": "function_call",
+                "status": "completed",
+                "name": "Bash",
+                "arguments": json.dumps({"command": f"echo step {step}"}),
+                "call_id": call_id,
+                "agent": "test-agent",
+            },
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "id": f"fco_{step}",
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": f"step {step}",
+            },
+        },
+    ]
+
+
+def _publish_sdk_events(stack: _TunnelStack, session_id: str, *events: dict[str, Any]) -> None:
+    """Publish turn events through the runner, as its SDK turn loop does."""
+    for event in events:
+        stack.runner_app.state.publish_event(session_id, event)
+
+
+def _stored_item_shape(stack: _TunnelStack, session_id: str) -> list[str]:
+    """Return the stored transcript as ``text:...`` / ``<type>:<call_id>`` rows."""
+    shape = []
+    for row in stack.conv_store.list_items(session_id, limit=1000, order="asc").data:
+        data = row.data.model_dump(exclude_none=True)
+        if row.type == "message":
+            shape.append("text:" + "".join(part.get("text", "") for part in data["content"]))
+        else:
+            shape.append(f"{row.type}:{data.get('call_id')}")
+    return shape
+
+
+async def _wait_for_stored(stack: _TunnelStack, session_id: str, row: str) -> None:
+    """Wait until the stored transcript contains *row*."""
+
+    async def _stored() -> None:
+        while row not in _stored_item_shape(stack, session_id):
+            await asyncio.sleep(0.02)
+
+    try:
+        await asyncio.wait_for(_stored(), timeout=budget(10.0))
+    except asyncio.TimeoutError:
+        raise AssertionError(
+            f"{row} never stored; items={_stored_item_shape(stack, session_id)}"
+        ) from None
+
+
+async def _wait_for_relayed_text(session_id: str, text: str) -> None:
+    """Wait until the relay has consumed and published the text delta *text*."""
+    from omnigent.runtime import inflight_text
+
+    async def _relayed() -> None:
+        while text not in json.dumps(inflight_text.snapshot_for(session_id)):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_relayed(), timeout=budget(10.0))
+
+
+async def _wait_for_relay_ready(session_id: str) -> None:
+    """Wait until a relay for *session_id* has seen the runner's ready heartbeat."""
+    from omnigent.server.routes.sessions import _runner_relay_tasks
+
+    async def _ready() -> None:
+        while True:
+            handle = _runner_relay_tasks.get(session_id)
+            if handle is not None and handle.ready.is_set():
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_ready(), timeout=budget(10.0))
+
+
+async def _kill_relays() -> None:
+    """Cancel every relay task, as a dying server process loses them."""
+    from omnigent.server.routes.sessions import _runner_relay_tasks
+
+    tasks = [handle.task for handle in _runner_relay_tasks.values()]
+    tasks += [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith(("runner-relay-", "runner-disconnect-grace-"))
+    ]
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    _runner_relay_tasks.clear()
+
+
+async def _start_sdk_turn(stack: _TunnelStack) -> str:
+    """Bind a session to the runner and stream a turn up to text after its first tool."""
+    create_resp = await stack.ap_client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({})},
+        files={"bundle": ("agent.tar.gz", _build_harness_agent_bundle(), "application/gzip")},
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["session_id"]
+    bind_resp = await stack.ap_client.patch(
+        f"/v1/sessions/{session_id}", json={"runner_id": _RUNNER_ID}
+    )
+    assert bind_resp.status_code == 200, bind_resp.text
+    await _wait_for_relay_ready(session_id)
+    _publish_sdk_events(
+        stack,
+        session_id,
+        {"type": "session.status", "status": "running"},
+        {"type": "response.in_progress", "response": _SDK_TURN_RESPONSE},
+        {"type": "response.output_text.delta", "delta": "looking "},
+        *_sdk_tool_step(1),
+        {"type": "response.output_text.delta", "delta": "done 1"},
+    )
+    await _wait_for_stored(stack, session_id, "function_call_output:call_step_1")
+    await _wait_for_relayed_text(session_id, "done 1")
+    return session_id
+
+
+async def _finish_sdk_turn(stack: _TunnelStack, session_id: str) -> None:
+    """Stream the turn's final text and terminal events, then wait for its last item."""
+    _publish_sdk_events(
+        stack,
+        session_id,
+        {"type": "response.output_text.delta", "delta": "all done"},
+        {"type": "response.completed", "response": _SDK_TURN_RESPONSE},
+        {"type": "session.status", "status": "idle"},
+    )
+    await _wait_for_stored(stack, session_id, "text:all done")
+
+
+@pytest.fixture()
+def _fast_relay_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry a dropped relay stream without the production backoff."""
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._RELAY_RETRY_INTERVAL_S", 0.05
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache", "_fast_relay_retry")
+async def test_sdk_turn_without_a_drop_stores_its_text_between_tool_calls(
+    tunnel_three_layer_stack: _TunnelStack,
+) -> None:
+    """Text segments of an SDK turn interleave with its tool items, each stored once."""
+    stack = tunnel_three_layer_stack
+    session_id = await _start_sdk_turn(stack)
+    _publish_sdk_events(stack, session_id, *_sdk_tool_step(2))
+    await _finish_sdk_turn(stack, session_id)
+
+    assert _stored_item_shape(stack, session_id) == _SDK_TURN_ITEMS
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache", "_fast_relay_retry")
+async def test_sdk_turn_text_streamed_before_a_relay_transport_drop_is_stored(
+    tunnel_three_layer_stack: _TunnelStack,
+) -> None:
+    """The runner owns a turn's text segment, so a relay retry cannot lose it.
+
+    ``done 1`` reaches the relay before the tunnel drops. The relay retries in
+    the same process, and the segment is stored when the runner closes it at
+    the next tool call.
+    """
+    stack = tunnel_three_layer_stack
+    session_id = await _start_sdk_turn(stack)
+
+    communicator, forwarder = stack.tunnels.pop()
+    await _close_tunnel(communicator, forwarder, code=1006)
+    stack.ap_app.state.tunnel_registry.deregister(_RUNNER_ID)
+    _publish_sdk_events(stack, session_id, *_sdk_tool_step(2))
+    stack.tunnels.append(await _open_tunnel(stack.ap_app, stack.runner_app))
+    await _wait_for_relay_ready(session_id)
+    await _finish_sdk_turn(stack, session_id)
+
+    assert _stored_item_shape(stack, session_id) == _SDK_TURN_ITEMS
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache", "_fast_relay_retry")
+async def test_sdk_turn_spanning_a_server_restart_stores_each_item_once_with_its_text(
+    tunnel_three_layer_stack: _TunnelStack,
+) -> None:
+    """A turn the runner keeps running across a server restart keeps its transcript.
+
+    The relay task and the tunnel die together and the server's in-memory
+    status is lost. The runner reconnects, ``_on_runner_connect`` attaches a
+    new relay, and the turn's text and tool items are each stored once.
+    """
+    from omnigent.server.routes._sessions.common import _session_active_response_cache
+    from omnigent.server.routes.sessions import _session_status_cache
+
+    stack = tunnel_three_layer_stack
+    session_id = await _start_sdk_turn(stack)
+
+    communicator, forwarder = stack.tunnels.pop()
+    await asyncio.gather(_kill_relays(), _close_tunnel(communicator, forwarder, code=1006))
+    stack.ap_app.state.tunnel_registry.deregister(_RUNNER_ID)
+    _session_status_cache.pop(session_id, None)
+    _session_active_response_cache.pop(session_id, None)
+    _publish_sdk_events(stack, session_id, *_sdk_tool_step(2))
+    stack.tunnels.append(await _open_tunnel(stack.ap_app, stack.runner_app))
+    await _wait_for_relay_ready(session_id)
+    await _finish_sdk_turn(stack, session_id)
+
+    assert _stored_item_shape(stack, session_id) == _SDK_TURN_ITEMS

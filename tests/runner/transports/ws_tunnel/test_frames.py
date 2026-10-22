@@ -13,6 +13,7 @@ import pytest
 
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
+    TEXT_SEGMENT_CAPABILITY,
     EventAckFrame,
     EventBatchFrame,
     EventReadyFrame,
@@ -57,6 +58,10 @@ def test_event_ingest_frames_round_trip() -> None:
     ack = EventAckFrame(id="batch-1", applied=0, error="busy", retryable=True)
     for frame in (ready, batch, ack, EventAckFrame(id="batch-1", applied=1)):
         assert decode_frame(encode_frame(frame)) == frame
+    segments_ready = EventReadyFrame(capabilities=[TEXT_SEGMENT_CAPABILITY])
+    assert decode_frame(encode_frame(segments_ready)) == segments_ready
+    # An older server's event.ready carries no capability list.
+    assert decode_frame('{"kind": "event.ready"}') == EventReadyFrame()
 
 
 @pytest.mark.parametrize(
