@@ -17120,7 +17120,7 @@
     },
     "/v1/sessions/{session_id}/search": {
       "get": {
-        "description": "Locate the items in a session whose text contains `q`, in chat order.\n\nBacks the chat's find bar: ids only, so the client loads history up to\na match and scrolls to it. Same match rule as session search.\n\n**Returns:** `{\"data\": [{\"id\", \"response_id\"}, ...], \"has_more\": bool}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no session exists or the caller can't read it.",
+        "description": "Locate the items in one window of a session whose text contains `q`.\n\nBacks the chat's find bar: ids only, so the client loads history up to\na match and scrolls to it. Same match rule as session search. Each\nrequest scans a fixed window of items, newest first; the client walks\nolder windows with `next_before` until `has_more` is false.\n\n**Returns:** `{\"data\": [{\"id\", \"response_id\"}, ...], \"has_more\": bool, \"next_before\": int | None}`, matches in chat order.\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if no session exists or the caller can't read it.",
         "operationId": "search_session_items_v1_sessions__session_id__search_get",
         "parameters": [
           {
@@ -17145,16 +17145,21 @@
             }
           },
           {
-            "description": "Maximum number of matches (1-1000, default 500).",
+            "description": "Position cursor from a previous page's `next_before`; omit to start at the newest item.",
             "in": "query",
-            "name": "limit",
+            "name": "before",
             "required": false,
             "schema": {
-              "default": 500,
-              "maximum": 1000,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
             }
           }
         ],
