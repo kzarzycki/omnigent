@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeAlias
@@ -25,6 +28,58 @@ def global_config_path(default_path: Path | None = None) -> Path:
     if config_home := os.environ.get(_CONFIG_HOME_ENV_VAR):
         return Path(config_home) / "config.yaml"
     return default_path or _GLOBAL_CONFIG_PATH
+
+
+def _origin_repo(workspace: Path) -> str | None:
+    """``host/owner/repo`` of the git checkout holding *workspace*, from its ``origin`` remote."""
+    try:
+        url = subprocess.run(
+            ["git", "-C", str(workspace), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # https://host[:port]/o/r(.git), ssh://user@host[:port]/o/r, user@host:o/r
+    match = re.fullmatch(
+        r"(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?/?", url, re.IGNORECASE
+    )
+    return f"{match.group(1)}/{match.group(2)}".lower() if match else None
+
+
+def telemetry_endpoint_for(workspace: Path) -> str | None:
+    """
+    The OTLP endpoint a session in *workspace* opts into, from the machine's allowlist.
+
+    ``telemetry-allowlist.json`` beside the user-level config (dotagents writes
+    it on a machine that keeps telemetry off by default; ``telemetry.json`` there
+    is Omnigent's own installation id) names an ``endpoint`` and the
+    ``repos`` allowed to export to it, as ``host/owner/repo`` matched against the
+    checkout's ``origin``, so every worktree and every clone whose origin is the
+    listed remote is covered, and nothing is committed to the repo. A clone of a
+    local checkout (a path as origin) matches nothing, which fails safe. Without
+    the file, harness telemetry is whatever the user's own settings say.
+
+    :param workspace: Session workspace, e.g. a worktree of a listed repo.
+    :returns: The endpoint base URL, or ``None`` when the workspace is not opted in.
+    """
+    path = global_config_path().parent / "telemetry-allowlist.json"
+    try:
+        allow = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        _log.warning("telemetry allowlist %s unreadable; no session opts in: %s", path, exc)
+        return None
+    endpoint = allow.get("endpoint") if isinstance(allow, dict) else None
+    repos = allow.get("repos") if isinstance(allow, dict) else None
+    if not isinstance(endpoint, str) or not endpoint.strip() or not isinstance(repos, list):
+        return None
+    repo = _origin_repo(workspace)
+    listed = {r.lower().strip("/") for r in repos if isinstance(r, str)}
+    return endpoint.strip().rstrip("/") if repo in listed else None
 
 
 def load_global_config(path: Path | None = None) -> _Config:
