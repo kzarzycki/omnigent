@@ -345,6 +345,20 @@ describe("CommandPalette — match preview", () => {
     for (const m of marks) expect(m.textContent?.toLowerCase()).toBe("what");
   });
 
+  it("opens a content match with the chat's find bar on the query", () => {
+    setSessions([
+      conv("c1", "Hello", "cursor", "…the deploy step failed…"),
+      conv("c2", "deploy runbook", "agent", null),
+    ]);
+    renderPalette();
+    search("deploy step");
+
+    fireEvent.click(screen.getByText("Hello"));
+    expect(navigate).toHaveBeenLastCalledWith("/c/c1?find=deploy%20step");
+    fireEvent.click(screen.getByText(/runbook/));
+    expect(navigate).toHaveBeenLastCalledWith("/c/c2");
+  });
+
   it("omits the snippet line for a title-only match (no search_snippet)", () => {
     setSessions([conv("c1", "deploy runbook", "agent", null)]);
     renderPalette();

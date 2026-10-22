@@ -5,7 +5,11 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useState, type ReactNode } from "react";
 import { TerminalFirstContextProvider } from "@/shell/TerminalFirstContext";
 import { useChatStore } from "@/store/chatStore";
-import { useMessageDeepLink, useMessageDeepLinkChatView } from "./useMessageDeepLink";
+import {
+  useMessageDeepLink,
+  useMessageDeepLinkChatView,
+  useMessageJump,
+} from "./useMessageDeepLink";
 
 const releaseScrollLock = vi.hoisted(() => vi.fn());
 vi.mock("@/components/ai-elements/conversation", async (importOriginal) => {
@@ -155,6 +159,45 @@ describe("useMessageDeepLink", () => {
     expect(releaseScrollLock).toHaveBeenCalled();
     const target = scrollSpy.mock.contexts.at(-1) as Element;
     expect(target.getAttribute("data-message-id")).toBe("old_msg");
+  });
+
+  it("loads older history until a find match resolves, then scrolls to its bubble", async () => {
+    const loadMoreHistory = vi.fn(async () => {
+      await Promise.resolve();
+      useChatStore.setState({ loadingMoreHistory: false, hasMoreHistory: false });
+      document.body.innerHTML = `<div data-message-id="resp_old">older reply</div>`;
+      useChatStore.setState((s) => ({ historyGeneration: s.historyGeneration + 1 }));
+    });
+    useChatStore.setState({ hasMoreHistory: true, loadMoreHistory });
+    // The matched tool call renders inside the reply bubble once its page loads.
+    const resolveAnchor = (id: string) =>
+      document.querySelector('[data-message-id="resp_old"]') && id === "fc_old" ? "resp_old" : null;
+    const target = { key: "find:1", candidates: ["fc_old", "resp_old_unrelated"] };
+
+    const { rerender } = renderHook(() => useMessageJump(target, { resolveAnchor }), {
+      wrapper: wrapperFor("/c/conv_1"),
+    });
+
+    expect(loadMoreHistory).toHaveBeenCalledOnce();
+    expect(scrollSpy).not.toHaveBeenCalled();
+    await act(async () => {
+      await loadMoreHistory.mock.results[0]?.value;
+    });
+    rerender();
+    const scrolled = scrollSpy.mock.contexts.at(-1) as Element;
+    expect(scrolled.getAttribute("data-message-id")).toBe("resp_old");
+    act(() => vi.advanceTimersByTime(SETTLE_MS));
+    expect(useChatStore.getState().flashItemId).toBe("resp_old");
+  });
+
+  it("centers a mounted target through the virtualizer before scrolling", () => {
+    document.body.innerHTML = `<div data-message-id="msg_1">hello</div>`;
+    const ensureMessageVisible = vi.fn(() => true);
+    renderHook(() => useMessageDeepLink("conv_1", { ensureMessageVisible }), {
+      wrapper: wrapperFor("/c/conv_1?message=msg_1"),
+    });
+    expect(ensureMessageVisible).toHaveBeenCalledWith("msg_1");
+    expect(scrollSpy).toHaveBeenCalledOnce();
   });
 
   it("does nothing when ?message= is absent", () => {
