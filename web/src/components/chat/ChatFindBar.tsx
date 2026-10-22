@@ -132,7 +132,7 @@ export function ChatFindBar({
   return (
     <div
       role="search"
-      className="flex w-80 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-1.5 shadow-md backdrop-blur"
+      className="pointer-events-auto flex w-80 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-1.5 shadow-md backdrop-blur"
     >
       <SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
       <input
