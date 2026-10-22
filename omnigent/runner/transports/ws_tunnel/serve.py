@@ -50,6 +50,7 @@ from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispa
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
     RUNNER_IDLE_SHUTDOWN_CLOSE_REASON,
+    TEXT_SEGMENT_CAPABILITY,
     EventAckFrame,
     EventReadyFrame,
     HelloFrame,
@@ -1515,7 +1516,11 @@ async def _send_hello(
                     CAP_FILESYSTEM_ATTACHMENTS,
                     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
                     CAP_MCP_REGISTRY,
-                    *([EVENT_INGEST_CAPABILITY] if event_dispatcher is not None else []),
+                    *(
+                        [EVENT_INGEST_CAPABILITY, TEXT_SEGMENT_CAPABILITY]
+                        if event_dispatcher is not None
+                        else []
+                    ),
                 ],
                 telemetry_opt_out=_tel_opt_out,
                 direct_attach_port=direct_attach_port,
@@ -1578,7 +1583,7 @@ async def _handle_tunnel_frame(
         return
     if isinstance(frame, EventReadyFrame):
         if event_dispatcher is not None:
-            event_dispatcher.ready(send_text)
+            event_dispatcher.ready(send_text, frame.capabilities)
     elif isinstance(frame, EventAckFrame):
         if event_dispatcher is not None:
             event_dispatcher.acknowledge(frame)
