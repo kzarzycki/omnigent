@@ -241,6 +241,7 @@ from omnigent.server.schemas import (
     UpdateSessionRequest,
 )
 from omnigent.server.session_orchestration import require_orchestration_source
+from omnigent.server.session_recaps import STATUS_BY_KEY, STATUS_LINE_KEY
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -3348,6 +3349,9 @@ def register_core_routes(
                     )
                 ):
                     family_pin_value = labels_to_set.pop(PINNED_LABEL_KEY)
+        # A status line names its writer in ``status.by``, or clears a previous writer's name.
+        if STATUS_LINE_KEY in labels_to_set:
+            labels_to_set.setdefault(STATUS_BY_KEY, "")
         # Pins are per-user. The client writes the canonical ``omnigent.pinned``
         # key; rewrite it to the caller's per-user key so one user's pin doesn't
         # pin the session for everyone with access. Empty value (unpin) carries

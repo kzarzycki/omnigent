@@ -31,6 +31,13 @@ describe("SessionStatusLine", () => {
     expect(line).toHaveAttribute("data-stale", "true");
   });
 
+  it("never marks the server's recap stale: it holds until the session runs again", () => {
+    renderLine({ "status.line": "Fixed the bug", "status.at": at(3600), "status.by": "recap" });
+    const line = screen.getByTestId("line");
+    expect(line).toHaveTextContent(/^Fixed the bug · 1h$/);
+    expect(line).not.toHaveAttribute("data-stale");
+  });
+
   it("shows the line with no age without status.at", () => {
     renderLine({ "status.line": "waits on CI" });
     expect(screen.getByTestId("line")).toHaveTextContent(/^waits on CI$/);

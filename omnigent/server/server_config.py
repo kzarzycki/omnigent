@@ -57,6 +57,7 @@ RESTRICT_TO_AGENT_NAMES_KEY = "restrict_to_agent_names"
 #: Agent name a fresh New Chat starts on, e.g. ``"polly"``.
 DEFAULT_AGENT_NAME_KEY = "default_agent_name"
 SESSION_TITLE_INSTRUCTIONS_MAX_CHARS = 4_000
+SESSION_RECAPS_KEY = "session_recaps"
 
 
 def resolve_config_path() -> Path | None:
@@ -225,6 +226,11 @@ def load_picker_curation(config: Mapping[str, Any]) -> PickerCuration:
         )
         default = None
     return PickerCuration(restrict_to_agent_names=names, default_agent_name=default)
+
+
+def session_recaps_enabled(config: Mapping[str, Any]) -> bool:
+    """Whether turn ends write a recap ``status.line``; on unless ``session_recaps: false``."""
+    return config.get(SESSION_RECAPS_KEY) is not False
 
 
 def _config_positive_int(key: str, default: int) -> int:
