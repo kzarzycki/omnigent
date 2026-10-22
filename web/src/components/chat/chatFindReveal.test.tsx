@@ -194,15 +194,19 @@ describe("find in chat reveals collapsed content", () => {
     expect(screen.queryByTestId("error-message-content")).toBeNull();
   });
 
-  it("keeps a container the reader closed while find revealed it closed", () => {
+  it("keeps a container the reader closed while find revealed it closed, until find reveals it again", () => {
     const bubbles = bubblesOf(toolTurn);
     const reveal = { anchor: "resp_1", itemIds: ["fco_1"], query: "zorblat" };
-    render(<Transcript bubbles={bubbles} reveal={reveal} />);
+    const view = render(<Transcript bubbles={bubbles} reveal={reveal} />);
     const fold = screen.getByTestId("turn-worked-fold");
     act(() => {
       fireEvent.click(screen.getByText("Worked"));
     });
     expect(fold.getAttribute("data-state")).toBe("closed");
+
+    view.rerender(<Transcript bubbles={bubbles} reveal={null} />);
+    view.rerender(<Transcript bubbles={bubbles} reveal={{ ...reveal }} />);
+    expect(fold.getAttribute("data-state")).toBe("open");
   });
 });
 
