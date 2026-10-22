@@ -2231,6 +2231,38 @@ class SqlAlchemyConversationStore(ConversationStore):
             self._conv_session_immediate, "transition_pending_input", write
         )
 
+    def find_item_matches(
+        self,
+        conversation_id: str,
+        query: str,
+        limit: int = 500,
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """
+        Locate the items in one conversation whose ``search_text`` contains *query*.
+
+        Same ILIKE predicate as :func:`_fetch_search_snippets`, walked on the
+        ``(workspace_id, conversation_id, position)`` index; ``data`` is never read.
+
+        :param conversation_id: The conversation to look in, e.g. ``"conv_abc123"``.
+        :param query: The text to find, e.g. ``"deploy"``.
+        :param limit: Maximum number of matches to return.
+        :returns: ``(matches, has_more)``: ``(item_id, response_id)`` pairs in
+            chat order, and whether more matches exist past *limit*.
+        """
+        with self._conv_session("find_item_matches") as session:
+            rows = session.execute(
+                select(SqlConversationItem.id, SqlConversationItem.response_id)
+                .where(
+                    SqlConversationItem.workspace_id == current_workspace_id(),
+                    SqlConversationItem.conversation_id == conversation_id,
+                    SqlConversationItem.search_text.ilike(f"%{query.lower()}%"),
+                )
+                .order_by(SqlConversationItem.position)
+                .limit(limit + 1)
+            ).all()
+        matches = [(item_id, response_id) for item_id, response_id in rows[:limit]]
+        return matches, len(rows) > limit
+
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         """
         Fetch one persisted item by id, or ``None`` when absent.

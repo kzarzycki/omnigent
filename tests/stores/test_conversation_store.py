@@ -2133,6 +2133,43 @@ def test_list_conversations_search_snippet_uses_earliest_match(
     assert "second mention" not in snippet
 
 
+def test_find_item_matches_lists_one_sessions_matches_in_chat_order(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Matches come back oldest first, case-insensitive, from that session only."""
+    conv = conversation_store.create_conversation()
+    other = conversation_store.create_conversation()
+
+    def message(text: str, response_id: str) -> NewConversationItem:
+        return NewConversationItem(
+            type="message",
+            response_id=response_id,
+            data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
+        )
+
+    appended = conversation_store.append(
+        conv.id,
+        [
+            message("the Zorblat appears", "resp_a"),
+            message("nothing here", "resp_b"),
+            message("zorblat again", "resp_c"),
+            message("ZORBLAT last", "resp_d"),
+        ],
+    )
+    conversation_store.append(other.id, [message("zorblat elsewhere", "resp_x")])
+
+    matches, has_more = conversation_store.find_item_matches(conv.id, "zorblat")
+    expected = [(item.id, item.response_id) for item in appended if item.response_id != "resp_b"]
+    assert matches == expected
+    assert has_more is False
+
+    capped, capped_has_more = conversation_store.find_item_matches(conv.id, "zorblat", limit=2)
+    assert capped == expected[:2]
+    assert capped_has_more is True
+
+    assert conversation_store.find_item_matches(conv.id, "absent") == ([], False)
+
+
 def test_list_conversations_excludes_archived_by_default(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
