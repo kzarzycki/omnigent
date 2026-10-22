@@ -12,7 +12,7 @@ import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ElicitationCard } from "@/components/blocks/ApprovalCard";
 import { cn } from "@/lib/utils";
 import { getCurrentAuthorId } from "@/lib/identity";
-import { hasCommandModifier } from "@/lib/hotkeys";
+import { fileViewerOwnsFind, hasCommandModifier } from "@/lib/hotkeys";
 import { isSystemUserContent } from "@/lib/systemMessage";
 import { isTerminalCommandInput } from "@/lib/blocks";
 import {
@@ -30,8 +30,14 @@ import { DbcertBanner } from "@/components/DbcertBanner";
 import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
 import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
 import { useSearchParams } from "@/lib/routing";
-import { MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
-import { useMessageDeepLink } from "@/hooks/useMessageDeepLink";
+import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
+import {
+  type MessageJumpTarget,
+  useMessageDeepLink,
+  useMessageJump,
+} from "@/hooks/useMessageDeepLink";
+import { useTerminalFirst } from "@/shell/TerminalFirstContext";
+import { ChatFindBar, type FindStart, useChatFindHighlight } from "@/components/chat/ChatFindBar";
 import { useUserMessageNav } from "@/hooks/useUserMessageNav";
 import { ChatPlanAccordion } from "@/shell/ChatPlanAccordion";
 import {
@@ -101,6 +107,25 @@ export function isNativeFindShortcut(
     event.key.toLowerCase() === "f" &&
     (event.metaKey || event.ctrlKey)
   );
+}
+
+/**
+ * Where a find shortcut goes: the chat's find bar on the first press; the
+ * browser's find from the bar's input or the terminal view; nowhere (null) when
+ * it isn't a find shortcut or an open file owns it.
+ */
+export function findShortcutRoute(
+  event: Parameters<typeof isNativeFindShortcut>[0],
+  {
+    showTerminal,
+    findInput,
+    fileOwnsFind,
+  }: { showTerminal: boolean; findInput: Element | null; fileOwnsFind: boolean },
+): "chat" | "native" | null {
+  if (!isNativeFindShortcut(event) || fileOwnsFind) return null;
+  const opensBar =
+    hasCommandModifier(event) && !showTerminal && document.activeElement !== findInput;
+  return opensBar ? "chat" : "native";
 }
 
 /**
@@ -218,21 +243,44 @@ function TranscriptImpl({
       showsWorking,
     ],
   );
-  const [nativeFindConversationId, setNativeFindConversationId] = useState<string | null>(null);
-  useEffect(() => setNativeFindConversationId(null), [conversationId]);
-  useEffect(() => {
-    const handleFind = (event: globalThis.KeyboardEvent) => {
-      if (!display.conversationId || !isNativeFindShortcut(event)) return;
-      // Native find runs after keydown dispatch. Commit every row before the
-      // browser scans the DOM so off-screen messages participate.
-      flushSync(() => setNativeFindConversationId(display.conversationId));
-    };
-    window.addEventListener("keydown", handleFind);
-    return () => window.removeEventListener("keydown", handleFind);
-  }, [display.conversationId]);
-  const disableVirtualization = nativeFindConversationId === display.conversationId;
   const [searchParams] = useSearchParams();
   const messageId = searchParams.get(MESSAGE_QUERY_PARAM);
+  const findParam = searchParams.get(FIND_QUERY_PARAM);
+  // The find bar: ?find=<q> opens it filled in, at the oldest match.
+  const [find, setFind] = useState<{ query: string; start: FindStart } | null>(null);
+  const [findTarget, setFindTarget] = useState<MessageJumpTarget | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    setFind(findParam ? { query: findParam, start: "oldest" } : null);
+    setFindTarget(null);
+  }, [conversationId, findParam]);
+  const closeFind = useCallback(() => {
+    setFind(null);
+    setFindTarget(null);
+  }, []);
+  const terminalFirst = useTerminalFirst();
+  const showTerminal = terminalFirst?.isTerminalFirst && terminalFirst.view === "terminal";
+
+  const [nativeFindConversationId, setNativeFindConversationId] = useState<string | null>(null);
+  useEffect(() => setNativeFindConversationId(null), [conversationId]);
+  const openChatFind = useCallback(() => {
+    setFind((current) => current ?? { query: "", start: "newest" });
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, []);
+  const prepareNativeFind = useCallback(() => {
+    // Native find runs after keydown dispatch. Commit every row before the
+    // browser scans the DOM so off-screen messages participate.
+    flushSync(() => setNativeFindConversationId(display.conversationId));
+  }, [display.conversationId]);
+  useChatFindShortcut({
+    enabled: !!display.conversationId,
+    showTerminal: !!showTerminal,
+    findInputRef,
+    onChatFind: openChatFind,
+    onNativeFind: prepareNativeFind,
+  });
+  const disableVirtualization = nativeFindConversationId === display.conversationId;
 
   // Virtualizer-derived geometry (scroll handle, active turn, range nonce),
   // published by VirtualBubbleList. The rail reads the active turn and the
@@ -264,11 +312,24 @@ function TranscriptImpl({
     [display.bubbles],
   );
   const nav = useUserMessageNav(userMessageIds, ensureItemVisible);
+  const jumpReady =
+    display.conversationId === conversationId && !!scroller?.el && !!scrollToItemRef.current;
   useMessageDeepLink(conversationId ?? null, {
     ensureMessageVisible: ensureItemVisible,
-    ready: display.conversationId === conversationId && !!scroller?.el && !!scrollToItemRef.current,
+    ready: jumpReady,
     rangeNonce: spacerMeasureNonce,
   });
+  const resolveAnchor = useCallback(
+    (id: string) => resolveMessageAnchor(display.streamBubbles, id, display.hasMoreHistory),
+    [display.streamBubbles, display.hasMoreHistory],
+  );
+  useMessageJump(findTarget, {
+    ensureMessageVisible: ensureItemVisible,
+    resolveAnchor,
+    ready: jumpReady,
+    rangeNonce: spacerMeasureNonce,
+  });
+  useChatFindHighlight(find?.query ?? "", scroller?.el ?? null);
 
   // One rail tick per real user turn, paired with a preview of the reply that
   // followed. Mirrors the transcript's loaded window and grows lazily.
@@ -387,7 +448,7 @@ function TranscriptImpl({
                   conversationId={display.conversationId}
                   hasTasks={display.hasTasks}
                   disableVirtualization={disableVirtualization}
-                  messageId={messageId}
+                  messageId={messageId ?? findParam}
                   onGeometryChange={onGeometryChange}
                 />
                 {/* Pending elicitation cards, floated to the bottom of the chat
@@ -438,6 +499,20 @@ function TranscriptImpl({
           scroller={scroller}
           hasMoreHistory={display.hasMoreHistory}
         />
+        {find && conversationId && (
+          <div className="absolute top-14 right-4 z-20 md:top-12">
+            <ChatFindBar
+              key={conversationId}
+              conversationId={conversationId}
+              query={find.query}
+              onQueryChange={(query) => setFind((current) => current && { ...current, query })}
+              start={find.start}
+              inputRef={findInputRef}
+              onTarget={setFindTarget}
+              onClose={closeFind}
+            />
+          </div>
+        )}
         {/* Too-many-tabs, dbcert, and sandbox-launch warnings, siblings of Conversation. */}
         <FloatingBannerStack>
           <StreamBudgetBanner />
@@ -457,6 +532,68 @@ function TranscriptImpl({
       </div>
     </>
   );
+}
+
+/**
+ * Route ⌘F in a chat by `findShortcutRoute`. Listens in the capture phase, so
+ * the chat claims a press before the side panel's window listeners see it.
+ */
+export function useChatFindShortcut({
+  enabled,
+  showTerminal,
+  findInputRef,
+  onChatFind,
+  onNativeFind,
+}: {
+  enabled: boolean;
+  showTerminal: boolean;
+  findInputRef: React.RefObject<HTMLInputElement | null>;
+  onChatFind: () => void;
+  onNativeFind: () => void;
+}): void {
+  useEffect(() => {
+    if (!enabled) return;
+    const handleFind = (event: globalThis.KeyboardEvent) => {
+      const route = findShortcutRoute(event, {
+        showTerminal,
+        findInput: findInputRef.current,
+        fileOwnsFind: fileViewerOwnsFind(),
+      });
+      if (route === "chat") {
+        event.preventDefault();
+        onChatFind();
+      } else if (route === "native") {
+        onNativeFind();
+      }
+    };
+    window.addEventListener("keydown", handleFind, true);
+    return () => window.removeEventListener("keydown", handleFind, true);
+  }, [enabled, showTerminal, findInputRef, onChatFind, onNativeFind]);
+}
+
+/**
+ * The anchor id (a user bubble's `itemId` or an assistant bubble's
+ * `responseId`) of the loaded bubble that renders item `id`, or null when it is
+ * not loaded. An id matching no bubble or render item (a tool output folds into
+ * its call's row) falls back to the assistant bubble with that `responseId`,
+ * unless that bubble is the oldest loaded one and older history remains: its
+ * response may then continue on the unloaded page.
+ */
+export function resolveMessageAnchor(
+  bubbles: readonly Bubble[],
+  id: string,
+  hasOlderHistory = false,
+): string | null {
+  let byResponse: string | null = null;
+  for (const [index, bubble] of bubbles.entries()) {
+    if (bubble.kind === "user" && bubble.itemId === id) return bubble.itemId;
+    if (bubble.kind !== "assistant") continue;
+    if (bubble.items.some((item) => item.itemId === id)) return bubble.responseId;
+    if (byResponse === null && bubble.responseId === id && (index > 0 || !hasOlderHistory)) {
+      byResponse = bubble.responseId;
+    }
+  }
+  return byResponse;
 }
 
 /**
