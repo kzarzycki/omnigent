@@ -8,7 +8,7 @@
 #   OMNIGENT_SYNC_ALLOWED_SIGNERS  base64 of an allowed_signers file
 #   OMNIGENT_SYNC_SIGNING_KEY      base64 of the private key listed in it
 #
-# exit 0 ready, 2 not the fork checkout, 3 missing or untrusted key, 4 the
+# exit 0 ready, 2 not the fork checkout, 3 missing tools or a missing or untrusted key, 4 the
 # checked-out commit (and so this skill) is not signed by an allowed key.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -19,6 +19,11 @@ git remote get-url upstream >/dev/null 2>&1 \
 
 [ -n "${OMNIGENT_SYNC_ALLOWED_SIGNERS:-}" ] && [ -n "${OMNIGENT_SYNC_SIGNING_KEY:-}" ] \
   || { echo "!! OMNIGENT_SYNC_ALLOWED_SIGNERS / OMNIGENT_SYNC_SIGNING_KEY not set" >&2; exit 3; }
+# Claude cloud images ship git without the OpenSSH tools that SSH signing needs.
+command -v ssh-keygen >/dev/null || {
+  sudo=$( [ "$(id -u)" = 0 ] || echo sudo )
+  $sudo apt-get update -qq && $sudo apt-get install -y -qq openssh-client >/dev/null
+} || { echo "!! ssh-keygen missing and openssh-client did not install" >&2; exit 3; }
 umask 077
 dir="$HOME/.config/omnigent-sync"
 mkdir -p "$dir"
