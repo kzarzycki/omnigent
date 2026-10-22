@@ -1033,6 +1033,27 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def find_item_matches(
+        self,
+        conversation_id: str,
+        query: str,
+        limit: int = 500,
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """
+        Locate the items in one conversation whose text contains *query*.
+
+        The same case-insensitive substring rule as session search, so the
+        chat's find bar agrees with the sidebar's snippet.
+
+        :param conversation_id: The conversation to look in, e.g. ``"conv_abc123"``.
+        :param query: The text to find, e.g. ``"deploy"``.
+        :param limit: Maximum number of matches to return.
+        :returns: ``(matches, has_more)``: ``(item_id, response_id)`` pairs in
+            chat order, and whether more matches exist past *limit*.
+        """
+        ...
+
+    @abstractmethod
     def update_conversation(
         self,
         conversation_id: str,
