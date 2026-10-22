@@ -2172,7 +2172,7 @@ def test_find_item_matches_scans_one_window_and_walks_older_windows_by_cursor(
 ) -> None:
     """Each call sees only its window of items; the cursor reaches every older match."""
     conv = conversation_store.create_conversation()
-    texts = ["zorblat 0", "-", "zorblat 2", "-", "-", "zorblat 5", "zorblat 6"]
+    texts = ["zorblat 0", "zorblat 1", "zorblat 2", "-", "zorblat 4", "-", "zorblat 6"]
     appended = conversation_store.append(
         conv.id, [_find_message(text, f"resp_{i}") for i, text in enumerate(texts)]
     )
@@ -2189,7 +2189,8 @@ def test_find_item_matches_scans_one_window_and_walks_older_windows_by_cursor(
             break
 
     # Windows of three items, newest first: positions 4-6, then 1-3, then 0.
-    assert pages == [([ids[5], ids[6]], 4), ([ids[2]], 1), ([ids[0]], None)]
+    # Each window's oldest item (4, then 1) matches and belongs to its own page.
+    assert pages == [([ids[4], ids[6]], 4), ([ids[1], ids[2]], 1), ([ids[0]], None)]
 
 
 def test_list_conversations_excludes_archived_by_default(
