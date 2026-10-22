@@ -4718,7 +4718,9 @@ async def _forward_available_status_events(
                     _http_status_for_log(exc),
                     extra={"session_id": session_id},
                 )
-                if status != "failed":
+                # A refused sub-agent delivery was already recorded by the server;
+                # a ``failed`` edge would replace the child's real result.
+                if status != "failed" and not _is_subagent_delivery_not_confirmed(exc):
                     await _post_forwarder_failed_status(
                         client,
                         session_id=session_id,
@@ -7178,15 +7180,17 @@ def _is_session_not_bound(exc: httpx.HTTPError) -> bool:
 
 def _is_subagent_delivery_not_confirmed(exc: httpx.HTTPError) -> bool:
     """
-    Return whether ``exc`` is a runner ``subagent_delivery_not_confirmed`` 503.
+    Return whether ``exc`` is a ``subagent_delivery_not_confirmed`` 503.
 
     The runner returns this application-level 503 when a terminal sub-agent
-    payload could not be delivered to the parent inbox (no work entry / inbox).
-    It is a bounded-retry class, distinct from a generic transient 5xx.
+    payload could not be delivered to the parent inbox (no work entry / inbox),
+    and the server relays it as its ``error.code`` envelope. It is a
+    bounded-retry class, distinct from a generic transient 5xx.
 
     :param exc: HTTP exception raised while posting an Omnigent event.
     :returns: ``True`` only for a 503 whose JSON body carries
-        ``error == "subagent_delivery_not_confirmed"``.
+        ``error == "subagent_delivery_not_confirmed"`` (runner) or
+        ``error.code == "subagent_delivery_not_confirmed"`` (server).
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
@@ -7196,7 +7200,12 @@ def _is_subagent_delivery_not_confirmed(exc: httpx.HTTPError) -> bool:
         body = exc.response.json()
     except Exception:  # noqa: BLE001 — best-effort body parse
         return False
-    return isinstance(body, dict) and body.get("error") == "subagent_delivery_not_confirmed"
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if isinstance(error, dict):
+        error = error.get("code")
+    return error == "subagent_delivery_not_confirmed"
 
 
 def _http_status_for_log(exc: httpx.HTTPError) -> int | None:

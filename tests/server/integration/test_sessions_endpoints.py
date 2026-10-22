@@ -5973,7 +5973,8 @@ async def test_post_external_session_status_propagates_runner_delivery_failure(
 
     assert status_resp.status_code == 503, status_resp.text
     error = status_resp.json()["error"]
-    assert error["code"] == "runner_unavailable"
+    # A distinct code lets the child forwarder bound its retries of this refusal.
+    assert error["code"] == "subagent_delivery_not_confirmed"
     # The runner's delivery-not-confirmed reason is retained in AP's error
     # message. If absent, Omnigent flattened the failure and made diagnosis harder.
     assert "missing_parent_inbox" in error["message"]
