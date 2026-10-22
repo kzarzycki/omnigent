@@ -15,6 +15,7 @@ planner uses the content index for the real search predicate.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from sqlalchemy.engine import Engine
 
 from omnigent.db.utils import (
     _build_alembic_config,
+    _run_migrations,
     clear_engine_cache,
     get_or_create_engine,
 )
@@ -91,12 +93,12 @@ def test_roundtrip_reversible_on_sqlite(tmp_path: Path) -> None:
 @pytest.mark.databricks
 def test_trgm_indexes_present_on_postgres(db_uri: str) -> None:
     """
-    On Postgres the title trigram GIN index exists at head. The obsolete item
-    content index is absent because content search intentionally uses raw
-    ILIKE with a conversation-correlated b-tree probe.
+    On Postgres both trigram GIN indexes exist at head: the title one over
+    ``lower(title)``, and the item content one over the raw ``search_text``,
+    which is what content search's ``ILIKE`` reads.
 
-    Asserts the migration's contract structurally — index type ``gin`` with
-    ``gin_trgm_ops`` over a ``lower(...)`` expression — rather than a query plan,
+    Asserts the migrations' contract structurally — index type ``gin`` with
+    ``gin_trgm_ops`` — rather than a query plan,
     which depends on table statistics and would be non-deterministic against the
     empty per-worker test DB. (Whether the planner *chooses* the index at scale
     is a property of Postgres + ``pg_trgm``, not of this DDL.)
@@ -127,11 +129,83 @@ def test_trgm_indexes_present_on_postgres(db_uri: str) -> None:
             ),
             {"items": _ITEMS_INDEX, "title": _TITLE_INDEX},
         ).fetchall()
-    assert set(defs) == {_TITLE_INDEX}, defs
+    assert set(defs) == {_TITLE_INDEX, _ITEMS_INDEX}, defs
     for definition in defs.values():
         lowered = definition.lower()
-        assert "gin" in lowered and "gin_trgm_ops" in lowered and "lower(" in lowered, definition
+        assert "gin" in lowered and "gin_trgm_ops" in lowered, definition
+    assert "lower(" in defs[_TITLE_INDEX].lower(), defs[_TITLE_INDEX]
+    assert "lower(" not in defs[_ITEMS_INDEX].lower(), defs[_ITEMS_INDEX]
     # The indexes are built with CREATE INDEX CONCURRENTLY; a failed concurrent
     # build leaves an INVALID (planner-ignored) index that would still pass the
     # structural checks above, so assert both builds actually completed.
     assert not invalid, invalid
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OMNIGENT_TEST_DB_URI", "").startswith("postgresql"),
+    reason="needs PostgreSQL (OMNIGENT_TEST_DB_URI)",
+)
+def test_postgres_items_index_rebuild_keeps_a_valid_build_and_replaces_leftovers() -> None:
+    """
+    ``sa2b3c4d5e6f`` keeps a valid index an operator built ahead of a deploy,
+    replaces an INVALID leftover of a failed concurrent build and the old
+    ``lower(search_text)`` index, and its downgrade runs in a caller's transaction.
+    """
+    root = sa.make_url(os.environ["OMNIGENT_TEST_DB_URI"])
+    name = f"sa2_rebuild_{os.getpid()}"
+    uri = root.set(database=name).render_as_string(hide_password=False)
+    admin = sa.create_engine(root, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}"'))
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    setup = sa.create_engine(uri, isolation_level="AUTOCOMMIT")
+    index_state = (
+        "SELECT i.indexrelid::int, i.indisvalid, pg_get_indexdef(i.indexrelid) "
+        "FROM pg_index i WHERE i.indexrelid = to_regclass(:name)"
+    )
+
+    def rerun_migration(conn: sa.Connection) -> tuple[int, bool, str]:
+        conn.execute(sa.text("UPDATE alembic_version SET version_num = 'rc7d1e2f3a4b'"))
+        _run_migrations(sa.create_engine(uri), uri)
+        return tuple(conn.execute(sa.text(index_state), {"name": _ITEMS_INDEX}).one())
+
+    try:
+        _run_migrations(sa.create_engine(uri), uri)
+        with setup.connect() as conn:
+            prebuilt, _, _ = conn.execute(sa.text(index_state), {"name": _ITEMS_INDEX}).one()
+            assert rerun_migration(conn)[0] == prebuilt, "a valid prebuilt index was rebuilt"
+
+            conn.execute(
+                sa.text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = :oid"),
+                {"oid": prebuilt},
+            )
+            oid, valid, _ = rerun_migration(conn)
+            assert valid and oid != prebuilt, "an INVALID leftover was kept"
+
+            conn.execute(sa.text(f"DROP INDEX {_ITEMS_INDEX}"))
+            conn.execute(
+                sa.text(
+                    f"CREATE INDEX {_ITEMS_INDEX} ON conversation_items "
+                    "USING gin (lower(search_text) gin_trgm_ops)"
+                )
+            )
+            _, valid, definition = rerun_migration(conn)
+            assert valid and "lower(" not in definition.lower(), definition
+
+        cfg = _build_alembic_config(uri)
+        engine = sa.create_engine(uri)
+        with engine.begin() as conn:
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "rc7d1e2f3a4b")
+        engine.dispose()
+        with setup.connect() as conn:
+            assert (
+                conn.execute(sa.text("SELECT to_regclass(:n)"), {"n": _ITEMS_INDEX}).scalar()
+                is None
+            )
+    finally:
+        setup.dispose()
+        clear_engine_cache()
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()

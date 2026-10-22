@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiError } from "@/lib/sessionsApi";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps, ReactNode } from "react";
+import type * as UseConversationsModule from "@/hooks/useConversations";
 
 import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { CommandPalette } from "./CommandPalette";
@@ -17,7 +19,8 @@ const serverInfo = vi.fn();
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => serverInfo(),
 }));
-vi.mock("@/hooks/useConversations", () => ({
+vi.mock("@/hooks/useConversations", async (importOriginal) => ({
+  isSearchTimeout: (await importOriginal<typeof UseConversationsModule>()).isSearchTimeout,
   useConversations: (...args: unknown[]) => useConversations(...args),
   useSessionSearch: (...args: unknown[]) => useSessionSearch(...args),
 }));
@@ -195,6 +198,29 @@ describe("CommandPalette — sessions", () => {
       expect(refetch).toHaveBeenCalledOnce();
     },
   );
+
+  it("says a search took too long when the server cancelled it", () => {
+    vi.useFakeTimers();
+    try {
+      setSearchGroups({
+        content: {
+          isError: true,
+          error: new ApiError("search took too long", 504, "search_timeout"),
+          refetch: vi.fn(),
+        },
+      });
+      renderPalette({ sessionsOnly: false });
+      fireEvent.change(screen.getByTestId("command-palette-input"), {
+        target: { value: "station" },
+      });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(screen.getByRole("status").textContent).toContain("Search took too long.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("shows only one loading message during the initial session fetch", () => {
     setSessions([], true);

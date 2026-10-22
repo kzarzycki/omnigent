@@ -60,7 +60,7 @@ import {
   readPinnedConversationIds,
   setLegacyPinnedConversationId,
 } from "@/shell/sidebarNav";
-import { apiErrorFromResponse, stopSession } from "@/lib/sessionsApi";
+import { ApiError, apiErrorFromResponse, stopSession } from "@/lib/sessionsApi";
 import { isStaleCursorError, useRestartOnStaleCursor } from "@/lib/staleCursor";
 import { isRetryableRequestError } from "@/lib/queryRetry";
 import { sessionRoutingHostId, setSessionHost, setSessionParent } from "@/lib/sessionHost";
@@ -83,18 +83,14 @@ export const CONNECTED_STREAM_REFETCH_INTERVAL_MS = 60_000;
 export const DISCONNECTED_STREAM_REFETCH_INTERVAL_MS = 45_000;
 
 /**
- * Client-side deadline for a *search* page fetch (`?search_query=`). Content
- * search is a substring scan server-side; if its trigram index is ever missing
- * the query can run for tens of seconds, and the palette would otherwise sit on
- * "Searching…" forever (the fetch has no timeout of its own). Aborting here
- * settles the query to a terminal state so the user sees "No results found"
- * rather than an endless spinner. Deliberately shorter than the server's own
- * search `statement_timeout` (see `_SEARCH_STATEMENT_TIMEOUT_MS` in the store)
- * so the client gives up first and the row-limited fast path still has room.
- * Only search fetches are bounded — ordinary (indexed) list pagination is left
- * untouched.
+ * Client-side deadline for a *search* page fetch (`?search_query=`), so the
+ * palette never sits on "Searching…" forever. Longer than the server's search
+ * `statement_timeout` (`_SEARCH_STATEMENT_TIMEOUT_MS`, 15 s): the server then
+ * always answers first, with a result or a 504 `search_timeout`, instead of the
+ * browser abandoning a scan that keeps running while the user retries. Only
+ * search fetches are bounded — plain list pagination is indexed and fast.
  */
-export const SEARCH_FETCH_TIMEOUT_MS = 10_000;
+export const SEARCH_FETCH_TIMEOUT_MS = 20_000;
 
 /**
  * True for the DOMException a fetch raises when its `AbortSignal.timeout`
@@ -108,14 +104,23 @@ function isAbortTimeout(error: unknown): boolean {
 }
 
 /**
+ * True when a search gave up on either side: the browser's deadline fired, or
+ * the server cancelled the query at its own deadline (504 `search_timeout`).
+ * Both are terminal — a retry repeats the same scan.
+ */
+export function isSearchTimeout(error: unknown): boolean {
+  return isAbortTimeout(error) || (error instanceof ApiError && error.code === "search_timeout");
+}
+
+/**
  * Retry policy for session-list fetches: up to 3 retries, and only for failures
- * a retry can fix. A client-side search timeout and a stale cursor are
- * terminal, and so is a 4xx the same request would hit again.
+ * a retry can fix. A search timeout (browser or server side) and a stale cursor
+ * are terminal, and so is a 4xx the same request would hit again.
  */
 export function retryListFetch(failureCount: number, error: unknown): boolean {
   return (
     failureCount < 3 &&
-    !isAbortTimeout(error) &&
+    !isSearchTimeout(error) &&
     !isStaleCursorError(error) &&
     isRetryableRequestError(error)
   );
@@ -770,8 +775,8 @@ export function useConversations(
           meta: { snapshot: true },
         }
       : {}),
-    // A client-side search timeout is terminal — retrying would just re-arm the
-    // same slow request (default 3×) and prolong the spinner.
+    // A search timeout (browser or server side) is terminal — retrying would
+    // just re-run the same slow scan (default 3×) and prolong the spinner.
     // A stale cursor is terminal for that page param too: the row it names is
     // gone, so a retry reissues the same doomed cursor. The restart below
     // recovers it instead.
