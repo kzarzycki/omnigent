@@ -1300,23 +1300,28 @@ export interface SessionSearchMatch {
 }
 
 /**
- * Every item in a session whose text contains `query`, oldest first.
+ * The items whose text contains `query` in one window of a session, oldest first.
  *
  * Ids only (the find bar pages history in up to a match before scrolling to
- * it); capped server-side, with `hasMore` reporting a truncated list.
+ * it). The server scans a fixed window of items per call, newest first; pass
+ * `nextBefore` back as `before` for the next older window until it is null.
  */
 export async function searchSessionItems(
   sessionId: string,
   query: string,
-  { signal }: { signal?: AbortSignal } = {},
-): Promise<{ matches: SessionSearchMatch[]; hasMore: boolean }> {
+  { before, signal }: { before?: number; signal?: AbortSignal } = {},
+): Promise<{ matches: SessionSearchMatch[]; nextBefore: number | null }> {
   const params = new URLSearchParams({ q: query });
+  if (before !== undefined) params.set("before", String(before));
   const res = await authenticatedFetch(
     `/v1/sessions/${encodeURIComponent(sessionId)}/search?${params}`,
     { signal },
   );
-  const page = await readJsonOrThrow<{ data: SessionSearchMatch[]; has_more: boolean }>(res);
-  return { matches: page.data, hasMore: page.has_more };
+  const page = await readJsonOrThrow<{
+    data: SessionSearchMatch[];
+    next_before: number | null;
+  }>(res);
+  return { matches: page.data, nextBefore: page.next_before };
 }
 
 /**

@@ -1,8 +1,6 @@
-// Find-in-chat bar. A long chat renders only the rows on screen and loads older
-// history on demand, so matches come from the server (every matching item, in
-// chat order) and the transcript jumps to each one, paging history in as needed.
-// Matches on screen are painted with the CSS Custom Highlight API, never by
-// mutating React-owned message DOM. The look matches MarkdownSearchBar.
+// Find-in-chat bar. Only on-screen rows render, so matches come from the server,
+// one window of items per request, newest first, and the transcript pages history
+// in up to each one. Matches are painted with the CSS Custom Highlight API.
 
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon, XIcon } from "lucide-react";
@@ -40,7 +38,7 @@ export function ChatFindBar({
   const [result, setResult] = useState<{
     query: string;
     matches: SessionSearchMatch[];
-    hasMore: boolean;
+    complete: boolean;
   } | null>(null);
   const [index, setIndex] = useState(0);
   const [step, setStep] = useState(0);
@@ -54,16 +52,38 @@ export function ChatFindBar({
       return;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => {
-      searchSessionItems(conversationId, trimmed, { signal: controller.signal })
-        .then(({ matches, hasMore }) => {
-          setResult({ query: trimmed, matches, hasMore });
+    // Pages arrive newest window first. ⌘F starts at the newest match as soon
+    // as one lands; a search result starts at the oldest, so it waits for the last page.
+    const fetchPages = async () => {
+      let matches: SessionSearchMatch[] = [];
+      let before: number | undefined;
+      let seeded = false;
+      do {
+        // Each page's cursor comes from the one before it.
+        // oxlint-disable-next-line no-await-in-loop
+        const page = await searchSessionItems(conversationId, trimmed, {
+          before,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        matches = [...page.matches, ...matches];
+        before = page.nextBefore ?? undefined;
+        const complete = page.nextBefore === null;
+        if (start === "oldest" && !complete) continue;
+        setResult({ query: trimmed, matches, complete });
+        if (seeded) {
+          setIndex((i) => i + page.matches.length);
+        } else if (matches.length > 0 || complete) {
+          seeded = true;
           setIndex(start === "newest" ? Math.max(0, matches.length - 1) : 0);
           setStep((n) => n + 1);
-        })
-        .catch(() => {
-          if (!controller.signal.aborted) setFailed(true);
-        });
+        }
+      } while (before !== undefined);
+    };
+    const timer = setTimeout(() => {
+      fetchPages().catch(() => {
+        if (!controller.signal.aborted) setFailed(true);
+      });
     }, FIND_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
@@ -81,13 +101,19 @@ export function ChatFindBar({
     );
   }, [match, step, onTarget]);
 
+  const complete = result?.complete ?? false;
   const stepBy = useCallback(
     (delta: number) => {
       if (matches.length === 0) return;
-      setIndex((i) => (i + delta + matches.length) % matches.length);
+      // Older pages are still loading, so stepping stops at the oldest loaded match.
+      const next = complete
+        ? (index + delta + matches.length) % matches.length
+        : Math.min(Math.max(index + delta, 0), matches.length - 1);
+      if (!complete && next === index) return;
+      setIndex(next);
       setStep((n) => n + 1);
     },
-    [matches.length],
+    [matches.length, complete, index],
   );
 
   useEffect(() => {
@@ -98,8 +124,10 @@ export function ChatFindBar({
   const searched = result !== null && result.query === query.trim();
   let counter = "";
   if (failed) counter = "Search failed";
-  else if (searched && matches.length === 0) counter = "No results";
-  else if (searched) counter = `${index + 1} / ${matches.length}${result.hasMore ? "+" : ""}`;
+  else if (searched && matches.length > 0)
+    counter = `${index + 1} / ${matches.length}${complete ? "" : "+"}`;
+  else if (searched && complete) counter = "No results";
+  else if (query.trim()) counter = "Searching…";
 
   return (
     <div
