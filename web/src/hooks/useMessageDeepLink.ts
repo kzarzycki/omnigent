@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "@/lib/routing";
+import { SESSION_HISTORY_SEEK_PAGE_SIZE } from "@/lib/sessionsApi";
 import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM, findMessageElement } from "@/lib/messageDeepLink";
 import { scrollToMessage } from "@/hooks/useUserMessageNav";
 import { useChatStore } from "@/store/chatStore";
@@ -109,7 +110,7 @@ export function useMessageJump(
       if (ensureMessageVisible?.(anchor)) return;
     }
     if (hasMoreHistory) {
-      void useChatStore.getState().loadMoreHistory();
+      void useChatStore.getState().loadMoreHistory(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
       return;
     }
     appliedKeyRef.current = key;
