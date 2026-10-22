@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_TITLE_INSTRUCTIONS_KEY = "session_title_instructions"
 SESSION_TITLE_INSTRUCTIONS_MAX_CHARS = 4_000
+SESSION_RECAPS_KEY = "session_recaps"
 
 
 def resolve_config_path() -> Path | None:
@@ -138,6 +139,11 @@ def session_title_instructions(config: Mapping[str, Any]) -> str | None:
         )
         return None
     return value
+
+
+def session_recaps_enabled(config: Mapping[str, Any]) -> bool:
+    """Whether turn ends write a recap ``status.line``; on unless ``session_recaps: false``."""
+    return config.get(SESSION_RECAPS_KEY) is not False
 
 
 def _config_positive_int(key: str, default: int) -> int:
