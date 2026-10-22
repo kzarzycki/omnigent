@@ -14,6 +14,7 @@
 //  12. Comments are marked seen (inbox-clearing registry) only while the
 //      comments panel is open — never from merely opening the file.
 
+import { fileViewerOwnsFind } from "@/lib/hotkeys";
 import { useMemo } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -37,6 +38,7 @@ vi.mock("./CodeViewer", () => ({
     viewMode,
     markdownSourceFallback,
     searchOpen,
+    panelOpen,
     onDirtyChange,
   }: {
     path: string;
@@ -44,6 +46,7 @@ vi.mock("./CodeViewer", () => ({
     viewMode: string;
     markdownSourceFallback?: boolean;
     searchOpen?: boolean;
+    panelOpen?: boolean;
     onDirtyChange?: (dirty: boolean) => void;
   }) => {
     codeViewerRenders({ path, position });
@@ -53,6 +56,7 @@ vi.mock("./CodeViewer", () => ({
         data-view-mode={viewMode}
         data-markdown-source={String(!!markdownSourceFallback)}
         data-search-open={String(!!searchOpen)}
+        data-panel-open={String(!!panelOpen)}
       >
         <button type="button" aria-label="make dirty" onClick={() => onDirtyChange?.(true)} />
         {viewMode === "editor" && (
@@ -249,6 +253,8 @@ interface RenderProps {
   sort?: ChangedSort;
   /** Enables the prev/next nav header when provided. */
   onNavigateTo?: (path: string) => void;
+  /** Which shell copy this is; defaults to the single-viewport viewer. */
+  viewport?: "desktop" | "mobile";
 }
 
 /**
@@ -271,6 +277,7 @@ function viewerTree({
   onClose = vi.fn(),
   sort,
   onNavigateTo,
+  viewport,
 }: RenderProps = {}) {
   const url = initialSearch ? `/?${initialSearch}` : "/";
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -290,6 +297,7 @@ function viewerTree({
           onClose={onClose}
           sort={sort}
           onNavigateTo={onNavigateTo}
+          viewport={viewport}
         />
       </MemoryRouter>
     </QueryClientProvider>
@@ -1896,6 +1904,30 @@ describe("FileViewer Cmd+F opens find on Monaco surfaces", () => {
     fireEvent.keyDown(window, { key: "f", metaKey: true });
     expect(searchOpenOf("code-viewer")).toBe("false");
     document.body.removeChild(chatArea);
+  });
+
+  it("marks its root while it owns Cmd+F, so the chat's find stands down", () => {
+    renderViewer({ open: true, path: "file1.py" });
+    expect(fileViewerOwnsFind()).toBe(true);
+    const chatArea = document.createElement("div");
+    document.body.appendChild(chatArea);
+    fireEvent.mouseDown(chatArea);
+    expect(fileViewerOwnsFind()).toBe(false);
+    fireEvent.mouseDown(insideButton());
+    expect(fileViewerOwnsFind()).toBe(true);
+    document.body.removeChild(chatArea);
+  });
+
+  it("leaves Cmd+F alone in the hidden copy for the other viewport", () => {
+    // Desktop (the mocked default) keeps the mobile copy mounted but hidden.
+    renderViewer({ open: true, path: "file1.py", viewport: "mobile" });
+    expect(fileViewerOwnsFind()).toBe(false);
+    fireEvent.mouseDown(insideButton());
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(fileViewerOwnsFind()).toBe(false);
+    expect(searchOpenOf("code-viewer")).toBe("false");
+    // CodeViewer's own ⌘F handlers register only for an open panel.
+    expect(screen.getByTestId("code-viewer").getAttribute("data-panel-open")).toBe("false");
   });
 
   it("re-claims Cmd+F after the user clicks back into the viewer", () => {
