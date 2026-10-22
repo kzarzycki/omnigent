@@ -546,8 +546,9 @@ function TranscriptImpl({
           scroller={scroller}
           hasMoreHistory={display.hasMoreHistory}
         />
-        {find && conversationId && (
-          <div className="chat-find-bar absolute top-14 right-4 z-20 md:top-12">
+        {/* Find bar first, so the too-many-tabs, certificate and sandbox-launch warnings stack under it. */}
+        <FloatingBannerStack>
+          {find && conversationId && (
             <ChatFindBar
               key={conversationId}
               conversationId={conversationId}
@@ -558,10 +559,7 @@ function TranscriptImpl({
               onTarget={setFindTarget}
               onClose={closeFind}
             />
-          </div>
-        )}
-        {/* Too-many-tabs, dbcert, and sandbox-launch warnings, siblings of Conversation. */}
-        <FloatingBannerStack>
+          )}
           <StreamBudgetBanner />
           <DbcertBanner conversationId={conversationId} hostId={hostId} />
           <SandboxActionBanner />

@@ -41,6 +41,7 @@ import {
   INITIAL_WINDOW_ITEMS,
   OLDER_HISTORY_PAGE_ITEMS,
   SESSION_HISTORY_PAGE_SIZE,
+  SESSION_HISTORY_SEEK_PAGE_SIZE,
 } from "@/lib/sessionsApi";
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
@@ -2103,6 +2104,32 @@ describe("chatStore — switchTo", () => {
       expect(state.hasMoreHistory).toBe(true);
     },
   );
+
+  it("loadMoreHistory pages a scroll-up page by default and a seek page when asked", async () => {
+    const total = INITIAL_WINDOW_ITEMS + OLDER_HISTORY_PAGE_ITEMS + 50;
+    const fullItems = Array.from({ length: total }, (_, idx) =>
+      userMessage(`resp_${idx.toString().padStart(4, "0")}`, `message ${idx}`),
+    );
+    seedSessionSnapshot("conv_big", fullItems.slice(-INITIAL_WINDOW_ITEMS));
+    seedSessionItems("conv_big", fullItems);
+    await useChatStore.getState().switchTo("conv_big");
+    const olderPageLimits = () =>
+      fetchMock.mock.calls
+        .map(([u]) => String(u))
+        .filter((u) => u.startsWith("/v1/sessions/conv_big/items") && u.includes("after="))
+        .map((u) => new URLSearchParams(u.split("?")[1]).get("limit"));
+
+    await useChatStore.getState().loadMoreHistory();
+    await useChatStore.getState().loadMoreHistory(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
+
+    expect(olderPageLimits()).toEqual([
+      String(OLDER_HISTORY_PAGE_ITEMS),
+      String(SESSION_HISTORY_SEEK_PAGE_SIZE),
+    ]);
+    // The seek page held every remaining item, oldest first.
+    expect(useChatStore.getState().blocks[0]?.ctx.itemId).toBe("msg_resp_0000_user");
+    expect(useChatStore.getState().hasMoreHistory).toBe(false);
+  });
 
   it("applies a scroll-up page that resolves after navigating away and back", async () => {
     // This used to be "drops a stale page": navigating away destroyed the window
