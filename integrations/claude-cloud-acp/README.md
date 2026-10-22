@@ -1,5 +1,7 @@
 # Claude Code cloud sessions as an Omnigent agent
 
+**Status: experimental.** It relies on undocumented claude.ai endpoints, so it can break without notice; see Limits.
+
 `claude_cloud_acp.py` is a stdio ACP server. When Omnigent runs it as an
 `acp:<slug>` agent, the agent runs in a Claude Code cloud session
 (claude.ai/code) on Anthropic's infrastructure and on your claude.ai plan,
