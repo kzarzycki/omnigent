@@ -680,7 +680,7 @@ def _usage_series(
     }
 
 
-def test_usage_metrics_carry_harness_host_agent_project_and_role(
+def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
     db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
@@ -703,8 +703,17 @@ def test_usage_metrics_carry_harness_host_agent_project_and_role(
     monkeypatch.setattr(
         _globals, "_project_store", type("P", (), {"get_name": lambda self, i: "homelab"})()
     )
+    # A sub-agent has no grant of its own and is attributed to its root's owner.
+    child = store.create_conversation(agent_id=_AGENT_ID, parent_conversation_id=conv.id)
+    owners = {conv.id: "alice"}
+    monkeypatch.setattr(
+        _globals,
+        "_conversation_store",
+        type("C", (), {"get_session_owner": lambda self, i: owners.get(i)})(),
+    )
 
     cost = _usage_series(monkeypatch, store, conv.id)[usage_metrics.COST_METRIC_NAME]
+    child_cost = _usage_series(monkeypatch, store, child.id)[usage_metrics.COST_METRIC_NAME]
 
     assert cost == [
         {
@@ -714,8 +723,11 @@ def test_usage_metrics_carry_harness_host_agent_project_and_role(
             "omnigent.agent.name": "claude",
             "omnigent.project.name": "homelab",
             "omnigent.role": "verifier",
+            "omnigent.user": "alice",
         }
     ]
+    assert child.root_conversation_id == conv.id
+    assert child_cost[0]["omnigent.user"] == "alice"
 
 
 def test_usage_metrics_for_session_without_host_or_project(
@@ -723,7 +735,7 @@ def test_usage_metrics_for_session_without_host_or_project(
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(harness_override="codex-native")
-    for name in ("_host_store", "_agent_store", "_project_store"):
+    for name in ("_host_store", "_agent_store", "_project_store", "_conversation_store"):
         monkeypatch.setattr(_globals, name, None)
 
     cost = _usage_series(monkeypatch, store, conv.id)[usage_metrics.COST_METRIC_NAME]
@@ -733,3 +745,4 @@ def test_usage_metrics_for_session_without_host_or_project(
     assert cost[0]["omnigent.agent.name"] == "unknown"
     assert cost[0]["omnigent.project.name"] == ""
     assert cost[0]["omnigent.role"] == "other"
+    assert cost[0]["omnigent.user"] == "unknown"

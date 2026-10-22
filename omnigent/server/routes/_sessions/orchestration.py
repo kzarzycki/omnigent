@@ -1664,11 +1664,12 @@ def _record_usage_metrics(
 ) -> None:
     """
     Record a usage write on the counters, split by the session's harness, host,
-    agent and project names and its ``omni.role`` label.
+    agent and project names, its ``omni.role`` label and its owner (the root
+    session's for a sub-agent without its own grant, as the daily rollup does).
 
     Skipped entirely when telemetry is off. Otherwise costs one indexed lookup
-    each for the host, agent and project, plus the harness resolution (agent row
-    and cached spec) the callers already do.
+    each for the host, agent, project and owner, plus the harness resolution
+    (agent row and cached spec) the callers already do.
 
     :param growth: Increase per ``session_usage`` key.
     :param model: Model the growth is attributed to.
@@ -1689,6 +1690,11 @@ def _record_usage_metrics(
             )
         if conv.project_id and _globals._project_store is not None:
             names["project_name"] = _globals._project_store.get_name(conv.project_id)
+        if _globals._conversation_store is not None:
+            store = _globals._conversation_store
+            names["user"] = store.get_session_owner(conv.id)
+            if names["user"] is None and conv.root_conversation_id != conv.id:
+                names["user"] = store.get_session_owner(conv.root_conversation_id)
     usage_metrics.record_usage_growth(growth, model=model, **names)
 
 
