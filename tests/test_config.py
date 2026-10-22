@@ -468,3 +468,45 @@ def test_adopted_preferences_keep_legacy_project_clears(harness, project):
         "base",
         "--invocation",
     ]
+
+
+def test_the_telemetry_allowlist_opts_in_only_listed_origins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import subprocess
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(home))
+
+    def checkout(name: str, origin: str) -> Path:
+        repo = tmp_path / name
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", origin], check=True)
+        (repo / "sub").mkdir()
+        return repo
+
+    ssh = checkout("ssh", "git@github.com:kzarzycki/agent-skills.git")
+    https = checkout("https", "https://github.com/KZarzycki/Dotagents")
+    work = checkout("work", "ssh://git@xrepo.example.com:7999/kzarzycki/agent-skills")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    # Omnigent's own installation-id file shares the directory and is no allowlist.
+    (home / "telemetry.json").write_text('{"installation_id": "x", "schema_version": 1}')
+    assert _config_module.telemetry_endpoint_for(ssh) is None  # no allowlist: user settings decide
+    (home / "telemetry-allowlist.json").write_text(
+        json.dumps(
+            {
+                "endpoint": "http://collector:4318/",
+                "repos": ["github.com/kzarzycki/agent-skills", "github.com/kzarzycki/dotagents"],
+            }
+        )
+    )
+    assert _config_module.telemetry_endpoint_for(ssh / "sub") == "http://collector:4318"
+    assert _config_module.telemetry_endpoint_for(https) == "http://collector:4318"
+    assert _config_module.telemetry_endpoint_for(work) is None  # same name, other host
+    assert _config_module.telemetry_endpoint_for(plain) is None  # not a checkout
+    (home / "telemetry-allowlist.json").write_text("{ not json")
+    assert _config_module.telemetry_endpoint_for(ssh) is None  # unreadable: nobody opts in
