@@ -5,7 +5,7 @@ Each scenario starts real cloud sessions on the signed-in claude.ai account.
 
     python3 e2e.py turns    <git checkout>   # create, tool call, follow-up
     python3 e2e.py restart  <git checkout>   # a new bridge process loses the cloud session
-    python3 e2e.py cancel   <git checkout>   # cancel stops the mirror, not the cloud turn
+    python3 e2e.py cancel   <git checkout>   # cancel interrupts the running cloud turn
     python3 e2e.py subagent <git checkout>   # sub-agent steps are not mirrored
     python3 e2e.py untrusted                 # a folder Claude Code has not trusted fails clearly
 """
@@ -21,7 +21,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import claude_cloud_acp as bridge  # noqa: E402
 
 
 class Client:
@@ -122,34 +121,22 @@ def scenario_restart(cwd: str) -> None:
 
 def scenario_cancel(cwd: str) -> None:
     client = Client(cwd)
+    client.prompt("Reply with the single word: ready")
 
     def cancel_on_tool(update: dict) -> None:
         if update.get("sessionUpdate") == "tool_call":
             print("\033[33m  -> sending session/cancel\033[0m")
             client.request("session/cancel", {"sessionId": client.session})
 
+    started = time.monotonic()
     client.prompt(
-        "Run `sleep 20; echo finished-after-cancel` and report its output.", cancel_on_tool
+        "Run this with Bash in the foreground and report the last line it printed:\n"
+        'python3 -c "import time\nfor i in range(60): print(i, flush=True); time.sleep(1)\n'
+        "print('loop-finished')\"",
+        cancel_on_tool,
     )
-    cloud_id = client.cloud_url.rsplit("/", 1)[1]
+    print(f"\n  turn ended after {time.monotonic() - started:.0f}s (the loop alone takes 60s)")
     client.close()
-    print("\nReading the cloud session directly after the cancel:")
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        events, _ = bridge.fetch_events(cloud_id, None)
-        results = [
-            e["payload"].get("result")
-            for e in events
-            if (e.get("payload") or {}).get("type") == "result"
-        ]
-        if results:
-            print(
-                "\033[33m  the cloud turn finished anyway: "
-                f"{str(results[-1]).strip()[:200]}\033[0m"
-            )
-            return
-        time.sleep(3)
-    print("  no result within 120s")
 
 
 def scenario_subagent(cwd: str) -> None:

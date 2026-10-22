@@ -8,10 +8,12 @@ it as a plain ``acp:<slug>`` agent:
 * the first ``session/prompt`` creates the cloud session with
   ``claude --cloud "<prompt>"`` on a pseudo-terminal from the session's cwd
   (the cloud VM clones that checkout's GitHub remote and branch);
-* later prompts are queued with ``claude -p "<prompt>" --cloud <id>``;
-* the transcript is read back from ``GET /v1/code/sessions/{id}/events`` with
-  the Claude CLI's own claude.ai login, and mirrored as ACP ``session/update``
-  notifications until the turn's ``result`` event.
+* later prompts are posted to ``POST /v1/code/sessions/{id}/events`` and
+  ``session/cancel`` posts an ``interrupt`` control request there, the protocol
+  the CLI's own interactive client speaks, so any process can re-attach;
+* the transcript is read back from ``GET /v1/code/sessions/{id}/events``,
+  and mirrored as ACP ``session/update`` notifications until the turn's
+  ``result`` event. All calls use the Claude CLI's own claude.ai login.
 
 Standard library only. Run ``python3 claude_cloud_acp.py --self-check`` to
 exercise the event mapping offline.
@@ -34,6 +36,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 API_BASE = os.environ.get("CLAUDE_CLOUD_API_BASE", "https://api.anthropic.com")
@@ -68,10 +71,10 @@ def access_token() -> str:
 
     Read from where the CLI itself keeps it: the login keychain item
     ``Claude Code-credentials`` for ``$USER`` on macOS, else
-    ``~/.claude/.credentials.json``. The CLI refreshes the token whenever it
-    runs, and every turn runs it to create or message the session.
+    ``~/.claude/.credentials.json``, re-read on every call. Only the CLI
+    refreshes it, whenever any ``claude`` process runs on this machine.
     ponytail: only the default config dir (no CLAUDE_CONFIG_DIR suffix), and
-    no refresh of our own; a turn that outlives the token fails its poll.
+    no refresh of our own; a session idle past the token's life gets a 401.
     """
     if token := os.environ.get("CLAUDE_CLOUD_TOKEN"):
         return token
@@ -99,21 +102,60 @@ def access_token() -> str:
     return json.loads(raw)["claudeAiOauth"]["accessToken"]
 
 
+def call_api(path: str, body: dict | None = None) -> dict:
+    """GET *path*, or POST *body* to it, on the sessions API; return the JSON reply."""
+    req = urllib.request.Request(
+        f"{API_BASE}{path}",
+        data=None if body is None else json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {access_token()}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "ccr-byoc-2025-07-29",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def post_event(session_id: str, payload: dict) -> None:
+    """Post one client event (a user message or a control request) into the session."""
+    payload = {"uuid": str(uuid.uuid4()), **payload}
+    call_api(
+        f"/v1/code/sessions/{session_id}/events",
+        {"session_id": session_id, "events": [{"payload": payload}]},
+    )
+
+
+def send_message(session_id: str, text: str) -> None:
+    post_event(
+        session_id,
+        {
+            "session_id": session_id,
+            "type": "user",
+            "parent_tool_use_id": None,
+            "message": {"role": "user", "content": text},
+        },
+    )
+
+
+def interrupt(session_id: str) -> None:
+    post_event(
+        session_id,
+        {
+            "type": "control_request",
+            "request_id": str(uuid.uuid4()),
+            "request": {"subtype": "interrupt"},
+        },
+    )
+
+
 def fetch_events(session_id: str, cursor: str | None) -> tuple[list[dict], str | None]:
     """Fetch every event after *cursor*; return them and the new tail cursor."""
     events: list[dict] = []
     while True:
         query = "sort_order=asc" + (f"&cursor={cursor}" if cursor else "")
-        req = urllib.request.Request(
-            f"{API_BASE}/v1/code/sessions/{session_id}/events?{query}",
-            headers={
-                "Authorization": f"Bearer {access_token()}",
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "ccr-byoc-2025-07-29",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            page = json.load(resp)
+        page = call_api(f"/v1/code/sessions/{session_id}/events?{query}")
         events.extend(page.get("data") or [])
         if page.get("next_cursor"):
             cursor = page["next_cursor"]
@@ -167,23 +209,6 @@ def create_cloud_session(text: str, cwd: str) -> str:
         except subprocess.TimeoutExpired:
             proc.kill()
         os.close(master)
-
-
-def run_cli(args: list[str], cwd: str) -> str:
-    proc = subprocess.run(
-        [CLAUDE_CLI, *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=CLI_TIMEOUT_S,
-        check=False,
-    )
-    out = proc.stdout + proc.stderr
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"`claude {args[0]} ...` exited {proc.returncode}: {out.strip()[-800:]}"
-        )
-    return out
 
 
 # ── event mapping ──────────────────────────────────────────
@@ -311,12 +336,14 @@ def run_turn(acp_id: str, text: str) -> str:
         )
     else:
         _, s.cursor = fetch_events(s.cloud_id, s.cursor)  # skip anything since the last turn
-        run_cli(["-p", text, "--cloud", s.cloud_id], s.cwd)
+        send_message(s.cloud_id, text)
     deadline = time.monotonic() + TURN_TIMEOUT_S
+    interrupted = False
     while time.monotonic() < deadline:
-        if s.cancelled.is_set():
-            # ponytail: the cloud turn keeps running; the CLI has no interrupt.
-            return "cancelled"
+        if s.cancelled.is_set() and not interrupted:
+            # Keep mirroring: the interrupted turn still ends with a ``result`` event.
+            interrupt(s.cloud_id)
+            interrupted = True
         try:
             events, s.cursor = fetch_events(s.cloud_id, s.cursor)
         except urllib.error.URLError as exc:
@@ -333,7 +360,7 @@ def run_turn(acp_id: str, text: str) -> str:
                     }
                 )
             if done:
-                return "end_turn"
+                return "cancelled" if interrupted else "end_turn"
         time.sleep(POLL_S)
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
 
