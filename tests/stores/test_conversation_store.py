@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -12,8 +14,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import event, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import event, func, literal, select, text
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session
 
 from omnigent.db.utils import get_or_create_engine
@@ -28,16 +30,19 @@ from omnigent.entities import (
     ReasoningData,
     ResourceEventData,
 )
-from omnigent.errors import StaleCursorError
+from omnigent.errors import _CODE_TO_HTTP_STATUS, ErrorCode, OmnigentError, StaleCursorError
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.session_import import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.conversation_store import ConversationUpdateResult
+from omnigent.stores.conversation_store import ConversationUpdateResult, sqlalchemy_store
 from omnigent.stores.conversation_store.sqlalchemy_store import (
+    _SEARCH_STATEMENT_TIMEOUT_MS,
     SqlAlchemyConversationStore,
+    _execute_content_search,
+    _search_timeout_as_error,
 )
 from omnigent.stores.host_store import HostStore
 
@@ -2122,6 +2127,51 @@ def test_list_conversations_search_sets_statement_timeout(
         lambda: conversation_store.list_conversations(search_query="deployment"),
     )
     assert any("statement_timeout" in s.lower() for s in statements), statements
+    # A query of three or more characters tries the trigram index first, inside
+    # a savepoint it can roll back to.
+    assert any("SAVEPOINT" in s.upper() for s in statements), statements
+    # The snippet probe covers one page of ids, so it stays off the
+    # workspace-wide trigram bitmap.
+    bitmap_off = next(i for i, s in enumerate(statements) if "enable_bitmapscan = off" in s)
+    snippet = next(i for i, s in enumerate(statements) if "min(conversation_items.position)" in s)
+    assert bitmap_off < snippet, statements
+
+    # Under three characters the trigram index cannot narrow the match, so the
+    # search skips the index try (its savepoint) and goes straight to the plan
+    # without bitmap scans.
+    short = _captured_sql(
+        conversation_store, lambda: conversation_store.list_conversations(search_query="de")
+    )
+    assert not any("SAVEPOINT" in s.upper() for s in short), short
+    assert any("enable_bitmapscan = off" in s for s in short), short
+
+
+@pytest.mark.databricks
+def test_content_search_falls_back_without_the_index_within_one_deadline(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A search that outlasts the index-allowed try reruns with bitmap scans off,
+    and both tries share one deadline: past it the search reads as
+    ``search_timeout`` instead of starting a second full-length statement.
+    """
+    if conversation_store._conv_engine.dialect.name != "postgresql":
+        pytest.skip("statement_timeout is a Postgres feature")
+    monkeypatch.setattr(sqlalchemy_store, "_SEARCH_INDEX_ATTEMPT_MS", 50)
+    slow = select(literal(1)).select_from(func.pg_sleep(0.6))
+
+    with conversation_store._conv_session("test_search_fallback") as session:
+        assert _execute_content_search(session, slow, time.monotonic() + 5) == [1]
+        assert session.execute(text("SHOW enable_bitmapscan")).scalar_one() == "off"
+
+    with (
+        pytest.raises(OmnigentError) as caught,
+        _search_timeout_as_error(True),
+        conversation_store._conv_session("test_search_deadline") as session,
+    ):
+        _execute_content_search(session, slow, time.monotonic() + 0.4)
+    assert caught.value.code == ErrorCode.SEARCH_TIMEOUT
 
 
 def test_list_conversations_no_search_skips_statement_timeout(
@@ -2193,14 +2243,11 @@ def test_search_predicate_avoids_the_trigram_index_expression(
     Content search matches with ``ILIKE`` on the raw column, never
     ``lower(search_text) LIKE``.
 
-    ``lower(search_text)`` is exactly the expression the pg_trgm index
-    (migration ``d5e9f1a2b3c4``) is built on. Writing the predicate that way
-    makes the planner prefer that index, which scans every item in the
-    workspace out of a multi-GB index rather than probing the handful of
-    conversations the query is scoped to. ILIKE is the same case-insensitive
-    substring match but cannot match the index expression, so the scoped btree
-    probe wins. Covers both the list predicate and the snippet lookup, since
-    both run on a search request.
+    The pg_trgm index on ``search_text`` (migration ``sa2b3c4d5e6f``) is built
+    on the raw column, so only ``ILIKE`` on that column can use it;
+    ``lower(search_text)`` is a different expression no index serves. Covers
+    both the list predicate and the snippet lookup, since both run on a search
+    request.
     """
     conv = conversation_store.create_conversation()
     conversation_store.append(
@@ -2235,6 +2282,74 @@ def test_search_predicate_avoids_the_trigram_index_expression(
     item_sql = " ".join(s for s in statements if "conversation_items" in s).lower()
     assert "ilike" in item_sql, item_sql
     assert "lower(conversation_items.search_text)" not in item_sql, item_sql
+
+
+@pytest.mark.databricks
+def test_content_search_predicate_is_served_by_the_trigram_index(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    The trigram index on ``search_text`` serves the exact ``ILIKE`` predicate
+    the search emits. An index on a different expression (``lower(search_text)``)
+    never serves it, and then a word no item contains reads every item. Which
+    index the planner prefers depends on table size, so this checks that the
+    index is usable for the predicate with sequential and b-tree scans off; the
+    planner choosing it at scale was measured on a 245k-item copy.
+    """
+    if conversation_store._conv_engine.dialect.name != "postgresql":
+        pytest.skip("the trigram index is Postgres-only")
+    statements = _captured_sql(
+        conversation_store,
+        lambda: conversation_store.list_conversations(search_query="qzxqzxq"),
+    )
+    assert any("conversation_items.search_text ILIKE" in s for s in statements), statements
+    with conversation_store._conv_session("test_setup") as session:
+        conn = session.connection()
+        conn.exec_driver_sql("SET LOCAL enable_seqscan = off")
+        conn.exec_driver_sql("SET LOCAL enable_indexscan = off")
+        plan = conn.execute(
+            text(
+                "EXPLAIN (FORMAT JSON) SELECT 1 FROM conversation_items "
+                "WHERE search_text ILIKE :pattern"
+            ),
+            {"pattern": "%qzxqzxq%"},
+        ).scalar_one()
+    assert "ix_conversation_items_search_text_trgm" in json.dumps(plan), plan
+
+
+def test_cancelled_search_reads_as_search_timeout() -> None:
+    """
+    Postgres cancelling a search at its ``statement_timeout`` surfaces as the
+    ``search_timeout`` error (HTTP 504), which the web client does not retry;
+    any other database error, or a cancel outside a search, passes through.
+    """
+
+    class _QueryCanceled(Exception):
+        sqlstate = "57014"
+
+    with pytest.raises(OmnigentError) as caught, _search_timeout_as_error(True):
+        raise OperationalError("SELECT 1", {}, _QueryCanceled())
+    assert caught.value.code == ErrorCode.SEARCH_TIMEOUT
+    assert _CODE_TO_HTTP_STATUS[ErrorCode.SEARCH_TIMEOUT] == 504
+
+    with pytest.raises(OperationalError), _search_timeout_as_error(False):
+        raise OperationalError("SELECT 1", {}, _QueryCanceled())
+    with pytest.raises(OperationalError), _search_timeout_as_error(True):
+        raise OperationalError("SELECT 1", {}, Exception("connection lost"))
+
+
+def test_browser_search_deadline_outlasts_the_server_statement_timeout() -> None:
+    """
+    The browser waits longer than the server's search ``statement_timeout``, so
+    a slow search ends on the server with an answer. A shorter browser deadline
+    abandons a scan that keeps running, and the user's retry starts a second one.
+    """
+    source = (
+        Path(__file__).resolve().parents[2] / "web" / "src" / "hooks" / "useConversations.ts"
+    ).read_text()
+    match = re.search(r"SEARCH_FETCH_TIMEOUT_MS = ([\d_]+);", source)
+    assert match is not None
+    assert int(match.group(1)) > _SEARCH_STATEMENT_TIMEOUT_MS
 
 
 def test_list_conversations_search_snippet_uses_earliest_match(
