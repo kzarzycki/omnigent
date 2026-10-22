@@ -36,11 +36,11 @@ from omnigent.session_import import (
     IMPORT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.conversation_store import ConversationUpdateResult, sqlalchemy_store
+from omnigent.stores.conversation_store import ConversationUpdateResult
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     _SEARCH_STATEMENT_TIMEOUT_MS,
     SqlAlchemyConversationStore,
-    _execute_content_search,
+    _first_answer,
     _search_timeout_as_error,
 )
 from omnigent.stores.host_store import HostStore
@@ -1983,6 +1983,7 @@ def _captured_sql(store: SqlAlchemyConversationStore, run) -> list[str]:
 @pytest.mark.databricks
 def test_list_conversations_search_sets_statement_timeout(
     conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     A content search bounds itself with ``SET LOCAL statement_timeout`` on
@@ -1998,56 +1999,135 @@ def test_list_conversations_search_sets_statement_timeout(
     conv = conversation_store.create_conversation()
     conversation_store.update_conversation(conv.id, title="deployment runbook")
 
+    raced_setups: list[list[tuple[str, ...]]] = []
+
+    def record_race(session_factory, attempts, deadline):
+        raced_setups.append([tuple(setup) for setup, _ in attempts])
+        return _first_answer(session_factory, attempts, deadline)
+
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store._first_answer", record_race
+    )
     statements = _captured_sql(
         conversation_store,
         lambda: conversation_store.list_conversations(search_query="deployment"),
     )
     assert any("statement_timeout" in s.lower() for s in statements), statements
-    # A query of three or more characters tries the trigram index first, inside
-    # a savepoint it can roll back to.
-    assert any("SAVEPOINT" in s.upper() for s in statements), statements
+    # A query of three or more characters races the plan with the trigram index
+    # against the plan without bitmap scans. The winner may answer before the
+    # other plan sends its select, so the race is checked at its entry.
+    assert raced_setups == [[(), ("SET LOCAL enable_bitmapscan = off",)]]
+    race = [s for s in statements if s.lstrip().startswith("SELECT conversations.id ")]
+    assert race, statements
     # The snippet probe covers one page of ids, so it stays off the
     # workspace-wide trigram bitmap.
-    bitmap_off = next(i for i, s in enumerate(statements) if "enable_bitmapscan = off" in s)
+    last_race = max(i for i, s in enumerate(statements) if s in race)
     snippet = next(i for i, s in enumerate(statements) if "min(conversation_items.position)" in s)
-    assert bitmap_off < snippet, statements
+    assert any("enable_bitmapscan = off" in s for s in statements[last_race:snippet]), statements
 
     # Under three characters the trigram index cannot narrow the match, so the
-    # search skips the index try (its savepoint) and goes straight to the plan
-    # without bitmap scans.
+    # search runs only the plan without bitmap scans, in its own session.
     short = _captured_sql(
         conversation_store, lambda: conversation_store.list_conversations(search_query="de")
     )
-    assert not any("SAVEPOINT" in s.upper() for s in short), short
+    assert len(raced_setups) == 1, raced_setups
     assert any("enable_bitmapscan = off" in s for s in short), short
 
 
 @pytest.mark.databricks
-def test_content_search_falls_back_without_the_index_within_one_deadline(
+def test_content_search_takes_the_first_plan_to_answer(
     conversation_store: SqlAlchemyConversationStore,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A search that outlasts the index-allowed try reruns with bitmap scans off,
-    and both tries share one deadline: past it the search reads as
-    ``search_timeout`` instead of starting a second full-length statement.
+    The plans a search races share one deadline: the first to answer wins and
+    the others are cancelled at once; when none answers by the deadline the
+    search reads as ``search_timeout``.
     """
     if conversation_store._conv_engine.dialect.name != "postgresql":
         pytest.skip("statement_timeout is a Postgres feature")
-    monkeypatch.setattr(sqlalchemy_store, "_SEARCH_INDEX_ATTEMPT_MS", 50)
-    slow = select(literal(1)).select_from(func.pg_sleep(0.6))
+    slow = select(literal("slow")).select_from(func.pg_sleep(3))
+    fast = select(literal("fast")).select_from(func.pg_sleep(0.2))
 
-    with conversation_store._conv_session("test_search_fallback") as session:
-        assert _execute_content_search(session, slow, time.monotonic() + 5) == [1]
-        assert session.execute(text("SHOW enable_bitmapscan")).scalar_one() == "off"
+    invalidated: list[object] = []
+
+    def count_invalidate(dbapi_connection, connection_record, exception):
+        invalidated.append(dbapi_connection)
+
+    event.listen(conversation_store._conv_engine, "invalidate", count_invalidate)
+    try:
+        started = time.monotonic()
+        rows = _first_answer(
+            conversation_store._conv_session, [((), slow), ((), fast)], started + 10
+        )
+    finally:
+        event.remove(conversation_store._conv_engine, "invalidate", count_invalidate)
+    assert rows == ["fast"]
+    # Returning waits for the loser, so a cancelled loser keeps this well under 3 s.
+    assert time.monotonic() - started < 1.5
+    # The cancelled loser's connection is closed, never pooled.
+    assert len(invalidated) == 1
+
+    # A loser still on its way to the server when the winner answers is
+    # cancelled once its query arrives.
+    def stall_slow(conn, cursor, statement, parameters, context, executemany):
+        if "pg_sleep" in statement and "slow" in str(parameters):
+            time.sleep(0.3)
+
+    event.listen(conversation_store._conv_engine, "before_cursor_execute", stall_slow)
+    try:
+        started = time.monotonic()
+        rows = _first_answer(
+            conversation_store._conv_session, [((), slow), ((), fast)], started + 10
+        )
+    finally:
+        event.remove(conversation_store._conv_engine, "before_cursor_execute", stall_slow)
+    assert rows == ["fast"]
+    assert time.monotonic() - started < 1.5
 
     with (
         pytest.raises(OmnigentError) as caught,
         _search_timeout_as_error(True),
-        conversation_store._conv_session("test_search_deadline") as session,
     ):
-        _execute_content_search(session, slow, time.monotonic() + 0.4)
+        _first_answer(
+            conversation_store._conv_session, [((), slow), ((), slow)], time.monotonic() + 0.4
+        )
     assert caught.value.code == ErrorCode.SEARCH_TIMEOUT
+
+
+@pytest.mark.databricks
+def test_raced_search_page_keeps_sort_order_and_workspace(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    The raced plans return ids; the page loaded from them keeps the listing's
+    sort order and only the caller's workspace, even when another workspace
+    holds a conversation with the same id (an import of the same session).
+    """
+    from omnigent.db.db_models import workspace_scope
+
+    def matching_item(response_id: str) -> NewConversationItem:
+        return NewConversationItem(
+            type="message",
+            response_id=response_id,
+            data=MessageData(role="user", content=[{"type": "input_text", "text": "zebrafish"}]),
+        )
+
+    shared_id = uuid.uuid4().hex
+    with workspace_scope(424244):
+        conversation_store.create_conversation(conversation_id=shared_id, title="this workspace")
+        conversation_store.append(shared_id, [matching_item("resp_shared")])
+        for index in range(4):
+            conversation = conversation_store.create_conversation(title=f"match {index}")
+            conversation_store.append(conversation.id, [matching_item(f"resp_{index}")])
+    with workspace_scope(424243):
+        conversation_store.create_conversation(conversation_id=shared_id, title="other workspace")
+        conversation_store.append(shared_id, [matching_item("resp_other")])
+    with workspace_scope(424244):
+        listed = [c.id for c in conversation_store.list_conversations().data]
+        page = conversation_store.list_conversations(search_query="zebrafish").data
+
+    assert [c.id for c in page] == listed
+    assert {c.title for c in page if c.id == shared_id} == {"this workspace"}
 
 
 def test_list_conversations_no_search_skips_statement_timeout(
