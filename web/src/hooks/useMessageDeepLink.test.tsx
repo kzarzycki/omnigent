@@ -259,6 +259,13 @@ describe("useMessageDeepLink", () => {
     expect(scrollSpy).toHaveBeenCalledOnce();
   });
 
+  it("opens Chat for a search result's ?find= so the find bar can jump to the match", () => {
+    renderHook(() => useMessageDeepLinkChatView("conv_1"), {
+      wrapper: terminalWrapperFor("/c/conv_1?find=hello"),
+    });
+    expect(screen.getByText("hello")).toBeInTheDocument();
+  });
+
   it("preserves Terminal view without a message link", () => {
     renderHook(
       () => {
