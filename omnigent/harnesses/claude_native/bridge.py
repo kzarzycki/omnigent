@@ -1620,9 +1620,9 @@ def clear_approval_wait_marker(marker: Path) -> None:
     """
     Remove an approval-wait marker.
 
-    Called when the hook stops waiting (verdict, rejection, give-up, or a
-    signal that kills it mid-wait) so the pane returns to normal idle
-    accounting at once rather than after :data:`APPROVAL_WAIT_MARKER_TTL_S`.
+    Called when the hook stops waiting (verdict, rejection or give-up) so the
+    pane returns to normal idle accounting at once rather than after
+    :data:`APPROVAL_WAIT_MARKER_TTL_S`.
 
     :param marker: Marker path from :func:`approval_wait_marker_path`.
     :returns: None.
@@ -1635,16 +1635,19 @@ def approval_wait_is_fresh(session_id: str, *, bridge_dir: Path | None = None) -
     """
     Whether a permission hook is parked on this session's verdict right now.
 
-    Scans every hook's marker for the session; a stale one (a hook killed
-    mid-wait) is removed on the way so they never accumulate.
+    Scans every hook's marker for the session. A marker whose hook PID is gone
+    (killed mid-wait, so its ``finally`` never ran) or that went untouched past
+    the TTL (a reused PID) is removed on the way so they never accumulate.
 
     :param session_id: Omnigent session id to check, e.g.
         ``"conv_abc123"``.
     :param bridge_dir: Derive the marker root from this bridge, matching the hook writer.
-    :returns: ``True`` when any marker was touched within
+    :returns: ``True`` when any marker's hook is alive and touched it within
         :data:`APPROVAL_WAIT_MARKER_TTL_S`; ``False`` when none exists, all
         are stale, or the root is unreadable.
     """
+    from omnigent.inner.terminal import _process_alive
+
     root = bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME if bridge_dir else _APPROVAL_WAIT_ROOT
     try:
         markers = list(root.glob(f"{_approval_wait_digest(session_id)}.*.wait"))
@@ -1657,7 +1660,9 @@ def approval_wait_is_fresh(session_id: str, *, bridge_dir: Path | None = None) -
             touched_at = marker.stat().st_mtime
         except OSError:
             continue
-        if now - touched_at < APPROVAL_WAIT_MARKER_TTL_S:
+        pid = marker.name.split(".")[1]
+        hook_alive = pid.isdigit() and _process_alive(int(pid))
+        if hook_alive and now - touched_at < APPROVAL_WAIT_MARKER_TTL_S:
             fresh = True
         else:
             clear_approval_wait_marker(marker)
@@ -1675,7 +1680,7 @@ def hold_approval_wait_marker(marker: Path) -> Iterator[None]:
     wait) reads as parked exactly like one a gateway severs every few
     minutes. The refresher is stopped before the marker is cleared so a late
     touch cannot resurrect it; a hook killed mid-wait takes the thread with
-    it and its marker simply expires.
+    it, and :func:`approval_wait_is_fresh` drops the marker once its PID is gone.
 
     :param marker: Marker path from :func:`approval_wait_marker_path`.
     :returns: ``None`` for the duration of the block.
