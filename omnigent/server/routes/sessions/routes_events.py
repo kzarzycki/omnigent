@@ -771,7 +771,8 @@ class _ServerEventContext:
 
 
 def _refuse_undelivered_server_message(
-    request: Request | _RunnerEventContext | _ServerEventContext, reason: str | None
+    request: Request | _RunnerEventContext | StartupInputContext | _ServerEventContext,
+    reason: str | None,
 ) -> None:
     """Refuse a server notice no runner can take, so its sender keeps it to retry.
 
