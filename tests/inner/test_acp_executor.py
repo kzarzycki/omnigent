@@ -15,6 +15,7 @@ Two layers:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import sys
@@ -1880,6 +1881,69 @@ async def test_end_to_end_against_fake_acp_agent(tmp_path: Path) -> None:
     assert tool_reqs[0].name == "shell" and tool_reqs[0].args == {"command": "echo hi"}
     tool_done = [e for e in events if isinstance(e, ToolCallComplete)]
     assert tool_done[0].status is ToolCallStatus.SUCCESS
+
+
+# An ACP agent that, like real ones, knows only the sessions its own process
+# created, logs each prompt it receives, and exits after answering one.
+_CRASHING_ACP_AGENT = r"""
+import os, sys, json
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+session_id = f"sess-{os.getpid()}"
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session_id}})
+    elif method == "session/prompt":
+        if params["sessionId"] != session_id:
+            error = {"code": -32602, "message": "unknown session"}
+            send({"jsonrpc": "2.0", "id": mid, "error": error})
+            continue
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps(params["prompt"][0]["text"]) + "\n")
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"""
+
+
+@pytest.mark.asyncio
+async def test_respawned_agent_gets_new_session_and_transcript(tmp_path: Path) -> None:
+    """After the agent process dies, the next turn opens a session in the new
+    process and replays the conversation, instead of prompting a dead id."""
+    agent_path = tmp_path / "crashing_acp_agent.py"
+    agent_path.write_text(_CRASHING_ACP_AGENT)
+    prompt_log = tmp_path / "prompts.jsonl"
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join([sys.executable, str(agent_path), str(prompt_log)]), name="Crashy"
+        )
+    )
+    first = [{"role": "user", "content": "remember PELICAN"}]
+    second = [
+        *first,
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": "word?"},
+    ]
+    try:
+        events = [ev async for ev in ex.run_turn(first, [], "")]
+        assert any(isinstance(e, TurnComplete) for e in events)
+        assert ex._proc is not None
+        await ex._proc.wait()
+        events = [ev async for ev in ex.run_turn(second, [], "")]
+    finally:
+        await ex.close()
+
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    prompts = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    assert prompts[0] == "remember PELICAN"
+    assert "remember PELICAN" in prompts[1] and "noted" in prompts[1]
+    assert prompts[1].endswith("user: word?")
 
 
 # ---------------------------------------------------------------------------
