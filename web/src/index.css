@@ -983,6 +983,14 @@ html[data-electron-mac] .breadcrumb-folder {
 :is([data-ios-native], [data-android-native]) .chat-plan-accordion {
   margin-top: calc(var(--omnigent-header-height) + max(0px, var(--omnigent-safe-top) - 0.5rem));
 }
+:is([data-ios-native], [data-android-native]) .chat-find-bar {
+  top: calc(3.5rem + max(0px, var(--omnigent-safe-top) - 0.5rem));
+}
+@media (width >= 48rem) {
+  :is([data-ios-native], [data-android-native]) .chat-find-bar {
+    top: calc(3rem + max(0px, var(--omnigent-safe-top) - 0.5rem));
+  }
+}
 
 /* Settings titles join the mobile header row beside the sidebar control. */
 @media (width < 48rem) {
