@@ -95,11 +95,18 @@ export function ChatFindBar({
 
   const matches = result?.matches ?? [];
   const match = matches[index];
+  const matchedQuery = result?.query;
   useEffect(() => {
     onTarget(
-      match ? { key: `find:${step}:${match.id}`, candidates: [match.id, match.response_id] } : null,
+      match
+        ? {
+            key: `find:${step}:${match.id}`,
+            candidates: [match.id, match.response_id],
+            query: matchedQuery,
+          }
+        : null,
     );
-  }, [match, step, onTarget]);
+  }, [match, matchedQuery, step, onTarget]);
 
   const complete = result?.complete ?? false;
   const stepBy = useCallback(
