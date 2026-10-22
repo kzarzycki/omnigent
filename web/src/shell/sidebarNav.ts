@@ -207,6 +207,12 @@ export const STATUS_AT_LABEL_KEY = "status.at";
 /** A status line older than this reads as stale: its writer may be gone. */
 export const STATUS_STALE_AFTER_MS = 10 * 60_000;
 
+/**
+ * Who wrote the status line. The server's turn-end recap writes `recap`; its
+ * line holds until the session runs again, so it never reads as stale.
+ */
+export const STATUS_BY_LABEL_KEY = "status.by";
+
 /** Status line with its age from `nowMs`, or null when no line is set. Age and stale are absent without a valid `status.at`. */
 export function sessionStatusAge(
   conversation: Pick<Conversation, "labels">,
@@ -228,7 +234,8 @@ export function sessionStatusAge(
         : minutes < 1440
           ? `${Math.floor(minutes / 60)}h`
           : `${Math.floor(minutes / 1440)}d`;
-  return { line, age, stale: ms > STATUS_STALE_AFTER_MS };
+  const recap = conversation.labels?.[STATUS_BY_LABEL_KEY] === "recap";
+  return { line, age, stale: !recap && ms > STATUS_STALE_AFTER_MS };
 }
 
 export function conversationDisplayLabel(conversation: Conversation): string {
