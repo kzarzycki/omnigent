@@ -593,6 +593,19 @@ def test_session_title_instructions_are_wired_into_coordinator(
     )
 
 
+@pytest.mark.parametrize(("config", "enabled"), [({}, True), ({"session_recaps": False}, False)])
+def test_session_recaps_follow_the_server_config(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    config: dict[str, bool],
+    enabled: bool,
+) -> None:
+    app = _build_branding_app(db_uri, tmp_path, f"recaps-{enabled}", server_config=config)
+
+    assert (app.state.session_recap_coordinator is not None) is enabled
+
+
 @pytest.mark.asyncio
 async def test_branding_logo_route_serves_only_validated_asset_pre_auth(
     db_uri: str,

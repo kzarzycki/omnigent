@@ -80,6 +80,7 @@ from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.server import (
     managed_host_keepalive,
     session_live_state,
+    session_recaps,
     session_revival,
     session_subscriptions,
     shutdown_state,
@@ -147,6 +148,7 @@ from omnigent.server.scheduled.dispatch_scheduler import (
     PersistentTaskScheduler,
     ScheduledTaskDispatchHooks,
 )
+from omnigent.server.session_recaps import SessionRecapCoordinator
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
@@ -1566,6 +1568,7 @@ def create_app(
     from omnigent.server.server_config import (
         load_branding_snapshot,
         load_server_config,
+        session_recaps_enabled,
         session_title_instructions,
     )
 
@@ -1682,6 +1685,11 @@ def create_app(
         RunnerBackgroundTitleGenerator(runner_router),
         additional_instructions=title_instructions,
     )
+    session_recap_coordinator = (
+        SessionRecapCoordinator(conversation_store, RunnerBackgroundTitleGenerator(runner_router))
+        if session_recaps_enabled(resolved_server_config)
+        else None
+    )
     # Shared between the host tunnel (which records ``host.runner_exited``
     # reports from daemons) and the runner status endpoint (which surfaces
     # them to clients waiting for a launched runner to connect).
@@ -1767,6 +1775,7 @@ def create_app(
         )
         # Prompts can be published off the loop; subscription notices hop back onto it.
         session_subscriptions.set_loop(asyncio.get_running_loop())
+        session_recaps.configure(session_recap_coordinator)
         # Relaunches sessions whose runner died while the server holds work for them.
         session_revival.configure(app_inst, conversation_store, permission_store)
         # Retries notices left pending by a failed post or a restart.
@@ -1997,6 +2006,9 @@ def create_app(
             if startup_inputs is not None:
                 await startup_inputs.shutdown()
             await background_title_coordinator.shutdown()
+            session_recaps.configure(None)
+            if session_recap_coordinator is not None:
+                await session_recap_coordinator.shutdown()
             _uninstall_subagent_block_notifier()
             session_revival.configure(None, None)
             subscription_retry_task.cancel()
@@ -2035,6 +2047,7 @@ def create_app(
     app.state.runner_router = runner_router
     app.state.runner_session_initializer = runner_session_initializer
     app.state.background_title_coordinator = background_title_coordinator
+    app.state.session_recap_coordinator = session_recap_coordinator
     app.state.host_registry = host_registry
     from omnigent.server.startup_inputs import ManagedStartupInputs
 
