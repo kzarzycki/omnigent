@@ -1351,9 +1351,10 @@ export interface ChatActions {
    * Fetch the next page of older messages and prepend them to `blocks`.
    *
    * No-ops when `hasMoreHistory` is false, `loadingMoreHistory` is true,
-   * or there is no active conversation / oldest-item cursor yet.
+   * or there is no active conversation / oldest-item cursor yet. `pageSize`
+   * defaults to the scroll-up page.
    */
-  loadMoreHistory: (sessionId?: string) => Promise<void>;
+  loadMoreHistory: (sessionId?: string, pageSize?: number) => Promise<void>;
   /** Flash a bubble briefly; rapid calls reschedule so the latest target wins. */
   flashUserMessage: (itemId: string) => void;
   /** Queue an "@"-mention chip into the active composer from outside it. */
@@ -3626,7 +3627,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }
   },
 
-  loadMoreHistory: async (sessionId) => {
+  loadMoreHistory: async (sessionId, pageSize) => {
     const conversationId = sessionId ?? get().conversationId;
     const conversation = sessionId ? conversationRegistry.peek(sessionId)?.getState() : get();
     if (!conversation) return;
@@ -3652,6 +3653,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     try {
       const { items, hasMore } = await fetchSessionItemsPage(conversationId, {
         olderThan: oldestItemId,
+        limit: pageSize,
       });
       if (stale()) return;
       const newBlocks = itemsToBlocks(items);
