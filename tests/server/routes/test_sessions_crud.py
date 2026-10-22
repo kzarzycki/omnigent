@@ -592,6 +592,32 @@ async def test_patch_session_empty_project_removes_label(
     assert "omni_project" not in conv.labels
 
 
+async def test_patch_status_line_names_or_clears_its_writer(
+    client: httpx.AsyncClient,
+    session_id: str,
+    db_uri: str,
+) -> None:
+    """A ``status.line`` write without ``status.by`` clears the server recap's name."""
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv_store.set_labels(session_id, {"status.line": "Recap", "status.by": "recap"})
+
+    resp = await client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"labels": {"status.line": "waits on CI", "status.at": "1"}},
+    )
+    assert resp.status_code == 200
+    labels = conv_store.get_conversation(session_id).labels
+    assert labels["status.line"] == "waits on CI"
+    assert labels.get("status.by", "") == ""
+
+    resp = await client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"labels": {"status.line": "deploying", "status.by": "deployer"}},
+    )
+    assert resp.status_code == 200
+    assert conv_store.get_conversation(session_id).labels["status.by"] == "deployer"
+
+
 # ── Pinned session label (omnigent.pinned) ───────────────────────────
 
 
