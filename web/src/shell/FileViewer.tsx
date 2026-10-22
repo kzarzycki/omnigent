@@ -110,7 +110,7 @@ import { copyText } from "@/lib/clipboard";
 import { absoluteWorkspacePath } from "@/lib/composerContext";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
-import { hasCommandModifier } from "@/lib/hotkeys";
+import { FILE_FIND_OWNER_ATTRIBUTE, hasCommandModifier } from "@/lib/hotkeys";
 import { type ChangedSort, groupChangedFiles } from "./FlatFileList";
 import { CodeViewer } from "./CodeViewer";
 import {
@@ -500,6 +500,7 @@ function FileViewerBody({
   const viewerRootRef = useRef<HTMLElement | null>(null);
   const setViewerRoot = useCallback((el: HTMLElement | null) => {
     viewerRootRef.current = el;
+    el?.toggleAttribute(FILE_FIND_OWNER_ATTRIBUTE, viewerIsActiveSurfaceRef.current);
   }, []);
   const setFramedViewerRoot = useInertRef<HTMLElement>(!open, setViewerRoot);
   const [contentWidth, setContentWidth] = useState<number | null>(null);
@@ -1065,23 +1066,29 @@ function FileViewerBody({
   // works in the chat/composer, Cmd+F falls through to the browser's find.
   const viewerIsActiveSurfaceRef = useRef(true);
   // Mirrors the ref for rendering, which marks the viewer as owning Escape.
-  const [viewerIsActiveSurface, setViewerIsActiveSurface] = useState(true);
+  const [viewerIsActiveSurface, setViewerIsActiveSurfaceState] = useState(true);
+  // Only the copy on screen takes ⌘F: on desktop a mobile copy stays mounted, hidden.
+  const findActive = open && isActiveViewport;
+  // Mirrored on the root so the chat's ⌘F handler can tell who owns the press.
+  const setViewerIsActiveSurface = useCallback((active: boolean) => {
+    viewerIsActiveSurfaceRef.current = active;
+    setViewerIsActiveSurfaceState(active);
+    viewerRootRef.current?.toggleAttribute(FILE_FIND_OWNER_ATTRIBUTE, active);
+  }, []);
   useEffect(() => {
     // Opening the viewer (or switching files within it) makes it the active
     // surface again. Keyed on `open` too, so reopening the same path after the
     // user had clicked into the chat re-seeds the ref instead of staying stale.
-    if (!open) return;
-    viewerIsActiveSurfaceRef.current = true;
-    setViewerIsActiveSurface(true);
-  }, [open, path]);
+    // A closed viewer that stays mounted must not keep ⌘F from the chat.
+    setViewerIsActiveSurface(findActive);
+  }, [findActive, path, setViewerIsActiveSurface]);
   useEffect(() => {
-    if (!open) return;
+    if (!findActive) return;
     const track = (e: Event) => {
       const root = viewerRootRef.current;
       const target = e.target;
       if (root !== null && target instanceof Node) {
-        viewerIsActiveSurfaceRef.current = root.contains(target);
-        setViewerIsActiveSurface(viewerIsActiveSurfaceRef.current);
+        setViewerIsActiveSurface(root.contains(target));
       }
     };
     window.addEventListener("mousedown", track, true);
@@ -1090,9 +1097,9 @@ function FileViewerBody({
       window.removeEventListener("mousedown", track, true);
       window.removeEventListener("focusin", track, true);
     };
-  }, [open]);
+  }, [findActive, setViewerIsActiveSurface]);
   useEffect(() => {
-    if (!open || !isMonacoFindSurface) return;
+    if (!findActive || !isMonacoFindSurface) return;
     const handler = (e: KeyboardEvent) => {
       if (!(hasCommandModifier(e) && !e.altKey && !e.shiftKey && e.key === "f")) return;
       if (!viewerIsActiveSurfaceRef.current) return;
@@ -1106,7 +1113,7 @@ function FileViewerBody({
     // host page, not the file).
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [open, isMonacoFindSurface, setSearchOpen]);
+  }, [findActive, isMonacoFindSurface, setSearchOpen]);
 
   // Reset the toggle when find is closed from inside Monaco (Escape or the
   // widget's ✕) so the next Cmd+F re-opens it instead of no-opping. Shared by
@@ -1963,7 +1970,7 @@ function FileViewerBody({
               activeSelection={activeSelection}
               onSetActiveSelection={handleSetActiveSelection}
               pendingBodyRef={pendingBodyRef}
-              panelOpen={open}
+              panelOpen={findActive}
               mediaActive={onScreen}
               searchOpen={searchOpen}
               setSearchOpen={setSearchOpen}

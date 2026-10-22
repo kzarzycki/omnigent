@@ -377,7 +377,8 @@ export function CommandPalette({
   };
 
   const queryClient = useQueryClient();
-  const goToSession = (id: string): void => {
+  // A content match opens the chat's find bar on that query, at its oldest match.
+  const goToSession = (id: string, findQuery?: string): void => {
     // Search results are dropped when the palette closes; the sidebar lists
     // the opened session from this copy, which keeps its owner.
     const searchRow = [titleSearch.data, contentSearch.data]
@@ -386,7 +387,7 @@ export function CommandPalette({
       .find((row) => row.id === id);
     if (searchRow) rememberOpenSessionRow(queryClient, searchRow);
     close();
-    navigate(`/c/${id}`);
+    navigate(findQuery ? `/c/${id}?find=${encodeURIComponent(findQuery)}` : `/c/${id}`);
   };
 
   const renderSession = (s: PaletteSession): React.ReactNode => (
@@ -395,7 +396,7 @@ export function CommandPalette({
     <CommandItem
       key={s.id}
       value={s.id}
-      onSelect={() => goToSession(s.id)}
+      onSelect={() => goToSession(s.id, s.snippet ? debouncedQuery : undefined)}
       className="items-start pl-6"
     >
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">

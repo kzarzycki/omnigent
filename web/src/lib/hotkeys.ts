@@ -8,6 +8,14 @@
 // the composer untouched. On Windows/Linux the dialog shows Ctrl and only Ctrl
 // fires.
 
+/** Set on the file viewer's root while it owns ⌘F (the user last clicked or focused it). */
+export const FILE_FIND_OWNER_ATTRIBUTE = "data-find-owner";
+
+/** True while an open file viewer owns ⌘F rather than the chat. */
+export function fileViewerOwnsFind(): boolean {
+  return document.querySelector(`[${FILE_FIND_OWNER_ATTRIBUTE}]`) !== null;
+}
+
 /** True on Apple platforms (⌘ is the command modifier); false elsewhere (Ctrl). */
 export function isMacPlatform(): boolean {
   if (typeof navigator === "undefined") return false;

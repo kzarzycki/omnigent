@@ -455,6 +455,20 @@ describe("CommandPalette — match preview", () => {
     for (const m of marks) expect(m.textContent?.toLowerCase()).toBe("what");
   });
 
+  it("opens a content match with the chat's find bar on the query", () => {
+    setSearchGroups({
+      title: searchPages([conv("c2", "deploy runbook", "agent", null)]),
+      content: searchPages([conv("c1", "Hello", "cursor", "…the deploy step failed…")]),
+    });
+    renderPalette();
+    search("deploy step");
+
+    fireEvent.click(screen.getByText("Hello"));
+    expect(navigate).toHaveBeenLastCalledWith("/c/c1?find=deploy%20step");
+    fireEvent.click(screen.getByText(/runbook/));
+    expect(navigate).toHaveBeenLastCalledWith("/c/c2");
+  });
+
   it("omits the snippet line for a title-only match (no search_snippet)", () => {
     setSearchGroups({ title: searchPages([conv("c1", "deploy runbook", "agent", null)]) });
     renderPalette();
@@ -689,7 +703,7 @@ describe("CommandPalette — title and content groups", () => {
     rerender(<CommandPalette {...props} />);
 
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(navigate).toHaveBeenCalledWith("/c/second");
+    expect(navigate).toHaveBeenCalledWith("/c/second?find=kestrel");
   });
 
   it("selects the top row again when the palette reopens", () => {
@@ -766,7 +780,7 @@ describe("CommandPalette — title and content groups", () => {
     const input = screen.getByTestId("command-palette-input");
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(navigate).toHaveBeenCalledWith("/c/c3");
+    expect(navigate).toHaveBeenCalledWith("/c/c3?find=deploy");
   });
 
   it("holds the search until server info loads, then sends only the grouped requests", () => {
