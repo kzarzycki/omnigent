@@ -68,6 +68,11 @@ export interface ConversationListFilters {
    * only archived sessions. ``undefined`` is the default all-sessions list.
    */
   visibility?: "mine" | "shared" | "archived";
+  /**
+   * The list is a project folder (`["project-sessions", name]`), which sorts
+   * on the client and is never searched, so only membership changes refetch it.
+   */
+  projectFolder?: boolean;
 }
 
 /**
@@ -223,25 +228,32 @@ function violatesKnownMembership(conv: Conversation, filters: ConversationListFi
  * fields immediately; this tells the provider when to follow with a list
  * refetch so filtered query membership and page order converge. Title
  * changes reconcile every list variant because a row absent from a search
- * query may now match it.
+ * query may now match it. A project folder only needs membership changes.
  *
  * @param changed - Names of wire fields that changed the cached row.
  * @param isActiveRow - Whether this row is the active chat (the one held
  *   in place by `ActiveChatOverride`). An `updated_at`-only change on it
  *   doesn't move the visible row, so it doesn't need a server resort.
+ * @param filters - Canonical filters for the query being patched.
  * @returns `true` when the query should be invalidated after patching.
  */
-function changedFieldsNeedRefetch(changed: Set<string>, isActiveRow: boolean): boolean {
+function changedFieldsNeedRefetch(
+  changed: Set<string>,
+  isActiveRow: boolean,
+  filters: ConversationListFilters,
+): boolean {
   if (changed.has("archived")) return true;
-  if (changed.has("title")) return true;
-  // A labels change can move a row between project-filtered variants and the
-  // project folders (["project-sessions", …]). A session relabeled INTO the
+  // A labels/project_id change can move a row between project-filtered variants
+  // and the project folders (["project-sessions", …]). A session moved INTO the
   // selected project isn't in that filtered cache yet, so no local patch can
   // place it; only a server reconcile can. The unfiltered variant where the
-  // row lives detects the label change here and flags the refetch, and the
-  // caller's invalidation is prefix-wide (["conversations"]), so it reconciles
-  // the filtered variants too.
-  if (changed.has("labels")) return true;
+  // row lives detects the change here and flags the refetch, and the caller's
+  // invalidation is prefix-wide (["conversations"]), so it reconciles the
+  // filtered variants too.
+  if (isProjectMove(changed)) return true;
+  // Folders sort on the client and are never searched.
+  if (filters.projectFolder) return false;
+  if (changed.has("title")) return true;
   // updated_at only affects the server's sort order. The active chat row is
   // pinned at its position by ActiveChatOverride regardless of that order, so
   // an updated_at bump on it — the common case while the user sends messages —
@@ -250,6 +262,11 @@ function changedFieldsNeedRefetch(changed: Set<string>, isActiveRow: boolean): b
   // server resort to move it.
   if (changed.has("updated_at") && !isActiveRow) return true;
   return false;
+}
+
+/** A labels or project_id change can move a row between project folders. */
+function isProjectMove(changed: Set<string>): boolean {
+  return changed.has("labels") || changed.has("project_id");
 }
 
 /**
@@ -271,17 +288,24 @@ function changedFieldsNeedRefetch(changed: Set<string>, isActiveRow: boolean): b
  * @param activeId - The active chat's conversation id (`/c/:id`), or
  *   `undefined` when not on a chat route. Its `updated_at` bumps don't force
  *   a refetch because `ActiveChatOverride` pins its visible position.
- * @returns The possibly updated data, ids found in it, and whether this
- *   query needs a server refetch after the local patch.
+ * @returns The possibly updated data, ids found in it, ids whose project
+ *   membership may have moved, and whether this query needs a server refetch
+ *   after the local patch.
  */
 export function mergeItemsIntoPages(
   data: ConversationsInfiniteData | undefined,
   itemsById: Map<string, SessionListWireItem>,
   filters: ConversationListFilters,
   activeId: string | undefined,
-): { data: ConversationsInfiniteData | undefined; found: Set<string>; needsRefetch: boolean } {
+): {
+  data: ConversationsInfiniteData | undefined;
+  found: Set<string>;
+  movedIds: Set<string>;
+  needsRefetch: boolean;
+} {
   const found = new Set<string>();
-  if (!data) return { data, found, needsRefetch: false };
+  const movedIds = new Set<string>();
+  if (!data) return { data, found, movedIds, needsRefetch: false };
   let anyPageChanged = false;
   let needsRefetch = false;
   const pages = data.pages.map((page) => {
@@ -300,12 +324,13 @@ export function mergeItemsIntoPages(
         continue;
       }
       const nextConv = { ...conv, ...wire };
+      if (isProjectMove(changed)) movedIds.add(conv.id);
       if (violatesKnownMembership(nextConv, filters)) {
         rowChanged = true;
         needsRefetch = true;
         continue;
       }
-      if (changedFieldsNeedRefetch(changed, conv.id === activeId)) {
+      if (changedFieldsNeedRefetch(changed, conv.id === activeId, filters)) {
         needsRefetch = true;
       }
       rowChanged = true;
@@ -315,8 +340,8 @@ export function mergeItemsIntoPages(
     anyPageChanged = true;
     return { ...page, data: nextData };
   });
-  if (!anyPageChanged) return { data, found, needsRefetch };
-  return { data: { ...data, pages }, found, needsRefetch };
+  if (!anyPageChanged) return { data, found, movedIds, needsRefetch };
+  return { data: { ...data, pages }, found, movedIds, needsRefetch };
 }
 
 // ── Recently-created keep-alive ───────────────────────────────────────
@@ -462,7 +487,11 @@ export function collectConversationIds(datas: (ConversationsInfiniteData | undef
  * lists are non-archived and unsearched, the same dimensions the push-delta
  * merge uses when overlaying rows into them.
  */
-export const PROJECT_FOLDER_FILTERS = { searchQuery: "", includeArchived: false } as const;
+export const PROJECT_FOLDER_FILTERS = {
+  searchQuery: "",
+  includeArchived: false,
+  projectFolder: true,
+} as const;
 
 /**
  * Overlay a title into every cache that holds a row for one session.
