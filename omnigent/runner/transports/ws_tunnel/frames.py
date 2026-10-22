@@ -205,6 +205,9 @@ class WSCloseFrame:
 # Additive extension of the runner tunnel, negotiated after hello. These are
 # not tunneled HTTP responses or terminal WebSocket channel frames.
 EVENT_INGEST_CAPABILITY = "session-event-ingest-v1"
+# The relay persists the runner's closed SDK text-segment items. An older relay
+# stores them as extra messages, so the runner emits them only once accepted.
+TEXT_SEGMENT_CAPABILITY = "relay-text-segment-v1"
 
 # Close reason (with code 1000) a runner sends when its idle watchdog found no
 # active work, so the server settles the runner's sessions instead of failing them.
@@ -213,7 +216,12 @@ RUNNER_IDLE_SHUTDOWN_CLOSE_REASON = "runner idle shutdown"
 
 @dataclass
 class EventReadyFrame:
-    """Server → runner: event ingestion is available on this tunnel generation."""
+    """Server → runner: the hello capabilities this tunnel generation accepts.
+
+    Older servers send no list, meaning event ingestion only.
+    """
+
+    capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -358,7 +366,10 @@ def encode_frame(frame: Frame) -> str:
             }
         )
     if isinstance(frame, EventReadyFrame):
-        return json.dumps({"kind": FrameKind.EVENT_READY.value})
+        ready: dict[str, object] = {"kind": FrameKind.EVENT_READY.value}
+        if frame.capabilities:
+            ready["capabilities"] = list(frame.capabilities)
+        return json.dumps(ready)
     if isinstance(frame, EventBatchFrame):
         return json.dumps(
             {
@@ -461,7 +472,7 @@ def _decode_known_frame(kind: FrameKind, msg: _JsonObject) -> Frame:
         case FrameKind.WS_CLOSE:
             return _decode_ws_close(msg)
         case FrameKind.EVENT_READY:
-            return EventReadyFrame()
+            return EventReadyFrame(capabilities=_optional_str_list(msg, "capabilities"))
         case FrameKind.EVENT_BATCH:
             return EventBatchFrame(
                 id=_required_str(msg, "id"),

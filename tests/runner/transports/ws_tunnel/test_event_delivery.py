@@ -17,6 +17,8 @@ from omnigent.runner.transports.ws_tunnel.event_delivery import (
     TunnelEventClient,
 )
 from omnigent.runner.transports.ws_tunnel.frames import (
+    EVENT_INGEST_CAPABILITY,
+    TEXT_SEGMENT_CAPABILITY,
     EventAckFrame,
     EventBatchFrame,
     EventReadyFrame,
@@ -570,3 +572,22 @@ async def test_disconnect_during_failed_send_leaves_no_unretrieved_future_error(
     await asyncio.sleep(0)
     assert dispatcher._pending == {}
     assert not reported
+
+
+async def test_event_ready_records_the_capabilities_the_server_accepted() -> None:
+    dispatcher = RunnerEventDispatcher()
+
+    async def send(_text: str) -> None:
+        pass
+
+    dispatcher.ready(send)  # an older server: event ingestion only
+    assert dispatcher.accepts(EVENT_INGEST_CAPABILITY)
+    assert not dispatcher.accepts(TEXT_SEGMENT_CAPABILITY)
+
+    dispatcher.disconnected()
+    dispatcher.ready(send, [TEXT_SEGMENT_CAPABILITY])
+    assert dispatcher.accepts(TEXT_SEGMENT_CAPABILITY)
+    assert not await dispatcher.wait_for_first_ready()
+
+    dispatcher.disconnected()
+    assert not dispatcher.accepts(TEXT_SEGMENT_CAPABILITY)

@@ -197,6 +197,7 @@ from omnigent.runner.subagent_work import (
     unregister_child_session,
     unregister_subagent_work_for_session,
 )
+from omnigent.runner.transports.ws_tunnel.frames import TEXT_SEGMENT_CAPABILITY
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.runtime.prompt import (
     build_instructions,
@@ -450,6 +451,87 @@ _INPUT_LIFECYCLE_EVENT_TYPES = frozenset(
         "response.incomplete",
     }
 )
+
+
+_TERMINAL_RESPONSE_EVENT_TYPES = _INPUT_LIFECYCLE_EVENT_TYPES - {"response.in_progress"}
+
+
+@dataclasses.dataclass
+class _TextSegment:
+    """A turn's id-less assistant text since its last tool call or turn end."""
+
+    deltas: list[str] = dataclasses.field(default_factory=list)
+    model: str | None = None
+
+
+def _requeue_at_front(queue: asyncio.Queue[Any], event: Any) -> None:
+    """Put an event the stream pulled but did not deliver back ahead of later ones."""
+    later = [queue.get_nowait() for _ in range(queue.qsize())]
+    for queued in (event, *later):
+        queue.put_nowait(queued)
+
+
+def _text_segment_event(segment: _TextSegment, event: Mapping[str, object]) -> _JsonObject | None:
+    """
+    Track *event* into *segment* and return the message item it closes, if any.
+
+    SDK harnesses stream text as id-less deltas with no message item of their
+    own. The runner closes each segment with one, published just before the
+    boundary that ends it: a completed ``function_call``, a delegated child
+    session, or the turn's terminal event. The server persists that item, so
+    the text survives a relay that drops or restarts mid-segment.
+    ``text_segment`` names the boundary.
+
+    :param segment: The session's open segment, updated in place.
+    :param event: The event about to be published.
+    :returns: The ``response.output_item.done`` message event, or ``None``.
+    """
+    evt_type = event.get("type")
+    response = event.get("response")
+    response_model = response.get("model") if isinstance(response, dict) else None
+    if evt_type == "session.status" and event.get("status") == "running":
+        segment.deltas.clear()
+        return None
+    if evt_type == "response.in_progress":
+        if isinstance(response_model, str) and response_model:
+            segment.model = response_model
+        return None
+    if evt_type == "response.output_text.delta":
+        delta = event.get("delta")
+        if not event.get("message_id") and isinstance(delta, str) and delta:
+            segment.deltas.append(delta)
+        return None
+    item = event.get("item")
+    if (
+        evt_type == "response.output_item.done"
+        and isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("status") == "completed"
+    ):
+        boundary = "function_call"
+    elif evt_type == "session.created" and event.get("child_session_id"):
+        boundary = "session.created"
+    elif isinstance(evt_type, str) and evt_type in _TERMINAL_RESPONSE_EVENT_TYPES:
+        boundary = evt_type
+    else:
+        return None
+    if not segment.deltas:
+        return None
+    text = "".join(segment.deltas)
+    segment.deltas.clear()
+    model = response_model if isinstance(response_model, str) and response_model else None
+    return {
+        "type": "response.output_item.done",
+        "text_segment": boundary,
+        "item": {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "agent": model or segment.model,
+            "content": [{"type": "output_text", "text": text}],
+        },
+    }
 
 
 def _input_stable_id(source: Mapping[str, object]) -> str | None:
@@ -1445,6 +1527,7 @@ def create_runner_app(
     _last_server_item_id: dict[str, str] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
+    _text_segments: dict[str, _TextSegment] = {}
     _session_inboxes = _session_inboxes_ref
     _session_async_tasks: dict[str, dict[str, tuple[asyncio.Task[str], asyncio.Event]]] = {}
 
@@ -1493,12 +1576,18 @@ def create_runner_app(
         if queue is None:
             queue = asyncio.Queue()
             _session_event_queues[session_id] = queue
+        segment = _text_segments.setdefault(session_id, _TextSegment())
+        segment_event = _text_segment_event(segment, event_body)
+        if segment_event is not None:
+            queue.put_nowait(segment_event)
         queue.put_nowait(event_body)
         if event_body.get("type") == "session.status":
             _status_value = event_body.get("status")
             if isinstance(_status_value, str):
                 _native_pane_status[session_id] = _status_value
         _fan_out_child_delta_to_parent(session_id, event_body)
+
+    app.state.publish_event = _publish_event
 
     def _child_preview_from_status(
         session_id: str,
@@ -3216,6 +3305,16 @@ def create_runner_app(
             content=json.loads(bytes(response.body)),
         )
 
+    def _text_segment_disposition() -> str:
+        # An older relay would store a segment item next to its own delta flush.
+        # While the tunnel is down, keep the segment for the next generation.
+        dispatcher = getattr(app.state, "runner_event_dispatcher", None)
+        if dispatcher is None:
+            return "drop"
+        if dispatcher.is_disconnected:
+            return "requeue"
+        return "send" if dispatcher.accepts(TEXT_SEGMENT_CAPABILITY) else "drop"
+
     @app.get("/v1/sessions/{session_id}/stream")
     async def stream_session(session_id: str) -> StreamingResponse:
         async def _event_generator() -> AsyncIterator[bytes]:
@@ -3235,11 +3334,18 @@ def create_runner_app(
                     continue
                 if event is None:
                     break
+                if event.get("text_segment"):
+                    disposition = _text_segment_disposition()
+                    if disposition == "requeue":
+                        _requeue_at_front(queue, event)
+                        return
+                    if disposition == "drop":
+                        continue
                 frame = "data: " + json.dumps(event) + "\n\n"
                 try:
                     yield frame.encode("utf-8")
                 except (GeneratorExit, asyncio.CancelledError):
-                    queue.put_nowait(event)
+                    _requeue_at_front(queue, event)
                     return
             yield b"data: [DONE]\n\n"
 
@@ -3454,6 +3560,7 @@ def create_runner_app(
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
+        _text_segments.pop(session_id, None)
         _session_inboxes.pop(session_id, None)
         _subagent_recovery_done.discard(session_id)
         _subagent_recovery_locks.pop(session_id, None)
