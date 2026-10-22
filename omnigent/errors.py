@@ -236,6 +236,9 @@ class ErrorCode:
         indistinguishable from a completed enumeration, so the caller
         silently loses the remaining rows. The caller's remedy is to
         restart the enumeration without the cursor.
+    :cvar SEARCH_TIMEOUT: A session search ran past the server's search
+        ``statement_timeout`` and the database cancelled it (HTTP 504). Retrying
+        the same query scans the same rows again, so clients don't retry it.
     """
 
     UNAUTHORIZED = "unauthorized"
@@ -259,6 +262,7 @@ class ErrorCode:
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
+    SEARCH_TIMEOUT = "search_timeout"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -318,6 +322,8 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
     ErrorCode.STALE_CURSOR: 400,
+    # 504: the server gave up on the query, not the caller's input.
+    ErrorCode.SEARCH_TIMEOUT: 504,
 }
 
 
@@ -361,6 +367,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
+    ErrorCode.SEARCH_TIMEOUT: ErrorCategory.SERVER,
 }
 
 
@@ -406,6 +413,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.CONFLICT: ErrorImpact.BENIGN,
     ErrorCode.REFRESH_UNSUPPORTED: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
+    ErrorCode.SEARCH_TIMEOUT: ErrorImpact.BENIGN,
 }
 
 
@@ -447,6 +455,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
+    ErrorCode.SEARCH_TIMEOUT: ErrorPhase.REQUEST,
 }
 
 

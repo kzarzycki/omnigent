@@ -1,6 +1,8 @@
+import { ApiError } from "@/lib/sessionsApi";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
+import type * as UseConversationsModule from "@/hooks/useConversations";
 
 import { CommandPalette } from "./CommandPalette";
 
@@ -10,7 +12,8 @@ vi.mock("@/lib/routing", () => ({
 }));
 
 const useConversations = vi.fn();
-vi.mock("@/hooks/useConversations", () => ({
+vi.mock("@/hooks/useConversations", async (importOriginal) => ({
+  isSearchTimeout: (await importOriginal<typeof UseConversationsModule>()).isSearchTimeout,
   useConversations: (...args: unknown[]) => useConversations(...args),
 }));
 
@@ -148,6 +151,17 @@ describe("CommandPalette — sessions", () => {
       expect(refetch).toHaveBeenCalledOnce();
     },
   );
+
+  it("says a search took too long when the server cancelled it", () => {
+    useConversations.mockReturnValue({
+      isError: true,
+      error: new ApiError("search took too long", 504, "search_timeout"),
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+    renderPalette({ sessionsOnly: false });
+    expect(screen.getByRole("status").textContent).toContain("Search took too long.");
+  });
 
   it("shows only one loading message during the initial session fetch", () => {
     setSessions([], true);
