@@ -12,7 +12,7 @@ import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ElicitationCard } from "@/components/blocks/ApprovalCard";
 import { cn } from "@/lib/utils";
 import { getCurrentAuthorId } from "@/lib/identity";
-import { fileViewerOwnsFind, hasCommandModifier } from "@/lib/hotkeys";
+import { CHAT_FIND_REQUEST_EVENT, fileViewerOwnsFind, hasCommandModifier } from "@/lib/hotkeys";
 import { isSystemUserContent } from "@/lib/systemMessage";
 import { isTerminalCommandInput } from "@/lib/blocks";
 import {
@@ -242,28 +242,13 @@ function TranscriptImpl({
   const [searchParams] = useSearchParams();
   const messageId = searchParams.get(MESSAGE_QUERY_PARAM);
   const findParam = searchParams.get(FIND_QUERY_PARAM);
-  // The find bar: ?find=<q> opens it filled in, at the oldest match.
-  const [find, setFind] = useState<{ query: string; start: FindStart } | null>(null);
-  const [findTarget, setFindTarget] = useState<MessageJumpTarget | null>(null);
-  const findInputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    setFind(findParam ? { query: findParam, start: "oldest" } : null);
-    setFindTarget(null);
-  }, [conversationId, findParam]);
-  const closeFind = useCallback(() => {
-    setFind(null);
-    setFindTarget(null);
-  }, []);
+  const { find, setFind, findTarget, setFindTarget, findInputRef, openChatFind, closeFind } =
+    useChatFind(conversationId, findParam);
   const terminalFirst = useTerminalFirst();
   const showTerminal = terminalFirst?.isTerminalFirst && terminalFirst.view === "terminal";
 
   const [nativeFindConversationId, setNativeFindConversationId] = useState<string | null>(null);
   useEffect(() => setNativeFindConversationId(null), [conversationId]);
-  const openChatFind = useCallback(() => {
-    setFind((current) => current ?? { query: "", start: "newest" });
-    findInputRef.current?.focus();
-    findInputRef.current?.select();
-  }, []);
   const prepareNativeFind = useCallback(() => {
     // Native find runs after keydown dispatch. Commit every row before the
     // browser scans the DOM so off-screen messages participate.
@@ -496,7 +481,7 @@ function TranscriptImpl({
           hasMoreHistory={display.hasMoreHistory}
         />
         {find && conversationId && (
-          <div className="absolute top-14 right-4 z-20 md:top-12">
+          <div className="chat-find-bar absolute top-14 right-4 z-20 md:top-12">
             <ChatFindBar
               key={conversationId}
               conversationId={conversationId}
@@ -530,7 +515,34 @@ function TranscriptImpl({
 }
 
 /**
- * Route ⌘F in a chat by `findShortcutRoute`. Listens in the capture phase, so
+ * The chat's find bar state. `?find=<q>` opens it filled in, at the oldest
+ * match; `openChatFind` (⌘F, the header's button) opens it at the newest.
+ */
+export function useChatFind(conversationId: string | null | undefined, findParam: string | null) {
+  const [find, setFind] = useState<{ query: string; start: FindStart } | null>(null);
+  const [findTarget, setFindTarget] = useState<MessageJumpTarget | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    setFind(findParam ? { query: findParam, start: "oldest" } : null);
+    setFindTarget(null);
+  }, [conversationId, findParam]);
+  const openChatFind = useCallback(() => {
+    // Mount the bar now and focus it in the same event: iOS opens the keyboard
+    // only for a focus made during the tap.
+    flushSync(() => setFind((current) => current ?? { query: "", start: "newest" }));
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, []);
+  const closeFind = useCallback(() => {
+    setFind(null);
+    setFindTarget(null);
+  }, []);
+  return { find, setFind, findTarget, setFindTarget, findInputRef, openChatFind, closeFind };
+}
+
+/**
+ * Route ⌘F in a chat by `findShortcutRoute`, and open the find bar when the
+ * header's find button asks. Listens in the capture phase, so
  * the chat claims a press before the side panel's window listeners see it.
  */
 export function useChatFindShortcut({
@@ -561,8 +573,16 @@ export function useChatFindShortcut({
         onNativeFind();
       }
     };
+    // The header's find button: the same bar, outside the terminal view.
+    const handleRequest = () => {
+      if (!showTerminal) onChatFind();
+    };
     window.addEventListener("keydown", handleFind, true);
-    return () => window.removeEventListener("keydown", handleFind, true);
+    window.addEventListener(CHAT_FIND_REQUEST_EVENT, handleRequest);
+    return () => {
+      window.removeEventListener("keydown", handleFind, true);
+      window.removeEventListener(CHAT_FIND_REQUEST_EVENT, handleRequest);
+    };
   }, [enabled, showTerminal, findInputRef, onChatFind, onNativeFind]);
 }
 
