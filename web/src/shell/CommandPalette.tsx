@@ -18,6 +18,7 @@ import {
 import { useNavigate } from "@/lib/routing";
 import {
   type ConversationsPage,
+  isSearchTimeout,
   useConversations,
   useSessionSearch,
 } from "@/hooks/useConversations";
@@ -300,6 +301,7 @@ export function CommandPalette({
   const loadMoreError = searching
     ? searchGroups.some((group) => group.isFetchNextPageError)
     : isFetchNextPageError;
+  const searchTimedOut = searching && searchGroups.some((group) => isSearchTimeout(group.error));
   const searchFetching =
     (searching && awaitingServerInfo) || searchGroups.some((group) => group.isFetching);
   const retrying = searching
@@ -485,7 +487,9 @@ export function CommandPalette({
                 {loadError
                   ? loadMoreError
                     ? "Couldn't load more sessions."
-                    : "Couldn't load sessions."
+                    : searchTimedOut
+                      ? "Search took too long. Try a longer or more specific word."
+                      : "Couldn't load sessions."
                   : "Loading sessions…"}
                 {loadError && (
                   <button
