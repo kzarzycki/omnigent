@@ -3880,7 +3880,7 @@ async def _forward_subagent_status_to_parent_runner(
     :returns: The parent runner's result, or ``None`` when the child's runner
         answered for any other reason, the parent shares the child's runner, or
         the parent has no reachable runner (the caller keeps its own outcome; a
-        503 makes the forwarder retry until the parent is back).
+        ``subagent_delivery_not_confirmed`` 503 gets a bounded forwarder retry).
     """
     if runner_result is not None:
         try:

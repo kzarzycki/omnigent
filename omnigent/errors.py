@@ -236,6 +236,11 @@ class ErrorCode:
     :cvar SEARCH_TIMEOUT: A session search ran past the server's search
         ``statement_timeout`` and the database cancelled it (HTTP 504). Retrying
         the same query scans the same rows again, so clients don't retry it.
+    :cvar SUBAGENT_DELIVERY_NOT_CONFIRMED: A sub-agent's terminal status
+        reached no parent inbox: the child's runner refused it and no parent
+        runner took it (HTTP 503). Distinct from ``RUNNER_UNAVAILABLE`` so a
+        forwarder bounds its retries; the parent's relaunch or restart
+        recovery delivers the result without it.
     """
 
     UNAUTHORIZED = "unauthorized"
@@ -258,6 +263,7 @@ class ErrorCode:
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
     SEARCH_TIMEOUT = "search_timeout"
+    SUBAGENT_DELIVERY_NOT_CONFIRMED = "subagent_delivery_not_confirmed"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -316,6 +322,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     ErrorCode.STALE_CURSOR: 400,
     # 504: the server gave up on the query, not the caller's input.
     ErrorCode.SEARCH_TIMEOUT: 504,
+    ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED: 503,
 }
 
 
@@ -357,6 +364,8 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
     ErrorCode.SEARCH_TIMEOUT: ErrorCategory.SERVER,
+    # The parent's inbox lives on a runner we route to; no caller input fixes it.
+    ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED: ErrorCategory.SERVER,
 }
 
 
@@ -392,6 +401,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.RUNNER_UNAVAILABLE: ErrorImpact.TRANSIENT,
     ErrorCode.WRONG_REPLICA: ErrorImpact.TRANSIENT,
     ErrorCode.UPSTREAM_CANCELLED: ErrorImpact.TRANSIENT,
+    ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED: ErrorImpact.TRANSIENT,
     # A single rejected request; the session stays healthy and usable.
     ErrorCode.FORBIDDEN: ErrorImpact.BENIGN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorImpact.BENIGN,
@@ -441,6 +451,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
     ErrorCode.SEARCH_TIMEOUT: ErrorPhase.REQUEST,
+    ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED: ErrorPhase.TURN,
 }
 
 

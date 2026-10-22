@@ -841,6 +841,71 @@ async def test_individual_redrive_honors_not_confirmed_retry_budget(
     assert row["attributes"]["exception_type"] == "HTTPStatusError"
 
 
+def test_server_relayed_delivery_not_confirmed_exhausts_the_status_retry_budget() -> None:
+    """The server's ``error.code`` envelope of the runner refusal is bounded like the runner's."""
+    request = httpx.Request("POST", "http://ap/v1/sessions/conv_child/events")
+    response = httpx.Response(
+        503,
+        json={
+            "error": {
+                "code": "subagent_delivery_not_confirmed",
+                "message": "Runner rejected external_session_status 'idle': missing_parent_inbox",
+            }
+        },
+        request=request,
+    )
+    error = httpx.HTTPStatusError("refused", request=request, response=response)
+    tracker = forwarder._PostRetryTracker(base_delay_s=0.0)
+
+    decisions = [
+        tracker.record_failure("status:idle", error, session_id="conv_child")
+        for _ in range(forwarder._SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS)
+    ]
+
+    assert [decision.exhausted for decision in decisions] == [False] * (
+        forwarder._SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS - 1
+    ) + [True]
+    assert not tracker.has_retry_state("status:idle")
+
+
+@pytest.mark.asyncio
+async def test_exhausted_undelivered_idle_posts_no_failed_status(tmp_path: Path) -> None:
+    """A parent down past the budget keeps the child's idle; no ``failed`` edge replaces it."""
+    bridge_dir = tmp_path / "bridge"
+    record_hook_event(bridge_dir, {"hook_event_name": "Stop", "session_id": "native"})
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content)["data"])
+        return httpx.Response(
+            503, json={"error": {"code": "subagent_delivery_not_confirmed", "message": "refused"}}
+        )
+
+    tracker = forwarder._PostRetryTracker(base_delay_s=0.0, max_delay_s=0.0)
+    state = forwarder.HookForwardState(event_cursor=0, byte_offset=0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ap"
+    ) as client:
+        for _ in range(forwarder._SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS):
+            state = await forwarder._forward_available_status_events(
+                client=client,
+                session_id="conv_child",
+                bridge_dir=bridge_dir,
+                state=state,
+                retry_tracker=tracker,
+                dedupe=forwarder._ForwardDedupeState(),
+                task_subjects={},
+                task_statuses={},
+                task_order=[],
+                response_id="resp_child",
+            )
+
+    assert [data["status"] for data in posted] == [
+        "idle"
+    ] * forwarder._SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS
+    assert state.event_cursor == 1
+
+
 @pytest.mark.asyncio
 async def test_subagent_batch_backoff_survives_new_tail_items(
     tmp_path: Path,

@@ -4737,8 +4737,31 @@ def _require_external_status_forward(
             f"Runner rejected external_session_status {status!r} for "
             f"sub-agent session {session_id!r} with status "
             f"{runner_result.status_code}{suffix}",
-            code=ErrorCode.RUNNER_UNAVAILABLE,
+            code=(
+                ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED
+                if _is_subagent_delivery_not_confirmed_result(runner_result)
+                else ErrorCode.RUNNER_UNAVAILABLE
+            ),
         )
+
+
+def _is_subagent_delivery_not_confirmed_result(runner_result: _RunnerForwardResult) -> bool:
+    """
+    Return whether the runner refused a terminal status for want of a parent inbox.
+
+    :param runner_result: HTTP result returned by the runner.
+    :returns: ``True`` for a 503 whose JSON body carries
+        ``error == "subagent_delivery_not_confirmed"``.
+    """
+    if runner_result.status_code != 503:
+        return False
+    try:
+        body = json.loads(runner_result.body)
+    except ValueError:
+        return False
+    return (
+        isinstance(body, dict) and body.get("error") == ErrorCode.SUBAGENT_DELIVERY_NOT_CONFIRMED
+    )
 
 
 def _require_collaboration_mode_forward(
