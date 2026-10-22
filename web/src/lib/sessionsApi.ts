@@ -1293,6 +1293,32 @@ export async function fetchSessionItemsPage(
   return { items: [...page.data].reverse(), hasMore: page.has_more };
 }
 
+/** One item that matched a find-in-chat query. */
+export interface SessionSearchMatch {
+  id: string;
+  response_id: string;
+}
+
+/**
+ * Every item in a session whose text contains `query`, oldest first.
+ *
+ * Ids only (the find bar pages history in up to a match before scrolling to
+ * it); capped server-side, with `hasMore` reporting a truncated list.
+ */
+export async function searchSessionItems(
+  sessionId: string,
+  query: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<{ matches: SessionSearchMatch[]; hasMore: boolean }> {
+  const params = new URLSearchParams({ q: query });
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/search?${params}`,
+    { signal },
+  );
+  const page = await readJsonOrThrow<{ data: SessionSearchMatch[]; has_more: boolean }>(res);
+  return { matches: page.data, hasMore: page.has_more };
+}
+
 /**
  * Build a portable JSONL export of a session's transcript.
  *

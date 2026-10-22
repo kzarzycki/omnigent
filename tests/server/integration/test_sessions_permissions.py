@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from omnigent.entities import MessageData, NewConversationItem
 from omnigent.host.frames import HostHelloFrame
 from omnigent.runtime import inflight_text, session_stream
 from omnigent.runtime.agent_cache import AgentCache
@@ -1196,6 +1197,47 @@ async def test_revoke_nonexistent_grant_returns_204(
 
 
 # ── Cross-session isolation ──────────────────────────────────
+
+
+async def test_session_search_needs_read_access(
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Find-in-chat 404s for a stranger and lists matching item ids for the owner."""
+    agent = await create_test_agent(auth_client, user="bryan")
+    session = await _create_session_as(auth_client, agent["id"], "user-a")
+    appended = SqlAlchemyConversationStore(db_uri).append(
+        session["id"],
+        [
+            NewConversationItem(
+                type="message",
+                response_id=f"resp_{i}",
+                data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
+            )
+            for i, text in enumerate(["say Quuxly", "nothing", "quuxly again"])
+        ],
+    )
+    url = f"/v1/sessions/{session['id']}/search"
+
+    stranger = await auth_client.get(
+        url, params={"q": "quuxly"}, headers={"X-Forwarded-Email": "user-b"}
+    )
+    assert stranger.status_code == 404, stranger.text
+
+    owner = await auth_client.get(
+        url, params={"q": "quuxly"}, headers={"X-Forwarded-Email": "user-a"}
+    )
+    assert owner.status_code == 200, owner.text
+    assert owner.json() == {
+        "data": [
+            {"id": appended[0].id, "response_id": "resp_0"},
+            {"id": appended[2].id, "response_id": "resp_2"},
+        ],
+        "has_more": False,
+    }
+
+    empty = await auth_client.get(url, params={"q": ""}, headers={"X-Forwarded-Email": "user-a"})
+    assert empty.status_code == 422, empty.text
 
 
 async def test_grant_on_one_session_does_not_leak_to_another(
