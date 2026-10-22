@@ -2014,9 +2014,17 @@ def test_list_conversations_search_sets_statement_timeout(
     )
     assert any("statement_timeout" in s.lower() for s in statements), statements
     # A query of three or more characters races the plan with the trigram index
-    # against the plan without bitmap scans. The winner may answer before the
-    # other plan sends its select, so the race is checked at its entry.
-    assert raced_setups == [[(), ("SET LOCAL enable_bitmapscan = off",)]]
+    # against the scan: no bitmap scans, 4 parallel workers. The winner may answer
+    # before the other plan sends its select, so the race is checked at its entry.
+    assert raced_setups == [
+        [
+            (),
+            (
+                "SET LOCAL enable_bitmapscan = off",
+                "SET LOCAL max_parallel_workers_per_gather = 4",
+            ),
+        ]
+    ]
     race = [s for s in statements if s.lstrip().startswith("SELECT conversations.id ")]
     assert race, statements
     # The snippet probe covers one page of ids, so it stays off the
@@ -2031,6 +2039,7 @@ def test_list_conversations_search_sets_statement_timeout(
         conversation_store, lambda: conversation_store.list_conversations(search_query="de")
     )
     assert len(raced_setups) == 1, raced_setups
+    assert any("max_parallel_workers_per_gather = 4" in s for s in short), short
     assert any("enable_bitmapscan = off" in s for s in short), short
 
 
