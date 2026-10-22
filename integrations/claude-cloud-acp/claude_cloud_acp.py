@@ -105,6 +105,10 @@ def access_token() -> str:
     """
     if token := os.environ.get("CLAUDE_CLOUD_TOKEN"):
         return token
+    return _read_login()["accessToken"]
+
+
+def _read_login() -> dict:
     raw = ""
     if sys.platform == "darwin":
         raw = subprocess.run(
@@ -126,7 +130,7 @@ def access_token() -> str:
         raw = path.read_text() if path.exists() else ""
     if not raw:
         raise RuntimeError("no Claude Code login found; run `claude auth login`")
-    return json.loads(raw)["claudeAiOauth"]["accessToken"]
+    return json.loads(raw)["claudeAiOauth"]
 
 
 def _headers() -> dict[str, str]:
@@ -284,6 +288,10 @@ def create_cloud_session(text: str, cwd: str) -> str:
         os.close(master)
 
 
+# Omnigent's host tools act on this machine, not the VM, which has its own shell and files.
+HIDDEN_TOOL_PREFIX = "sys_os_"
+
+
 class McpProxy:
     """A local stdio MCP server, served to the cloud session as an SDK MCP server.
 
@@ -312,7 +320,17 @@ class McpProxy:
                 if method != "notifications/initialized":
                     self._write(message)
                 return {"jsonrpc": "2.0", "result": {}}
-            return self._call(message)
+            name = (message.get("params") or {}).get("name", "")
+            if method == "tools/call" and name.startswith(HIDDEN_TOOL_PREFIX):
+                error = {"code": -32602, "message": f"{name} is not available in a cloud session"}
+                return {"jsonrpc": "2.0", "id": mid, "error": error}
+            reply = self._call(message)
+            if method == "tools/list" and "result" in reply:
+                tools = reply["result"].get("tools") or []
+                reply["result"]["tools"] = [
+                    tool for tool in tools if not tool["name"].startswith(HIDDEN_TOOL_PREFIX)
+                ]
+            return reply
 
     def _start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -627,13 +645,12 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
     if s.cloud_id is None:
         s.cloud_id, text = split_replay(text)
         if s.cloud_id is None:
-            s.cloud_id = create_cloud_session(text, s.cwd)
-            log(f"created {s.cloud_id}")
-            after = 0
-            # ponytail: the first prompt is already running, so its tools may come late.
             if s.mcp:
-                register_mcp(s.cloud_id, s.mcp)
-                s.mcp_registered = True
+                after = _bootstrap(acp_id, s, text)
+            else:
+                s.cloud_id = create_cloud_session(text, s.cwd)
+                log(f"created {s.cloud_id}")
+                after = 0
         else:
             log(f"re-attaching to {s.cloud_id}")
             after, unarchived = _send(s, text)
@@ -679,6 +696,31 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
                 )
             return "cancelled" if s.interrupted else "end_turn"
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
+
+
+# The CLI starts a new session on its first prompt, before servers can be registered.
+# ponytail: a throwaway first turn; it shows in the cloud transcript.
+BOOTSTRAP_PROMPT = "Reply with the single word: ready"
+
+
+def _bootstrap(acp_id: str, s: Session, text: str) -> int:
+    """Create the cloud session, register MCP servers, then post *text*; return its seq."""
+    s.cloud_id = create_cloud_session(BOOTSTRAP_PROMPT, s.cwd)
+    log(f"created {s.cloud_id}")
+    s.follow(0)
+    deadline = time.monotonic() + TURN_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            payload = s.events.get(timeout=1).get("payload") or {}
+        except queue.Empty:
+            continue
+        if payload.get("type") == "env_manager_log":
+            for upd in to_updates(payload)[0]:
+                update(acp_id, upd)
+        elif to_updates(payload)[1]:
+            break
+    after, _ = _send(s, text)
+    return after
 
 
 def _send(s: Session, text: str) -> tuple[int, bool]:
@@ -769,8 +811,9 @@ for line in sys.stdin:
     r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
          "serverInfo": {"name": "echo", "version": "0"}}
     if m["method"] == "tools/list":
-        r = {"tools": [{"name": "echo", "description": "Echo text, tagged with the serving host.",
-             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
+        schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+        r = {"tools": [{"name": n, "description": "Echo text, tagged with the serving host.",
+             "inputSchema": schema} for n in ("echo", "sys_os_shell")]}
     elif m["method"] == "tools/call":
         t = m["params"]["arguments"].get("text", "")
         t = f"echo: {t} (served by {socket.gethostname()})"
@@ -846,6 +889,11 @@ def self_check() -> None:
     call = {"name": "echo", "arguments": {"text": "hi"}}
     reply = proxy.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": call})
     assert reply["id"] == 5 and reply["result"]["content"][0]["text"].startswith("echo: hi"), reply
+    listed = proxy.handle({"jsonrpc": "2.0", "id": 6, "method": "tools/list"})
+    assert [t["name"] for t in listed["result"]["tools"]] == ["echo"], listed
+    hidden = {"name": "sys_os_shell", "arguments": {}}
+    refused = proxy.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": hidden})
+    assert refused["id"] == 7 and "error" in refused, refused
     proxy.proc.kill()
     answers: list[tuple] = []
     globals()["respond"] = lambda *args: answers.append(args[1:])

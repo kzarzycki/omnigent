@@ -15,7 +15,7 @@ while the conversation shows up in Omnigent.
 | Resume | The first answer ends with a `cloud session: https://claude.ai/code/<id>` line. A new bridge process that gets Omnigent's replayed transcript finds that line and sends only the latest message to the same cloud session. A respawned bridge prompted with an old ACP session id finds the cloud session in `$XDG_STATE_HOME/claude-cloud-acp/sessions.json`. A prompt that starts with that line adopts an existing cloud session |
 | Archived session | A send that gets `409 session_not_active` unarchives the session and resends. History comes back, but files and the repo checkout from before the archive are gone. An idle or stopped VM re-provisions by itself on the next send |
 | Transcript | `GET /v1/code/sessions/{id}/events/stream` (server-sent events), from the sequence number of the posted message, reconnecting from the last event seen; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
-| MCP servers | Each stdio server in `session/new.mcpServers`, Omnigent's own tools among them, runs on this host. The bridge registers it in the cloud session as an SDK MCP server (`mcp_set_servers`) and answers the CLI's `mcp_message` requests from that process. The traffic goes VM → Anthropic → bridge, so the VM needs no route to this host or the tailnet. A new bridge re-registers the servers on its first turn |
+| MCP servers | Each stdio server in `session/new.mcpServers`, Omnigent's own tools among them, runs on this host. The bridge registers it in the cloud session as an SDK MCP server (`mcp_set_servers`) and answers the CLI's `mcp_message` requests from that process. The traffic goes VM → Anthropic → bridge, so the VM needs no route to this host or the tailnet. A new bridge re-registers the servers on its first turn. Omnigent's `sys_os_*` tools are hidden: they act on this host, and the VM has its own shell and files. When servers are configured, a new session is created with a one-word bootstrap prompt, so the servers are registered before the real first prompt |
 | Permission requests | A `can_use_tool` request for a tool of a served MCP server is allowed; Omnigent applies its own policy when its relay runs the tool. Any other is denied, since nothing here can approve it |
 | Provisioning steps | `env_manager_log` lines, shown as thoughts |
 
@@ -83,8 +83,11 @@ and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
   public API, so they can change without notice. Sends go out unsigned and
   without a trusted-device token; an account whose sessions require either gets
   the send refused.
-- **MCP on the first turn:** a new cloud session starts its first prompt
-  before the bridge can register servers, so their tools may arrive mid-turn.
+- **Bootstrap turn:** with MCP servers, each new cloud session's transcript
+  starts with the bridge's `ready` exchange.
+- **Child sessions:** an agent spec with `spawn: true` gives the cloud agent
+  `sys_session_create` and `sys_session_send`; `config_path` is resolved on the
+  Omnigent host.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.

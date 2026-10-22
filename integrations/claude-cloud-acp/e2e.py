@@ -237,16 +237,11 @@ def scenario_mcp(cwd: str) -> None:
     ]
     ask = "Call the echo tool of the echo MCP server with text '{}' and quote its result exactly."
     first = Client(cwd, mcp=echo)
-    first.prompt("Reply with the single word: ready")
-    first.prompt(ask.format("hello from cloud"))
+    first.prompt(ask.format("hello from cloud"))  # the first turn already has the tool
     first.close()
     print("\n-- bridge gone; a new one re-registers the server from this host --")
     second = Client(cwd, mcp=echo)
-    cloud_id = first.cloud_url.rsplit("/", 1)[1]
-    history = (
-        f"user: Reply with the single word: ready\nassistant: ready\n\n{bridge.MARKER}{cloud_id}\n"
-        f"user: {ask.format('hello from cloud')}\nassistant: {first.answer.strip()}"
-    )
+    history = f"user: {ask.format('hello from cloud')}\nassistant: {first.answer.strip()}"
     second.prompt(REPLAY.format(history=history, latest=ask.format("second bridge")))
     second.close()
     host = socket.gethostname()
