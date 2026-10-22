@@ -34,6 +34,7 @@ from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_RE
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
+from omnigent.stores.conversation_store import FIND_WINDOW_ITEMS
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -1199,13 +1200,14 @@ async def test_revoke_nonexistent_grant_returns_204(
 # ── Cross-session isolation ──────────────────────────────────
 
 
-async def test_session_search_needs_read_access(
+async def test_session_search_needs_read_access_and_pages_older_windows_by_cursor(
     auth_client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
-    """Find-in-chat 404s for a stranger and lists matching item ids for the owner."""
+    """Find-in-chat 404s for a stranger; the owner walks the chat newest window first."""
     agent = await create_test_agent(auth_client, user="bryan")
     session = await _create_session_as(auth_client, agent["id"], "user-a")
+    texts = ["say Quuxly", "nothing", "quuxly again"] + ["filler"] * (FIND_WINDOW_ITEMS - 1)
     appended = SqlAlchemyConversationStore(db_uri).append(
         session["id"],
         [
@@ -1214,29 +1216,37 @@ async def test_session_search_needs_read_access(
                 response_id=f"resp_{i}",
                 data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
             )
-            for i, text in enumerate(["say Quuxly", "nothing", "quuxly again"])
+            for i, text in enumerate([*texts, "QUUXLY newest"])
         ],
     )
     url = f"/v1/sessions/{session['id']}/search"
+    owner = {"X-Forwarded-Email": "user-a"}
 
     stranger = await auth_client.get(
         url, params={"q": "quuxly"}, headers={"X-Forwarded-Email": "user-b"}
     )
     assert stranger.status_code == 404, stranger.text
 
-    owner = await auth_client.get(
-        url, params={"q": "quuxly"}, headers={"X-Forwarded-Email": "user-a"}
-    )
-    assert owner.status_code == 200, owner.text
-    assert owner.json() == {
+    newest = await auth_client.get(url, params={"q": "quuxly"}, headers=owner)
+    assert newest.status_code == 200, newest.text
+    assert newest.json() == {
+        "data": [{"id": appended[-1].id, "response_id": appended[-1].response_id}],
+        "has_more": True,
+        "next_before": 3,
+    }
+
+    older = await auth_client.get(url, params={"q": "quuxly", "before": 3}, headers=owner)
+    assert older.status_code == 200, older.text
+    assert older.json() == {
         "data": [
             {"id": appended[0].id, "response_id": "resp_0"},
             {"id": appended[2].id, "response_id": "resp_2"},
         ],
         "has_more": False,
+        "next_before": None,
     }
 
-    empty = await auth_client.get(url, params={"q": ""}, headers={"X-Forwarded-Email": "user-a"})
+    empty = await auth_client.get(url, params={"q": ""}, headers=owner)
     assert empty.status_code == 422, empty.text
 
 
