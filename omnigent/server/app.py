@@ -159,6 +159,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.util.uuid import normalize_uuid
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
@@ -502,6 +503,57 @@ class BasePathMiddleware:
                     if raw_path.startswith(prefix):
                         scope["raw_path"] = raw_path[len(prefix) :] or b"/"
                 scope["root_path"] = self.base_path
+        await self.app(scope, receive, send)
+
+
+# Session-id positions in API paths: ``/v1/sessions/<id>`` and its
+# ``/subscriptions/<id>``. Other segments may be free-form (file paths, names).
+_SESSION_ID_PATH_RE = re.compile(r"^(/v1/sessions/)([^/]+)(?:(/subscriptions/)([^/]+))?")
+
+
+def canonicalize_session_path(path: str) -> str:
+    """Rewrite session ids in an API path to the bare hex the stores return.
+
+    The stores resolve any spelling :func:`uuid_to_bytes` accepts (bare,
+    uppercase, dashed, ``conv_``-prefixed) to one row but return bare hex, so a
+    handler comparing or keying on the raw URL id would treat one session as two.
+
+    :param path: A request path, e.g. ``"/v1/sessions/conv_<hex>/items"``.
+    :returns: The path with each session id canonical, e.g.
+        ``"/v1/sessions/<hex>/items"``; ids that don't parse are left unchanged.
+    """
+
+    def _canonical(match: re.Match[str]) -> str:
+        sessions, session_id, subscriptions, target_id = match.groups()
+        rewritten = f"{sessions}{normalize_uuid(session_id)}"
+        if subscriptions is not None:
+            rewritten += f"{subscriptions}{normalize_uuid(target_id)}"
+        return rewritten
+
+    return _SESSION_ID_PATH_RE.sub(_canonical, path, count=1)
+
+
+class SessionIdPathMiddleware:
+    """Canonicalize session ids in request paths before routing.
+
+    :param app: The wrapped ASGI application.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            canonical = canonicalize_session_path(path)
+            if canonical != path:
+                scope = dict(scope)
+                scope["path"] = canonical
+                raw_path = scope.get("raw_path")
+                if isinstance(raw_path, (bytes, bytearray)):
+                    scope["raw_path"] = canonicalize_session_path(
+                        raw_path.decode("latin-1")
+                    ).encode("latin-1")
         await self.app(scope, receive, send)
 
 
@@ -4584,6 +4636,7 @@ def create_app(
 
     app.add_middleware(AccountAuthorityMiddleware, auth_provider=auth_provider)
     app.add_middleware(PublicSharingPolicyMiddleware, max_level=app.state.public_sharing_max_level)
+    app.add_middleware(SessionIdPathMiddleware)
     if resolved_base_path:
         # Added last → outermost ASGI layer, so the prefix is stripped before
         # routing and every other middleware sees canonical `/v1/...` paths.
