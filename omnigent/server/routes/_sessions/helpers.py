@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import secrets
@@ -8162,9 +8163,29 @@ class _SessionEventDispatchResult:
     pending_id: str | None
 
 
+def _relay_item_stable_id(session_id: str, item: Mapping[str, Any]) -> str | None:
+    """
+    Return the store id a relayed output item keeps when its frame is re-delivered.
+
+    A dropped runner stream can hand the relay a frame it already persisted, so
+    the item's row id derives from the item itself: a message's id, or a tool
+    item's ``call_id``. The store's stable-id probe then drops the second copy.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param item: The ``response.output_item.done`` item.
+    :returns: A 32-hex stable id, or ``None`` when the item carries no key.
+    """
+    item_type = item.get("type")
+    key = item.get("id") if item_type == "message" else item.get("call_id")
+    if not isinstance(item_type, str) or not isinstance(key, str) or not key:
+        return None
+    return hashlib.sha256(f"relay:{session_id}:{item_type}:{key}".encode()).hexdigest()[:32]
+
+
 def _extract_persistent_item_from_sse(
     event: dict[str, Any],
     response_id: str | None = None,
+    session_id: str | None = None,
 ) -> NewConversationItem | None:
     """
     Extract a persistable conversation item from a runner SSE event.
@@ -8185,6 +8206,8 @@ def _extract_persistent_item_from_sse(
         the same turn share this id so the web UI can group them
         into a single bubble and pair function_calls with their
         outputs. Falls back to a fresh uuid when unavailable.
+    :param session_id: When given, an output item gets the stable id from
+        :func:`_relay_item_stable_id`, so a re-delivered frame persists once.
     :returns: A ``NewConversationItem`` ready for
         ``conv_store.append()``, or ``None``.
     """
@@ -8234,6 +8257,7 @@ def _extract_persistent_item_from_sse(
         type=item_type,
         response_id=response_id or f"turn_{uuid.uuid4().hex}",
         data=data,
+        stable_id=_relay_item_stable_id(session_id, item) if session_id is not None else None,
     )
 
 
@@ -8617,12 +8641,15 @@ async def _flush_relay_text(
     deny_reason: str | None = None,
     evaluate_response_phase: bool = False,
     turn_final: bool = False,
+    stable_id: str | None = None,
 ) -> None:
     """
     Persist buffered assistant text as a message item and clear the buffer.
 
     Scaffold harnesses (claude-sdk) stream text deltas with no per-message
-    ``output_item.done``, so the relay buffers them. Flushing at each
+    ``output_item.done``. The runner closes each segment with a message item
+    the relay persists here; a runner that predates it leaves the relay to
+    buffer the deltas itself. Flushing at each
     text→function_call boundary (not only at ``response.completed``) keeps
     the persisted transcript interleaved — ``[text, tool, text, tool]`` —
     instead of collapsing a turn's narration into one block after its tool
@@ -8681,6 +8708,8 @@ async def _flush_relay_text(
         turn. Completion policies can use it to skip intermediate and
         unsuccessful-turn segments. Content policies should check every
         segment. Empty segments never invoke policies.
+    :param stable_id: Row id of a runner-closed segment, so a re-delivered
+        segment persists once and is not published again.
     """
     if not text_acc:
         return
@@ -8730,6 +8759,7 @@ async def _flush_relay_text(
                     "content": [{"type": "output_text", "text": text}],
                 },
             ),
+            stable_id=stable_id,
         )
         persisted = await asyncio.to_thread(conversation_store.append, session_id, [item])
     except Exception:  # noqa: BLE001
@@ -8746,6 +8776,8 @@ async def _flush_relay_text(
     # stale replay together.
     text_acc.clear()
     inflight_text.reset_text(session_id)
+    if persisted[0].deduplicated:
+        return
     # Publish the persisted item so live clients learn its store-assigned
     # id and stamp it onto the already-rendered streamed text (see the
     # docstring). Ordered before the boundary item / terminal event the
@@ -12277,6 +12309,7 @@ __all__ = [
     "_registered_runner_id",
     "_reject_reserved_cost_control_label_seed",
     "_reject_server_reserved_label_seed",
+    "_relay_item_stable_id",
     "_relay_persist",
     "_relay_persist_error_once",
     "_remove_session_worktree_best_effort",
