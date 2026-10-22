@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
-from contextlib import suppress
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
 
@@ -27,6 +28,7 @@ from sqlalchemy import (
     tuple_,
     update,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import QueryableAttribute, Session, load_only
 from sqlalchemy.sql.selectable import Subquery
 
@@ -156,17 +158,92 @@ def _encode_session_state(
     return json.dumps(payload, separators=(",", ":"))
 
 
-# Server-side deadline (ms) for the content-search query in
-# ``list_conversations``. Session search matches ``LOWER(search_text) LIKE
-# '%q%'`` across ``conversation_items``; that is index-backed by the pg_trgm
-# GIN index (migration ``d5e9f1a2b3c4``), but if the index is ever missing the
-# scan can run unbounded and — since the query runs in a worker thread — a
-# client disconnect does not stop it. ``SET LOCAL statement_timeout`` caps it so
-# a degraded deployment fails the search fast instead of pinning a DB
-# connection. Postgres-only; ``SET LOCAL`` reverts on commit so it never leaks
-# to the connection's next pooled use. Longer than the client's own
-# ``SEARCH_FETCH_TIMEOUT_MS`` so the browser gives up first on the happy path.
+# Server-side deadline (ms) for a whole content search in ``list_conversations``
+# (list and snippet statements together). A client disconnect does not stop a
+# worker-thread query, so ``SET LOCAL statement_timeout`` caps each statement at
+# what is left of it. Shorter than the browser's ``SEARCH_FETCH_TIMEOUT_MS``, so
+# the server's answer (504 ``search_timeout``) always arrives first.
 _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
+
+# Budget (ms) for the first, index-allowed try of the content-search list query.
+# The pg_trgm index (``sa2b3c4d5e6f``) answers a word with rare trigrams at once,
+# but Postgres estimates every ILIKE at a few rows, so for a word built from
+# common trigrams ("station") it also picks the index and rechecks tens of
+# thousands of items, slower than the scan. Past this budget the query reruns
+# without bitmap scans: early stop for common words, a scan otherwise.
+_SEARCH_INDEX_ATTEMPT_MS = 2_000
+
+
+def _sqlstate(error: OperationalError) -> str | None:
+    """Return the SQLSTATE of a DBAPI error, across psycopg and psycopg2."""
+    return getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
+
+
+def _set_statement_timeout(session: Session, deadline: float, cap_ms: int | None = None) -> None:
+    """
+    Cap the next statements at what is left before ``deadline`` (Postgres).
+
+    :param session: The active session; ``SET LOCAL`` reverts at its commit.
+    :param deadline: ``time.monotonic()`` value the search must finish by.
+    :param cap_ms: Optional lower cap, e.g. ``_SEARCH_INDEX_ATTEMPT_MS``.
+    """
+    remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+    if cap_ms is not None:
+        remaining_ms = min(remaining_ms, cap_ms)
+    # SET takes no bind parameter; the value is an int computed here.
+    session.execute(text(f"SET LOCAL statement_timeout = {remaining_ms}"))
+
+
+def _execute_content_search(
+    session: Session, stmt: Any, deadline: float, try_index: bool = True
+) -> list[Any]:
+    """
+    Run a content-search statement on Postgres: index allowed first, within
+    ``_SEARCH_INDEX_ATTEMPT_MS``; past that, again without bitmap scans until
+    ``deadline``. Leaves bitmap scans off for the rest of the transaction.
+
+    :param session: The active session, inside its transaction.
+    :param stmt: The select to run; its scalars are returned.
+    :param deadline: ``time.monotonic()`` value the search must finish by.
+    :param try_index: False skips the index try, e.g. for a query shorter than
+        one trigram, which the index cannot narrow.
+    :returns: The statement's scalar rows.
+    """
+    rows: list[Any] | None = None
+    if try_index:
+        try:
+            with session.begin_nested():
+                _set_statement_timeout(session, deadline, _SEARCH_INDEX_ATTEMPT_MS)
+                rows = list(session.execute(stmt).scalars().all())
+        except OperationalError as error:
+            if _sqlstate(error) != "57014" or time.monotonic() >= deadline:
+                raise
+    session.execute(text("SET LOCAL enable_bitmapscan = off"))
+    if rows is None:
+        _set_statement_timeout(session, deadline)
+        rows = list(session.execute(stmt).scalars().all())
+    return rows
+
+
+@contextmanager
+def _search_timeout_as_error(is_search: bool) -> Iterator[None]:
+    """
+    Turn Postgres cancelling a search at ``statement_timeout`` (SQLSTATE 57014)
+    into the ``search_timeout`` error, so callers can tell it from a failure.
+
+    :param is_search: Whether the wrapped query is a content search; a cancel
+        anywhere else passes through unchanged.
+    """
+    try:
+        yield
+    except OperationalError as error:
+        if is_search and _sqlstate(error) == "57014":
+            raise OmnigentError(
+                "Session search took too long; try a longer or more specific query.",
+                code=ErrorCode.SEARCH_TIMEOUT,
+            ) from error
+        raise
+
 
 # Upper bound on rows fetched per SQL statement when listing conversation
 # items. A deployed managed-Postgres backend failed one oversized read of a
@@ -671,10 +748,9 @@ def _fetch_search_snippets(
     # workspace_id leads the (workspace_id, conversation_id, position) index.
     # Both the aggregate and the join-back below must include it or Postgres
     # can't use that index and falls back to a full table scan of every item.
-    # ILIKE on the raw column rather than ``lower(search_text) LIKE`` for the
-    # same reason as the content match in ``list_conversations``: the lower()
-    # form matches the pg_trgm index expression, and the planner then scans the
-    # whole workspace even though this is already scoped to one page of ids.
+    # ILIKE on the raw column, as in ``list_conversations``. On Postgres the
+    # caller turns bitmap scans off first: this is scoped to one page of ids, and
+    # the pg_trgm index would recheck matches across the whole workspace.
     match_pred = and_(
         SqlConversationItem.workspace_id == workspace_id,
         SqlConversationItem.conversation_id.in_(conversation_ids),
@@ -2954,22 +3030,19 @@ class SqlAlchemyConversationStore(ConversationStore):
                         accessible_set if accessible_set is not None else owned_set or set()
                     )
 
-        with self._conv_session("list_conversations") as session:
+        with (
+            _search_timeout_as_error(bool(search_query)),
+            self._conv_session("list_conversations") as session,
+        ):
             # Bound the content-search scan server-side (Postgres only). SET
             # LOCAL scopes to this transaction and reverts on commit, so it
             # can't leak to the connection's next pooled use. See
             # _SEARCH_STATEMENT_TIMEOUT_MS. A worker-thread query is not stopped
             # by a client disconnect, so this is the only server-side bound.
-            is_postgres = session.bind is not None and is_postgresql_family(
-                session.bind.dialect.name
-            )
-            if search_query and is_postgres:
-                # Postgres SET does not accept a bind parameter, so the value is
-                # inlined. Safe from injection: it is an int module constant, not
-                # caller input — coerced through int() to keep it that way.
-                session.execute(
-                    text(f"SET LOCAL statement_timeout = {int(_SEARCH_STATEMENT_TIMEOUT_MS)}")
-                )
+            dialect = session.bind.dialect.name if session.bind is not None else ""
+            search_deadline = time.monotonic() + _SEARCH_STATEMENT_TIMEOUT_MS / 1000
+            if search_query and is_postgresql_family(dialect):
+                _set_statement_timeout(session, search_deadline)
 
             stmt = select(SqlConversation).where(
                 SqlConversation.workspace_id == current_workspace_id()
@@ -3069,19 +3142,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                 pattern = f"%{search_query.lower()}%"
                 title_match = func.lower(SqlConversation.title).like(pattern)
                 # Correlated EXISTS rather than ``id IN (SELECT ...)``: the IN
-                # form is uncorrelated, so the match set is built for the WHOLE
-                # workspace before the outer query discards every row the caller
-                # cannot see. Correlating on conversation_id keeps each probe on
-                # the (workspace_id, conversation_id) index and lets it stop at
-                # the first matching item per conversation.
+                # form builds the match set for the WHOLE workspace first.
+                # Correlated, a probe can use the (workspace_id, conversation_id)
+                # btree and stop at the first match, or the planner can take the
+                # pg_trgm index on raw ``search_text`` for a rare word; see
+                # _execute_content_search for how a wrong pick is bounded.
                 # ``ILIKE`` on the raw column, NOT ``lower(search_text) LIKE``:
-                # the latter matches the ``lower(search_text)`` pg_trgm index
-                # expression, and the planner then prefers that index — scanning
-                # every item in the workspace out of a multi-GB index that does
-                # not fit in shared_buffers. ILIKE is the same case-insensitive
-                # match but cannot use that index, so the probe stays on the
-                # (workspace_id, conversation_id) btree above. Do not "simplify"
-                # this back to lower(...) LIKE; see the covering test.
+                # only the raw column is indexed; see the covering test.
                 content_match = (
                     select(SqlConversationItem.conversation_id)
                     .where(
@@ -3208,7 +3275,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                 sort_fn(sort_col),
                 sort_fn(self._tiebreaker_col),  # insertion-order tiebreaker for timestamp ties
             ).limit(limit + 1)
-            rows = list(session.execute(stmt).scalars().all())
+            if search_query and dialect == "postgresql":
+                rows = _execute_content_search(
+                    session, stmt, search_deadline, try_index=len(search_query) >= 3
+                )
+                # The snippet probe is scoped to one page of ids: keep it on the
+                # btree (bitmap scans stay off) within what is left of the deadline.
+                _set_statement_timeout(session, search_deadline)
+            else:
+                rows = list(session.execute(stmt).scalars().all())
             has_more = len(rows) > limit
             if has_more:
                 rows = rows[:limit]
