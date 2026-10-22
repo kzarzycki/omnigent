@@ -1,5 +1,9 @@
 import { SidebarDataContext } from "./useSidebarData";
-import { PINNED_CONVERSATIONS_KEY, type PinnedConversationsResult } from "./useConversations";
+import {
+  PINNED_CONVERSATIONS_KEY,
+  type PinnedConversationsResult,
+  type ProjectSummary,
+} from "./useConversations";
 // App-level wiring for the `WS /v1/sessions/updates` push stream.
 //
 // Mounted once near the app root. It:
@@ -35,6 +39,7 @@ import {
   insertNewRowsIntoPages,
   mergeItemsIntoPages,
   nullsToUndefined,
+  PROJECT_FOLDER_FILTERS,
   PROJECT_LABEL_KEY,
   removeIdsFromPages,
 } from "@/lib/sessionListCache";
@@ -47,27 +52,54 @@ import { isTempConvId } from "@/lib/tempConversationId";
 // flurry of cache writes a single frame can trigger.
 const DEBOUNCE_MS = 250;
 
-// A project folder's ["project-sessions", <name>] query is always the
-// non-archived, unsearched slice of that project (see useProjectSessions).
-// Live frames overlay those caches with these fixed filters so archived rows
-// drop out the same way they do from the default sidebar list.
-const PROJECT_FOLDER_FILTERS = { searchQuery: "", includeArchived: false } as const;
+/**
+ * Project folders (`["project-sessions", <name>]`) a frame needs refetched.
+ * `"all"` when a filed session's folder name can't be resolved.
+ */
+type FolderRefetch = Set<string> | "all";
+
+function addFolderRefetch(target: FolderRefetch, more: FolderRefetch): FolderRefetch {
+  if (target === "all" || more === "all") return "all";
+  for (const name of more) target.add(name);
+  return target;
+}
+
+/**
+ * Name of the project folder a wire item is filed in: the cached `["projects"]`
+ * row for its `project_id`, else its `omni_project` label.
+ *
+ * @returns The folder name, `null` when unfiled, or `undefined` when filed in a
+ *   project whose name isn't known yet.
+ */
+function folderNameForItem(
+  queryClient: QueryClient,
+  item: SessionListWireItem,
+): string | null | undefined {
+  const label = item.labels?.[PROJECT_LABEL_KEY];
+  if (item.project_id) {
+    const projects = queryClient.getQueryData<ProjectSummary[]>(["projects"]);
+    return (
+      projects?.find((project) => project.id === item.project_id)?.name ?? (label || undefined)
+    );
+  }
+  return label || null;
+}
 
 /**
  * Overlay wire items onto every cached `["conversations", ...]` variant.
  *
  * @param queryClient - The app QueryClient.
  * @param items - Wire items from a snapshot/changed frame.
- * @returns Ids not found in any cached page and whether any patched row
- *   needs a server refetch to preserve filtered-query membership or sort
- *   order.
+ * @returns Ids not found in any cached page, whether any patched row needs a
+ *   global list refetch to preserve filtered-query membership or sort order,
+ *   and the project folders whose membership the frame may have changed.
  */
 function applyItemsToCache(
   queryClient: QueryClient,
   items: SessionListWireItem[],
   activeId: string | undefined,
   viewerId?: string | null,
-): { missingIds: string[]; needsRefetch: boolean } {
+): { missingIds: string[]; needsRefetch: boolean; folders: FolderRefetch } {
   // Frames are full rows with explicit nulls; convert null → undefined so a
   // cleared field overlays the cache in the same shape GET /v1/sessions
   // produces (absent), without tripping the permission_level === null sentinel.
@@ -80,7 +112,9 @@ function applyItemsToCache(
     );
   }
   const foundAnywhere = new Set<string>();
+  const movedIds = new Set<string>();
   let needsRefetch = false;
+  let folders: FolderRefetch = new Set<string>();
   const entries = queryClient.getQueriesData<ConversationsInfiniteData>({
     queryKey: ["conversations"],
   });
@@ -90,9 +124,11 @@ function applyItemsToCache(
     const {
       data: merged,
       found,
+      movedIds: movedHere,
       needsRefetch: queryNeedsRefetch,
     } = mergeItemsIntoPages(data, itemsById, filters, activeId);
     for (const id of found) foundAnywhere.add(id);
+    for (const id of movedHere) movedIds.add(id);
     if (queryNeedsRefetch) needsRefetch = true;
     // Surface a brand-new watched session (a create here or elsewhere, a share)
     // at the top now, instead of after the debounced refetch (which lags the
@@ -119,9 +155,8 @@ function applyItemsToCache(
   // Each project folder fetches its own ["project-sessions", <name>] list, so
   // streamed field updates (pending_elicitations_count → "Needs response",
   // status, runner_online, …) must overlay those caches too — otherwise a
-  // filed session's row stays frozen at fetch time. Folders are non-archived,
-  // unsearched lists; an archived/label-changed row converges via the
-  // debounced ["project-sessions"] invalidation the caller schedules.
+  // filed session's row stays frozen at fetch time. Only a folder whose
+  // membership changed (archived, moved out) is refetched.
   const projectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
     queryKey: ["project-sessions"],
   });
@@ -129,10 +164,12 @@ function applyItemsToCache(
     const {
       data: next,
       found,
+      movedIds: movedHere,
       needsRefetch: queryNeedsRefetch,
     } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS, activeId);
     for (const id of found) foundAnywhere.add(id);
-    if (queryNeedsRefetch) needsRefetch = true;
+    for (const id of movedHere) movedIds.add(id);
+    if (queryNeedsRefetch) folders = addFolderRefetch(folders, new Set([key[1] as string]));
     if (next !== data) queryClient.setQueryData(key, next);
   }
   queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, (previous) => {
@@ -157,10 +194,18 @@ function applyItemsToCache(
       .filter((row) => !row.archived);
     return changed ? { ...previous, conversations } : previous;
   });
-  return {
-    missingIds: [...itemsById.keys()].filter((id) => !foundAnywhere.has(id)),
-    needsRefetch,
-  };
+  const missingIds = [...itemsById.keys()].filter((id) => !foundAnywhere.has(id));
+  // A new or moved session joins the folder it is now filed in. The active
+  // chat lands in missingIds before the first list fetch, and sub-agent
+  // children never appear in folders.
+  for (const id of [...missingIds.filter((missingId) => missingId !== activeId), ...movedIds]) {
+    const item = itemsById.get(id)!;
+    if (item.archived || item.parent_session_id) continue;
+    const name = folderNameForItem(queryClient, item);
+    if (name === null) continue;
+    folders = addFolderRefetch(folders, name === undefined ? "all" : new Set([name]));
+  }
+  return { missingIds, needsRefetch, folders };
 }
 
 /**
@@ -168,11 +213,15 @@ function applyItemsToCache(
  *
  * @param queryClient - The app QueryClient.
  * @param ids - Conversation ids to evict.
- * @returns `true` when at least one cached page changed.
+ * @returns Whether a global list changed, and the project folders that did.
  */
-function removeIdsFromCache(queryClient: QueryClient, ids: string[]): boolean {
+function removeIdsFromCache(
+  queryClient: QueryClient,
+  ids: string[],
+): { removedFromLists: boolean; folders: Set<string> } {
   const idSet = new Set(ids);
-  let removedAny = false;
+  let removedFromLists = false;
+  const folders = new Set<string>();
   // Both the global lists and each project folder's own list (same page shape).
   for (const queryKey of [["conversations"], ["project-sessions"]]) {
     const entries = queryClient.getQueriesData<ConversationsInfiniteData>({ queryKey });
@@ -180,11 +229,12 @@ function removeIdsFromCache(queryClient: QueryClient, ids: string[]): boolean {
       const { data: next, removed } = removeIdsFromPages(data, idSet);
       if (removed) {
         queryClient.setQueryData(key, next);
-        removedAny = true;
+        if (key[0] === "project-sessions") folders.add(key[1] as string);
+        else removedFromLists = true;
       }
     }
   }
-  return removedAny;
+  return { removedFromLists, folders };
 }
 
 /**
@@ -318,23 +368,59 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     }
 
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleInvalidate = () => {
+    let pendingLists = false;
+    let pendingFolders: FolderRefetch = new Set<string>();
+    let staleWhileHidden = false;
+    const scheduleInvalidate = (lists: boolean, folders: FolderRefetch) => {
+      pendingLists ||= lists;
+      pendingFolders = addFolderRefetch(pendingFolders, folders);
       if (invalidateTimer !== null) return;
       invalidateTimer = setTimeout(() => {
         invalidateTimer = null;
-        void queryClient.invalidateQueries({
-          queryKey: ["conversations"],
-          predicate: (query) => query.meta?.snapshot !== true,
-        });
-        // Converge each project folder's own list too (new/archived/relabeled
-        // members the local field-patch can't place).
-        void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+        // A hidden tab only marks lists stale; they refetch once on return.
+        const hidden = document.visibilityState === "hidden";
+        if (hidden) staleWhileHidden = true;
+        const refetch = hidden ? { refetchType: "none" as const } : {};
+        if (pendingLists) {
+          void queryClient.invalidateQueries({
+            queryKey: ["conversations"],
+            predicate: (query) => query.meta?.snapshot !== true,
+            ...refetch,
+          });
+        }
+        // Converge only the project folders whose members the local
+        // field-patch can't place (new, archived, moved).
+        const folderKeys =
+          pendingFolders === "all"
+            ? [["project-sessions"]]
+            : [...pendingFolders].map((name) => ["project-sessions", name]);
+        for (const queryKey of folderKeys) {
+          void queryClient.invalidateQueries({ queryKey, ...refetch });
+        }
         // Another client archiving/relabeling/deleting can add or remove a
         // project from the Archived view's picker; only local mutations
         // invalidate this scan otherwise.
-        void queryClient.invalidateQueries({ queryKey: ["archived-project-names"] });
+        void queryClient.invalidateQueries({ queryKey: ["archived-project-names"], ...refetch });
+        pendingLists = false;
+        pendingFolders = new Set<string>();
       }, DEBOUNCE_MS);
     };
+    const refetchStaleOnVisible = () => {
+      if (document.visibilityState === "hidden" || !staleWhileHidden) return;
+      staleWhileHidden = false;
+      for (const queryKey of [
+        ["conversations"],
+        ["project-sessions"],
+        ["archived-project-names"],
+      ]) {
+        void queryClient.refetchQueries({
+          queryKey,
+          type: "active",
+          predicate: (query) => query.state.isInvalidated,
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", refetchStaleOnVisible);
 
     // See commentsFingerprintsRef: invalidate `["comments", id]` (prefix —
     // covers the per-file variants too) when a session's fingerprint moves.
@@ -377,7 +463,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           refreshProjects();
           void queryClient.invalidateQueries({ queryKey: ["project-config"] });
           return;
-        case "removed":
+        case "removed": {
           for (const id of frame.ids) commentsFingerprintsRef.current.delete(id);
           queryClient.setQueryData<PinnedConversationsResult>(
             PINNED_CONVERSATIONS_KEY,
@@ -391,8 +477,10 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
                   }
                 : previous,
           );
-          if (removeIdsFromCache(queryClient, frame.ids)) scheduleInvalidate();
+          const { removedFromLists, folders } = removeIdsFromCache(queryClient, frame.ids);
+          if (removedFromLists || folders.size > 0) scheduleInvalidate(removedFromLists, folders);
           return;
+        }
         case "snapshot":
         case "changed": {
           syncCommentsFingerprints(frame.items);
@@ -417,7 +505,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           for (const parentId of parentIds) {
             void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(parentId) });
           }
-          const { missingIds, needsRefetch } = applyItemsToCache(
+          const { missingIds, needsRefetch, folders } = applyItemsToCache(
             queryClient,
             frame.items,
             activeIdRef.current,
@@ -426,7 +514,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           // A watched id absent from every page is a new session whose sort
           // position we can't place locally. Membership-affecting deltas
           // (archive/search/connected filters) and updated_at resorting need
-          // the same server-side reconciliation.
+          // the same server-side reconciliation of the global lists.
           //
           // Skip the active session: its updated_at bumps on open before the
           // initial list fetch returns, so it lands in missingIds even though
@@ -435,7 +523,10 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           const sidebarMissingIds = activeIdRef.current
             ? missingIds.filter((id) => id !== activeIdRef.current)
             : missingIds;
-          if (sidebarMissingIds.length > 0 || needsRefetch) scheduleInvalidate();
+          const listsNeedRefetch = sidebarMissingIds.length > 0 || needsRefetch;
+          if (listsNeedRefetch || folders === "all" || folders.size > 0) {
+            scheduleInvalidate(listsNeedRefetch, folders);
+          }
           return;
         }
       }
@@ -473,6 +564,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
       unsubscribeFrames();
       unsubscribeMutations();
       unsubscribeCache();
+      document.removeEventListener("visibilitychange", refetchStaleOnVisible);
       if (invalidateTimer !== null) clearTimeout(invalidateTimer);
       if (watchTimer !== null) clearTimeout(watchTimer);
       sessionUpdatesSocket.stop();
