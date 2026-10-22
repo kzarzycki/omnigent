@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useState, type ReactNode } from "react";
 import { TerminalFirstContextProvider } from "@/shell/TerminalFirstContext";
+import { SESSION_HISTORY_SEEK_PAGE_SIZE } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import {
   useMessageDeepLink,
@@ -178,7 +179,11 @@ describe("useMessageDeepLink", () => {
       wrapper: wrapperFor("/c/conv_1"),
     });
 
-    expect(loadMoreHistory).toHaveBeenCalledOnce();
+    // A jump pages toward its target in large pages, not the scroll-up page.
+    expect(loadMoreHistory).toHaveBeenCalledExactlyOnceWith(
+      undefined,
+      SESSION_HISTORY_SEEK_PAGE_SIZE,
+    );
     expect(scrollSpy).not.toHaveBeenCalled();
     await act(async () => {
       await loadMoreHistory.mock.results[0]?.value;

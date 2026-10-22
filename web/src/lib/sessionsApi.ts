@@ -290,6 +290,12 @@ interface SessionItemsResponseWire {
 export const SESSION_HISTORY_PAGE_SIZE = 20;
 
 /**
+ * Page size when history is paged toward a target (a find match, a deep link,
+ * the first message) rather than by a scroll-up. The server caps `limit` at 1000.
+ */
+export const SESSION_HISTORY_SEEK_PAGE_SIZE = 1000;
+
+/**
  * Convert the snake-case `usage_by_model` wire map into the camelCase
  * `Record<string, ModelUsage>` the store/UI use, or `null` when absent.
  * A `null`/absent value (or `null` token bucket) maps to `null` on the
