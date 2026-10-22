@@ -23,6 +23,8 @@ comments). This file pins only the new BE-2 surface.
 
 from __future__ import annotations
 
+import uuid
+
 import httpx
 import pytest
 
@@ -263,3 +265,60 @@ async def test_delete_session_when_runner_offline(client: httpx.AsyncClient) -> 
 
     get_resp = await client.get(f"/v1/sessions/{conv_id}")
     assert get_resp.status_code == 404
+
+
+def _uuid_spellings(session_id: str) -> list[str]:
+    """Every spelling of *session_id* the store resolves to the same row."""
+    dashed = str(uuid.UUID(session_id))
+    return [f"conv_{session_id}", session_id.upper(), dashed, f"conv_{dashed}"]
+
+
+async def test_session_id_spellings_resolve_like_bare_id(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """Every id spelling the store accepts serves the same session as the bare id.
+
+    The store resolves them all but returns the bare id, so a route that
+    compared the raw URL id against it raised a 500 for the other spellings.
+    """
+    from omnigent.runner.routing import RunnerRouter
+    from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
+    from omnigent.runtime import _globals, set_runner_router
+
+    conv_id = (await create_test_session(client))["id"]
+    prior = _globals._runner_router
+    set_runner_router(
+        RunnerRouter(
+            registry=TunnelRegistry(),
+            conversation_store=SqlAlchemyConversationStore(db_uri),
+        )
+    )
+    try:
+        responses = {
+            spelling: (
+                await client.get(f"/v1/sessions/{spelling}"),
+                await client.get(f"/v1/sessions/{spelling}/items"),
+            )
+            for spelling in _uuid_spellings(conv_id)
+        }
+    finally:
+        set_runner_router(prior)
+
+    for spelling, (snapshot, items) in responses.items():
+        assert snapshot.status_code == 200, (spelling, snapshot.text)
+        assert snapshot.json()["id"] == conv_id
+        assert items.status_code == 200, (spelling, items.text)
+
+
+async def test_session_cannot_subscribe_to_itself_by_another_spelling(
+    client: httpx.AsyncClient,
+) -> None:
+    """A watched-session id spelled differently is still the subscriber itself."""
+    conv_id = (await create_test_session(client))["id"]
+
+    for path_id in (conv_id, f"conv_{conv_id}"):
+        for body_id in _uuid_spellings(conv_id):
+            resp = await client.post(
+                f"/v1/sessions/{path_id}/subscriptions", json={"session_id": body_id}
+            )
+            assert resp.status_code == 400, (path_id, body_id, resp.text)
