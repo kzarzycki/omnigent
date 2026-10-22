@@ -26,6 +26,7 @@ from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_run
 from omnigent.runner.transports.ws_tunnel.diagnostics import OutboundFrame, TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
+    TEXT_SEGMENT_CAPABILITY,
     EventAckFrame,
     EventBatchFrame,
     EventReadyFrame,
@@ -1516,6 +1517,30 @@ async def test_ws_tunnel_loopback_unauthenticated_registers_as_local() -> None:
         await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
         with contextlib.suppress(asyncio.TimeoutError):
             await communicator.wait(timeout=budget(1.0))
+
+
+async def test_event_ready_accepts_text_segments_without_event_ingest() -> None:
+    route = _tunnel_route_app()
+    comm = await _connect_route(route.app, _TUNNEL_PATH)
+    try:
+        await comm.send_input(
+            {
+                "type": "websocket.receive",
+                "text": encode_frame(
+                    HelloFrame(
+                        runner_version="test",
+                        frame_protocol_version=1,
+                        capabilities=[EVENT_INGEST_CAPABILITY, TEXT_SEGMENT_CAPABILITY],
+                    )
+                ),
+            }
+        )
+        ready = decode_frame((await comm.receive_output(timeout=budget(1.0)))["text"])
+        assert ready == EventReadyFrame(capabilities=[TEXT_SEGMENT_CAPABILITY])
+    finally:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(asyncio.TimeoutError):
+            await comm.wait(timeout=budget(1.0))
 
 
 async def test_event_ingest_does_not_block_tunnel_receive_loop() -> None:
