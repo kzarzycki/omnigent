@@ -13,7 +13,10 @@ it as a plain ``acp:<slug>`` agent:
   the CLI's own interactive client speaks, so any process can re-attach;
 * the transcript is read back from ``GET /v1/code/sessions/{id}/events``,
   and mirrored as ACP ``session/update`` notifications until the turn's
-  ``result`` event. All calls use the Claude CLI's own claude.ai login.
+  ``result`` event. All calls use the Claude CLI's own claude.ai login;
+* the first answer ends with a ``cloud session: <url>`` line. A bridge that
+  starts on a transcript Omnigent replays (after a restart) finds that line and
+  re-attaches to the same cloud session, unarchiving it when needed.
 
 Standard library only. Run ``python3 claude_cloud_acp.py --self-check`` to
 exercise the event mapping offline.
@@ -21,6 +24,7 @@ exercise the event mapping offline.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -28,6 +32,7 @@ import pty
 import pwd
 import re
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -48,6 +53,18 @@ os.environ.setdefault("USER", pwd.getpwuid(os.getuid()).pw_name)
 CLI_TIMEOUT_S = 300
 PROTOCOL_VERSION = 1
 SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
+MARKER = "cloud session: https://claude.ai/code/"
+MARKER_RE = re.compile(re.escape(MARKER) + r"((?:session|cse)_[A-Za-z0-9]{10,})")
+# The tail of the transcript Omnigent's ACP executor replays into the first
+# prompt of a fresh session (``AcpExecutor._history_prefix``).
+# ACP session -> cloud session, for an Omnigent that re-prompts a respawned
+# bridge with the old ACP session id instead of opening a new one.
+STATE_FILE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / (
+    "claude-cloud-acp/sessions.json"
+)
+REPLAY_TAIL = (
+    "Respond to the latest user message, using the conversation above as context.\n\nuser: "
+)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 
 _write_lock = threading.Lock()
@@ -60,7 +77,13 @@ def send(msg: dict) -> None:
 
 
 def log(text: str) -> None:
-    print(f"[claude-cloud-acp] {text}", file=sys.stderr, flush=True)
+    line = f"[claude-cloud-acp {os.getpid()}] {time.strftime('%H:%M:%S')} {text}"
+    print(line, file=sys.stderr, flush=True)
+    # Omnigent keeps only a tail of agent stderr; a file survives the bridge.
+    with contextlib.suppress(OSError):
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with (STATE_FILE.parent / "bridge.log").open("a") as out:
+            out.write(line + "\n")
 
 
 # ── claude.ai credentials and the events API ───────────────
@@ -127,7 +150,20 @@ def post_event(session_id: str, payload: dict) -> None:
     )
 
 
-def send_message(session_id: str, text: str) -> None:
+def send_message(session_id: str, text: str) -> bool:
+    """Post a user message; return True when the session had to be unarchived first."""
+    try:
+        _post_user(session_id, text)
+        return False
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:  # 409 ``session_not_active``: archived
+            raise
+    call_api(f"/v1/code/sessions/{session_id}/unarchive", {})
+    _post_user(session_id, text)
+    return True
+
+
+def _post_user(session_id: str, text: str) -> None:
     post_event(
         session_id,
         {
@@ -227,11 +263,10 @@ def _text_of(content: object) -> str:
 def to_updates(payload: dict) -> tuple[list[dict], bool]:
     """Map one cloud-session event payload to ACP updates; True ends the turn."""
     kind = payload.get("type")
-    # ponytail: sub-agent traffic (parent_tool_use_id set) is dropped, not
-    # mirrored as child sessions.
-    if payload.get("parent_tool_use_id"):
-        return [], False
-    if kind == "result":
+    # Sub-agent steps carry the id of the Agent tool call that started them.
+    # ponytail: mirrored inline with a label, not as nested cards; ACP has no nesting.
+    sub = "[sub-agent] " if payload.get("parent_tool_use_id") else ""
+    if kind == "result" and not sub:
         return [], True
     if kind == "env_manager_log":
         text = (payload.get("data") or {}).get("content")
@@ -255,8 +290,8 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
         if kind == "assistant" and btype == "text" and block.get("text"):
             updates.append(
                 {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": block["text"]},
+                    "sessionUpdate": "agent_thought_chunk" if sub else "agent_message_chunk",
+                    "content": {"type": "text", "text": sub + block["text"]},
                 }
             )
         elif kind == "assistant" and btype == "thinking" and block.get("thinking"):
@@ -271,7 +306,7 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
                 {
                     "sessionUpdate": "tool_call",
                     "toolCallId": block.get("id"),
-                    "title": block.get("name"),
+                    "title": sub + str(block.get("name")),
                     "kind": "other",
                     "status": "in_progress",
                     "rawInput": block.get("input") or {},
@@ -303,47 +338,133 @@ class Session:
         self.cloud_id: str | None = None
         self.cursor: str | None = None
         self.cancelled = threading.Event()
+        self.running = False
+        self.interrupted = False
+        self.lock = threading.RLock()  # re-entered by the SIGTERM handler
+
+    def cancel(self) -> None:
+        """Interrupt the running cloud turn, once.
+
+        Sent right away, not on the next poll: Omnigent terminates the bridge
+        straight after ``session/cancel``.
+        """
+        self.cancelled.set()
+        with self.lock:
+            if self.running and self.cloud_id and not self.interrupted:
+                log(f"interrupting {self.cloud_id}")
+                interrupt(self.cloud_id)
+                # Only once delivered: a SIGTERM during the POST aborts it, and
+                # the handler re-entering here sends it again.
+                self.interrupted = True
 
 
 SESSIONS: dict[str, Session] = {}
+
+
+def remember(acp_id: str, cloud_id: str) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    known = recall()
+    known[acp_id] = cloud_id
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(known))
+    tmp.replace(STATE_FILE)
+
+
+def recall() -> dict[str, str]:
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def session_for(acp_id: str) -> Session:
+    """The live session, or one rebuilt from the state file after a respawn."""
+    if acp_id not in SESSIONS:
+        cloud_id = recall().get(acp_id)
+        if cloud_id is None:
+            raise RuntimeError(f"unknown ACP session {acp_id}")
+        log(f"re-attaching {acp_id} to {cloud_id} after a respawn")
+        SESSIONS[acp_id] = Session(os.getcwd())
+        SESSIONS[acp_id].cloud_id = cloud_id
+    return SESSIONS[acp_id]
 
 
 def prompt_text(blocks: list[dict]) -> str:
     return "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
 
 
+def split_replay(text: str) -> tuple[str | None, str]:
+    """Return the cloud session a replayed transcript names, and the message to send.
+
+    Without a marker the text is a fresh request and goes out whole. With one,
+    the cloud session already holds the conversation, so only the latest user
+    message is sent.
+    """
+    ids = MARKER_RE.findall(text)
+    if not ids:
+        return None, text
+    latest = text.rsplit(REPLAY_TAIL, 1)[-1] if REPLAY_TAIL in text else text
+    latest = "\n".join(line for line in latest.splitlines() if MARKER not in line).strip()
+    return ids[-1], latest
+
+
+def thought(acp_id: str, text: str) -> None:
+    update(
+        acp_id, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": text}}
+    )
+
+
+def update(acp_id: str, upd: dict) -> None:
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": acp_id, "update": upd},
+        }
+    )
+
+
 def run_turn(acp_id: str, text: str) -> str:
-    s = SESSIONS[acp_id]
+    s = session_for(acp_id)
     s.cancelled.clear()
+    s.interrupted = False
+    s.running = True
+    try:
+        return _mirror_turn(acp_id, s, text)
+    finally:
+        s.running = False
+
+
+def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
+    announce = False
     if s.cloud_id is None:
-        s.cloud_id = create_cloud_session(text, s.cwd)
-        log(f"created {s.cloud_id}: https://claude.ai/code/{s.cloud_id}")
-        send(
-            {
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": acp_id,
-                    "update": {
-                        "sessionUpdate": "agent_thought_chunk",
-                        "content": {
-                            "type": "text",
-                            "text": f"[cloud] https://claude.ai/code/{s.cloud_id}\n",
-                        },
-                    },
-                },
-            }
-        )
+        s.cloud_id, text = split_replay(text)
+        if s.cloud_id is None:
+            s.cloud_id = create_cloud_session(text, s.cwd)
+            log(f"created {s.cloud_id}")
+        else:
+            log(f"re-attaching to {s.cloud_id}")
+            _, s.cursor = fetch_events(s.cloud_id, None)
+            if send_message(s.cloud_id, text):
+                thought(
+                    acp_id,
+                    "[cloud] unarchived the session; files from before the archive are gone\n",
+                )
+        remember(acp_id, s.cloud_id)
+        thought(acp_id, f"[cloud] https://claude.ai/code/{s.cloud_id}\n")
+        announce = True
     else:
         _, s.cursor = fetch_events(s.cloud_id, s.cursor)  # skip anything since the last turn
-        send_message(s.cloud_id, text)
+        if send_message(s.cloud_id, text):
+            thought(
+                acp_id, "[cloud] unarchived the session; files from before the archive are gone\n"
+            )
     deadline = time.monotonic() + TURN_TIMEOUT_S
-    interrupted = False
     while time.monotonic() < deadline:
-        if s.cancelled.is_set() and not interrupted:
-            # Keep mirroring: the interrupted turn still ends with a ``result`` event.
-            interrupt(s.cloud_id)
-            interrupted = True
+        if s.cancelled.is_set():
+            # A cancel that came before the session existed. Keep mirroring after
+            # it: the interrupted turn still ends with a ``result`` event.
+            s.cancel()
         try:
             events, s.cursor = fetch_events(s.cloud_id, s.cursor)
         except urllib.error.URLError as exc:
@@ -351,16 +472,19 @@ def run_turn(acp_id: str, text: str) -> str:
             events = []
         for event in events:
             updates, done = to_updates(event.get("payload") or {})
-            for update in updates:
-                send(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {"sessionId": acp_id, "update": update},
-                    }
-                )
+            for upd in updates:
+                update(acp_id, upd)
             if done:
-                return "cancelled" if interrupted else "end_turn"
+                if announce:
+                    # Lands in the transcript, so a restarted bridge finds the session.
+                    update(
+                        acp_id,
+                        {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": f"\n\n{MARKER}{s.cloud_id}"},
+                        },
+                    )
+                return "cancelled" if s.interrupted else "end_turn"
         time.sleep(POLL_S)
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
 
@@ -375,7 +499,16 @@ def handle_prompt(msg: dict) -> None:
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
 
 
+def stop(*_: object) -> None:
+    """On SIGTERM or EOF, interrupt any running cloud turn; nobody is left to mirror it."""
+    log("stopping")
+    for session in SESSIONS.values():
+        session.cancel()
+    sys.exit(0)
+
+
 def serve() -> None:
+    signal.signal(signal.SIGTERM, stop)
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -397,15 +530,16 @@ def serve() -> None:
                 }
             )
         elif method == "session/new":
-            acp_id = f"ccloud-{len(SESSIONS) + 1}-{int(time.time())}"
+            acp_id = f"ccloud-{uuid.uuid4().hex}"
             SESSIONS[acp_id] = Session(params.get("cwd") or os.getcwd())
             log(f"session {acp_id} cwd={SESSIONS[acp_id].cwd}")
             send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": acp_id}})
         elif method == "session/prompt":
             threading.Thread(target=handle_prompt, args=(msg,), daemon=True).start()
         elif method == "session/cancel":
-            if s := SESSIONS.get(params.get("sessionId", "")):
-                s.cancelled.set()
+            log(f"cancel {params.get('sessionId')}")
+            if session := SESSIONS.get(params.get("sessionId", "")):
+                session.cancel()
         elif mid is not None:
             send(
                 {
@@ -414,6 +548,7 @@ def serve() -> None:
                     "error": {"code": -32601, "message": f"method not supported: {method}"},
                 }
             )
+    stop()  # stdin closed: Omnigent is tearing the bridge down
 
 
 def self_check() -> None:
@@ -447,16 +582,45 @@ def self_check() -> None:
     )
     assert upd[0]["status"] == "failed" and upd[0]["content"][0]["content"]["text"] == "boom"
     assert to_updates({"type": "result"}) == ([], True)
-    assert to_updates(
+    upd, _ = to_updates(
         {
             "type": "assistant",
             "parent_tool_use_id": "x",
-            "message": {"content": [{"type": "text", "text": "sub"}]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "looking"},
+                    {"type": "tool_use", "id": "t2", "name": "Read", "input": {}},
+                ]
+            },
         }
-    ) == ([], False)
+    )
+    assert [u["sessionUpdate"] for u in upd] == ["agent_thought_chunk", "tool_call"]
+    assert (
+        upd[0]["content"]["text"] == "[sub-agent] looking"
+        and upd[1]["title"] == "[sub-agent] Read"
+    )
+    assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
+    assert split_replay("fix the bug") == (None, "fix the bug")
+    replay = (
+        "Conversation so far:\nuser: hi\nassistant: done\n\n"
+        f"{MARKER}session_01AbCdEfGhIjKl\n\n{REPLAY_TAIL}and now this?"
+    )
+    assert split_replay(replay) == ("session_01AbCdEfGhIjKl", "and now this?")
+    adopt = f"{MARKER}session_01AbCdEfGhIjKl\ncontinue the migration"
+    assert split_replay(adopt) == ("session_01AbCdEfGhIjKl", "continue the migration")
     assert to_updates({"type": "user", "message": {"content": "plain prompt echo"}}) == ([], False)
     screen = "\x1b[32m✓\x1b[0m Created cloud session \x1b]8;;x\x07https://claude.ai/code/session_01DiUkqY2kzbUb"
     assert SESSION_ID_RE.search(ANSI_RE.sub("", screen)).group(1) == "session_01DiUkqY2kzbUb"
+    sent: list[str] = []
+    globals()["interrupt"] = sent.append
+    idle = Session("/")
+    idle.cloud_id = "session_x"
+    idle.cancel()
+    busy = Session("/")
+    busy.cloud_id, busy.running = "session_y", True
+    busy.cancel()
+    busy.cancel()
+    assert sent == ["session_y"], sent
     print("self-check ok")
 
 
