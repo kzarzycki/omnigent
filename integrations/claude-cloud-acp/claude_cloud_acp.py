@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import itertools
 import json
 import os
 import pty
@@ -42,11 +43,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 API_BASE = os.environ.get("CLAUDE_CLOUD_API_BASE", "https://api.anthropic.com")
 CLAUDE_CLI = os.environ.get("CLAUDE_CLOUD_CLI", "claude")
-POLL_S = float(os.environ.get("CLAUDE_CLOUD_POLL_S", "2"))
+# The stream sends a keepalive every ~12 s; reconnect when it goes quiet for longer.
+STREAM_IDLE_S = 60
 TURN_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_TURN_TIMEOUT_S", "3600"))
 # Omnigent's agent env allowlist drops USER, but the CLI's keychain lookup keys on it.
 os.environ.setdefault("USER", pwd.getpwuid(os.getuid()).pw_name)
@@ -125,46 +128,49 @@ def access_token() -> str:
     return json.loads(raw)["claudeAiOauth"]["accessToken"]
 
 
+def _headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token()}",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "ccr-byoc-2025-07-29",
+        "Content-Type": "application/json",
+    }
+
+
 def call_api(path: str, body: dict | None = None) -> dict:
     """GET *path*, or POST *body* to it, on the sessions API; return the JSON reply."""
     req = urllib.request.Request(
         f"{API_BASE}{path}",
         data=None if body is None else json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {access_token()}",
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "ccr-byoc-2025-07-29",
-            "Content-Type": "application/json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
 
-def post_event(session_id: str, payload: dict) -> None:
-    """Post one client event (a user message or a control request) into the session."""
+def post_event(session_id: str, payload: dict) -> int:
+    """Post one client event (a user message or a control request); return its sequence number."""
     payload = {"uuid": str(uuid.uuid4()), **payload}
-    call_api(
+    reply = call_api(
         f"/v1/code/sessions/{session_id}/events",
         {"session_id": session_id, "events": [{"payload": payload}]},
     )
+    return int(reply["results"][0]["sequence_num"])
 
 
-def send_message(session_id: str, text: str) -> bool:
-    """Post a user message; return True when the session had to be unarchived first."""
+def send_message(session_id: str, text: str) -> tuple[int, bool]:
+    """Post a user message; return its sequence number and whether the session was unarchived."""
     try:
-        _post_user(session_id, text)
-        return False
+        return _post_user(session_id, text), False
     except urllib.error.HTTPError as exc:
         if exc.code != 409:  # 409 ``session_not_active``: archived
             raise
     call_api(f"/v1/code/sessions/{session_id}/unarchive", {})
-    _post_user(session_id, text)
-    return True
+    return _post_user(session_id, text), True
 
 
-def _post_user(session_id: str, text: str) -> None:
-    post_event(
+def _post_user(session_id: str, text: str) -> int:
+    return post_event(
         session_id,
         {
             "session_id": session_id,
@@ -197,6 +203,34 @@ def fetch_events(session_id: str, cursor: str | None) -> tuple[list[dict], str |
             cursor = page["next_cursor"]
             continue
         return events, page.get("resume_cursor") or cursor
+
+
+def stream_events(session_id: str, after: int) -> Iterator[dict | None]:
+    """Yield the session's events after sequence number *after*, live, without end.
+
+    Yields None for keepalives and dropped connections, so the caller can check
+    its deadline. Reconnects from the last event seen.
+    """
+    while True:
+        req = urllib.request.Request(
+            f"{API_BASE}/v1/code/sessions/{session_id}/events/stream?from_sequence_num={after}",
+            headers={**_headers(), "Accept": "text/event-stream"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=STREAM_IDLE_S) as resp:
+                for raw in resp:
+                    line = raw.decode()
+                    # ponytail: one-line ``data:`` fields only, which is all the server sends.
+                    event = json.loads(line[5:]) if line.startswith("data:") else {}
+                    if "sequence_num" in event:
+                        after = int(event["sequence_num"])
+                        yield event
+                    else:
+                        yield None
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            log(f"stream dropped after {after}, reconnecting: {exc}")
+        yield None
+        time.sleep(1)
 
 
 def create_cloud_session(text: str, cwd: str) -> str:
@@ -336,7 +370,6 @@ class Session:
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
         self.cloud_id: str | None = None
-        self.cursor: str | None = None
         self.cancelled = threading.Event()
         self.running = False
         self.interrupted = False
@@ -442,10 +475,11 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         if s.cloud_id is None:
             s.cloud_id = create_cloud_session(text, s.cwd)
             log(f"created {s.cloud_id}")
+            after = 0
         else:
             log(f"re-attaching to {s.cloud_id}")
-            _, s.cursor = fetch_events(s.cloud_id, None)
-            if send_message(s.cloud_id, text):
+            after, unarchived = send_message(s.cloud_id, text)
+            if unarchived:
                 thought(
                     acp_id,
                     "[cloud] unarchived the session; files from before the archive are gone\n",
@@ -454,38 +488,35 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         thought(acp_id, f"[cloud] https://claude.ai/code/{s.cloud_id}\n")
         announce = True
     else:
-        _, s.cursor = fetch_events(s.cloud_id, s.cursor)  # skip anything since the last turn
-        if send_message(s.cloud_id, text):
+        after, unarchived = send_message(s.cloud_id, text)
+        if unarchived:
             thought(
                 acp_id, "[cloud] unarchived the session; files from before the archive are gone\n"
             )
     deadline = time.monotonic() + TURN_TIMEOUT_S
-    while time.monotonic() < deadline:
+    for event in stream_events(s.cloud_id, after):
+        if time.monotonic() > deadline:
+            break
         if s.cancelled.is_set():
             # A cancel that came before the session existed. Keep mirroring after
             # it: the interrupted turn still ends with a ``result`` event.
             s.cancel()
-        try:
-            events, s.cursor = fetch_events(s.cloud_id, s.cursor)
-        except urllib.error.URLError as exc:
-            log(f"poll failed, retrying: {exc}")
-            events = []
-        for event in events:
-            updates, done = to_updates(event.get("payload") or {})
-            for upd in updates:
-                update(acp_id, upd)
-            if done:
-                if announce:
-                    # Lands in the transcript, so a restarted bridge finds the session.
-                    update(
-                        acp_id,
-                        {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": f"\n\n{MARKER}{s.cloud_id}"},
-                        },
-                    )
-                return "cancelled" if s.interrupted else "end_turn"
-        time.sleep(POLL_S)
+        if event is None:
+            continue
+        updates, done = to_updates(event.get("payload") or {})
+        for upd in updates:
+            update(acp_id, upd)
+        if done:
+            if announce:
+                # Lands in the transcript, so a restarted bridge finds the session.
+                update(
+                    acp_id,
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": f"\n\n{MARKER}{s.cloud_id}"},
+                    },
+                )
+            return "cancelled" if s.interrupted else "end_turn"
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
 
 
@@ -621,6 +652,34 @@ def self_check() -> None:
     busy.cancel()
     busy.cancel()
     assert sent == ["session_y"], sent
+    streams = [
+        [b":keepalive\n", b'data: {"sequence_num": "7", "payload": {"type": "user"}}\n'],
+        [b'data: {"sequence_num": "8", "payload": {"type": "result"}}\n'],
+    ]
+    urls: list[str] = []
+
+    class FakeResponse(list):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def fake_urlopen(req, **_):
+        urls.append(req.full_url)
+        return FakeResponse(streams.pop(0))
+
+    globals()["access_token"] = lambda: "token"
+    urllib.request.urlopen, real_urlopen = fake_urlopen, urllib.request.urlopen
+    globals()["time"] = type("T", (), {"sleep": staticmethod(lambda _: None)})
+    try:
+        seen = [e and e["sequence_num"] for e in itertools.islice(stream_events("s", 6), 5)]
+    finally:
+        urllib.request.urlopen = real_urlopen
+    assert seen == [None, "7", None, "8", None], seen
+    assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7"], (
+        urls
+    )  # reconnects after the last seen
     print("self-check ok")
 
 

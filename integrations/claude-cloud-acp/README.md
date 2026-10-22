@@ -14,7 +14,7 @@ while the conversation shows up in Omnigent.
 | Cancel | The same endpoint with a `control_request` of subtype `interrupt`. The running tool is stopped and the turn ends with `error_during_execution`. Omnigent terminates the agent process right after `session/cancel`, so the bridge sends the interrupt at once, and again on EOF or SIGTERM for any turn still running |
 | Resume | The first answer ends with a `cloud session: https://claude.ai/code/<id>` line. A new bridge process that gets Omnigent's replayed transcript finds that line and sends only the latest message to the same cloud session. A respawned bridge prompted with an old ACP session id finds the cloud session in `$XDG_STATE_HOME/claude-cloud-acp/sessions.json`. A prompt that starts with that line adopts an existing cloud session |
 | Archived session | A send that gets `409 session_not_active` unarchives the session and resends. History comes back, but files and the repo checkout from before the archive are gone. An idle or stopped VM re-provisions by itself on the next send |
-| Transcript | `GET /v1/code/sessions/{id}/events`, polled; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
+| Transcript | `GET /v1/code/sessions/{id}/events/stream` (server-sent events), from the sequence number of the posted message, reconnecting from the last event seen; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
 | Provisioning steps | `env_manager_log` lines, shown as thoughts |
 
 The bridge stores no credential. Create goes through the `claude` CLI and its own
@@ -79,9 +79,6 @@ and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
   public API, so they can change without notice. Sends go out unsigned and
   without a trusted-device token; an account whose sessions require either gets
   the send refused.
-- **Polling:** updates arrive every `CLAUDE_CLOUD_POLL_S` seconds (default 2).
-  `GET /v1/code/sessions/{id}/events/stream` serves the same events as
-  server-sent events, resumable from a sequence number.
 - **Sub-agents:** a sub-agent's steps appear inline, its text as thoughts and
   its tool calls titled `[sub-agent] <tool>`, not as a separate Omnigent session.
 - **Forks (untested):** a forked Omnigent conversation carries the marker
@@ -92,7 +89,7 @@ and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
 - **Token lifetime:** only the default Claude config dir is supported. The
   bridge reads the CLI's access token but never refreshes it; the CLI does,
   whenever it runs. A token that expires with no `claude` run in between
-  fails the next send or poll.
+  fails the next send or stream reconnect.
 
-Environment overrides: `CLAUDE_CLOUD_CLI`, `CLAUDE_CLOUD_POLL_S`,
+Environment overrides: `CLAUDE_CLOUD_CLI`,
 `CLAUDE_CLOUD_TURN_TIMEOUT_S`, `CLAUDE_CLOUD_TOKEN`, `CLAUDE_CLOUD_API_BASE`.
