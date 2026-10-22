@@ -33,13 +33,14 @@ pub=$(ssh-keygen -y -f "$dir/key" | awk '{print $2}')
 grep -q " $pub" "$dir/allowed_signers" \
   || { echo "!! the signing key is not in the allowed signers" >&2; exit 3; }
 
+# Verify and sign with ssh-keygen: cloud sessions point gpg.ssh.program at the
+# platform's own signer, which also answers for verification.
+git config gpg.format ssh
+git config gpg.ssh.program ssh-keygen
 git config gpg.ssh.allowedSignersFile "$dir/allowed_signers"
 git verify-commit HEAD 2>/dev/null \
   || { echo "!! HEAD $(git rev-parse --short HEAD) is not signed by an allowed key; not running" >&2; exit 4; }
 
-# Cloud sessions sign through the platform's signer; this job signs as itself.
-git config gpg.format ssh
-git config gpg.ssh.program ssh-keygen
 git config user.signingkey "$dir/key"
 git config commit.gpgsign true
 git config user.name "omnigent fork sync"
