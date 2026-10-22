@@ -16,7 +16,7 @@ while the conversation shows up in Omnigent.
 | Archived session | A send that gets `409 session_not_active` unarchives the session and resends. History comes back, but files and the repo checkout from before the archive are gone. An idle or stopped VM re-provisions by itself on the next send |
 | Transcript | `GET /v1/code/sessions/{id}/events/stream` (server-sent events), from the sequence number of the posted message, reconnecting from the last event seen; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
 | MCP servers | Each stdio server in `session/new.mcpServers`, Omnigent's own tools among them, runs on this host. The bridge registers it in the cloud session as an SDK MCP server (`mcp_set_servers`) and answers the CLI's `mcp_message` requests from that process. The traffic goes VM → Anthropic → bridge, so the VM needs no route to this host or the tailnet. A new bridge re-registers the servers on its first turn. Omnigent's `sys_os_*` tools are hidden: they act on this host, and the VM has its own shell and files. When servers are configured, a new session is created with a one-word bootstrap prompt, so the servers are registered before the real first prompt |
-| Permission requests | A `can_use_tool` request for a tool of a served MCP server is allowed; Omnigent applies its own policy when its relay runs the tool. Any other is denied, since nothing here can approve it |
+| Permission requests | A `can_use_tool` request for a tool of a served MCP server is allowed; Omnigent applies its own policy when its relay runs the tool. Any other goes to Omnigent as `session/request_permission`: policy, then an approval card |
 | Provisioning steps | `env_manager_log` lines, shown as thoughts |
 
 The bridge stores no credential. Create goes through the `claude` CLI and its own
@@ -69,16 +69,38 @@ turns|restart|respawn|archived|cancel|teardown|subagent <checkout>` and
 `python3 e2e.py untrusted`. The
 tapes in `demo/` record them with [VHS](https://github.com/charmbracelet/vhs):
 `vhs demo/omnigent.tape -o "$tmp/omnigent.mp4"`. The tapes expect the spike
-checkout at `~/dev/ccr-spike-repo` and the agent specs at `~/dev/ccr-spike-agent`
-and `~/dev/ccr-spike-agent-sandboxed` (the same spec without `sandbox`).
+checkout at `~/dev/ccr-spike-repo` and the agent specs at `~/dev/claude-cloud-agent`
+and `~/dev/claude-cloud-agent-sandboxed` (the same spec without `sandbox`).
+
+## Policy
+
+Commit this to the repo the cloud session clones, so its built-in tools ask
+Omnigent first:
+
+```json
+{
+  "permissions": {
+    "ask": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch"]
+  }
+}
+```
+
+The bridge forwards each `can_use_tool` request as `session/request_permission`.
+Omnigent evaluates the agent's `tool_call` policies against the native tool
+name (`Bash`, `Write`; the built-in policies already match them), then shows an
+approval card unless the agent runs with `permission_mode: bypassPermissions`.
+A card left unanswered for 30 minutes denies the call. Tools the CLI treats as
+read-only, such as `Read` and `Grep`, never ask.
 
 ## Limits
 
-- **Policy:** Omnigent policy and approval cards do not apply to the VM's
-  built-in tools (Bash, edits): the cloud CLI runs them without asking the
-  client, and it does not apply SDK hooks (`initialize` answers
-  `hooks_applied: false`). Cloud sessions run under the cloud environment's permission mode
-  and network policy.
+- **Policy:** the cloud CLI runs the VM's built-in tools (Bash, edits) without
+  asking the client unless the repo's committed `.claude/settings.json` lists
+  them under `permissions.ask`; setting the permission mode from the client
+  does not change that. With those rules, each call goes to Omnigent's TOOL_CALL
+  policy and approval card (see [Policy](#policy)). The CLI does not apply SDK hooks
+  (`initialize` answers `hooks_applied: false`), and user-level `~/.claude`
+  settings do not reach the VM.
 - **Undocumented API:** the events endpoints are not part of the documented
   public API, so they can change without notice. Sends go out unsigned and
   without a trusted-device token; an account whose sessions require either gets

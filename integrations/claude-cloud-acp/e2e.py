@@ -11,6 +11,7 @@ Each scenario starts real cloud sessions on the signed-in claude.ai account.
     python3 e2e.py teardown <git checkout>   # cancel then kill, as Omnigent's Esc does
     python3 e2e.py subagent <git checkout>   # sub-agent steps are mirrored with a label
     python3 e2e.py mcp      <git checkout>   # the cloud agent calls an MCP server on this host
+    python3 e2e.py policy   <git checkout>   # permissions.ask rules send built-ins to Omnigent
     python3 e2e.py untrusted                 # a folder Claude Code has not trusted fails clearly
 
 A scenario that checks an outcome exits non-zero when it doesn't hold.
@@ -64,6 +65,8 @@ class Client:
         self.answer = ""
         self.thoughts: list[str] = []
         self.tools: list[str] = []
+        self.asked: list[str] = []
+        self.permit = lambda _tool: False  # what this client approves when the bridge asks
         self.call("initialize", {"protocolVersion": 1})
         self.session = (
             session
@@ -88,6 +91,16 @@ class Client:
                 show(msg["params"]["update"], self)
                 if on_update:
                     on_update(msg["params"]["update"])
+            elif msg.get("method") == "session/request_permission":
+                tool = msg["params"]["toolCall"]["title"]
+                self.asked.append(tool)
+                option = "allow" if self.permit(tool) else "reject"
+                print(f"\033[33m  permission: {tool} -> {option}\033[0m")
+                outcome = {"outcome": {"outcome": "selected", "optionId": option}}
+                self.proc.stdin.write(
+                    json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": outcome}) + "\n"
+                )
+                self.proc.stdin.flush()
             elif msg.get("id") == req_id:
                 return msg
         raise RuntimeError("bridge exited")
@@ -250,6 +263,26 @@ def scenario_mcp(cwd: str) -> None:
     check("second bridge" in second.answer, "the new bridge serves the tool to that session")
 
 
+def scenario_policy(cwd: str) -> None:
+    """*cwd* must commit a `.claude/settings.json` listing Bash and Write in `permissions.ask`."""
+    client = Client(cwd)
+    client.permit = lambda tool: tool == "Bash"
+    client.prompt(
+        "Use the Bash tool to run `echo bash-ran > ran.txt && cat ran.txt`, then use the "
+        "Write tool to create notes.txt containing hi. Report each tool's result."
+    )
+    client.close()
+    check(
+        client.asked[:2] == ["Bash", "Write"],
+        f"the bridge asked about Bash, then Write: {client.asked}",
+    )
+    check("bash-ran" in client.answer, "the approved Bash call ran")
+    check(
+        "not approved by Omnigent" in client.answer or "denied" in client.answer.lower(),
+        "the rejected Write call was refused",
+    )
+
+
 def scenario_untrusted() -> None:
     repo = tempfile.mkdtemp(prefix="ccr-untrusted-")
     subprocess.run(["git", "init", "-q", repo], check=True)
@@ -273,5 +306,6 @@ if __name__ == "__main__":
         "teardown": scenario_teardown,
         "subagent": scenario_subagent,
         "mcp": scenario_mcp,
+        "policy": scenario_policy,
         "untrusted": scenario_untrusted,
     }[name](*args)

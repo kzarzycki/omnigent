@@ -10,9 +10,9 @@ Hide
 Type "cd ~/dev/ccr-spike-repo && export PS1='> ' && clear" Enter
 Show
 
-Type "cat ~/dev/ccr-spike-agent/config.yaml; git log --oneline -1" Sleep 300ms Enter
+Type "cat ~/dev/claude-cloud-agent/config.yaml; git log --oneline -1" Sleep 300ms Enter
 Sleep 3s
-Type "omnigent run ~/dev/ccr-spike-agent" Sleep 300ms Enter
+Type "omnigent run ~/dev/claude-cloud-agent" Sleep 300ms Enter
 Wait+Screen@90s /ready/
 Sleep 2s
 Type "Run `pwd; git log --oneline -1; uname -sm` and report the output." Sleep 300ms Enter

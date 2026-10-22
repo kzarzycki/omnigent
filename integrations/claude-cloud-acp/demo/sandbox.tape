@@ -9,9 +9,9 @@ Hide
 Type "cd ~/dev/ccr-spike-repo && export PS1='> ' && clear" Enter
 Show
 
-Type "cat ~/dev/ccr-spike-agent-sandboxed/config.yaml" Sleep 300ms Enter
+Type "cat ~/dev/claude-cloud-agent-sandboxed/config.yaml" Sleep 300ms Enter
 Sleep 3s
-Type "omnigent run ~/dev/ccr-spike-agent-sandboxed -p 'Say hi.'" Sleep 300ms Enter
+Type "omnigent run ~/dev/claude-cloud-agent-sandboxed -p 'Say hi.'" Sleep 300ms Enter
 Wait+Screen@180s /pty|rror/
 Sleep 6s
 Ctrl+C

@@ -55,6 +55,12 @@ TURN_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_TURN_TIMEOUT_S", "3600"))
 # Omnigent's agent env allowlist drops USER, but the CLI's keychain lookup keys on it.
 os.environ.setdefault("USER", pwd.getpwuid(os.getuid()).pw_name)
 CLI_TIMEOUT_S = 300
+# The CLI refreshes its token from 5 minutes before expiry.
+REFRESH_WINDOW_S = 300
+REFRESH_EVERY_S = 60
+# ponytail: unverified that this subcommand refreshes; without it the next call fails clearly.
+REFRESH_CMD = [CLAUDE_CLI, "agents", "--json"]
+_last_refresh = 0.0
 PROTOCOL_VERSION = 1
 SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
 MARKER = "cloud session: https://claude.ai/code/"
@@ -72,6 +78,10 @@ REPLAY_TAIL = (
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 
 _write_lock = threading.Lock()
+# Replies to the requests this bridge sends Omnigent, by request id.
+_replies: dict[str, queue.Queue[dict]] = {}
+# A permission card waits for a person; past this the tool is denied.
+APPROVAL_TIMEOUT_S = 1800
 
 
 def send(msg: dict) -> None:
@@ -98,14 +108,26 @@ def access_token() -> str:
 
     Read from where the CLI itself keeps it: the login keychain item
     ``Claude Code-credentials`` for ``$USER`` on macOS, else
-    ``~/.claude/.credentials.json``, re-read on every call. Only the CLI
-    refreshes it, whenever any ``claude`` process runs on this machine.
-    ponytail: only the default config dir (no CLAUDE_CONFIG_DIR suffix), and
-    no refresh of our own; a session idle past the token's life gets a 401.
+    ``~/.claude/.credentials.json``, re-read on every call. Inside the CLI's
+    own refresh window, run the CLI to refresh it: the CLI rotates the refresh
+    token under its own lock, so the bridge never writes the credential.
+    ponytail: only the default config dir (no CLAUDE_CONFIG_DIR suffix).
     """
     if token := os.environ.get("CLAUDE_CLOUD_TOKEN"):
         return token
-    return _read_login()["accessToken"]
+    oauth = _read_login()
+    if oauth.get("expiresAt", 0) / 1000 - time.time() < REFRESH_WINDOW_S:
+        global _last_refresh
+        if time.monotonic() - _last_refresh > REFRESH_EVERY_S:
+            _last_refresh = time.monotonic()
+            log("access token near expiry; asking the CLI to refresh it")
+            subprocess.run(REFRESH_CMD, capture_output=True, timeout=CLI_TIMEOUT_S, check=False)
+            oauth = _read_login()
+        if oauth.get("expiresAt", 0) / 1000 < time.time():
+            raise RuntimeError(
+                "the Claude Code login has expired; run `claude` once to refresh it"
+            )
+    return oauth["accessToken"]
 
 
 def _read_login() -> dict:
@@ -405,22 +427,53 @@ def register_mcp(session_id: str, servers: dict[str, McpProxy]) -> tuple[int, bo
     return sent
 
 
-def answer_control(session_id: str, servers: dict[str, McpProxy], payload: dict) -> None:
+def ask_client(method: str, params: dict, timeout: float) -> dict:
+    """Send Omnigent a JSON-RPC request and wait for its result; ``{}`` on error or timeout."""
+    request_id = f"bridge-{uuid.uuid4().hex}"
+    _replies[request_id] = queue.Queue(maxsize=1)
+    send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    try:
+        return _replies[request_id].get(timeout=timeout).get("result") or {}
+    except queue.Empty:
+        return {}
+    finally:
+        del _replies[request_id]
+
+
+def approve(s: Session, tool: str, tool_input: dict, call_id: str) -> bool:
+    """Ask Omnigent whether a built-in tool may run: TOOL_CALL policy, then an approval card."""
+    params = {
+        "sessionId": s.acp_id,
+        "toolCall": {"toolCallId": call_id, "title": tool, "rawInput": tool_input},
+        "options": [
+            {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+            {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+        ],
+    }
+    # ponytail: once-scoped only; "always allow" would need the CLI's updatedPermissions.
+    outcome = ask_client("session/request_permission", params, APPROVAL_TIMEOUT_S).get("outcome")
+    return (outcome or {}).get("optionId") == "allow"
+
+
+def answer_control(s: Session, payload: dict) -> None:
     """Answer a control request the cloud CLI sent to this client."""
     request, request_id = payload.get("request") or {}, payload.get("request_id")
     subtype = request.get("subtype")
-    if subtype == "mcp_message" and (proxy := servers.get(request.get("server_name", ""))):
+    if subtype == "mcp_message" and (proxy := s.mcp.get(request.get("server_name", ""))):
         reply = proxy.handle(request.get("message") or {})
-        respond(session_id, request_id, {"mcp_response": reply})
+        respond(s.cloud_id, request_id, {"mcp_response": reply})
     elif subtype == "can_use_tool":
-        tool = request.get("tool_name", "")
-        # Omnigent applies its own policy when its relay runs the tool. Anything
-        # else asking here has no approver, so it fails closed.
-        if any(tool.startswith(f"mcp__{name}__") for name in servers):
-            decision = {"behavior": "allow", "updatedInput": request.get("input") or {}}
+        tool, tool_input = request.get("tool_name", ""), request.get("input") or {}
+        # Omnigent applies its own policy when its relay runs an MCP tool. The
+        # VM's built-ins ask here only under the repo's `permissions.ask` rules.
+        allowed = any(tool.startswith(f"mcp__{name}__") for name in s.mcp) or approve(
+            s, tool, tool_input, request.get("tool_use_id") or request_id
+        )
+        if allowed:
+            decision = {"behavior": "allow", "updatedInput": tool_input}
         else:
             decision = {"behavior": "deny", "message": f"{tool} is not approved by Omnigent"}
-        respond(session_id, request_id, decision)
+        respond(s.cloud_id, request_id, decision)
 
 
 # ── event mapping ──────────────────────────────────────────
@@ -509,8 +562,9 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
 
 
 class Session:
-    def __init__(self, cwd: str) -> None:
+    def __init__(self, cwd: str, acp_id: str = "") -> None:
         self.cwd = cwd
+        self.acp_id = acp_id
         self.cloud_id: str | None = None
         self.mcp: dict[str, McpProxy] = {}
         self.mcp_registered = False
@@ -538,7 +592,7 @@ class Session:
                     # Off the reader: a tool call can outlast the CLI's wait for other events.
                     threading.Thread(
                         target=answer_control,
-                        args=(self.cloud_id, self.mcp, payload),
+                        args=(self, payload),
                         daemon=True,
                     ).start()
                 elif event is not None:
@@ -589,7 +643,7 @@ def session_for(acp_id: str) -> Session:
         if cloud_id is None:
             raise RuntimeError(f"unknown ACP session {acp_id}")
         log(f"re-attaching {acp_id} to {cloud_id} after a respawn")
-        SESSIONS[acp_id] = Session(os.getcwd())
+        SESSIONS[acp_id] = Session(os.getcwd(), acp_id)
         SESSIONS[acp_id].cloud_id = cloud_id
     return SESSIONS[acp_id]
 
@@ -758,7 +812,9 @@ def serve() -> None:
             continue
         msg = json.loads(line)
         method, params, mid = msg.get("method"), msg.get("params") or {}, msg.get("id")
-        if method == "initialize":
+        if method is None and (waiting := _replies.get(str(mid))):
+            waiting.put(msg)
+        elif method == "initialize":
             send(
                 {
                     "jsonrpc": "2.0",
@@ -775,7 +831,7 @@ def serve() -> None:
             )
         elif method == "session/new":
             acp_id = f"ccloud-{uuid.uuid4().hex}"
-            SESSIONS[acp_id] = Session(params.get("cwd") or os.getcwd())
+            SESSIONS[acp_id] = Session(params.get("cwd") or os.getcwd(), acp_id)
             # ponytail: stdio servers only, which is what Omnigent's relay is.
             SESSIONS[acp_id].mcp = {
                 spec["name"]: McpProxy(spec)
@@ -897,13 +953,35 @@ def self_check() -> None:
     proxy.proc.kill()
     answers: list[tuple] = []
     globals()["respond"] = lambda *args: answers.append(args[1:])
-    for tool in ("mcp__echo__echo", "Bash"):
-        ask = {"subtype": "can_use_tool", "tool_name": tool, "input": {}}
-        answer_control("s", {"echo": proxy}, {"request_id": tool, "request": ask})
+    verdicts = {"Bash": "allow", "Write": "reject"}
+    asked: list[dict] = []
+    globals()["ask_client"] = lambda _method, params, _timeout: (
+        asked.append(params)
+        or {"outcome": {"outcome": "selected", "optionId": verdicts[params["toolCall"]["title"]]}}
+    )
+    gated = Session("/", "acp-1")
+    gated.mcp = {"echo": proxy}
+    for tool in ("mcp__echo__echo", "Bash", "Write"):
+        ask = {"subtype": "can_use_tool", "tool_name": tool, "input": {"x": 1}}
+        answer_control(gated, {"request_id": tool, "request": ask})
     assert [(rid, r["behavior"]) for rid, r in answers] == [
         ("mcp__echo__echo", "allow"),
-        ("Bash", "deny"),
+        ("Bash", "allow"),
+        ("Write", "deny"),
     ], answers
+    assert [(a["sessionId"], a["toolCall"]["rawInput"]) for a in asked] == [
+        ("acp-1", {"x": 1})
+    ] * 2
+    logins = [{"accessToken": "old", "expiresAt": (time.time() + 60) * 1000}]
+    logins.append({"accessToken": "new", "expiresAt": (time.time() + 3600) * 1000})
+    runs: list[list[str]] = []
+    globals()["_read_login"] = lambda: logins[0] if not runs else logins[1]
+    real_run, subprocess.run = subprocess.run, lambda cmd, **_: runs.append(cmd)
+    try:
+        assert access_token() == "new" and runs == [REFRESH_CMD], runs
+        assert access_token() == "new" and len(runs) == 1  # fresh token: no second refresh
+    finally:
+        subprocess.run = real_run
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")
