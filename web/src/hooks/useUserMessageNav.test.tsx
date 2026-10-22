@@ -221,7 +221,7 @@ describe("useUserMessageNav", () => {
 
 describe("scrollToMessage with a focus range", () => {
   function box(top: number, height: number) {
-    return () => ({ top, height }) as DOMRect;
+    return () => ({ top, height, bottom: top + height }) as DOMRect;
   }
 
   it("centers the range in the panel around it at once and in the transcript smoothly", () => {
@@ -250,5 +250,13 @@ describe("scrollToMessage with a focus range", () => {
     expect(panelScrollTop).toBe(310);
     expect(scrollBy).toHaveBeenCalledWith({ top: 110, behavior: "smooth" });
     expect(scrollSpy).not.toHaveBeenCalled();
+
+    // A row above re-measured during the scroll and moved the word off screen.
+    const flash = vi.fn();
+    scrollToMessage("resp_1", flash, undefined, () => range);
+    range.getBoundingClientRect = box(3000, 20);
+    act(() => vi.advanceTimersByTime(SETTLE_MS));
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: 2610, behavior: "auto" });
+    expect(flash).toHaveBeenCalledWith("resp_1");
   });
 });

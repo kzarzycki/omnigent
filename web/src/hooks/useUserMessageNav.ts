@@ -43,9 +43,9 @@ function getScrollParent(node: Element): Element | null {
 
 /**
  * Center `range` in each scroller around it, up to `outer`: inner ones (a
- * tool's output panel) at once, `outer` smoothly.
+ * tool's output panel) at once, `outer` with `behavior`.
  */
-function scrollRangeIntoView(range: Range, outer: Element | null): void {
+function scrollRangeIntoView(range: Range, outer: Element | null, behavior: ScrollBehavior): void {
   for (let el = range.startContainer.parentElement; el; el = el.parentElement) {
     const { overflowY } = getComputedStyle(el);
     if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") continue;
@@ -53,11 +53,17 @@ function scrollRangeIntoView(range: Range, outer: Element | null): void {
     const box = el.getBoundingClientRect();
     const top = rect.top - box.top - (box.height - rect.height) / 2;
     if (el === outer) {
-      el.scrollBy?.({ top, behavior: "smooth" });
+      el.scrollBy?.({ top, behavior });
       return;
     }
     el.scrollTop += top;
   }
+}
+
+function rangeInBox(range: Range, box: Element): boolean {
+  const rect = range.getBoundingClientRect();
+  const bounds = box.getBoundingClientRect();
+  return rect.top >= bounds.top && rect.bottom <= bounds.bottom;
 }
 
 /**
@@ -99,8 +105,10 @@ export function scrollToMessage(
   // multi-message sessions (single short transcripts stay in view anyway).
   releaseConversationScrollLock();
 
-  const range = focus?.(el) ?? null;
-  if (range) scrollRangeIntoView(range, getScrollParent(el));
+  const message: Element = el;
+  const outer = getScrollParent(message);
+  const range = focus?.(message) ?? null;
+  if (range) scrollRangeIntoView(range, outer, "smooth");
   else el.scrollIntoView({ block: "center", behavior: "smooth" });
 
   // Nothing to defer when there's no flash to fire — the smooth-scroll runs
@@ -109,7 +117,7 @@ export function scrollToMessage(
 
   // Defer the flash until the smooth-scroll settles. On a long jump the
   // highlight would otherwise burn out before the message is on screen.
-  const scroller: EventTarget = getScrollParent(el) ?? window;
+  const scroller: EventTarget = outer ?? window;
   let settleTimer = 0;
   let maxTimer = 0;
   let done = false;
@@ -125,6 +133,12 @@ export function scrollToMessage(
     if (done) return;
     done = true;
     cleanup();
+    // Rows the jump resized (a bubble find opened or closed) move once the
+    // virtualizer re-measures them, so a found word can end up off screen.
+    const settled = focus?.(message);
+    if (settled && outer && !rangeInBox(settled, outer)) {
+      scrollRangeIntoView(settled, outer, "auto");
+    }
     flash?.(messageId);
   }
 
