@@ -27,6 +27,8 @@ export interface AppShellOverlaysProps {
   allConversations: Conversation[] | undefined;
   serverConversationId: string | undefined;
   updateOverlayHeight: number;
+  /** Close the left sidebar before the palette navigates on a phone. */
+  onCloseSidebar: (path: string) => void;
 }
 
 /**
@@ -46,6 +48,7 @@ export function AppShellOverlays({
   allConversations,
   serverConversationId,
   updateOverlayHeight,
+  onCloseSidebar,
 }: AppShellOverlaysProps) {
   return (
     <>
@@ -74,6 +77,7 @@ export function AppShellOverlays({
         onToggleLeftSidebar={toggleLeftSidebar}
         onToggleRightSidebar={toggleRightPanel}
         rightSidebarShortcutEnabled={!gridRoute}
+        onCloseSidebar={onCloseSidebar}
       />
       <RecentSessionsSwitcher
         conversations={allConversations}
