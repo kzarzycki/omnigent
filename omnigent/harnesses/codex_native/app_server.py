@@ -3475,6 +3475,43 @@ def _resolve_databricks_codex_model(
     return model_catalog.resolve_catalog_model("databricks", family="openai").model_id
 
 
+def _workspace_otel_overrides(cwd: Path) -> list[str]:
+    """
+    Codex ``-c otel.*`` overrides for a workspace the machine's allowlist opts in.
+
+    Codex ignores ``[otel]`` in a repo's own ``.codex/config.toml``, and a
+    machine that keeps telemetry off by default lists the repos allowed to
+    export (:func:`omnigent.config.telemetry_endpoint_for`). Logs and metrics go
+    over OTLP/HTTP to that endpoint, with prompts and responses, the way
+    dotagents writes the user-level ``[otel]`` table.
+
+    :param cwd: Session workspace.
+    :returns: ``-c`` override values; empty when the workspace is not opted in.
+    """
+    from omnigent.config import telemetry_endpoint_for
+    from omnigent.host.identity import load_host_identity_if_present
+
+    base = telemetry_endpoint_for(cwd)
+    if base is None:
+        return []
+
+    def otlp(path: str) -> str:
+        return f'{{ otlp-http = {{ endpoint = {json.dumps(base + path)}, protocol = "binary" }} }}'
+
+    overrides = [
+        "otel.log_user_prompt=true",
+        "otel.log_agent_responses=true",
+        f"otel.exporter={otlp('/v1/logs')}",
+        f"otel.metrics_exporter={otlp('/v1/metrics')}",
+        'otel.trace_exporter="none"',
+    ]
+    identity = load_host_identity_if_present()
+    if identity is not None:
+        # Codex puts no host.name on metrics; the Collector copies ``environment`` into it.
+        overrides.insert(0, f"otel.environment={json.dumps(identity.name)}")
+    return overrides
+
+
 def build_codex_native_server(
     *,
     socket_path: Path,
@@ -3597,6 +3634,7 @@ def build_codex_native_server(
         pinned_model = codex_spawn_model(databricks.model) or databricks.model
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
+    config_overrides.extend(_workspace_otel_overrides(cwd))
     if bypass_sandbox:
         # Mirror the --remote TUI's --dangerously-bypass-approvals-and-sandbox
         # on the app-server threads: never prompt for approval, and run
