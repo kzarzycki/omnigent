@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -320,3 +323,59 @@ def test_submit_retry_respects_a_hook_even_when_the_draft_is_still_visible(
             bridge_dir=native_bridge,
         )
     assert sent == []
+
+
+# A parked hook as hook.py holds it: a marker named by its own pid, kept fresh until it exits.
+_HOOK_PROCESS = """
+import sys, time
+from pathlib import Path
+from omnigent.harnesses.claude_native import bridge
+marker = bridge.approval_wait_marker_path(sys.argv[1], bridge_dir=Path(sys.argv[2]))
+with bridge.hold_approval_wait_marker(marker):
+    print(marker, flush=True)
+    time.sleep(600)
+"""
+
+
+def _spawn_parked_hook(native: Path) -> tuple[subprocess.Popen[str], Path]:
+    (native.parent / "approval-waits").mkdir(exist_ok=True)
+    hook = subprocess.Popen(
+        [sys.executable, "-c", _HOOK_PROCESS, "session-question", str(native)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert hook.stdout is not None
+    marker = Path(hook.stdout.readline().strip())
+    assert marker.name.endswith(f".{hook.pid}.wait")
+    return hook, marker
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL], ids=["SIGTERM", "SIGKILL"])
+def test_a_prompt_is_not_pending_once_its_hook_process_is_killed(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, signum: int
+) -> None:
+    """Claude Code kills the parked hook on Escape, so its marker outlives it."""
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: "")
+    hook, marker = _spawn_parked_hook(native_bridge)
+    assert bridge.has_pending_user_prompt(native_bridge)
+
+    hook.send_signal(signum)
+    hook.wait(timeout=10)
+    assert marker.exists()
+
+    assert not bridge.has_pending_user_prompt(native_bridge)
+    assert not marker.exists()
+
+
+def test_a_hook_that_exits_its_wait_clears_its_marker(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: "")
+    hook, marker = _spawn_parked_hook(native_bridge)
+    try:
+        assert bridge.has_pending_user_prompt(native_bridge)
+    finally:
+        hook.send_signal(signal.SIGINT)  # KeyboardInterrupt unwinds the with-block
+        hook.wait(timeout=10)
+    assert not marker.exists()
+    assert not bridge.has_pending_user_prompt(native_bridge)

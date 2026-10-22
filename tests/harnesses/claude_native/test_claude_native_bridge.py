@@ -15202,7 +15202,7 @@ def test_approval_wait_marker_tracks_a_parked_permission_hook(
 
     # Each hook owns its own marker, so one finishing (parallel tool calls each
     # raising a permission request) leaves the other's evidence.
-    sibling = marker.with_name(marker.name.replace(f".{os.getpid()}.", f".{os.getpid() + 1}."))
+    sibling = marker.with_name(marker.name.replace(f".{os.getpid()}.", f".{os.getppid()}."))
     assert sibling != marker
     claude_native_bridge.touch_approval_wait_marker(sibling)
     claude_native_bridge.clear_approval_wait_marker(marker)
