@@ -2145,6 +2145,8 @@ def test_find_item_matches_lists_one_sessions_matches_in_chat_order(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     """Matches come back oldest first, case-insensitive, from that session only."""
+    from omnigent.db.db_models import workspace_scope
+
     conv = conversation_store.create_conversation()
     other = conversation_store.create_conversation()
     appended = conversation_store.append(
@@ -2161,6 +2163,8 @@ def test_find_item_matches_lists_one_sessions_matches_in_chat_order(
     expected = [(item.id, item.response_id) for item in appended if item.response_id != "resp_b"]
     assert conversation_store.find_item_matches(conv.id, "zorblat") == (expected, None)
     assert conversation_store.find_item_matches(conv.id, "absent") == ([], None)
+    with workspace_scope(424242):
+        assert conversation_store.find_item_matches(conv.id, "zorblat") == ([], None)
 
 
 def test_find_item_matches_scans_one_window_and_walks_older_windows_by_cursor(
