@@ -353,6 +353,162 @@ describe("SessionUpdatesProvider project folders", () => {
     ]);
     expect(folder!.pages[0].data.map((c) => c.id)).toEqual(["conv_other"]);
   });
+
+  describe("refetches", () => {
+    const FOLDER_COUNT = 12;
+
+    function filedConv(id: string, folder: string, updatedAt = 0): Conversation {
+      return {
+        ...conv(id),
+        updated_at: updatedAt,
+        project_id: `pid_${folder}`,
+        labels: { omni_project: folder },
+      };
+    }
+
+    function pageOf(rows: Conversation[]): ConversationsInfiniteData {
+      return {
+        pages: [
+          {
+            data: rows,
+            first_id: rows[0]?.id ?? null,
+            last_id: rows.at(-1)?.id ?? null,
+            has_more: false,
+          },
+        ],
+        pageParams: [undefined],
+      };
+    }
+
+    // Seeds the projects list and 12 expanded folders, proj-<i> holding conv_<i>.
+    // An expanded folder is an active observer on its key; each refetch is recorded.
+    function mountExpandedFolders(client: QueryClient) {
+      const refetched: string[] = [];
+      const unsubscribers: (() => void)[] = [];
+      const observe = (queryKey: unknown[], label: string, data: ConversationsInfiniteData) => {
+        client.setQueryData(queryKey, data);
+        const observer = new QueryObserver(client, {
+          queryKey,
+          queryFn: async () => {
+            refetched.push(label);
+            return data;
+          },
+          staleTime: 30_000,
+        });
+        unsubscribers.push(observer.subscribe(() => {}));
+      };
+      const names = Array.from({ length: FOLDER_COUNT }, (_, index) => `proj-${index}`);
+      client.setQueryData(
+        ["projects"],
+        names.map((name) => ({ id: `pid_${name}`, name })),
+      );
+      names.forEach((name, index) =>
+        observe(["project-sessions", name], name, pageOf([filedConv(`conv_${index}`, name)])),
+      );
+      return { refetched, observe, unmount: () => unsubscribers.forEach((stop) => stop()) };
+    }
+
+    async function settle() {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300); // past the debounce
+      });
+    }
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it("does not refetch any folder when only a session's updated_at moves", async () => {
+      const client = new QueryClient();
+      const folders = mountExpandedFolders(client);
+      renderProvider(client, ["/"]);
+
+      act(() => frameHandler()({ type: "changed", items: [filedConv("conv_0", "proj-0", 1_000)] }));
+      await settle();
+
+      expect(folders.refetched).toEqual([]);
+      const folder = client.getQueryData<ConversationsInfiniteData>(["project-sessions", "proj-0"]);
+      expect(folder!.pages[0].data[0]!.updated_at).toBe(1_000);
+      folders.unmount();
+    });
+
+    it("refetches only the folder that held a session archived elsewhere", async () => {
+      const client = new QueryClient();
+      const folders = mountExpandedFolders(client);
+      renderProvider(client, ["/"]);
+
+      act(() =>
+        frameHandler()({
+          type: "changed",
+          items: [{ ...filedConv("conv_3", "proj-3"), archived: true }],
+        }),
+      );
+      await settle();
+
+      expect(folders.refetched).toEqual(["proj-3"]);
+      folders.unmount();
+    });
+
+    it("refetches only the folder a new session's project_id names", async () => {
+      const client = new QueryClient();
+      const folders = mountExpandedFolders(client);
+      renderProvider(client, ["/"]);
+
+      // First-class membership: project_id only, no legacy label.
+      act(() =>
+        frameHandler()({
+          type: "changed",
+          items: [{ ...conv("conv_new"), project_id: "pid_proj-5" }],
+        }),
+      );
+      await settle();
+
+      expect(folders.refetched).toEqual(["proj-5"]);
+      folders.unmount();
+    });
+
+    it("refetches only the folders a session moves between", async () => {
+      const client = new QueryClient();
+      const folders = mountExpandedFolders(client);
+      renderProvider(client, ["/"]);
+
+      act(() => frameHandler()({ type: "changed", items: [filedConv("conv_1", "proj-2")] }));
+      await settle();
+
+      expect([...folders.refetched].sort()).toEqual(["proj-1", "proj-2"]);
+      folders.unmount();
+    });
+
+    it("defers refetches while the tab is hidden and runs each once on return", async () => {
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      const client = new QueryClient();
+      const folders = mountExpandedFolders(client);
+      folders.observe(
+        ["conversations", "", false],
+        "conversations",
+        pageOf([filedConv("conv_3", "proj-3")]),
+      );
+      renderProvider(client, ["/"]);
+
+      act(() =>
+        frameHandler()({
+          type: "changed",
+          items: [{ ...filedConv("conv_3", "proj-3"), archived: true }],
+        }),
+      );
+      await settle();
+      expect(folders.refetched).toEqual([]);
+
+      visibility.mockReturnValue("visible");
+      act(() => document.dispatchEvent(new Event("visibilitychange")));
+      await settle();
+
+      expect([...folders.refetched].sort()).toEqual(["conversations", "proj-3"]);
+      folders.unmount();
+    });
+  });
 });
 
 describe("SessionUpdatesProvider fingerprint pruning", () => {
