@@ -113,6 +113,7 @@ from omnigent.server import (
     presence,
     session_live_state,
     session_pull_requests,
+    session_recaps,
     session_revival,
     shutdown_state,
 )
@@ -5110,6 +5111,8 @@ def _publish_status(
         return
     previous_status = _session_status_cache.get(session_id)
     _session_status_cache[session_id] = status
+    if status in ("idle", "failed"):
+        session_recaps.turn_ended(session_id, from_runner=from_runner, failed=status == "failed")
     if previous_status != status:
         _publish_child_status_to_parent(session_id, status)
     if status == "idle" and previous_status in ("running", "waiting") and persist_live_status:
