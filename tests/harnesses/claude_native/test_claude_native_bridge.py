@@ -3812,6 +3812,26 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
     assert all(expected_tmpdir in command for command in python_commands)
 
 
+def test_augment_claude_args_turns_telemetry_on_for_an_allowlisted_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invocation settings outrank the user's telemetry-off setting, only when allowed."""
+    import omnigent.config as config
+
+    allowed = {tmp_path / "listed": "http://collector:4318"}
+    monkeypatch.setattr(config, "telemetry_endpoint_for", lambda ws: allowed.get(ws))
+
+    def env(workspace: Path) -> dict:
+        args = augment_claude_args((), bridge_dir=tmp_path / workspace.name, workspace=workspace)
+        return _load_invocation_settings(args).get("env", {})
+
+    assert env(tmp_path / "listed") == {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+    }
+    assert env(tmp_path / "other") == {}
+
+
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:
     """
     ``EnterWorktree`` / ``ExitWorktree`` PostToolUse events reach the observer hook.

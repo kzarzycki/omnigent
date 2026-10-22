@@ -2847,6 +2847,18 @@ def augment_claude_args(
     )
     args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
+    if workspace is not None:
+        from omnigent.config import telemetry_endpoint_for
+
+        # A machine that keeps telemetry off lists the repos that export; the
+        # invocation settings outrank the user's, so they turn it on per session.
+        if endpoint := telemetry_endpoint_for(workspace):
+            env = hook_settings.get("env")
+            hook_settings["env"] = {
+                **(env if isinstance(env, dict) else {}),
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+            }
     settings_path = bridge_dir / _INVOCATION_SETTINGS_FILE
     _write_json_file(settings_path, hook_settings)
     args.extend(

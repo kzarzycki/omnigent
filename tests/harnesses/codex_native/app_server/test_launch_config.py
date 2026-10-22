@@ -1113,3 +1113,50 @@ async def test_codex_native_launch_config_reads_reasoning_effort(
         config = await _codex_native_launch_config(session_id="conv_abc", server_client=client)
 
     assert config.reasoning_effort == expected
+
+
+def test_an_allowlisted_workspace_gets_codex_otel_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex ignores ``[otel]`` in a repo's ``.codex/config.toml``; the allowlist opts it in."""
+    import omnigent.config as config
+    from omnigent.host import identity
+
+    opted, plain = tmp_path / "opted", tmp_path / "plain"
+    monkeypatch.setattr(
+        config,
+        "telemetry_endpoint_for",
+        lambda ws: "http://collector:4318" if ws == opted else None,
+    )
+    monkeypatch.setattr(
+        identity,
+        "load_host_identity_if_present",
+        lambda: identity.HostIdentity(
+            host_id="host_0123456789abcdef0123456789abcdef", name="macbook-work"
+        ),
+    )
+
+    def overrides(cwd: Path) -> list[str]:
+        return build_codex_native_server(
+            socket_path=tmp_path / "codex.sock",
+            codex_home=tmp_path / "codex-home",
+            cwd=cwd,
+            model=None,
+            profile=None,
+            bridge_dir=tmp_path / "bridge",
+            codex_path=sys.executable,
+        ).config_overrides
+
+    assert not [o for o in overrides(plain) if o.startswith("otel.")]
+    otel = {
+        key: tomllib.loads(f"v = {value}")["v"]
+        for key, value in (o.split("=", 1) for o in overrides(opted) if o.startswith("otel."))
+    }
+    assert otel["otel.environment"] == "macbook-work"
+    logs = {"endpoint": "http://collector:4318/v1/logs", "protocol": "binary"}
+    assert otel["otel.exporter"] == {"otlp-http": logs}
+    assert (
+        otel["otel.metrics_exporter"]["otlp-http"]["endpoint"]
+        == "http://collector:4318/v1/metrics"
+    )
+    assert otel["otel.log_user_prompt"] is True and otel["otel.trace_exporter"] == "none"
