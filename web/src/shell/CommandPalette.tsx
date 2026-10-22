@@ -30,7 +30,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useNavigate } from "@/lib/routing";
-import { useConversations } from "@/hooks/useConversations";
+import { isSearchTimeout, useConversations } from "@/hooks/useConversations";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -189,8 +189,16 @@ export function CommandPalette({
     );
   }, [actions, query, sessionsOnly]);
 
-  const { data, isFetching, isError, refetch, hasNextPage, fetchNextPage, isFetchNextPageError } =
-    useConversations(sessionsOnly ? "" : debouncedQuery, false, { enabled: open });
+  const {
+    data,
+    error,
+    isFetching,
+    isError,
+    refetch,
+    hasNextPage,
+    fetchNextPage,
+    isFetchNextPageError,
+  } = useConversations(sessionsOnly ? "" : debouncedQuery, false, { enabled: open });
   const loadedPages = data?.pages.length ?? 0;
   useEffect(() => {
     if (
@@ -338,7 +346,9 @@ export function CommandPalette({
                 {loadError
                   ? isFetchNextPageError
                     ? "Couldn't load more sessions."
-                    : "Couldn't load sessions."
+                    : isSearchTimeout(error)
+                      ? "Search took too long. Try a longer or more specific word."
+                      : "Couldn't load sessions."
                   : "Loading sessions…"}
                 {loadError && (
                   <button
