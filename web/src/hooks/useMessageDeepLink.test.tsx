@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useState, type ReactNode } from "react";
 import { TerminalFirstContextProvider } from "@/shell/TerminalFirstContext";
+import { SESSION_HISTORY_SEEK_PAGE_SIZE } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import {
   useMessageDeepLink,
@@ -178,7 +179,8 @@ describe("useMessageDeepLink", () => {
       wrapper: wrapperFor("/c/conv_1"),
     });
 
-    expect(loadMoreHistory).toHaveBeenCalledOnce();
+    // A jump pages toward its target in large pages, not the scroll-up page.
+    expect(loadMoreHistory).toHaveBeenCalledExactlyOnceWith(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
     expect(scrollSpy).not.toHaveBeenCalled();
     await act(async () => {
       await loadMoreHistory.mock.results[0]?.value;
@@ -257,6 +259,13 @@ describe("useMessageDeepLink", () => {
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
     expect(screen.getByText("Terminal view")).toBeInTheDocument();
     expect(scrollSpy).toHaveBeenCalledOnce();
+  });
+
+  it("opens Chat for a search result's ?find= so the find bar can jump to the match", () => {
+    renderHook(() => useMessageDeepLinkChatView("conv_1"), {
+      wrapper: terminalWrapperFor("/c/conv_1?find=hello"),
+    });
+    expect(screen.getByText("hello")).toBeInTheDocument();
   });
 
   it("preserves Terminal view without a message link", () => {
