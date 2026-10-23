@@ -145,10 +145,31 @@ instructions:
 Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
 commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR from this checkout on
-a landing host with `bash ~/dev/homelab/automations/omnigent-fork-sync/land-pr.sh <pr>`,
-which squashes it into one commit signed with a key in `allowed_signers`. The VPS
-(`cc-experiments`) and the work Mac (`xmac-work`) are landing hosts; homelab's
-`automations/README.md`, Landing host, lists them and says how to make another one.
+a landing host with `bash .claude/skills/fork-sync/land-pr.sh <pr>`, which
+squashes it into one commit signed with a key in `allowed_signers`. The PR must
+be open, from this repo, and contain `origin/mine`.
+
+A landing host has `gh` logged in to an account that can push to
+`kzarzycki/omnigent`, and an SSH signing key of its own: its public key in
+dotagents' `patches/omnigent/allowed_signers` and in every consumer's trust list
+(each machine's `~/.config/omnigent/allowed_signers`, read by `omnigent-update`,
+and the VPS's `/etc/omnigent/allowed_signers`, read by `omnigent-deploy`). The
+checkout signs with it:
+
+```sh
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/git_signing_ed25519.pub
+git config commit.gpgsign true
+```
+
+`land-pr.sh` refuses a checkout that doesn't sign with SSH (exit 2) and checks
+each squash against `~/.config/omnigent/allowed_signers` (override with
+`OMNIGENT_ALLOWED_SIGNERS`) before it pushes. Landing hosts today:
+
+| Host | Key |
+| ---- | --- |
+| `cc-experiments` (VPS) | `omnigent-signing@cc-experiments` |
+| `xmac-work` (work Mac, account `zarz`) | `omnigent-signing@ZarzBook`, `SHA256:zr4WKwgYCr77WCbmOHqhc5hVRHjbnyYgQ9hKDz7Sr04` |
 
 ## This fork: filing upstream issues and PRs
 
