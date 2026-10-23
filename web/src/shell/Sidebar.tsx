@@ -54,6 +54,7 @@ import {
   ClockPlusIcon,
   CircleAlertIcon,
   CircleStopIcon,
+  CopyIcon,
   FolderGit2Icon,
   FolderIcon,
   FolderInputIcon,
@@ -63,6 +64,7 @@ import {
   GitForkIcon,
   GitPullRequestIcon,
   InboxIcon,
+  InfoIcon,
   ListChecksIcon,
   ListFilterIcon,
   LaptopIcon,
@@ -339,6 +341,8 @@ import {
   useDeleteSourceAutomations,
 } from "@/lib/automationFromSession";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
+import { SessionDetailsDialog } from "./SessionDetailsDialog";
+import { copyText } from "@/lib/clipboard";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
 import {
   SIDEBAR_ROW,
@@ -4508,6 +4512,7 @@ function ConversationMenuItems({
   setStopOpen,
   setDeleteOpen,
   setLeaveOpen,
+  setDetailsOpen,
   setMenuOpen,
   runArchive,
   reorder,
@@ -4545,6 +4550,7 @@ function ConversationMenuItems({
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
   setLeaveOpen: (open: boolean) => void;
+  setDetailsOpen: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -4841,6 +4847,23 @@ function ConversationMenuItems({
             </C.SubContent>
           </C.Sub>
         ))}
+      {/* Open to everyone: reading or copying an id changes nothing. */}
+      <C.Item
+        data-testid="copy-session-id"
+        onSelect={() => {
+          copyText(conversation.id).then(
+            () => showToast("Session ID copied"),
+            () => showToast("Couldn't copy the session ID"),
+          );
+        }}
+      >
+        <CopyIcon className="size-3.5" />
+        Copy session ID
+      </C.Item>
+      <C.Item data-testid="session-details" onSelect={() => setDetailsOpen(true)}>
+        <InfoIcon className="size-3.5" />
+        Details…
+      </C.Item>
       {/* Stop / Archive / Delete are grouped at the bottom, below a
           divider: lifecycle-ending actions separated from the everyday
           ones above. */}
@@ -5436,6 +5459,7 @@ function ConversationRowImpl({
   const [forkOpen, setForkOpen] = useState(false);
   const [automationOpen, setAutomationOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const gitBranch = conversation.git_branch ?? null;
   // Every row action gates on ownership alone — the sidebar carries no
   // effective-permission level, so rename/share/move/drag are owner-only and
@@ -5830,6 +5854,7 @@ function ConversationRowImpl({
     setStopOpen,
     setDeleteOpen,
     setLeaveOpen,
+    setDetailsOpen,
     runArchive,
     reorder: canReorder && !isProvisionalRow ? { previousId, nextId } : undefined,
   };
@@ -6351,6 +6376,14 @@ function ConversationRowImpl({
           sessionId={conversation.id}
           open={shareOpen}
           onOpenChange={setShareOpen}
+        />
+      )}
+      {detailsOpen && (
+        <SessionDetailsDialog
+          conversation={conversation}
+          project={currentProject}
+          onOpenChange={setDetailsOpen}
+          onCloseFocus={() => rowRef.current?.querySelector<HTMLElement>("a")?.focus()}
         />
       )}
       {forkOpen && (
