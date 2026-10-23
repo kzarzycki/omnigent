@@ -165,8 +165,10 @@ instructions:
 Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
 commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR from this checkout on
-the VPS with `bash ~/dev/homelab/automations/omnigent-fork-sync/land-pr.sh <pr>`,
-which squashes it into one commit signed with a key in `allowed_signers`.
+a landing host with `bash ~/dev/homelab/automations/omnigent-fork-sync/land-pr.sh <pr>`,
+which squashes it into one commit signed with a key in `allowed_signers`. The VPS
+(`cc-experiments`) and the work Mac (`xmac-work`) are landing hosts; homelab's
+`automations/README.md`, Landing host, lists them and says how to make another one.
 
 ## This fork: filing upstream issues and PRs
 
