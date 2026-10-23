@@ -1,7 +1,11 @@
+import type { BrandingTheme } from "./capabilities";
 import {
+  applyThemePalette,
   isThemePalette,
   PALETTE_TOKEN_CSS_NAMES,
   PALETTES,
+  readThemePalette,
+  setServerDefaultPalette,
   type PaletteMeta,
   type PaletteSwatch,
   type PaletteTokens,
@@ -83,14 +87,36 @@ function normalizeTheme(value: unknown): CustomTheme | null {
   };
 }
 
+/** Forget the user's custom colours, so this browser follows the server's default again. */
+export function clearCustomTheme(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // A failed preference clear should not interrupt live theme updates.
+  }
+}
+
+let serverDefaultCustomTheme: CustomTheme = DEFAULT_CUSTOM_THEME;
+
+/** Set the custom theme this server shows when the user has configured none. */
+export function setServerDefaultCustomTheme(theme: CustomTheme): void {
+  serverDefaultCustomTheme = normalizeTheme(theme) ?? DEFAULT_CUSTOM_THEME;
+}
+
+/** The custom theme used when nothing is stored: the server's default, else the stock one. */
+export function defaultCustomTheme(): CustomTheme {
+  return serverDefaultCustomTheme;
+}
+
 export function readCustomTheme(): CustomTheme {
-  if (typeof window === "undefined") return DEFAULT_CUSTOM_THEME;
+  if (typeof window === "undefined") return serverDefaultCustomTheme;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_CUSTOM_THEME;
-    return normalizeTheme(JSON.parse(raw)) ?? DEFAULT_CUSTOM_THEME;
+    if (!raw) return serverDefaultCustomTheme;
+    return normalizeTheme(JSON.parse(raw)) ?? serverDefaultCustomTheme;
   } catch {
-    return DEFAULT_CUSTOM_THEME;
+    return serverDefaultCustomTheme;
   }
 }
 
@@ -533,4 +559,57 @@ export function applyCustomTheme(theme: CustomTheme): void {
       style.setProperty(`--custom-${mode}-${token}`, variants[mode][key]);
     }
   }
+}
+
+/**
+ * Make the operator's `branding.theme` this server's default and apply it,
+ * unless the user picked a palette here. Colours build a custom theme on the
+ * named palette (else the brand one); a palette alone selects that palette.
+ * Returns whether a server theme now applies.
+ */
+export function applyServerTheme(theme: BrandingTheme | null): boolean {
+  if (!theme) return false;
+  const palette = PALETTES.find((candidate) => candidate.id === theme.palette) ?? PALETTES[0];
+  const colours = {
+    accent: theme.accent,
+    darkAccent: theme.dark_accent,
+    tint: theme.tint,
+    darkTint: theme.dark_tint,
+  };
+  const overrides = Object.fromEntries(
+    Object.entries(colours).filter(([, value]) => isHexColor(value)),
+  ) as Partial<CustomTheme>;
+  if (Object.keys(overrides).length > 0) {
+    setServerDefaultCustomTheme({ ...createCustomThemeFromPalette(palette), ...overrides });
+    setServerDefaultPalette("custom");
+  } else if (isThemePalette(theme.palette)) {
+    setServerDefaultPalette(theme.palette);
+  } else {
+    return false;
+  }
+  applyCustomTheme(readCustomTheme());
+  applyThemePalette(readThemePalette());
+  return true;
+}
+
+/**
+ * Keep `<meta name="theme-color">` (Safari's tab bar, an installed web app,
+ * the phone's status bar) on the page's accent as palette, colours or mode change.
+ */
+let themeColorObserver: MutationObserver | null = null;
+
+export function syncThemeColorMeta(): void {
+  const root = document.documentElement;
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta || themeColorObserver) return;
+  const sync = () => {
+    const accent = getComputedStyle(root).getPropertyValue("--primary").trim();
+    if (accent && meta.content !== accent) meta.content = accent;
+  };
+  sync();
+  themeColorObserver = new MutationObserver(sync);
+  themeColorObserver.observe(root, {
+    attributes: true,
+    attributeFilter: ["class", "data-theme", "style"],
+  });
 }
