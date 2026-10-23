@@ -653,6 +653,9 @@ branding:
     loading: loading.webp        # working indicator (falls back to main)
     favicon: favicon.png         # browser-tab icon
   powered_by: true               # "Powered by Omnigent" credit; false to hide
+  theme:                         # this server's default colours (see below)
+    palette: nord                # omni, dracula, github, catppuccin, gruvbox, solarized, nord
+    accent: "#6a00ff"            # #rrggbb; also dark_accent, tint, dark_tint
 ```
 
 Logo files must live under a dedicated `branding-assets/` directory beside the
@@ -670,6 +673,15 @@ sign-in. Any unset field keeps its built-in default, so a partial block is fine.
 The small "Powered by Omnigent" credit under the landing composer appears only
 once you set custom branding; `powered_by: false` hides it even then. It always
 shows the Omnigent mascot, never your logo.
+
+`theme` sets the colours every browser and device starts in, so two servers
+open side by side look different without anyone touching Settings. `palette`
+alone selects a built-in palette. Any of `accent`, `dark_accent`, `tint`
+(the light-mode background tint) and `dark_tint` builds a custom theme on top
+of `palette` (else the default Omni palette). A palette a user picks in
+Settings → Appearance overrides it in their browser, and resetting appearance
+returns to the server's theme. An unknown palette or a colour that isn't
+`#rrggbb` is ignored with a warning in the server log.
 
 `server_name` names this particular server, so people who connect the desktop
 app to several servers can tell them apart. It is published in the

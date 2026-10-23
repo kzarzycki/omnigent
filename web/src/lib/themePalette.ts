@@ -681,40 +681,63 @@ export function isThemeSelection(value: unknown): value is ThemeSelection {
   return typeof value === "string" && (themeSelections as readonly string[]).includes(value);
 }
 
+let serverDefaultPalette: ThemeSelection = DEFAULT_PALETTE;
+
+/** Set the palette this server shows when the user has picked none. */
+export function setServerDefaultPalette(palette: ThemeSelection): void {
+  serverDefaultPalette = palette;
+}
+
+/** The palette shown when nothing is stored: the server's default, else the brand look. */
+export function defaultThemePalette(): ThemeSelection {
+  return serverDefaultPalette;
+}
+
 /**
  * Read the persisted palette.
  *
- * Returns the default when nothing is stored, on a server render (no `window`),
+ * Returns the default (the server's, else the brand look) when nothing is stored, on a server render (no `window`),
  * or when the stored value is missing/malformed — never throws, so a corrupt
  * entry can't break app boot.
  */
 export function readThemePalette(): ThemeSelection {
-  if (typeof window === "undefined") return DEFAULT_PALETTE;
+  if (typeof window === "undefined") return serverDefaultPalette;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_PALETTE;
+    if (!raw) return serverDefaultPalette;
     const parsed: unknown = JSON.parse(raw);
-    return isThemeSelection(parsed) ? parsed : DEFAULT_PALETTE;
+    return isThemeSelection(parsed) ? parsed : serverDefaultPalette;
   } catch {
-    return DEFAULT_PALETTE;
+    return serverDefaultPalette;
   }
 }
 
 /**
- * Persist the palette. An unknown id clears the preference (reverting to the
- * default) rather than storing garbage. Swallows quota/access errors so a
+ * Persist the palette the user picked, the brand look included, so the pick
+ * survives a later change to the server's default. An unknown id clears the
+ * preference rather than storing garbage. Swallows quota/access errors so a
  * failed write can't break the app.
  */
 export function writeThemePalette(palette: ThemeSelection): void {
   if (typeof window === "undefined") return;
   try {
-    if (!isThemeSelection(palette) || palette === DEFAULT_PALETTE) {
+    if (!isThemeSelection(palette)) {
       window.localStorage.removeItem(STORAGE_KEY);
       return;
     }
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(palette));
   } catch {
     // localStorage quota or access errors shouldn't break the app.
+  }
+}
+
+/** Forget the user's palette, so this browser follows the server's default again. */
+export function clearThemePalette(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // localStorage access errors shouldn't break the app.
   }
 }
 

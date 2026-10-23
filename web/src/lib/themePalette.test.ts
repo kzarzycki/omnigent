@@ -91,12 +91,10 @@ describe("themePalette", () => {
     expect(localStorage.getItem(STORAGE_KEY)).toBe(JSON.stringify("custom"));
   });
 
-  it("clears the key when the default is written (nothing to persist)", () => {
+  it("stores an explicit pick of the default, so a server theme can't replace it later", () => {
     writeThemePalette("dracula");
-    expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
     writeThemePalette(DEFAULT_PALETTE);
-    // Storing the default just reverts to base tokens, so drop the key.
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY)).toBe(JSON.stringify(DEFAULT_PALETTE));
     expect(readThemePalette()).toBe(DEFAULT_PALETTE);
   });
 
