@@ -2173,10 +2173,10 @@ def test_chat_search_skips_compaction_summaries(
     """A compaction shows only as a marker, so its summary matches neither search."""
     conv = conversation_store.create_conversation()
     conversation_store.update_conversation(conv.id, title="General chat")
-    [message, _] = conversation_store.append(
+    # The compaction comes first, so the earliest-match snippet would pick it.
+    [_, message] = conversation_store.append(
         conv.id,
         [
-            _find_message("the zorblat plan", "resp_a"),
             NewConversationItem(
                 type="compaction",
                 response_id="compact_1",
@@ -2187,6 +2187,7 @@ def test_chat_search_skips_compaction_summaries(
                     token_count=50,
                 ),
             ),
+            _find_message("the zorblat plan", "resp_a"),
         ],
     )
 
@@ -2195,15 +2196,15 @@ def test_chat_search_skips_compaction_summaries(
         None,
     )
     assert conversation_store.find_item_matches(conv.id, "quuxite") == ([], None)
-    assert conv.id not in {
-        c.id for c in conversation_store.list_conversations(search_query="quuxite").data
-    }
+    quuxite = conversation_store.list_conversations(search_query="quuxite").data
+    assert conv.id not in {c.id for c in quuxite}
     [found] = [
         c
         for c in conversation_store.list_conversations(search_query="zorblat").data
         if c.id == conv.id
     ]
-    assert found.search_snippet is not None and "plan" in found.search_snippet
+    assert found.search_snippet is not None
+    assert "plan" in found.search_snippet and "discussed" not in found.search_snippet
 
 
 def test_find_item_matches_scans_one_window_and_walks_older_windows_by_cursor(
