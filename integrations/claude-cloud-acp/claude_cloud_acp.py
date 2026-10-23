@@ -1036,7 +1036,6 @@ def self_check() -> None:
     with contextlib.redirect_stdout(out):
         assert run_turn("acp-quiet", "sleep 420") == "end_turn"
     assert before_events[0] >= 1 and out.getvalue().count('"session/update"') >= 3, out.getvalue()
-    assert not any(t.name == "keepalive" for t in threading.enumerate())  # ended with its turn
     fresh = SESSIONS["acp-fresh"] = Session("/", "acp-fresh")
     fresh.reader = threading.current_thread()
     globals()["TURN_TIMEOUT_S"] = 0.1
@@ -1044,6 +1043,13 @@ def self_check() -> None:
     with contextlib.redirect_stdout(out), contextlib.suppress(RuntimeError):
         run_turn("acp-fresh", "start")
     assert f"{MARKER}session_01NewNewNewNew" in out.getvalue(), out.getvalue()
+    # Each turn's keepalive has ended by the time the turn returns, however fast turns follow.
+    globals()["_mirror_turn"] = lambda *_: time.sleep(0.1) or "end_turn"
+    threads_before = threading.active_count()
+    with contextlib.redirect_stdout(io.StringIO()):
+        for _ in range(3):
+            run_turn("acp-quiet", "again")
+            assert threading.active_count() == threads_before, threading.enumerate()
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")
