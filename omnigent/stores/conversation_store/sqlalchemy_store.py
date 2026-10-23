@@ -781,6 +781,21 @@ def _fetch_labels_bulk(
     return out
 
 
+def _chat_text_match(pattern: str) -> ColumnElement[bool]:
+    """
+    Items whose ``search_text`` matches ``pattern``, among those the chat shows as text.
+
+    A compaction renders only as a marker, so a match in its summary would
+    count in session search and find in chat with nothing to land on.
+    ILIKE on the raw column: only it carries the pg_trgm index. ``pattern`` comes
+    from :func:`_like_contains_pattern`.
+    """
+    return and_(
+        SqlConversationItem.search_text.ilike(pattern, escape=_LIKE_ESCAPE),
+        SqlConversationItem.type != encode_item_type("compaction"),
+    )
+
+
 def _fetch_search_snippets(
     session: Session,
     conversation_ids: list[str],
@@ -822,7 +837,7 @@ def _fetch_search_snippets(
     match_pred = and_(
         SqlConversationItem.workspace_id == workspace_id,
         SqlConversationItem.conversation_id.in_(conversation_ids),
-        SqlConversationItem.search_text.ilike(pattern, escape=_LIKE_ESCAPE),
+        _chat_text_match(pattern),
     )
     # Earliest matching position per conversation — a small (conv_id, position)
     # aggregate, no bodies materialized.
@@ -2449,7 +2464,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 in_scope.append(SqlConversationItem.position >= edges[0])
             rows = session.execute(
                 select(SqlConversationItem.id, SqlConversationItem.response_id)
-                .where(*in_scope, SqlConversationItem.search_text.ilike(f"%{query.lower()}%"))
+                .where(*in_scope, _chat_text_match(_like_contains_pattern(query)))
                 .order_by(SqlConversationItem.position)
             ).all()
         matches = [(item_id, response_id) for item_id, response_id in rows]
@@ -3427,7 +3442,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .where(
                         SqlConversationItem.workspace_id == current_workspace_id(),
                         SqlConversationItem.conversation_id == SqlConversation.id,
-                        SqlConversationItem.search_text.ilike(pattern, escape=_LIKE_ESCAPE),
+                        _chat_text_match(pattern),
                     )
                     .exists()
                 )
