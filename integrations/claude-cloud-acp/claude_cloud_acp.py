@@ -14,7 +14,7 @@ it as a plain ``acp:<slug>`` agent:
 * the transcript is read back from ``GET /v1/code/sessions/{id}/events``,
   and mirrored as ACP ``session/update`` notifications until the turn's
   ``result`` event. All calls use the Claude CLI's own claude.ai login;
-* the first answer ends with a ``cloud session: <url>`` line. A bridge that
+* the first answer starts with a ``cloud session: <url>`` line. A bridge that
   starts on a transcript Omnigent replays (after a restart) finds that line and
   re-attaches to the same cloud session, unarchiving it when needed.
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import io
 import itertools
 import json
 import os
@@ -52,6 +53,9 @@ CLAUDE_CLI = os.environ.get("CLAUDE_CLOUD_CLI", "claude")
 # The stream sends a keepalive every ~12 s; reconnect when it goes quiet for longer.
 STREAM_IDLE_S = 60
 TURN_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_TURN_TIMEOUT_S", "3600"))
+# Omnigent ends a turn after HARNESS_ACP_PROMPT_TIMEOUT_S (300 s) with no message,
+# and one cloud tool call can run longer, so a waiting turn sends an empty update.
+KEEPALIVE_S = 60
 # Omnigent's agent env allowlist drops USER, but the CLI's keychain lookup keys on it.
 os.environ.setdefault("USER", pwd.getpwuid(os.getuid()).pw_name)
 CLI_TIMEOUT_S = 300
@@ -78,6 +82,7 @@ REPLAY_TAIL = (
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 
 _write_lock = threading.Lock()
+_last_sent = 0.0
 # Replies to the requests this bridge sends Omnigent, by request id.
 _replies: dict[str, queue.Queue[dict]] = {}
 # A permission card waits for a person; past this the tool is denied.
@@ -85,9 +90,20 @@ APPROVAL_TIMEOUT_S = 1800
 
 
 def send(msg: dict) -> None:
+    global _last_sent
     with _write_lock:
         sys.stdout.write(json.dumps(msg) + "\n")
         sys.stdout.flush()
+        _last_sent = time.monotonic()
+
+
+def keepalive(acp_id: str) -> None:
+    """Tell Omnigent the turn is alive when nothing went out for KEEPALIVE_S.
+
+    ponytail: time-based, not proof the cloud is progressing; TURN_TIMEOUT_S bounds a stuck turn.
+    """
+    if time.monotonic() - _last_sent > KEEPALIVE_S:
+        thought(acp_id, "")
 
 
 def log(text: str) -> None:
@@ -694,8 +710,21 @@ def run_turn(acp_id: str, text: str) -> str:
         s.running = False
 
 
+def announce(acp_id: str, s: Session) -> None:
+    """Record the cloud session as soon as it exists, so a turn that fails still names it."""
+    remember(acp_id, s.cloud_id)
+    thought(acp_id, f"[cloud] https://claude.ai/code/{s.cloud_id}\n")
+    # Lands in the transcript, so a restarted bridge finds the session.
+    update(
+        acp_id,
+        {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": f"{MARKER}{s.cloud_id}\n\n"},
+        },
+    )
+
+
 def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
-    announce = False
     if s.cloud_id is None:
         s.cloud_id, text = split_replay(text)
         if s.cloud_id is None:
@@ -704,18 +733,17 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
             else:
                 s.cloud_id = create_cloud_session(text, s.cwd)
                 log(f"created {s.cloud_id}")
+                announce(acp_id, s)
                 after = 0
         else:
             log(f"re-attaching to {s.cloud_id}")
+            announce(acp_id, s)
             after, unarchived = _send(s, text)
             if unarchived:
                 thought(
                     acp_id,
                     "[cloud] unarchived the session; files from before the archive are gone\n",
                 )
-        remember(acp_id, s.cloud_id)
-        thought(acp_id, f"[cloud] https://claude.ai/code/{s.cloud_id}\n")
-        announce = True
     else:
         after, unarchived = _send(s, text)
         if unarchived:
@@ -732,6 +760,7 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         try:
             event = s.events.get(timeout=1)
         except queue.Empty:
+            keepalive(acp_id)
             continue
         if int(event["sequence_num"]) <= after:
             continue  # from before this turn's message
@@ -739,15 +768,6 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         for upd in updates:
             update(acp_id, upd)
         if done:
-            if announce:
-                # Lands in the transcript, so a restarted bridge finds the session.
-                update(
-                    acp_id,
-                    {
-                        "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": f"\n\n{MARKER}{s.cloud_id}"},
-                    },
-                )
             return "cancelled" if s.interrupted else "end_turn"
     raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
 
@@ -761,12 +781,14 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
     """Create the cloud session, register MCP servers, then post *text*; return its seq."""
     s.cloud_id = create_cloud_session(BOOTSTRAP_PROMPT, s.cwd)
     log(f"created {s.cloud_id}")
+    announce(acp_id, s)
     s.follow(0)
     deadline = time.monotonic() + TURN_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
             payload = s.events.get(timeout=1).get("payload") or {}
         except queue.Empty:
+            keepalive(acp_id)
             continue
         if payload.get("type") == "env_manager_log":
             for upd in to_updates(payload)[0]:
@@ -982,6 +1004,27 @@ def self_check() -> None:
         assert access_token() == "new" and len(runs) == 1  # fresh token: no second refresh
     finally:
         subprocess.run = real_run
+    # A turn quiet for longer than KEEPALIVE_S still sends updates, so Omnigent
+    # never idles it out; a turn that fails has already named its cloud session.
+    globals()["_send"] = lambda *_: (1, False)
+    globals()["create_cloud_session"] = lambda *_: "session_01NewNewNewNew"
+    globals()["remember"] = lambda *_: None
+    globals()["KEEPALIVE_S"] = 0.5
+    quiet = SESSIONS["acp-quiet"] = Session("/", "acp-quiet")
+    quiet.cloud_id, quiet.reader = "session_q", threading.current_thread()
+    result = {"sequence_num": "2", "payload": {"type": "result"}}
+    threading.Timer(3.5, quiet.events.put, [result]).start()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert run_turn("acp-quiet", "sleep 420") == "end_turn"
+    assert out.getvalue().count('"session/update"') >= 2, out.getvalue()
+    fresh = SESSIONS["acp-fresh"] = Session("/", "acp-fresh")
+    fresh.reader = threading.current_thread()
+    globals()["TURN_TIMEOUT_S"] = 0.1
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.suppress(RuntimeError):
+        run_turn("acp-fresh", "start")
+    assert f"{MARKER}session_01NewNewNewNew" in out.getvalue(), out.getvalue()
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")

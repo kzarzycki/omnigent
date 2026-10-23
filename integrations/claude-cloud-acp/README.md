@@ -12,7 +12,7 @@ while the conversation shows up in Omnigent.
 | First prompt | `claude --cloud "<prompt>"` from the session cwd, on a pseudo-terminal, because the CLI creates cloud sessions only interactively (`--cloud` refuses `--print`). The bridge reads the new session id from the screen and closes the local view. The VM clones that checkout's GitHub remote and branch, or uploads a bundle when there is no GitHub remote |
 | Later prompts | `POST /v1/code/sessions/{id}/events` with a `user` event, the call the CLI's own interactive client makes. Any process with the login can send, so nothing depends on the creating process staying alive |
 | Cancel | The same endpoint with a `control_request` of subtype `interrupt`. The running tool is stopped and the turn ends with `error_during_execution`. Omnigent terminates the agent process right after `session/cancel`, so the bridge sends the interrupt at once, and again on EOF or SIGTERM for any turn still running |
-| Resume | The first answer ends with a `cloud session: https://claude.ai/code/<id>` line. A new bridge process that gets Omnigent's replayed transcript finds that line and sends only the latest message to the same cloud session. A respawned bridge prompted with an old ACP session id finds the cloud session in `$XDG_STATE_HOME/claude-cloud-acp/sessions.json`. A prompt that starts with that line adopts an existing cloud session |
+| Resume | The first answer starts with a `cloud session: https://claude.ai/code/<id>` line, sent as soon as the session exists, so a turn that fails still leaves it in the transcript. A new bridge process that gets Omnigent's replayed transcript finds that line and sends only the latest message to the same cloud session. A respawned bridge prompted with an old ACP session id finds the cloud session in `$XDG_STATE_HOME/claude-cloud-acp/sessions.json`. A prompt that starts with that line adopts an existing cloud session |
 | Archived session | A send that gets `409 session_not_active` unarchives the session and resends. History comes back, but files and the repo checkout from before the archive are gone. An idle or stopped VM re-provisions by itself on the next send |
 | Transcript | `GET /v1/code/sessions/{id}/events/stream` (server-sent events), from the sequence number of the posted message, reconnecting from the last event seen; assistant text, thinking, tool calls and tool results become ACP `session/update`s; the `result` event ends the turn |
 | MCP servers | Each stdio server in `session/new.mcpServers`, Omnigent's own tools among them, runs on this host. The bridge registers it in the cloud session as an SDK MCP server (`mcp_set_servers`) and answers the CLI's `mcp_message` requests from that process. The traffic goes VM → Anthropic → bridge, so the VM needs no route to this host or the tailnet. A new bridge re-registers the servers on its first turn. Omnigent's `sys_os_*` tools are hidden: they act on this host, and the VM has its own shell and files. When servers are configured, a new session is created with a one-word bootstrap prompt, so the servers are registered before the real first prompt |
@@ -110,6 +110,10 @@ read-only, such as `Read` and `Grep`, never ask.
 - **Child sessions:** an agent spec with `spawn: true` gives the cloud agent
   `sys_session_create` and `sys_session_send`; `config_path` is resolved on the
   Omnigent host.
+- **Long tool calls:** while a turn waits on the cloud, the bridge sends an
+  empty thought every 60 s, so Omnigent's 300 s idle timeout
+  (`HARNESS_ACP_PROMPT_TIMEOUT_S`) never ends a turn whose tool call runs
+  longer. `CLAUDE_CLOUD_TURN_TIMEOUT_S` (1 hour) still bounds the whole turn.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.
