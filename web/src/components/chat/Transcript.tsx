@@ -123,12 +123,14 @@ export function visibleTranscriptBubbles(bubbles: Bubble[]): Bubble[] {
 export function isNativeFindShortcut(
   event: Pick<
     globalThis.KeyboardEvent,
-    "altKey" | "ctrlKey" | "defaultPrevented" | "key" | "metaKey"
+    "altKey" | "ctrlKey" | "defaultPrevented" | "key" | "metaKey" | "shiftKey"
   >,
 ): boolean {
+  // ⌘⇧F is the workspace's content search, not find.
   return (
     !event.defaultPrevented &&
     !event.altKey &&
+    !event.shiftKey &&
     event.key.toLowerCase() === "f" &&
     (event.metaKey || event.ctrlKey)
   );
