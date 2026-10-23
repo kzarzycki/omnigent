@@ -32,7 +32,12 @@ import {
 } from "./lib/uiFontPreferences";
 import { migrateLegacyProjectFolderPagination } from "./lib/projectFolderPaginationPreferences";
 import { applyThemePalette, readThemePalette } from "./lib/themePalette";
-import { applyCustomTheme, readCustomTheme } from "./lib/customTheme";
+import {
+  applyCustomTheme,
+  applyServerTheme,
+  readCustomTheme,
+  syncThemeColorMeta,
+} from "./lib/customTheme";
 import { initChatStore } from "./store/chatStore";
 import "katex/dist/katex.min.css";
 import "streamdown/styles.css";
@@ -142,6 +147,8 @@ function RootApp({ initialInfo }: { initialInfo: ServerInfo | "loading" }) {
   }, []);
   useEffect(() => {
     if (info === "loading") return;
+    // Stock servers keep their fixed theme-color, as before server themes existed.
+    if (applyServerTheme(info.branding?.theme ?? null)) syncThemeColorMeta();
     if (info.branding?.app_name) document.title = info.branding.app_name;
     const faviconUrl = info.branding?.logos.favicon;
     if (!faviconUrl) return;

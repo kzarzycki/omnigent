@@ -253,7 +253,8 @@ import {
 } from "@/lib/pickerEntryVisibility";
 import {
   applyThemePalette,
-  DEFAULT_PALETTE,
+  clearThemePalette,
+  defaultThemePalette,
   isThemeSelection,
   PALETTES,
   readThemePalette,
@@ -262,9 +263,10 @@ import {
 } from "@/lib/themePalette";
 import {
   applyCustomTheme,
+  clearCustomTheme,
   createCustomThemeFromPalette,
   customThemeSwatches,
-  DEFAULT_CUSTOM_THEME,
+  defaultCustomTheme,
   readCustomTheme,
   type CustomTheme,
   writeCustomTheme,
@@ -758,7 +760,11 @@ function ColorThemeControl() {
 
   const choose = useCallback(
     (next: ThemeSelection) => {
-      if (next === "custom") applyCustomTheme(customTheme);
+      if (next === "custom") {
+        // Pin the colours shown, so a later change to the server's default can't swap them.
+        writeCustomTheme(customTheme);
+        applyCustomTheme(customTheme);
+      }
       setSelection(next);
       writeThemePalette(next);
       applyThemePalette(next);
@@ -1048,10 +1054,11 @@ function AppearanceSection() {
 
     writeTerminalThemeMode(TERMINAL_THEME_DEFAULT);
 
-    writeThemePalette(DEFAULT_PALETTE);
-    applyThemePalette(DEFAULT_PALETTE);
-    writeCustomTheme(DEFAULT_CUSTOM_THEME);
-    applyCustomTheme(DEFAULT_CUSTOM_THEME);
+    // Forget the user's picks, so the server's default theme (if any) applies again.
+    clearThemePalette();
+    applyThemePalette(defaultThemePalette());
+    clearCustomTheme();
+    applyCustomTheme(defaultCustomTheme());
 
     writeTranscriptViewDefault(TRANSCRIPT_VIEW_DEFAULT);
 
