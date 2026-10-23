@@ -183,11 +183,22 @@ class BrandingLogosInfo(BaseModel):
     favicon: str | None
 
 
+class BrandingThemeInfo(BaseModel):
+    """The server's default colour theme; a palette picked in Settings overrides it."""
+
+    palette: str | None = None
+    accent: str | None = None
+    dark_accent: str | None = None
+    tint: str | None = None
+    dark_tint: str | None = None
+
+
 class BrandingInfo(BaseModel):
     app_name: str | None
     heading: str | None
     logos: BrandingLogosInfo
     powered_by: bool
+    theme: BrandingThemeInfo | None = None
 
 
 class FilesystemAttachmentsInfo(BaseModel):

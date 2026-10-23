@@ -9,6 +9,7 @@ const EMPTY_BRANDING: Branding = {
   heading: null,
   logos: { main: null, loading: null, favicon: null },
   powered_by: true,
+  theme: null,
 };
 
 /** Current operator branding, or all-null while loading / when unset. */

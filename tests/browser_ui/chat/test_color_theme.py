@@ -270,12 +270,12 @@ def test_color_palette_applies_persists_and_resets(
     assert _data_theme(page) == "github", "saved palette not re-applied after reload"
     expect(_color_theme_select(page)).to_contain_text("GitHub")
 
-    # → back to Omnigent (the default): the override is removed and the stored
-    # key cleared, since the default reverts to the base brand tokens.
+    # → back to Omnigent (the default): the override is removed, and the pick is
+    # stored so a server default theme set later can't replace it.
     _pick_palette(page, "Omnigent")
     expect(_color_theme_select(page)).to_contain_text("Omnigent")
     assert _data_theme(page) is None, "<html> kept data-theme after returning to Omnigent"
-    assert _stored_palette(page) is None, "the palette key was not cleared for the default"
+    assert _stored_palette(page) == '"omni"', "an explicit Omnigent pick was not stored"
 
 
 def test_color_palette_composes_with_dark_mode(
