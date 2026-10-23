@@ -164,10 +164,14 @@ instructions:
 
 Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
 commit with its own key, so every machine's `omnigent-update` refuses to install
-the head and the nightly sync refuses to take it. Land a PR from this checkout on
-a landing host with `bash .claude/skills/fork-sync/land-pr.sh <pr>`, which
-squashes it into one commit signed with a key in `allowed_signers`. The PR must
-be open, from this repo, and contain `origin/mine`.
+the head and the nightly sync refuses to take it. Land a PR on a landing host
+with the engineering loop's `python3 <engineering-loop skill>/scripts/approvals.py
+land <pr> --wait`, run from a checkout of the PR's head (its worktree): it reads
+`docs/agents/loop.md` there, whose `Land:` line makes it squash the PR into one
+commit signed with this checkout's key, check it against `allowed_signers`, and
+fast-forward `mine` to it. The fork runs no GitHub Actions (`CI: none`), so
+first record `mise run check:all` passing on the head with `approvals.py
+local-ci <pr>` (run `mise trust` once in a new checkout).
 
 A landing host has `gh` logged in to an account that can push to
 `kzarzycki/omnigent`, and an SSH signing key of its own: its public key in
@@ -182,9 +186,8 @@ git config user.signingkey ~/.ssh/git_signing_ed25519.pub
 git config commit.gpgsign true
 ```
 
-`land-pr.sh` refuses a checkout that doesn't sign with SSH (exit 2) and checks
-each squash against `~/.config/omnigent/allowed_signers` (override with
-`OMNIGENT_ALLOWED_SIGNERS`) before it pushes. Landing hosts today:
+`land` refuses a checkout that doesn't sign with SSH, and a squash the
+allowed signers file doesn't accept, before it pushes. Landing hosts today:
 
 | Host | Key |
 | ---- | --- |
