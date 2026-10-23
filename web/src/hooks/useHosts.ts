@@ -36,6 +36,10 @@ export interface Host {
    * or server — and must not gate anything away; only an explicit `false` does.
    */
   gateway_inference?: Record<string, boolean> | null;
+  /** Omnigent version and source-install commit from the host's live connect;
+   *  `null`/absent while offline, on another replica, or on an older server. */
+  version?: string | null;
+  commit?: string | null;
 }
 
 interface HostsResponse {
