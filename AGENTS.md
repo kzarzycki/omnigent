@@ -167,3 +167,10 @@ commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR from this checkout on
 the VPS with `bash ~/dev/homelab/automations/omnigent-fork-sync/land-pr.sh <pr>`,
 which squashes it into one commit signed with a key in `allowed_signers`.
+
+## This fork: filing upstream issues and PRs
+
+Upstream's triage and duplicate-check bots comment within about a minute of a
+new issue or PR. After filing, watch it for the first few minutes and answer any
+question with evidence (for example `git merge-base --is-ancestor <fix>
+upstream/main`) before reporting done.
