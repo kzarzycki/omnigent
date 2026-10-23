@@ -257,6 +257,7 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
+import { hostBuildLabel } from "./HostLabel";
 import {
   previewIsUnsupported,
   sandboxModelOptionsKey,
@@ -469,6 +470,7 @@ function HostOption({
   cloud?: boolean;
 }) {
   const isOnline = host.status === "online";
+  const build = hostBuildLabel(host);
   return (
     <span className="flex w-full min-w-0 items-center gap-1">
       <span className="flex size-4 shrink-0 items-center justify-center">
@@ -490,6 +492,7 @@ function HostOption({
           <span className="text-xs text-muted-foreground"> • {host.name}</span>
         )}
         {subtitle && <span className="text-xs text-muted-foreground"> • {subtitle}</span>}
+        {build && <span className="text-xs text-muted-foreground"> • {build}</span>}
       </span>
       {action}
       <span className="sr-only">{host.status}</span>
