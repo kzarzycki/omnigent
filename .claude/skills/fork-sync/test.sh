@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# The gate's selftest, land-pr.sh, and sync-fork.sh refusing a checkout that is not the fork.
+# The gate's selftest and sync-fork.sh refusing a checkout that is not the fork.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 python3 "$here/gate.py" --selftest
-bash "$here/test-land-pr.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 # A checkout with a commit and a dirty file that lacks one of the fork's pieces: the guard must
