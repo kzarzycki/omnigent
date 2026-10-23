@@ -81,9 +81,13 @@ export function scrollToMessage(
   // transcript to scroll it into the mounted range first; its node then mounts
   // on the next frame, so retry the DOM lookup + centering scroll there.
   const scrolledIntoWindow = ensureVisible?.(messageId) ?? false;
-  const el =
-    document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) ??
-    document.querySelector(`[data-user-message-id="${CSS.escape(messageId)}"]`);
+  const id = CSS.escape(messageId);
+  const bubbles = [
+    ...document.querySelectorAll(`[data-message-id="${id}"]`),
+    ...document.querySelectorAll(`[data-user-message-id="${id}"]`),
+  ];
+  // One response can render as several bubbles: land on the one holding the focus range.
+  const el = (focus && bubbles.find((bubble) => focus(bubble))) || bubbles[0];
   if (!el) {
     if (scrolledIntoWindow) {
       // Row is being mounted by the virtualizer — center on it next frame.
