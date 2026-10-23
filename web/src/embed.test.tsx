@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { createPortal } from "react-dom";
 import { MemoryRouter } from "react-router-dom";
 import { transform } from "lightningcss";
@@ -125,5 +125,27 @@ describe("embed color scheme", () => {
     const portalRoot = getEmbedRoot()!;
     expect(portalRoot).toHaveClass("text-foreground");
     expect(portalRoot.classList.contains("dark")).toBe(isDarkMode);
+  });
+});
+
+describe("embed server theme", () => {
+  it("applies the server's default palette to the scope root, not the host page", async () => {
+    const themedFetcher = async () =>
+      new Response(JSON.stringify({ branding: { logos: {}, theme: { palette: "nord" } } }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    // The earlier tests' never-resolving probe is cached per module; load a fresh one.
+    vi.resetModules();
+    const { OmnigentApp: FreshOmnigentApp } = await import("./embed");
+    const { container } = render(
+      <MemoryRouter>
+        <FreshOmnigentApp fetcher={themedFetcher} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".omnigent-app")).toHaveAttribute("data-theme", "nord"),
+    );
+    expect(document.documentElement).not.toHaveAttribute("data-theme");
   });
 });
