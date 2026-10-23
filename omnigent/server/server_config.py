@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -305,6 +306,49 @@ def _branding_powered_by(section: Mapping[str, Any]) -> bool:
     return True if value is None else bool(value)
 
 
+# Mirrors ``themePalettes`` in web/src/lib/themePalette.ts.
+THEME_PALETTES: tuple[str, ...] = (
+    "omni",
+    "dracula",
+    "github",
+    "catppuccin",
+    "gruvbox",
+    "solarized",
+    "nord",
+)
+THEME_COLOR_KEYS: tuple[str, ...] = ("accent", "dark_accent", "tint", "dark_tint")
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _branding_theme(section: Mapping[str, Any]) -> dict[str, str] | None:
+    """Return the validated ``branding.theme`` default, or None when nothing valid is set.
+
+    An unknown palette or a non-``#rrggbb`` colour is dropped with a warning, so
+    a typo falls back to the stock look instead of breaking the UI.
+    """
+    raw = section.get("theme")
+    if not isinstance(raw, dict):
+        return None
+    theme: dict[str, str] = {}
+    palette = raw.get("palette")
+    if palette is not None:
+        name = str(palette).strip().lower()
+        if name in THEME_PALETTES:
+            theme["palette"] = name
+        else:
+            logger.warning("branding.theme.palette %r is not a known palette — ignoring", palette)
+    for key in THEME_COLOR_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        color = str(value).strip()
+        if _HEX_COLOR.match(color):
+            theme[key] = color.lower()
+        else:
+            logger.warning("branding.theme.%s %r is not a #rrggbb colour — ignoring", key, value)
+    return theme or None
+
+
 LOGO_VARIANTS: tuple[str, ...] = ("main", "loading", "favicon")
 BRANDING_ASSETS_DIRNAME = "branding-assets"
 BRANDING_ASSET_MAX_BYTES = 5 * 1024 * 1024
@@ -336,6 +380,7 @@ class BrandingSnapshot:
     logo_assets: Mapping[str, BrandingAsset]
     powered_by: bool
     server_name: str | None = None
+    theme: Mapping[str, str] | None = None
 
     def config(self) -> dict[str, Any]:
         """Return the public branding block surfaced by ``GET /v1/info``."""
@@ -347,6 +392,7 @@ class BrandingSnapshot:
                 for variant in LOGO_VARIANTS
             },
             "powered_by": self.powered_by,
+            "theme": dict(self.theme) if self.theme is not None else None,
         }
 
     def logo_asset(self, variant: str = "main") -> BrandingAsset | None:
@@ -702,12 +748,14 @@ def load_branding_snapshot(config: Mapping[str, Any] | None = None) -> BrandingS
         )
         if asset is not None:
             logo_assets[variant] = asset
+    theme = _branding_theme(section)
     return BrandingSnapshot(
         app_name=_branding_str(section, "app_name"),
         heading=_branding_heading(section),
         logo_assets=MappingProxyType(logo_assets),
         powered_by=_branding_powered_by(section),
         server_name=_branding_str(section, "server_name"),
+        theme=MappingProxyType(theme) if theme is not None else None,
     )
 
 
