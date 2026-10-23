@@ -129,6 +129,11 @@ vi.mock("@/hooks/useConversations", async () => {
 
 // Heavy sibling widgets pull their own hooks/providers; stub them so this
 // test stays scoped to the conversation row.
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock("@/components/ui/toast", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  showToast,
+}));
 vi.mock("./AgentTypeFilter", () => ({ AgentTypeFilter: () => null }));
 vi.mock("./ReportIssueButton", () => ({ ReportIssueButton: () => null }));
 vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }));
@@ -1501,5 +1506,83 @@ describe("peek mode row menu", () => {
     fireEvent.pointerLeave(aside);
     vi.advanceTimersByTime(1000);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("session id and details from the row menu", () => {
+  const DETAILED: Conversation = {
+    ...CONV,
+    agent_name: "research-agent",
+    host_id: "host_a1b2",
+    workspace: "/Users/me/repo",
+    git_branch: "feature/login",
+  };
+
+  it("copies the session id with one click and confirms with a toast", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    showToast.mockReset();
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+    fireEvent.click(screen.getByTestId("copy-session-id"));
+
+    expect(writeText).toHaveBeenCalledWith("conv_1");
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith("Session ID copied"));
+  });
+
+  it("opens a details dialog from the loaded row, with a copy button per value", () => {
+    mockConversations([DETAILED]);
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+    fireEvent.click(screen.getByTestId("session-details"));
+
+    const dialog = screen.getByTestId("session-details-dialog");
+    expect(within(dialog).getByTestId("session-detail-Session ID")).toHaveTextContent("conv_1");
+    expect(within(dialog).getByTestId("session-detail-Agent")).toHaveTextContent("research-agent");
+    expect(within(dialog).getByTestId("session-detail-Host")).toHaveTextContent("host_a1b2");
+    expect(within(dialog).getByTestId("session-detail-Workspace")).toHaveTextContent(
+      "/Users/me/repo",
+    );
+    expect(within(dialog).getByTestId("session-detail-Branch")).toHaveTextContent("feature/login");
+    // Empty fields (no owner, no project here) are left out, not shown blank.
+    expect(within(dialog).queryByTestId("session-detail-Owner")).toBeNull();
+    expect(within(dialog).queryByTestId("session-detail-Project")).toBeNull();
+    // One copy button per shown row.
+    expect(within(dialog).getAllByTestId("copy-path-button")).toHaveLength(
+      within(dialog).getAllByRole("definition").length,
+    );
+  });
+
+  it("moves focus into the dialog and back to the row when it closes", async () => {
+    mockConversations([DETAILED]);
+    renderSidebar();
+    const link = screen.getByRole("link", { name: /My Session/ });
+
+    fireEvent.contextMenu(link);
+    fireEvent.click(screen.getByTestId("session-details"));
+    const dialog = screen.getByTestId("session-details-dialog");
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("session-details-dialog")).toBeNull());
+    await waitFor(() => expect(link).toHaveFocus());
+  });
+
+  it("offers both items on a shared row the viewer doesn't own", () => {
+    mockConversations([{ ...CONV, owner: "other@example.com" }]);
+    renderSidebar();
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(screen.getByTestId("session-filter-shared"));
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+
+    expect(screen.getByTestId("copy-session-id")).not.toHaveAttribute("data-disabled");
+    expect(screen.getByTestId("session-details")).not.toHaveAttribute("data-disabled");
   });
 });
