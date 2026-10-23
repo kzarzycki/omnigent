@@ -54,8 +54,11 @@ def _make_hello(
     gateway_inference: dict[str, bool] | None = None,
     harness_accounts: dict[str, dict[str, object]] | None = None,
     capabilities: list[str] | None = None,
+    commit: str | None = None,
 ) -> str:
     """Encode a HostHelloFrame for tests.
+
+    :param commit: Source-install commit to report, e.g. ``"abc123def"``.
 
     :param name: Human-readable host name.
     :param configured_harnesses: Per-harness readiness map to report,
@@ -75,6 +78,7 @@ def _make_hello(
             gateway_inference=gateway_inference,
             harness_accounts=harness_accounts,
             capabilities=capabilities or [],
+            commit=commit,
         )
     )
 
@@ -152,6 +156,7 @@ async def _connect_host(
     gateway_inference: dict[str, bool] | None = None,
     harness_accounts: dict[str, dict[str, object]] | None = None,
     capabilities: list[str] | None = None,
+    commit: str | None = None,
 ) -> ApplicationCommunicator:
     """Connect a mock host via WebSocket tunnel.
 
@@ -180,6 +185,7 @@ async def _connect_host(
                 gateway_inference,
                 harness_accounts,
                 capabilities,
+                commit,
             ),
         },
     )
@@ -332,6 +338,25 @@ async def test_hosts_api_surfaces_configured_harnesses(
     }
     assert single.status_code == 200
     assert single.json()["configured_harnesses"] == {"claude-sdk": True, "codex": "needs-auth"}
+
+
+async def test_hosts_api_surfaces_version_and_commit(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """An online host's hello version and commit reach GET /v1/hosts and /v1/hosts/{id}.
+
+    Without them nobody can tell from the server whether a deferred update ran.
+    """
+    app, registry, _hs, _cs = host_api_app
+    _comm = await _connect_host(app, registry, commit="abc123def")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listing = await client.get("/v1/hosts")
+        single = await client.get(f"/v1/hosts/{_HOST_ID}")
+
+    for body in (listing.json()["hosts"][0], single.json()):
+        assert body["version"] == "0.1.0-test"
+        assert body["commit"] == "abc123def"
 
 
 async def test_hosts_api_configured_harnesses_null_for_older_host(

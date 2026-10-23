@@ -870,6 +870,15 @@ def create_hosts_router(
             update_harness_accounts(conn, result_accounts)
         return conn.hello.configured_harnesses, conn.hello.harness_accounts
 
+    def _reported_build(host_id: str) -> dict[str, str | None]:
+        """Version and commit from the live hello; ``None`` when not connected here."""
+        conn = host_registry.get(host_id)
+        hello = conn.hello if conn is not None else None
+        return {
+            "version": hello.version if hello else None,
+            "commit": hello.commit if hello else None,
+        }
+
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
         """List all hosts owned by the authenticated user.
@@ -926,6 +935,7 @@ def create_hosts_router(
                 # gateway-backed".
                 "gateway_inference": host_registry.gateway_inference(host.host_id),
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
+                **_reported_build(host.host_id),
             }
             if (
                 harness_setup_enabled
@@ -985,6 +995,7 @@ def create_hosts_router(
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
+            **_reported_build(host.host_id),
             "runners": [],
         }
         if (
