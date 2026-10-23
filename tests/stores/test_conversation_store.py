@@ -2167,6 +2167,45 @@ def test_find_item_matches_lists_one_sessions_matches_in_chat_order(
         assert conversation_store.find_item_matches(conv.id, "zorblat") == ([], None)
 
 
+def test_chat_search_skips_compaction_summaries(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A compaction shows only as a marker, so its summary matches neither search."""
+    conv = conversation_store.create_conversation()
+    conversation_store.update_conversation(conv.id, title="General chat")
+    [message, _] = conversation_store.append(
+        conv.id,
+        [
+            _find_message("the zorblat plan", "resp_a"),
+            NewConversationItem(
+                type="compaction",
+                response_id="compact_1",
+                data=CompactionData(
+                    summary="earlier the zorblat and the quuxite were discussed",
+                    last_item_id="7ae6efab548a4e13ae0ac9efc56d841e",
+                    model="openai/gpt-4o",
+                    token_count=50,
+                ),
+            ),
+        ],
+    )
+
+    assert conversation_store.find_item_matches(conv.id, "zorblat") == (
+        [(message.id, "resp_a")],
+        None,
+    )
+    assert conversation_store.find_item_matches(conv.id, "quuxite") == ([], None)
+    assert conv.id not in {
+        c.id for c in conversation_store.list_conversations(search_query="quuxite").data
+    }
+    [found] = [
+        c
+        for c in conversation_store.list_conversations(search_query="zorblat").data
+        if c.id == conv.id
+    ]
+    assert found.search_snippet is not None and "plan" in found.search_snippet
+
+
 def test_find_item_matches_scans_one_window_and_walks_older_windows_by_cursor(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
