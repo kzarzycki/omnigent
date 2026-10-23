@@ -81,7 +81,7 @@ landed=$(git cherry "$PATCHED" "$FORK/$PATCHED" | sed -n 's/^+ //p')
 if [ -n "$landed" ]; then
   for c in $landed; do
     git verify-commit "$c" 2>/dev/null \
-      || { echo "!! $FORK/$PATCHED has unsigned or unknown-signer commit $c — not taking it (a PR merged on GitHub? land PRs with land-pr.sh)" >&2; exit 1; }
+      || { echo "!! $FORK/$PATCHED has unsigned or unknown-signer commit $c — not taking it (a PR merged on GitHub? land PRs with .claude/skills/fork-sync/land-pr.sh)" >&2; exit 1; }
   done
   echo "==> taking $(echo "$landed" | wc -l | tr -d ' ') commit(s) landed in $FORK/$PATCHED"
   git cherry-pick $landed
