@@ -870,6 +870,13 @@ def _get_head_sha(repo_root: Path) -> str | None:
         return None
 
 
+def source_install_commit() -> str | None:
+    """Return the short HEAD commit of a source install, ``None`` for a wheel."""
+    repo_root = _find_repo_root()
+    sha = _get_head_sha(repo_root) if repo_root is not None else None
+    return sha[:9] if sha else None
+
+
 def _local_rev_list_count(repo_root: Path) -> int | None:
     """Count commits HEAD is behind origin/main (or master), locally only.
 
