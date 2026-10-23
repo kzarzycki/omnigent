@@ -1,0 +1,8 @@
+# Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `CI: none`).
+[tasks."check:all"]
+alias = "check"
+description = "pre-commit on the files the branch changes since mine, then the fork-sync skill's tests."
+run = [
+  'pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD',
+  "bash .claude/skills/fork-sync/test.sh",
+]
