@@ -11,7 +11,8 @@ rendered result.
 Covered: custom app name (browser-tab title + sidebar wordmark), custom hero
 heading, an explicit empty heading that hides the hero line instead of falling
 back to the default, the custom in-app logo and favicon, and the "Powered by
-Omnigent" credit — which appears only when branding is set.
+Omnigent" credit — which appears only when branding is set — and the server's
+default colour theme, which a palette picked in Settings overrides.
 """
 
 from __future__ import annotations
@@ -122,3 +123,37 @@ def test_unbranded_keeps_defaults_and_hides_credit(page: Page, live_server: str)
     expect(page.get_by_role("heading", name="What should we build?")).to_be_visible()
     expect(page.get_by_role("link", name="Omnigent")).to_be_visible()
     expect(page.get_by_test_id("powered-by-omnigent")).to_have_count(0)
+
+
+def _primary(page: Page) -> str:
+    return page.evaluate(
+        "getComputedStyle(document.documentElement).getPropertyValue('--primary').trim()"
+    )
+
+
+def test_server_theme_colours_the_ui_until_the_user_picks_a_palette(
+    page: Page, live_server: str
+) -> None:
+    """``branding.theme`` colours the whole UI; a stored Settings palette wins."""
+    base_url = live_server
+    _stub_info(
+        page,
+        {"logos": {}, "powered_by": True, "theme": {"accent": "#6a00ff", "tint": "#f3edff"}},
+    )
+    _open_landing(page, base_url)
+
+    expect(page.locator("html")).to_have_attribute("data-theme", "custom")
+    assert _primary(page) == "#6a00ff"
+    expect(page.locator('meta[name="theme-color"]')).to_have_attribute("content", "#6a00ff")
+
+    page.evaluate("localStorage.setItem('omnigent:ui-theme-palette', JSON.stringify('nord'))")
+    _open_landing(page, base_url)
+
+    expect(page.locator("html")).to_have_attribute("data-theme", "nord")
+    nord_primary = _primary(page)
+    assert nord_primary != "#6a00ff"
+    expect(page.locator('meta[name="theme-color"]')).to_have_attribute("content", nord_primary)
+
+    # A live palette change (as Settings makes it) moves the browser chrome too.
+    page.evaluate("document.documentElement.setAttribute('data-theme', 'custom')")
+    expect(page.locator('meta[name="theme-color"]')).to_have_attribute("content", "#6a00ff")

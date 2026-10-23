@@ -628,3 +628,40 @@ def test_branding_logo_rejects_symlinked_assets_directory(
     (tmp_path / BRANDING_ASSETS_DIRNAME).symlink_to(external, target_is_directory=True)
 
     assert branding_logo_asset() is None
+
+
+@pytest.mark.parametrize(
+    ("theme", "expected"),
+    [
+        pytest.param(None, None, id="unset"),
+        pytest.param("nord", None, id="not-a-mapping"),
+        pytest.param({"palette": " Nord "}, {"palette": "nord"}, id="palette"),
+        pytest.param(
+            {
+                "accent": "#6A00FF",
+                "tint": "#f3edff",
+                "dark_accent": "#B18CFF",
+                "dark_tint": "#150027",
+            },
+            {
+                "accent": "#6a00ff",
+                "tint": "#f3edff",
+                "dark_accent": "#b18cff",
+                "dark_tint": "#150027",
+            },
+            id="colours",
+        ),
+        pytest.param(
+            {"palette": "neon", "accent": "violet", "tint": "#fff", "dark_tint": "#0b1a10"},
+            {"dark_tint": "#0b1a10"},
+            id="invalid-values-dropped",
+        ),
+        pytest.param({"palette": "neon", "accent": "#12345"}, None, id="nothing-valid"),
+    ],
+)
+def test_branding_theme_publishes_only_valid_values(
+    theme: object, expected: dict[str, str] | None
+) -> None:
+    snapshot = load_branding_snapshot({"branding": {"theme": theme}})
+
+    assert snapshot.config()["theme"] == expected

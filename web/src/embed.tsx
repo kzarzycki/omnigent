@@ -51,7 +51,7 @@ import {
   readUiFontFamily,
 } from "./lib/uiFontPreferences";
 import { applyThemePalette, readThemePalette } from "./lib/themePalette";
-import { applyCustomTheme, readCustomTheme } from "./lib/customTheme";
+import { applyCustomTheme, applyServerTheme, readCustomTheme } from "./lib/customTheme";
 import {
   type RoutingApi,
   RoutingProvider,
@@ -144,7 +144,10 @@ function EmbedCapabilitiesProvider({ children }: { children: ReactNode }) {
       if (alive) setInfo(resolved);
     });
     void boot.settled.then((resolved) => {
-      if (alive) setInfo(resolved);
+      if (!alive) return;
+      // The host page owns its theme-color meta, so the embed applies only the palette.
+      applyServerTheme(resolved.branding?.theme ?? null);
+      setInfo(resolved);
     });
     return () => {
       alive = false;

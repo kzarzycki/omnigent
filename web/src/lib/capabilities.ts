@@ -54,6 +54,17 @@ export interface Branding {
     favicon: string | null;
   };
   powered_by: boolean;
+  /** The server's default colour theme; a palette picked in Settings wins. */
+  theme?: BrandingTheme | null;
+}
+
+/** Operator default theme: a built-in palette id and/or `#rrggbb` colours. */
+export interface BrandingTheme {
+  palette: string | null;
+  accent: string | null;
+  dark_accent: string | null;
+  tint: string | null;
+  dark_tint: string | null;
 }
 
 /** Release features understood by this frontend build. */
@@ -247,13 +258,28 @@ function parseBranding(raw: unknown): Branding | null {
     loading: nonEmpty(rawLogos.loading),
     favicon: nonEmpty(rawLogos.favicon),
   };
+  const rawTheme =
+    value.theme !== null && typeof value.theme === "object"
+      ? (value.theme as Record<string, unknown>)
+      : null;
+  const theme: BrandingTheme | null = rawTheme
+    ? {
+        palette: nonEmpty(rawTheme.palette),
+        accent: nonEmpty(rawTheme.accent),
+        dark_accent: nonEmpty(rawTheme.dark_accent),
+        tint: nonEmpty(rawTheme.tint),
+        dark_tint: nonEmpty(rawTheme.dark_tint),
+      }
+    : null;
   const branding = {
     app_name: nonEmpty(value.app_name),
     heading: typeof value.heading === "string" ? value.heading : null,
     logos,
     powered_by: value.powered_by !== false,
+    theme,
   };
   const isEmpty =
+    branding.theme === null &&
     branding.app_name === null &&
     branding.heading === null &&
     logos.main === null &&

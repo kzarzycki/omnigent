@@ -705,6 +705,16 @@
           "powered_by": {
             "title": "Powered By",
             "type": "boolean"
+          },
+          "theme": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrandingThemeInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -758,6 +768,68 @@
           "favicon"
         ],
         "title": "BrandingLogosInfo",
+        "type": "object"
+      },
+      "BrandingThemeInfo": {
+        "description": "The server's default colour theme; a palette picked in Settings overrides it.",
+        "properties": {
+          "accent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accent"
+          },
+          "dark_accent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dark Accent"
+          },
+          "dark_tint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dark Tint"
+          },
+          "palette": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Palette"
+          },
+          "tint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tint"
+          }
+        },
+        "title": "BrandingThemeInfo",
         "type": "object"
       },
       "BrowserActionRequestEvent": {

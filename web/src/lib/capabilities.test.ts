@@ -256,6 +256,20 @@ describe("resolveServerInfo branding", () => {
       heading: "",
       logos: { main: "/logo/main", loading: "/logo/loading", favicon: "/logo/favicon" },
       powered_by: false,
+      theme: null,
+    });
+  });
+
+  it("keeps a theme-only branding block", async () => {
+    const themed = await probe({
+      branding: { logos: {}, powered_by: true, theme: { palette: "nord", accent: "#6a00ff" } },
+    });
+    expect(themed.branding?.theme).toEqual({
+      palette: "nord",
+      accent: "#6a00ff",
+      dark_accent: null,
+      tint: null,
+      dark_tint: null,
     });
   });
 

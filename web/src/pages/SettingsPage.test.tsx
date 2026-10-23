@@ -10,7 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
+import {
+  applyServerTheme,
+  DEFAULT_CUSTOM_THEME,
+  readCustomTheme,
+  setServerDefaultCustomTheme,
+} from "@/lib/customTheme";
 import * as host from "@/lib/host";
+import { DEFAULT_PALETTE, setServerDefaultPalette } from "@/lib/themePalette";
 import {
   readTerminalClipboardPreference,
   writeTerminalClipboardPreference,
@@ -661,6 +668,29 @@ describe("SettingsPage", () => {
     expect(select.value).toBe("github");
     expect(document.documentElement.getAttribute("data-theme")).toBe("github");
     expect(localStorage.getItem("omnigent:ui-theme-palette")).toBe(JSON.stringify("github"));
+  });
+
+  it("pins the server's custom colours when Custom is picked without edits", () => {
+    localStorage.clear();
+    applyServerTheme({
+      palette: null,
+      accent: "#6a00ff",
+      dark_accent: null,
+      tint: null,
+      dark_tint: null,
+    });
+    try {
+      renderPage("/settings/appearance");
+      const select = screen.getByTestId("color-theme-select") as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: "omni" } });
+      fireEvent.change(select, { target: { value: "custom" } });
+
+      setServerDefaultCustomTheme(DEFAULT_CUSTOM_THEME);
+      expect(readCustomTheme().accent).toBe("#6a00ff");
+    } finally {
+      setServerDefaultPalette(DEFAULT_PALETTE);
+      setServerDefaultCustomTheme(DEFAULT_CUSTOM_THEME);
+    }
   });
 
   it("creates and applies a custom theme when a guided color control changes", () => {
