@@ -1,20 +1,33 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyCustomTheme,
+  applyServerTheme,
+  clearCustomTheme,
   createCustomThemeFromPalette,
   customThemeSwatches,
   DEFAULT_CUSTOM_THEME,
   deriveCustomTheme,
   readCustomTheme,
+  setServerDefaultCustomTheme,
   writeCustomTheme,
 } from "./customTheme";
-import { PALETTES } from "./themePalette";
+import {
+  clearThemePalette,
+  DEFAULT_PALETTE,
+  PALETTES,
+  readThemePalette,
+  setServerDefaultPalette,
+  writeThemePalette,
+} from "./themePalette";
 import { setEmbedRoot, setEmbedScopeRoot } from "./host";
 
 const STORAGE_KEY = "omnigent:custom-theme";
 
 afterEach(() => {
   localStorage.clear();
+  setServerDefaultPalette(DEFAULT_PALETTE);
+  setServerDefaultCustomTheme(DEFAULT_CUSTOM_THEME);
+  document.documentElement.removeAttribute("data-theme");
   setEmbedScopeRoot(null);
   setEmbedRoot(null);
   document.documentElement.removeAttribute("data-custom-translucent-sidebar");
@@ -309,5 +322,82 @@ describe("customTheme", () => {
     expect(inner).toHaveAttribute("data-custom-translucent-sidebar");
     expect(document.documentElement.style.getPropertyValue("--custom-dark-background")).toBe("");
     expect(document.documentElement).not.toHaveAttribute("data-custom-translucent-sidebar");
+  });
+});
+
+describe("applyServerTheme", () => {
+  const noColours = { accent: null, dark_accent: null, tint: null, dark_tint: null };
+
+  it("applies the server's colours as a custom theme when the user picked none", () => {
+    applyServerTheme({ palette: null, ...noColours, accent: "#6a00ff", dark_tint: "#150027" });
+
+    expect(readThemePalette()).toBe("custom");
+    expect(readCustomTheme()).toMatchObject({
+      basePalette: "omni",
+      accent: "#6a00ff",
+      darkTint: "#150027",
+    });
+    expect(document.documentElement.getAttribute("data-theme")).toBe("custom");
+    expect(document.documentElement.style.getPropertyValue("--custom-light-primary")).toBe(
+      "#6a00ff",
+    );
+  });
+
+  it("selects a palette-only server theme", () => {
+    applyServerTheme({ palette: "nord", ...noColours });
+
+    expect(readThemePalette()).toBe("nord");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("nord");
+  });
+
+  it("keeps the user's stored palette over the server's", () => {
+    localStorage.setItem("omnigent:ui-theme-palette", JSON.stringify("github"));
+
+    applyServerTheme({ palette: "nord", ...noColours });
+
+    expect(document.documentElement.getAttribute("data-theme")).toBe("github");
+  });
+
+  it("keeps every explicit pick on a themed server, so a later default change can't take it", () => {
+    applyServerTheme({ palette: "nord", ...noColours });
+
+    writeThemePalette("omni");
+    expect(readThemePalette()).toBe("omni");
+    writeThemePalette("nord");
+    expect(localStorage.getItem("omnigent:ui-theme-palette")).toBe(JSON.stringify("nord"));
+
+    setServerDefaultPalette("github");
+    expect(readThemePalette()).toBe("nord");
+  });
+
+  it("keeps a custom edit made on a custom-themed server", () => {
+    applyServerTheme({ palette: null, ...noColours, accent: "#6a00ff" });
+
+    writeCustomTheme({ ...readCustomTheme(), accent: "#123456" });
+    writeThemePalette("custom");
+    setServerDefaultPalette("nord");
+
+    expect(readThemePalette()).toBe("custom");
+    expect(readCustomTheme().accent).toBe("#123456");
+  });
+
+  it("returns to the server's theme once the user's picks are cleared", () => {
+    applyServerTheme({ palette: null, ...noColours, accent: "#6a00ff" });
+    writeThemePalette("github");
+    writeCustomTheme({ ...readCustomTheme(), accent: "#123456" });
+
+    clearThemePalette();
+    clearCustomTheme();
+
+    expect(readThemePalette()).toBe("custom");
+    expect(readCustomTheme().accent).toBe("#6a00ff");
+  });
+
+  it("ignores an unset or invalid server theme", () => {
+    applyServerTheme(null);
+    applyServerTheme({ palette: "neon", ...noColours, accent: "violet" });
+
+    expect(readThemePalette()).toBe(DEFAULT_PALETTE);
+    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
   });
 });
