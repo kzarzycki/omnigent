@@ -97,13 +97,18 @@ def send(msg: dict) -> None:
         _last_sent = time.monotonic()
 
 
-def keepalive(acp_id: str) -> None:
-    """Tell Omnigent the turn is alive when nothing went out for KEEPALIVE_S.
+def keepalive(acp_id: str, s: Session) -> None:
+    """While *s* runs a turn, tell Omnigent it is alive whenever nothing went out for KEEPALIVE_S.
 
+    Its own thread, so a slow CLI call or token refresh before the first event is covered too.
     ponytail: time-based, not proof the cloud is progressing; TURN_TIMEOUT_S bounds a stuck turn.
     """
-    if time.monotonic() - _last_sent > KEEPALIVE_S:
-        thought(acp_id, "")
+    while s.running:
+        idle = time.monotonic() - _last_sent
+        if idle >= KEEPALIVE_S:
+            thought(acp_id, "")
+        else:
+            time.sleep(KEEPALIVE_S - idle)
 
 
 def log(text: str) -> None:
@@ -704,6 +709,7 @@ def run_turn(acp_id: str, text: str) -> str:
     s.cancelled.clear()
     s.interrupted = False
     s.running = True
+    threading.Thread(target=keepalive, args=(acp_id, s), daemon=True).start()
     try:
         return _mirror_turn(acp_id, s, text)
     finally:
@@ -760,7 +766,6 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         try:
             event = s.events.get(timeout=1)
         except queue.Empty:
-            keepalive(acp_id)
             continue
         if int(event["sequence_num"]) <= after:
             continue  # from before this turn's message
@@ -788,7 +793,6 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
         try:
             payload = s.events.get(timeout=1).get("payload") or {}
         except queue.Empty:
-            keepalive(acp_id)
             continue
         if payload.get("type") == "env_manager_log":
             for upd in to_updates(payload)[0]:
@@ -1006,18 +1010,25 @@ def self_check() -> None:
         subprocess.run = real_run
     # A turn quiet for longer than KEEPALIVE_S still sends updates, so Omnigent
     # never idles it out; a turn that fails has already named its cloud session.
-    globals()["_send"] = lambda *_: (1, False)
+    out = io.StringIO()
+    before_events: list[int] = []
+
+    def slow_send(*_: object) -> tuple[int, bool]:
+        time.sleep(2.5)  # a token refresh or POST before the first event
+        before_events.append(out.getvalue().count('"session/update"'))
+        return 1, False
+
+    globals()["_send"] = slow_send
     globals()["create_cloud_session"] = lambda *_: "session_01NewNewNewNew"
     globals()["remember"] = lambda *_: None
     globals()["KEEPALIVE_S"] = 0.5
     quiet = SESSIONS["acp-quiet"] = Session("/", "acp-quiet")
     quiet.cloud_id, quiet.reader = "session_q", threading.current_thread()
     result = {"sequence_num": "2", "payload": {"type": "result"}}
-    threading.Timer(3.5, quiet.events.put, [result]).start()
-    out = io.StringIO()
+    threading.Timer(5, quiet.events.put, [result]).start()
     with contextlib.redirect_stdout(out):
         assert run_turn("acp-quiet", "sleep 420") == "end_turn"
-    assert out.getvalue().count('"session/update"') >= 2, out.getvalue()
+    assert before_events[0] >= 1 and out.getvalue().count('"session/update"') >= 3, out.getvalue()
     fresh = SESSIONS["acp-fresh"] = Session("/", "acp-fresh")
     fresh.reader = threading.current_thread()
     globals()["TURN_TIMEOUT_S"] = 0.1
