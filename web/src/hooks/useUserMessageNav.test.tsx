@@ -6,7 +6,8 @@
 
 import type * as ConversationModule from "@/components/ai-elements/conversation";
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { firstFindRange } from "@/components/chat/chatFindReveal";
 import { useChatStore } from "@/store/chatStore";
 import { scrollToMessage, useUserMessageNav } from "./useUserMessageNav";
 
@@ -258,5 +259,33 @@ describe("scrollToMessage with a focus range", () => {
     act(() => vi.advanceTimersByTime(SETTLE_MS));
     expect(scrollBy).toHaveBeenLastCalledWith({ top: 2610, behavior: "auto" });
     expect(flash).toHaveBeenCalledWith("resp_1");
+  });
+});
+
+describe("scrollToMessage across the bubbles of one response", () => {
+  it("centers the found word in the bubble that holds the current match", () => {
+    // One response renders as several bubbles; the word also sits in the first.
+    document.body.innerHTML = `
+      <div id="transcript" style="overflow-y: auto">
+        <div data-message-id="resp_1"><p id="early">an earlier zorblat</p></div>
+        <div data-message-id="resp_1"><div data-chat-find-current><pre id="hit">found zorblat</pre></div></div>
+      </div>`;
+    const transcript = document.getElementById("transcript")!;
+    transcript.getBoundingClientRect = () => ({ top: 0, height: 800, bottom: 800 }) as DOMRect;
+    const scrollBy = vi.fn();
+    transcript.scrollBy = scrollBy;
+    // jsdom has no layout for ranges: the word in #hit sits far below the screen.
+    Range.prototype.getBoundingClientRect = function (this: Range) {
+      const top = this.startContainer.parentElement?.id === "hit" ? 3000 : 100;
+      return { top, height: 20, bottom: top + 20 } as DOMRect;
+    };
+    onTestFinished(() => {
+      delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+    });
+
+    scrollToMessage("resp_1", undefined, undefined, (el) => firstFindRange(el, "zorblat"));
+
+    expect(scrollBy).toHaveBeenCalledWith({ top: 2610, behavior: "smooth" });
+    expect(scrollSpy).not.toHaveBeenCalled();
   });
 });
