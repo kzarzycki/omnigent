@@ -97,18 +97,18 @@ def send(msg: dict) -> None:
         _last_sent = time.monotonic()
 
 
-def keepalive(acp_id: str, s: Session) -> None:
-    """While *s* runs a turn, tell Omnigent it is alive whenever nothing went out for KEEPALIVE_S.
+def keepalive(acp_id: str, turn_done: threading.Event) -> None:
+    """Until *turn_done*, tell Omnigent the turn is alive after KEEPALIVE_S with nothing sent.
 
     Its own thread, so a slow CLI call or token refresh before the first event is covered too.
     ponytail: time-based, not proof the cloud is progressing; TURN_TIMEOUT_S bounds a stuck turn.
     """
-    while s.running:
+    while not turn_done.is_set():
         idle = time.monotonic() - _last_sent
         if idle >= KEEPALIVE_S:
             thought(acp_id, "")
         else:
-            time.sleep(KEEPALIVE_S - idle)
+            turn_done.wait(KEEPALIVE_S - idle)
 
 
 def log(text: str) -> None:
@@ -709,10 +709,17 @@ def run_turn(acp_id: str, text: str) -> str:
     s.cancelled.clear()
     s.interrupted = False
     s.running = True
-    threading.Thread(target=keepalive, args=(acp_id, s), daemon=True).start()
+    turn_done = threading.Event()
+    beat = threading.Thread(
+        target=keepalive, args=(acp_id, turn_done), name="keepalive", daemon=True
+    )
+    beat.start()
     try:
         return _mirror_turn(acp_id, s, text)
     finally:
+        # Joined before the prompt's response goes out, so no update follows it.
+        turn_done.set()
+        beat.join()
         s.running = False
 
 
@@ -1029,6 +1036,7 @@ def self_check() -> None:
     with contextlib.redirect_stdout(out):
         assert run_turn("acp-quiet", "sleep 420") == "end_turn"
     assert before_events[0] >= 1 and out.getvalue().count('"session/update"') >= 3, out.getvalue()
+    assert not any(t.name == "keepalive" for t in threading.enumerate())  # ended with its turn
     fresh = SESSIONS["acp-fresh"] = Session("/", "acp-fresh")
     fresh.reader = threading.current_thread()
     globals()["TURN_TIMEOUT_S"] = 0.1
