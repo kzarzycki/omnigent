@@ -139,3 +139,41 @@ def test_find_steps_open_the_collapsed_content_that_holds_each_match(
     bar.get_by_role("button", name="Close find").click()
     expect(page.locator("[data-testid=turn-worked-fold][data-state=open]")).to_have_count(0)
     expect(page.get_by_text("Collapse prompt")).to_have_count(0)
+
+
+@pytest.mark.parametrize("viewport", [PHONE, DESKTOP], ids=["phone", "desktop"])
+def test_find_lands_on_the_later_bubble_of_a_response_that_holds_the_match(
+    page: Page,
+    chat_session_contract: ChatSessionContract,
+    viewport: dict[str, int],
+) -> None:
+    """A user message mid-response splits it into bubbles; the jump reaches the matching one."""
+    chat = chat_session_contract
+    long_output = "\n".join(f"log line {n}" for n in range(150)) + "\nfinal: zorblat healthy"
+    first_half = _tool_turn("split", "all green")
+    second_half = _tool_turn("split", long_output)
+    for item in second_half:
+        item["id"] = f"{item['id']}-2"
+        if "call_id" in item:
+            item["call_id"] = "split-call-2"
+    chronological = [
+        *_filler("before", 3),
+        *first_half,
+        message_item("steer", "user", "Keep going.", response_id="steer"),
+        *second_half[1:],
+        *_filler("after", 3),
+    ]
+    chat.set_items(list(reversed(chronological)))
+    chat.contract.json(
+        f"/v1/sessions/{chat.session_id}/search",
+        {
+            "data": [{"id": "split-out-2", "response_id": "split"}],
+            "has_more": False,
+            "next_before": None,
+        },
+    )
+    page.set_viewport_size(viewport)
+    page.goto(f"{chat.url}?find=zorblat")
+
+    expect(page.get_by_role("search").get_by_text("1 / 1")).to_be_visible(timeout=20_000)
+    page.wait_for_function(f"({_VISIBLE_HIGHLIGHTS})() > 0", timeout=10_000)

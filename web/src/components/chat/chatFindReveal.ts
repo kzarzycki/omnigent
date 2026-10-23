@@ -117,8 +117,12 @@ export function useRevealedCollapsible(revealed: boolean, current = false) {
   return { open: shown, onOpenChange: change, [FIND_CURRENT_ATTRIBUTE]: current ? "" : undefined };
 }
 
-/** The first occurrence of `query` in the current match's element, else anywhere in `bubble`. */
+/**
+ * The first occurrence of `query` in the current match's element, else anywhere
+ * in `bubble`. Null when the current match is in another bubble of the response.
+ */
 export function firstFindRange(bubble: Element, query: string): Range | null {
   const current = bubble.querySelector(`[${FIND_CURRENT_ATTRIBUTE}]`);
+  if (!current && document.querySelector(`[${FIND_CURRENT_ATTRIBUTE}]`)) return null;
   return (current && findTextRanges(current, query)[0]) || findTextRanges(bubble, query)[0] || null;
 }
