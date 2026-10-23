@@ -54,6 +54,7 @@ import { useSessionAgent } from "@/hooks/useAgents";
 import { useSession } from "@/hooks/useSession";
 import type { Session } from "@/lib/types";
 import { useHosts, useHostModelOptions, type Host } from "@/hooks/useHosts";
+import { hostBuildLabel } from "./HostLabel";
 import {
   nativeAgentHasCapability,
   nativeCodingAgentForAvailableAgent,
@@ -170,6 +171,7 @@ function sandboxRepositoryHint(count: number): string {
  */
 function HostLabel({ host }: { host: Host }) {
   const isOnline = host.status === "online";
+  const build = hostBuildLabel(host);
   return (
     <span className="flex items-center gap-2">
       {host.sandbox_provider || host.name.toLowerCase().includes("cloud") ? (
@@ -180,6 +182,7 @@ function HostLabel({ host }: { host: Host }) {
       <span className={host.sandbox_provider ? "text-sm" : "font-mono text-sm"}>
         {host.sandbox_provider ? "Same sandbox" : host.name}
       </span>
+      {build && <span className="text-[10px] text-muted-foreground">{build}</span>}
       <span
         className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
           isOnline ? "text-green-600" : "text-muted-foreground"
