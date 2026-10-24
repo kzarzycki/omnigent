@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from omnigent.host.frames import HostHelloFrame, HostStopRunnerFrame, decode_host_frame
+from omnigent.runner.subagent_work import SUBAGENT_DISPATCH_ID_LABEL_KEY
 from omnigent.runtime import session_stream
 from omnigent.server import session_live_state
 from omnigent.server.host_registry import HostRegistry, WebSocketLike
@@ -116,6 +117,7 @@ async def test_host_stop_ack_tells_a_parent_on_another_runner(
     """Stopping a sub-agent's own runner mid-turn wakes its parent on the parent's runner."""
     store, ids = family
     child_id = ids["elsewhere"]
+    store.set_labels(child_id, {SUBAGENT_DISPATCH_ID_LABEL_KEY: "subagent_dispatch1"})
     session_live_state.configure(store)
     posted: list[tuple[str, dict[str, Any]]] = []
 
@@ -140,8 +142,8 @@ async def test_host_stop_ack_tells_a_parent_on_another_runner(
         await asyncio.wrap_future(session_live_state.submit("drain_test_writes", lambda: None))
         session_live_state.configure(None)
     assert sessions._session_status_cache[child_id] == "idle"
-    assert [(path, data["status"]) for path, data in posted] == [
-        (f"/v1/sessions/{child_id}/events", "lost")
+    assert [(path, data["status"], data["work_id"]) for path, data in posted] == [
+        (f"/v1/sessions/{child_id}/events", "lost", "subagent_dispatch1")
     ]
     assert "Its runner was stopped." in posted[0][1]["output"]
 
