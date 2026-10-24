@@ -57,6 +57,7 @@ from omnigent.runner.native import (
     _is_runner_owned_codex_terminal,
     _log_terminal_lookup_miss,
     _publish_tmux_target_for_bridge,
+    _readvertise_missing_tmux_target,
     _resolved_spec_workdir,
     _unwrap_resolved_spec,
 )
@@ -667,6 +668,13 @@ def register_resource_routes(
         instance = terminal_registry.get(conv_id, terminal_name, "main")
         if instance is not None:
             if await instance.is_alive():
+                if terminal_name == "claude":
+                    _readvertise_missing_tmux_target(
+                        resource_registry=resource_registry,
+                        session_id=conv_id,
+                        terminal_name=terminal_name,
+                        session_key="main",
+                    )
                 return  # pane is registered and alive — nothing to heal
             _logger.info(
                 "native pane registered but dead for conv=%s harness=%s; closing stale entry",
