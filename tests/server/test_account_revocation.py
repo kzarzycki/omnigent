@@ -788,6 +788,7 @@ async def test_stale_schedule_cannot_contact_replacement_host(
                 connected=unexpected_dispatch,
                 connected_preflight=fire_module._make_connected_host_preflight(deps),
                 managed=unexpected_dispatch,
+                reuse=unexpected_dispatch,
             ),
         )
     )
@@ -906,6 +907,7 @@ async def test_scheduled_dispatch_obeys_revocation_boundary(setup_app, monkeypat
                 connected=_make_connected_host_dispatch(deps),
                 connected_preflight=None,
                 managed=_make_connected_host_dispatch(deps),
+                reuse=_make_connected_host_dispatch(deps),
             ),
         )
     )
