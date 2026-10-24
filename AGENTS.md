@@ -194,6 +194,15 @@ allowed signers file doesn't accept, before it pushes. Landing hosts today:
 | `cc-experiments` (VPS) | `omnigent-signing@cc-experiments` |
 | `xmac-work` (work Mac, account `zarz`) | `omnigent-signing@ZarzBook`, `SHA256:zr4WKwgYCr77WCbmOHqhc5hVRHjbnyYgQ9hKDz7Sr04` |
 
+## This fork: developing in a Claude cloud session
+
+Omnigent development runs in Claude cloud sessions (the `claude-cloud` agent,
+environment `omnigent-dev`), so the load is off the owner's machines. In such a
+session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
+first. The VM can't reach GitHub's GraphQL API or hold a signing key, so every
+`approvals.py` step, the signed land and the Codex verifier run on cc-experiments,
+through a host helper session the skill describes.
+
 ## This fork: filing upstream issues and PRs
 
 Upstream's triage and duplicate-check bots comment within about a minute of a
