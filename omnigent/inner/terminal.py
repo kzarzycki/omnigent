@@ -1124,6 +1124,8 @@ class TerminalInstance:
     # Runtime-owned observation; never part of the portable terminal spec.
     program_status_app: str | None = None
     program_status: ProgramStatusReader | None = field(default=None, init=False, repr=False)
+    # Bridge dir this pane's tmux target was advertised to; follows a ``/clear`` transfer.
+    advertised_bridge_id: str | None = field(default=None, init=False, repr=False)
     # Owned per-launch egress proxy. ``None`` when the sandbox
     # carries no ``egress_rules`` or the backend doesn't need a
     # spawn-time wrap (the ``none`` backend does nothing here). Cleaned
