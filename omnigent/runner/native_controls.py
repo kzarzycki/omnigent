@@ -41,6 +41,7 @@ from omnigent.runner.native import (
     _claude_native_bridge_id_for_session,
     _codex_native_model_from_spec,
     _CodexNativeModelOptionsNotReady,
+    _readvertise_missing_tmux_target,
     _resolve_opencode_compact_model,
 )
 from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE, SessionResourceRegistry
@@ -1208,6 +1209,12 @@ def build_native_controls(
         # only job is to decide whether the readiness poll below runs at all.
         instance = terminal_registry.get(conv_id, terminal_name, "main")
         if instance is not None and await instance.is_alive():
+            _readvertise_missing_tmux_target(
+                resource_registry=resource_registry,
+                session_id=conv_id,
+                terminal_name=terminal_name,
+                session_key="main",
+            )
             return
         await _ensure_native_terminal_for_turn(conv_id, "claude-native")
         if terminal_registry.get(conv_id, terminal_name, "main") is None:
