@@ -15811,11 +15811,14 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await Promise.all([bgLoop, fgLoop]);
   });
 
-  it("recomputes the idle flag on every reconnect, so a backgrounded tab reports idle", async () => {
+  it("recomputes the idle flag on every reconnect, and releases the socket while a tab is hidden", async () => {
     // The `idle` query param on the stream GET is the whole presence uplink, so
     // the flag has to be recomputed at each (re)connect rather than reused from
-    // the first open — that is what keeps presence eventually-correct even when
-    // a background tab's debounce timer never fires.
+    // the first open.
+    //
+    // A backgrounded idle tab does not reconnect with `?idle=true`: it holds no
+    // stream at all (the fork's fix for the ~6-connections-per-origin cap), so
+    // the pump reopens only once the tab is visible again, with `idle=false`.
     //
     // This covers the recompute, NOT the abort that triggers it: the mock body
     // stream has no signal wiring, so the drop is simulated explicitly below.
@@ -15850,15 +15853,59 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
     // A real fetch errors the response body when its signal aborts; the mock
     // stream has no signal wiring, so surface that here. The pump reads the
-    // failed read as a drop and reopens carrying the recomputed idle flag.
+    // failed read as a drop, but the tab is hidden, so it holds no socket.
     sinks[0]!.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
     await vi.advanceTimersByTimeAsync(6000);
+    expect(opened.slice(1)).toEqual([]);
 
-    expect(opened.slice(1)).toEqual([{ id: "conv_pflip", idle: true }]);
-
+    // Back in the foreground the pump reopens, with the flag recomputed.
     Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(opened.slice(1)).toEqual([{ id: "conv_pflip", idle: false }]);
+
     controller.abort();
     // Only the reopened stream is still open — the first was errored above.
+    sinks[sinks.length - 1]!.close();
+    await drainAsync(2);
+    await loop;
+  });
+
+  it("opens a stream started in an already-idle hidden tab only once visible, with a fresh idle flag", async () => {
+    // Guards the recompute from the other side: the tracker already reports
+    // idle when the pump starts, so a flag cached at start would open the
+    // stream with `?idle=true` after the tab returns.
+    seedSession("conv_pstart", []);
+    const opened: { id: string; idle: boolean }[] = [];
+    const sinks: StreamSink[] = [];
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const match = /\/v1\/sessions\/([^/?]+)\/stream(\?idle=true)?$/.exec(url);
+      if (match) {
+        opened.push({ id: match[1]!, idle: match[2] !== undefined });
+        const sink = pushableStream();
+        sinks.push(sink);
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    Object.defineProperty(document, "hidden", { value: true, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(PRESENCE_IDLE_AFTER_MS + 1000);
+
+    const controller = new AbortController();
+    useChatStore.setState({ conversationId: "conv_pstart", abortController: controller });
+    const loop = startStreamPump("conv_pstart", controller, setState, getState);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(opened).toEqual([]);
+
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(opened).toEqual([{ id: "conv_pstart", idle: false }]);
+
+    controller.abort();
     sinks[sinks.length - 1]!.close();
     await drainAsync(2);
     await loop;
