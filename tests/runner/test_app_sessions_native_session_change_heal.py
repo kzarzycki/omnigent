@@ -9,6 +9,9 @@ entry plus a missing tmux socket surfaced as ``503 claude_native_*_failed``.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -24,12 +27,14 @@ from omnigent.harnesses.claude_native.bridge import (
 )
 from omnigent.inner.terminal import TerminalInstance
 from omnigent.runner import create_runner_app, native_controls
+from omnigent.runner.native import orchestration
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
 from tests.runner.conftest import (
     _FakeProcessManager,
     _runner_client,
     _ScriptedHarnessClient,
+    _sse,
 )
 from tests.runner.helpers import NullServerClient
 
@@ -87,6 +92,7 @@ async def _open_claude_native_session(
     *,
     conv_id: str,
     auto_create_calls: list[str],
+    harness_client: _ScriptedHarnessClient | None = None,
 ) -> tuple[Any, TerminalRegistry]:
     """Build a runner with a real terminal registry and a claude-native session.
 
@@ -146,7 +152,7 @@ async def _open_claude_native_session(
 
     registry = TerminalRegistry()
     app = create_runner_app(
-        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        process_manager=_FakeProcessManager(harness_client or _ScriptedHarnessClient([])),  # type: ignore[arg-type]
         spec_resolver=_resolver,
         server_client=NullServerClient(),  # type: ignore[arg-type]
         terminal_registry=registry,
@@ -682,3 +688,117 @@ async def test_failed_recreate_does_not_wait(
         f"a recreate that made no pane must not be polled; got {pane_ready_calls!r}"
     )
     assert elapsed < 5.0, f"failed recreate stalled {elapsed:.1f}s instead of failing fast"
+
+
+class _TmuxAdvertisementProbe(_ScriptedHarnessClient):
+    """Harness fake recording whether ``tmux.json`` exists when a turn starts."""
+
+    def __init__(self, bridge_dir: Path) -> None:
+        super().__init__([_sse({"type": "response.completed", "response": {"id": "resp_0"}})])
+        self.bridge_dir = bridge_dir
+        self.advertised_at_turn: list[bool] = []
+
+    def stream(self, method: str, url: str, *, json: dict[str, Any], timeout: Any) -> Any:
+        self.advertised_at_turn.append((self.bridge_dir / "tmux.json").exists())
+        return super().stream(method, url, json=json, timeout=timeout)
+
+
+async def _advertise_then_lose_bridge_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    conv_id: str,
+    harness_client: _ScriptedHarnessClient | None = None,
+) -> tuple[Any, Path]:
+    """Launch-advertise a live Claude pane, then delete its whole bridge dir.
+
+    This is the reproduced outage: the pane keeps running, but its bridge dir
+    vanished, so the harness has no ``tmux.json`` to deliver web UI messages by.
+    """
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "claude-native")
+    auto_create_calls: list[str] = []
+    app, registry = await _open_claude_native_session(
+        monkeypatch,
+        conv_id=conv_id,
+        auto_create_calls=auto_create_calls,
+        harness_client=harness_client,
+    )
+    bridge_dir = bridge_dir_for_conversation_id(conv_id)
+    _plant_live_claude_pane(registry, conv_id, tmp_path, bridge_dir)
+    orchestration._publish_tmux_target_for_bridge(
+        resource_registry=app.state.session_resource_registry,
+        session_id=conv_id,
+        bridge_id=conv_id,
+        terminal_name="claude",
+        session_key="main",
+    )
+    shutil.rmtree(bridge_dir)
+    auto_create_calls.clear()
+    return app, bridge_dir
+
+
+@pytest.mark.asyncio
+async def test_turn_readvertises_tmux_target_lost_by_a_live_pane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A web UI message must find ``tmux.json`` even after the bridge dir was lost."""
+    conv_id = "93a4b5c6d7e8f901a2b3c4d5e6f70182"
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "claude-native")
+    probe = _TmuxAdvertisementProbe(bridge_dir_for_conversation_id(conv_id))
+    app, bridge_dir = await _advertise_then_lose_bridge_dir(
+        monkeypatch, tmp_path, conv_id=conv_id, harness_client=probe
+    )
+
+    async with _runner_client(app) as client:
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello from the web UI"}],
+                },
+            },
+        )
+        assert resp.status_code in (200, 202), resp.text
+        deadline = time.monotonic() + 5.0
+        while not probe.advertised_at_turn and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+
+    assert probe.advertised_at_turn == [True], (
+        f"the turn must re-advertise the live pane's tmux target; got {probe.advertised_at_turn!r}"
+    )
+    advertised = json.loads((bridge_dir / "tmux.json").read_text())
+    assert advertised["socket_path"] == str(tmp_path / "omnigent-terminal-live" / "tmux.sock")
+
+
+@pytest.mark.asyncio
+async def test_session_change_readvertises_tmux_target_lost_by_a_live_pane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``/effort`` on a live pane must also restore a lost ``tmux.json``."""
+    conv_id = "a4b5c6d7e8f901a2b3c4d5e6f7018293"
+    app, _bridge_dir = await _advertise_then_lose_bridge_dir(
+        monkeypatch, tmp_path, conv_id=conv_id
+    )
+    advertised_at_inject: list[bool] = []
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "inject_slash_command",
+        lambda inject_dir, **_kwargs: advertised_at_inject.append(
+            (inject_dir / "tmux.json").exists()
+        ),
+    )
+    monkeypatch.setattr(claude_native_bridge, "claude_pane_ready", lambda _bridge_dir: True)
+
+    async with _runner_client(app) as client:
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "effort_change", "effort": "high"},
+        )
+
+    assert resp.status_code == 204, resp.text
+    assert advertised_at_inject == [True]
