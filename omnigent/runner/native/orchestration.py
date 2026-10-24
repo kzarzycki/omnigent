@@ -173,6 +173,59 @@ def _publish_tmux_target_for_bridge(
         socket_path=instance.socket_path,
         tmux_target=instance.tmux_target,
     )
+    instance.advertised_bridge_id = bridge_id
+
+
+def _readvertise_missing_tmux_target(
+    *,
+    resource_registry: SessionResourceRegistry,
+    session_id: str,
+    terminal_name: str,
+    session_key: str,
+) -> None:
+    """
+    Rewrite a live pane's ``tmux.json`` when its bridge dir lost it.
+
+    The target is advertised once, at launch. If the file disappears while the
+    pane lives on (a bridge re-prep or an outside delete of the dir), every web
+    UI message fails with "tmux target is not advertised yet" until relaunch.
+
+    :param resource_registry: Session resource registry holding the pane.
+    :param session_id: Owning session id, e.g. ``"conv_abc123"``.
+    :param terminal_name: Terminal spec name, e.g. ``"claude"``.
+    :param session_key: Session key, e.g. ``"main"``.
+    :returns: None.
+    """
+    terminal_registry = resource_registry.terminal_registry
+    instance = (
+        None
+        if terminal_registry is None
+        else terminal_registry.get(session_id, terminal_name, session_key)
+    )
+    bridge_id = None if instance is None else instance.advertised_bridge_id
+    if bridge_id is None:
+        return
+    from omnigent.harnesses.claude_native.bridge import bridge_dir_for_bridge_id
+
+    bridge_dir = bridge_dir_for_bridge_id(bridge_id)
+    if (bridge_dir / "tmux.json").exists():
+        return
+    _logger.warning(
+        "Claude terminal tmux target missing from a live pane's bridge dir; re-advertising: "
+        "session=%s bridge_id=%s bridge_json_present=%s owner_pid_present=%s",
+        session_id,
+        bridge_id,
+        (bridge_dir / "bridge.json").exists(),
+        (bridge_dir / "owner.pid").exists(),
+        extra={"session_id": session_id},
+    )
+    _publish_tmux_target_for_bridge(
+        resource_registry=resource_registry,
+        session_id=session_id,
+        bridge_id=bridge_id,
+        terminal_name=terminal_name,
+        session_key=session_key,
+    )
 
 
 # Background transcript-forwarder tasks for host-spawned claude-native and
