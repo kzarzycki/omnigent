@@ -866,7 +866,7 @@ def test_an_allowlisted_workspace_gets_codex_otel_overrides(
         identity,
         "load_host_identity_if_present",
         lambda: identity.HostIdentity(
-            host_id="host_0123456789abcdef0123456789abcdef", name="macbook-work"
+            host_id="host_0123456789abcdef0123456789abcdef", name="workstation"
         ),
     )
 
@@ -886,7 +886,7 @@ def test_an_allowlisted_workspace_gets_codex_otel_overrides(
         key: tomllib.loads(f"v = {value}")["v"]
         for key, value in (o.split("=", 1) for o in overrides(opted) if o.startswith("otel."))
     }
-    assert otel["otel.environment"] == "macbook-work"
+    assert otel["otel.environment"] == "workstation"
     logs = {"endpoint": "http://collector:4318/v1/logs", "protocol": "binary"}
     assert otel["otel.exporter"] == {"otlp-http": logs}
     assert (

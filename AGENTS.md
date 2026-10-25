@@ -167,12 +167,12 @@ git config commit.gpgsign true
 ```
 
 `land` refuses a checkout that doesn't sign with SSH, and a squash the
-allowed signers file doesn't accept, before it pushes. Landing hosts today:
-
-| Host | Key |
-| ---- | --- |
-| `cc-experiments` (VPS) | `omnigent-signing@cc-experiments` |
-| `xmac-work` (work Mac, account `zarz`) | `omnigent-signing@ZarzBook`, `SHA256:zr4WKwgYCr77WCbmOHqhc5hVRHjbnyYgQ9hKDz7Sr04` |
+allowed signers file doesn't accept, before it pushes. Landing hosts today are the
+bridge host (a Linux VPS) and a macOS build host, each with its own key in the
+allowed signers file. Their names are machine-specific, so they stay out of this
+repo: `.claude/skills/cloud-dev/fork-env.sh OMNIGENT_BRIDGE_HOST` and
+`... OMNIGENT_MACOS_BUILD_HOST` print them from the local overlay
+`~/.config/omnigent/fork-dev.conf`.
 
 ## This fork: developing in a Claude cloud session
 
@@ -180,7 +180,7 @@ Omnigent development runs in Claude cloud sessions (the `claude-cloud` agent,
 environment `omnigent-dev`), so the load is off the owner's machines. In such a
 session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
 first. The VM can't reach GitHub's GraphQL API or hold a signing key, so every
-`approvals.py` step, the signed land and the Codex verifier run on cc-experiments,
+`approvals.py` step, the signed land and the Codex verifier run on the bridge host,
 through a host helper session the skill describes.
 
 ## This fork: filing upstream issues and PRs

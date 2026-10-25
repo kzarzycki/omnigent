@@ -651,7 +651,7 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
     )
     store.set_labels(conv.id, {"omni.role": "verifier"})
     monkeypatch.setattr(
-        _globals, "_host_store", type("H", (), {"get_host": lambda self, i: _Named("macbook")})()
+        _globals, "_host_store", type("H", (), {"get_host": lambda self, i: _Named("laptop")})()
     )
     monkeypatch.setattr(
         _globals,
@@ -659,7 +659,7 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
         type("A", (), {"get_names": lambda self, ids: {ids[0]: "claude"}})(),
     )
     monkeypatch.setattr(
-        _globals, "_project_store", type("P", (), {"get_name": lambda self, i: "homelab"})()
+        _globals, "_project_store", type("P", (), {"get_name": lambda self, i: "infra"})()
     )
     # A sub-agent has no grant of its own and is attributed to its root's owner.
     child = store.create_conversation(agent_id=_AGENT_ID, parent_conversation_id=conv.id)
@@ -677,9 +677,9 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
         {
             "model": "claude-opus-4-8",
             "omnigent.harness": "claude-native",
-            "omnigent.host.name": "macbook",
+            "omnigent.host.name": "laptop",
             "omnigent.agent.name": "claude",
-            "omnigent.project.name": "homelab",
+            "omnigent.project.name": "infra",
             "omnigent.role": "verifier",
             "omnigent.user": "alice",
         }
