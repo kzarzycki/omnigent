@@ -1,6 +1,6 @@
 ---
 name: cloud-dev
-description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on cc-experiments, and the VM's limits. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
+description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on the bridge host, and the VM's limits. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
 ---
 
 # Developing in a Claude cloud session
@@ -8,14 +8,18 @@ description: How to develop this fork from a Claude cloud session (the `claude-c
 Omnigent development runs in Claude cloud sessions through the `claude-cloud` Omnigent
 agent, so the load is on Anthropic's machines rather than the owner's. The session's VM
 (cloud machine) does the spec, the code, the tests and the PR. A few steps can't run
-there and go through a host helper on cc-experiments, where the bridge runs.
+there and go through a host helper on the bridge host, where the bridge runs. The owner's
+machine-specific values (host names, the environment's ID) stay out of this repo:
+`fork-env.sh <NAME>` next to this file prints one, from the environment or the local
+overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when neither has it.
 
 ## The environment
 
-- Sessions use the `omnigent-dev` cloud environment (`env_013xbZXkfpPpQa91ftHRkfYE`). It
-  holds no secrets and no signing key: landing signs on a host.
+- Sessions use the `omnigent-dev` cloud environment (its ID:
+  `fork-env.sh OMNIGENT_DEV_ENVIRONMENT_ID`). It holds no secrets and no signing key:
+  landing signs on a host.
 - The host workspace a session starts from pins it in `.claude/settings.local.json`:
-  `{"remote": {"defaultEnvironmentId": "env_013xbZXkfpPpQa91ftHRkfYE"}}`. Without that the
+  `{"remote": {"defaultEnvironmentId": "<that ID>"}}`. Without that the
   session lands in the account's default environment, which lacks the tools below.
 - `setup.sh` next to this file is the environment's setup script: `bubblewrap`,
   `openssh-client`, `pre-commit` and `mise`, logged to `/tmp/omnigent-dev-init.log`. It
@@ -70,7 +74,7 @@ there and go through a host helper on cc-experiments, where the bridge runs.
 | Anything needing the tailnet, a local browser or Xcode | The VM has none of these. No Omnigent step needs them today |
 
 - **Host helper.** Start one `claude-native-ui` child with `mcp__omnigent__sys_session_create`
-  (model `claude-sonnet-5-5`, title `<story>-host`). It runs on cc-experiments in your host
+  (model `claude-sonnet-5-5`, title `<story>-host`). It runs on the bridge host in your host
   workspace, the checkout your session started from. Send it exact commands and ask for
   their output and exit codes in its reply. It runs the engineering-loop scripts from the
   host's installed skill. `local-ci` and `land` check the checkout's HEAD against the PR

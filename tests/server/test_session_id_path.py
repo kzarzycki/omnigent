@@ -6,8 +6,8 @@ import pytest
 
 from omnigent.server.app import canonicalize_session_path
 
-_HEX = "0ce214d6ac80416ba305b08ecd16763a"
-_DASHED = "0ce214d6-ac80-416b-a305-b08ecd16763a"
+_HEX = "0123456789abcdef0123456789abcdef"
+_DASHED = "01234567-89ab-cdef-0123-456789abcdef"
 _OTHER = "11111111222233334444555555555555"
 
 
