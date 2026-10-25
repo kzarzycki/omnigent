@@ -220,7 +220,7 @@ async def test_turn_boundary_posts_the_rollouts_latest_rate_limit_windows(
     import json
     import types
 
-    thread_id = "01a152e9-6688-7573-ad4e-ffc3e8c493e7"
+    thread_id = "01900000-0000-7000-8000-000000000001"
     codex_home = tmp_path / "codex-home"
     rollout = codex_home / "sessions/2026/10/19" / f"rollout-2026-10-19T06-46-30-{thread_id}.jsonl"
     rollout.parent.mkdir(parents=True)
