@@ -123,8 +123,9 @@ read-only, such as `Read` and `Grep`, never ask.
 - **After a failed turn:** Omnigent drops a failed turn's output, `cloud session:`
   line included, and replays the transcript into a new bridge. The bridge
   records each cloud session it creates under the first prompt and working
-  directory, so the new bridge continues the same cloud session rather than
-  starting another.
+  directory. A new bridge whose replay starts with exactly that prompt, in the
+  same directory, continues the same cloud session rather than starting
+  another; a first message with a `word: ` line of its own never matches.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.

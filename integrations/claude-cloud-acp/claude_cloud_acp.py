@@ -676,13 +676,16 @@ class Session:
 SESSIONS: dict[str, Session] = {}
 
 
-def remember(acp_id: str, cloud_id: str) -> None:
+def remember(key: str, cloud_id: str) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    known = recall()
-    known[acp_id] = cloud_id
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(known))
-    tmp.replace(STATE_FILE)
+    # The bridges of other Omnigent sessions write the same file.
+    with STATE_FILE.with_suffix(".lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        known = recall()
+        known[key] = cloud_id
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(known))
+        tmp.replace(STATE_FILE)
 
 
 def recall() -> dict[str, str]:
@@ -709,27 +712,27 @@ def prompt_text(blocks: list[dict]) -> str:
 
 
 def first_prompt_key(cwd: str, text: str) -> str:
-    digest = hashlib.sha256(f"{cwd}\0{text}".encode()).hexdigest()
-    return f"first:{len(text)}:{digest}"
+    return "first:" + hashlib.sha256(f"{cwd}\0{text}".encode()).hexdigest()
+
+
+def replayed_first_prompt(replay: str) -> str | None:
+    """The fresh prompt that started *replay*'s transcript, as :func:`prompt_text` gave it.
+
+    That is any injected system prompt and the first user message, which ends at
+    the next ``<role>: `` line or at the replay's tail.
+    ponytail: a first message with a ``word: `` line of its own is cut there and never matches.
+    """
+    head, found, history = replay.partition(REPLAY_HEAD)
+    if not found:
+        return None
+    first = re.split(r"\n[a-z][a-z ]*: ", history.rsplit(REPLAY_TAIL, 1)[0], maxsplit=1)[0]
+    return (head + first).strip()
 
 
 def recall_first_prompt(cwd: str, replay: str) -> str | None:
-    """The cloud session this bridge created for the first message of *replay*.
-
-    Without its header, a replay starts with the fresh prompt that created the
-    session, then goes on to the next transcript line.
-    ponytail: two sessions in one cwd whose first prompts match up to a newline collide.
-    """
-    if REPLAY_HEAD not in replay:
-        return None
-    flat = replay.replace(REPLAY_HEAD, "", 1).lstrip()
-    found = None
-    for key, cloud_id in recall().items():
-        if key.startswith("first:"):
-            length = int(key.split(":")[1])
-            if flat[length : length + 1] == "\n" and first_prompt_key(cwd, flat[:length]) == key:
-                found = cloud_id  # the latest one created
-    return found
+    """The cloud session this bridge created for the Omnigent session *replay* comes from."""
+    first = replayed_first_prompt(replay)
+    return None if first is None else recall().get(first_prompt_key(cwd, first))
 
 
 def split_replay(text: str, cwd: str) -> tuple[str | None, str]:
@@ -1121,8 +1124,8 @@ def self_check() -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         assert run_turn("acp-working", "build it") == "end_turn"
     assert time.monotonic() - started > 3, "ended before the result"
-    working.answering.add("mcp-call")
-    threading.Timer(2.5, working.answering.discard, ["mcp-call"]).start()
+    globals()["answer_control"] = lambda *_: time.sleep(2.5)  # a long MCP call
+    threading.Thread(target=working.answer, args=({"request_id": "mcp-call"},)).start()
     threading.Timer(2.7, working.events.put, [result | {"sequence_num": "11"}]).start()
     with contextlib.redirect_stdout(io.StringIO()):
         assert run_turn("acp-working", "wait on a child session") == "end_turn"
@@ -1138,7 +1141,7 @@ def self_check() -> None:
     stalled.reader = threading.current_thread()
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            run_turn("acp-stalled", "the brief")
+            run_turn("acp-stalled", prompt_text([{"type": "text", "text": "the brief\nstep 2 "}]))
         raise AssertionError("a stalled turn ended")
     except RuntimeError as exc:
         assert "session_01StalledStalled made no progress" in str(exc), exc
@@ -1147,13 +1150,26 @@ def self_check() -> None:
     retry = SESSIONS["acp-retry"] = Session("/repo", "acp-retry")
     retry.reader = threading.current_thread()
     retry.events.put(result | {"sequence_num": "6"})
-    replay = f"{REPLAY_HEAD}the brief\n\n{REPLAY_TAIL}and this too"
+    replay = f"{REPLAY_HEAD}the brief\nstep 2 \nuser: and this\n\n{REPLAY_TAIL}and now this"
     with contextlib.redirect_stdout(io.StringIO()):
         assert run_turn("acp-retry", replay) == "end_turn"
-    assert created == ["the brief"] and posted == [("session_01StalledStalled", "and this too")]
+    assert created == ["the brief\nstep 2"] and posted == [
+        ("session_01StalledStalled", "and now this")
+    ]
     assert split_replay(replay, "/other") == (None, replay)  # another workspace's session
-    longer = f"{REPLAY_HEAD}the brief, longer\n\n{REPLAY_TAIL}hi"
-    assert split_replay(longer, "/repo") == (None, longer)  # another first message
+    for other in ("the brief", "the brief\nstep 2\nstep 3"):  # another first message
+        assert split_replay(f"{REPLAY_HEAD}{other}\n\n{REPLAY_TAIL}hi", "/repo")[0] is None
+    injected = f"rules\n\n{REPLAY_HEAD}the brief\nassistant: ok\n\n{REPLAY_TAIL}hi"
+    assert replayed_first_prompt(injected) == "rules\n\nthe brief"
+    # Bridges of concurrent sessions keep each other's records.
+    writers = [
+        threading.Thread(target=real_remember, args=(f"k{n}", f"session_{n}")) for n in range(20)
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+    assert all(f"k{n}" in recall() for n in range(20)), recall()
     # Each turn's keepalive has ended by the time the turn returns, however fast turns follow.
     globals()["_mirror_turn"] = lambda *_: time.sleep(0.1) or "end_turn"
     threads_before = threading.active_count()
