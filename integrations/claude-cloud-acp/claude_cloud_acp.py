@@ -718,14 +718,16 @@ def first_prompt_key(cwd: str, text: str) -> str:
 def replayed_first_prompt(replay: str) -> str | None:
     """The fresh prompt that started *replay*'s transcript, as :func:`prompt_text` gave it.
 
-    That is any injected system prompt and the first user message, which ends at
-    the next ``<role>: `` line or at the replay's tail.
-    ponytail: a first message with a ``word: `` line of its own is cut there and never matches.
+    That is any injected system prompt and the first user message. Every turn
+    this bridge completes carries the marker, so a replay without one holds only
+    user messages, and the first ends at the next ``user: `` line.
+    ponytail: a first message with a ``user: `` line of its own is ambiguous; one
+    that is cut there matches only a session whose whole first message was the cut part.
     """
     head, found, history = replay.partition(REPLAY_HEAD)
     if not found:
         return None
-    first = re.split(r"\n[a-z][a-z ]*: ", history.rsplit(REPLAY_TAIL, 1)[0], maxsplit=1)[0]
+    first = history.rsplit(REPLAY_TAIL, 1)[0].split("\nuser: ", 1)[0]
     return (head + first).strip()
 
 
@@ -811,8 +813,9 @@ def announce(acp_id: str, s: Session) -> None:
 def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
     """Start the cloud session, recorded under the Omnigent session's *first* prompt."""
     s.cloud_id = create_cloud_session(cli_prompt, s.cwd)
-    log(f"created {s.cloud_id}")
+    # Recorded first: nothing after it may lose the link to a session that exists.
     remember(first_prompt_key(s.cwd, first), s.cloud_id)
+    log(f"created {s.cloud_id}")
     announce(acp_id, s)
 
 
@@ -1159,8 +1162,19 @@ def self_check() -> None:
     assert split_replay(replay, "/other") == (None, replay)  # another workspace's session
     for other in ("the brief", "the brief\nstep 2\nstep 3"):  # another first message
         assert split_replay(f"{REPLAY_HEAD}{other}\n\n{REPLAY_TAIL}hi", "/repo")[0] is None
-    injected = f"rules\n\n{REPLAY_HEAD}the brief\nassistant: ok\n\n{REPLAY_TAIL}hi"
+    injected = f"rules\n\n{REPLAY_HEAD}the brief\nuser: ok\n\n{REPLAY_TAIL}hi"
     assert replayed_first_prompt(injected) == "rules\n\nthe brief"
+    for quoted in ("scope: B", "assistant: quoted"):  # a line of the first message, not a turn
+        assert (
+            split_replay(f"{REPLAY_HEAD}the brief\n{quoted}\n\n{REPLAY_TAIL}hi", "/repo")[0]
+            is None
+        )
+    # A session that exists stays recorded even when the next step fails.
+    real_log, globals()["log"] = log, lambda _: (_ for _ in ()).throw(BrokenPipeError())
+    with contextlib.suppress(BrokenPipeError):
+        _create("acp-x", Session("/logs"), "go", "go")
+    globals()["log"] = real_log
+    assert recall().get(first_prompt_key("/logs", "go")) == "session_01StalledStalled"
     # Bridges of concurrent sessions keep each other's records.
     writers = [
         threading.Thread(target=real_remember, args=(f"k{n}", f"session_{n}")) for n in range(20)
