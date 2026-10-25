@@ -1164,6 +1164,7 @@ def self_check() -> None:
         assert split_replay(f"{REPLAY_HEAD}{other}\n\n{REPLAY_TAIL}hi", "/repo")[0] is None
     injected = f"rules\n\n{REPLAY_HEAD}the brief\nuser: ok\n\n{REPLAY_TAIL}hi"
     assert replayed_first_prompt(injected) == "rules\n\nthe brief"
+    real_remember(first_prompt_key("/repo", "the brief"), "session_01ShortBrief")
     for quoted in ("scope: B", "assistant: quoted"):  # a line of the first message, not a turn
         assert (
             split_replay(f"{REPLAY_HEAD}the brief\n{quoted}\n\n{REPLAY_TAIL}hi", "/repo")[0]
