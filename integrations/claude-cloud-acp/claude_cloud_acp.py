@@ -601,6 +601,8 @@ class Session:
         self.cancelled = threading.Event()
         self.running = False
         self.interrupted = False
+        # A turn of this bridge that carried the marker has completed.
+        self.marked = False
         self.lock = threading.RLock()  # re-entered by the SIGTERM handler
 
     def follow(self, after: int) -> None:
@@ -718,17 +720,18 @@ def first_prompt_key(cwd: str, text: str) -> str:
 def replayed_first_prompt(replay: str) -> str | None:
     """The fresh prompt that started *replay*'s transcript, as :func:`prompt_text` gave it.
 
-    That is any injected system prompt and the first user message. Every turn
-    this bridge completes carries the marker, so a replay without one holds only
-    user messages, and the first ends at the next ``user: `` line.
+    That is any injected system prompt and the first user message. Each bridge
+    marks its turns until one completes, so a replay without a marker holds no
+    bridge turn and the first message ends at the next ``user: `` line. Lines of
+    other roles come from another harness, and then the replay matches nothing.
     ponytail: a first message with a ``user: `` line of its own is ambiguous; one
     that is cut there matches only a session whose whole first message was the cut part.
     """
     head, found, history = replay.partition(REPLAY_HEAD)
-    if not found:
+    history = history.rsplit(REPLAY_TAIL, 1)[0]
+    if not found or re.search(r"\n(?:assistant|system|developer|tool): ", history):
         return None
-    first = history.rsplit(REPLAY_TAIL, 1)[0].split("\nuser: ", 1)[0]
-    return (head + first).strip()
+    return (head + history.split("\nuser: ", 1)[0]).strip()
 
 
 def recall_first_prompt(cwd: str, replay: str) -> str | None:
@@ -781,7 +784,9 @@ def run_turn(acp_id: str, text: str) -> str:
     )
     beat.start()
     try:
-        return _mirror_turn(acp_id, s, text)
+        stop = _mirror_turn(acp_id, s, text)
+        s.marked = True
+        return stop
     except Exception as exc:
         # Omnigent drops a failed turn's output, marker included, so the error names it.
         if s.cloud_id and s.cloud_id not in str(exc):
@@ -838,6 +843,8 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
                     "[cloud] unarchived the session; files from before the archive are gone\n",
                 )
     else:
+        if not s.marked:
+            announce(acp_id, s)  # the turn that announced it failed, and Omnigent dropped it
         after, unarchived = _send(s, text)
         if unarchived:
             thought(
@@ -1165,6 +1172,24 @@ def self_check() -> None:
     injected = f"rules\n\n{REPLAY_HEAD}the brief\nuser: ok\n\n{REPLAY_TAIL}hi"
     assert replayed_first_prompt(injected) == "rules\n\nthe brief"
     real_remember(first_prompt_key("/repo", "the brief"), "session_01ShortBrief")
+    # Another harness's reply before the failure: no match, whatever was recorded.
+    real_remember(first_prompt_key("/repo", "the brief\nassistant: B"), "session_01OtherBrief")
+    other_harness = f"{REPLAY_HEAD}the brief\nassistant: B\n\n{REPLAY_TAIL}hi"
+    assert split_replay(other_harness, "/repo")[0] is None
+    # Until one of its turns completes, a bridge marks every turn.
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.suppress(RuntimeError):
+        run_turn("acp-stalled", "again")  # stalls once more
+    retry.events.put(result | {"sequence_num": "7"})
+    with contextlib.redirect_stdout(out):
+        assert run_turn("acp-retry", "next") == "end_turn"
+    marked_out = out.getvalue()
+    assert marked_out.count(MARKER) == 1, marked_out  # acp-retry has completed a turn: no marker
+    stalled.events.put(result | {"sequence_num": "8"})
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert run_turn("acp-stalled", "and now") == "end_turn"
+    assert MARKER in out.getvalue(), out.getvalue()
     for quoted in ("scope: B", "assistant: quoted"):  # a line of the first message, not a turn
         assert (
             split_replay(f"{REPLAY_HEAD}the brief\n{quoted}\n\n{REPLAY_TAIL}hi", "/repo")[0]
