@@ -295,6 +295,14 @@ def create_cloud_session(text: str, cwd: str) -> str:
     ``--print``), so run it on a pseudo-terminal, read the id it prints, and
     close the local view; the cloud session keeps running without it.
     """
+    # The CLI uploads the repo as a git bundle; outside one it fails with a garbled TUI error.
+    if subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--git-dir"], capture_output=True
+    ).returncode:
+        raise RuntimeError(
+            f"{cwd} is not a git repository, and Claude cloud sessions upload the repo. "
+            "Start the session from the repository folder."
+        )
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     proc = subprocess.Popen(
