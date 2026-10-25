@@ -2655,7 +2655,7 @@ async def _wait_for_stored(stack: _TunnelStack, session_id: str, row: str) -> No
 
     try:
         await asyncio.wait_for(_stored(), timeout=budget(10.0))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise AssertionError(
             f"{row} never stored; items={_stored_item_shape(stack, session_id)}"
         ) from None
