@@ -6670,7 +6670,9 @@ async def _session_close_via_rest(
     On success marks the child with ``omnigent.closed=true`` and
     rewrites its internal title to ``"<agent>:<title>:closed:<id>"`` so
     future ``sys_session_send`` calls with the same ``(agent, title)``
-    create a fresh child.
+    create a fresh child. A ``sys_session_create`` child's free-form
+    title becomes ``"<title>:closed:<id>"``, and its agent is the
+    snapshot's ``agent_name``.
 
     :param args: Parsed tool arguments; requires ``conversation_id``.
     :param conversation_id: The calling session's own id, e.g.
@@ -6696,10 +6698,16 @@ async def _session_close_via_rest(
     )
     if scope_error is not None:
         return scope_error
-    parsed = _parse_session_title(_optional_string(target_snap.get("title")))
-    if parsed.agent is None or parsed.title is None:
-        return json.dumps({"error": "session_not_a_sub_agent", "conversation_id": target_id})
-    new_title = f"{parsed.agent}:{parsed.title}{_CLOSED_TITLE_INFIX}{target_id}"
+    raw_title = _optional_string(target_snap.get("title"))
+    parsed = _parse_session_title(raw_title)
+    if parsed.agent is not None and parsed.title is not None:
+        agent, title = parsed.agent, parsed.title
+        new_title = f"{agent}:{title}{_CLOSED_TITLE_INFIX}{target_id}"
+    else:
+        # A sys_session_create child keeps the caller's free-form title.
+        agent = _optional_string(target_snap.get("agent_name"))
+        title = raw_title or ""
+        new_title = f"{title}{_CLOSED_TITLE_INFIX}{target_id}"
     try:
         patch = await server_client.patch(
             f"{_session_url(target_id)}",
@@ -6721,8 +6729,8 @@ async def _session_close_via_rest(
         {
             "closed": True,
             "conversation_id": target_id,
-            "agent": parsed.agent,
-            "title": parsed.title,
+            "agent": agent,
+            "title": title,
         }
     )
 
