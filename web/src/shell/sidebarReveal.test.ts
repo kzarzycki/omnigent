@@ -47,4 +47,25 @@ describe("scrollToAndFlashSidebarRow", () => {
     vi.advanceTimersByTime(800);
     expect(row).toHaveClass(SIDEBAR_REVEAL_FLASH_CLASS);
   });
+
+  it("flashes only once when both scrollend and the fallback timer fire", () => {
+    vi.useFakeTimers();
+    const { container, row } = setup(900);
+    const add = vi.spyOn(row.classList, "add");
+    scrollToAndFlashSidebarRow(container, "conv_1");
+    vi.advanceTimersToNextFrame();
+    container.dispatchEvent(new Event("scrollend"));
+    vi.advanceTimersByTime(800);
+    expect(add.mock.calls.filter(([c]) => c === SIDEBAR_REVEAL_FLASH_CLASS)).toHaveLength(1);
+  });
+
+  it("clears the ring when a newer reveal cancels this one mid-flash", () => {
+    vi.useFakeTimers();
+    const { container, row } = setup(100);
+    const cancel = scrollToAndFlashSidebarRow(container, "conv_1");
+    vi.advanceTimersToNextFrame();
+    expect(row).toHaveClass(SIDEBAR_REVEAL_FLASH_CLASS);
+    cancel();
+    expect(row).not.toHaveClass(SIDEBAR_REVEAL_FLASH_CLASS);
+  });
 });

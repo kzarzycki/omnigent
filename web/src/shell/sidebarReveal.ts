@@ -73,10 +73,10 @@ export function scrollToAndFlashSidebarRow(
   let stopWaitingForScroll = () => {};
   const deadline = performance.now() + FIND_TIMEOUT_MS;
   const selector = `[data-sidebar-session-id="${CSS.escape(sessionId)}"]`;
-  let flashed = false;
+  let flashedRow: HTMLElement | null = null;
   const flash = (row: HTMLElement) => {
-    if (flashed) return;
-    flashed = true;
+    if (flashedRow) return;
+    flashedRow = row;
     stopWaitingForScroll();
     row.classList.remove(SIDEBAR_REVEAL_FLASH_CLASS);
     // Force a reflow so a repeat reveal restarts the animation.
@@ -108,5 +108,7 @@ export function scrollToAndFlashSidebarRow(
     cancelAnimationFrame(frame);
     stopWaitingForScroll();
     for (const timer of timers) clearTimeout(timer);
+    // A newer reveal cancels this one; its timer would have removed the ring.
+    flashedRow?.classList.remove(SIDEBAR_REVEAL_FLASH_CLASS);
   };
 }

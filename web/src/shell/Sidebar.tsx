@@ -2439,17 +2439,12 @@ function ConversationList({
       titles.push("Projects");
       expandProject(project);
     }
-    const uncollapse = (prev: string[]) => prev.filter((t) => !titles.includes(t));
-    if (searchQuery) {
-      setSearchCollapsedSections(uncollapse);
-    } else {
-      setCollapsedSections((prev) => {
-        const next = uncollapse(prev);
-        if (next.length === prev.length) return prev;
-        writeCollapsedSidebarSections(next);
-        return next;
-      });
-    }
+    setCollapsedSections((prev) => {
+      const next = prev.filter((t) => !titles.includes(t));
+      if (next.length === prev.length) return prev;
+      writeCollapsedSidebarSections(next);
+      return next;
+    });
     cancelRevealRef.current?.();
     cancelRevealRef.current = scrollToAndFlashSidebarRow(scrollContainerRef.current, sessionId);
     // Fires per request only; the section lookups read the current render.

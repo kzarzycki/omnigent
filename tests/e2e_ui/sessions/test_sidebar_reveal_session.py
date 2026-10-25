@@ -98,3 +98,40 @@ def test_show_in_sidebar_expands_scrolls_and_flashes_row(
     expect(row).to_have_class(_FLASH)
     page.wait_for_timeout(300)
     page.screenshot(path=str(artifacts / "4-after-command-palette.png"))
+
+
+def test_palette_reveal_opens_closed_sidebar_and_refolded_project(
+    page: Page,
+    live_server: str,
+    output_path: str,
+) -> None:
+    """With the sidebar closed and the folder collapsed after opening, ⌘K reveals the row."""
+    artifacts = Path(output_path)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    project = f"refold-{uuid.uuid4().hex[:6]}"
+    target = _create_session(live_server, "Refold target session", project)
+    for i in range(30):
+        _create_session(live_server, f"Refold filler {i:02d}")
+    shell = page.locator(".app-shell")
+
+    page.set_viewport_size({"width": 1400, "height": 800})
+    page.goto(f"{live_server}/c/{target}")
+    # Opening the session auto-expands its folder; the user then folds it away.
+    folder = page.get_by_role("button", name=project, exact=True)
+    expect(folder).to_have_attribute("aria-expanded", "true", timeout=30_000)
+    folder.click()
+    expect(folder).to_have_attribute("aria-expanded", "false")
+    expect(_row(page, target)).to_have_count(0)
+    page.keyboard.press("Control+Alt+BracketLeft")
+    expect(shell).not_to_have_attribute("data-sidebar-open", "true")
+    page.screenshot(path=str(artifacts / "5-before-sidebar-closed.png"))
+
+    page.keyboard.press("ControlOrMeta+k")
+    page.get_by_text("Show current session in sidebar").click()
+    expect(shell).to_have_attribute("data-sidebar-open", "true")
+    expect(folder).to_have_attribute("aria-expanded", "true")
+    row = _row(page, target)
+    expect(row).to_be_in_viewport()
+    expect(row).to_have_class(_FLASH)
+    page.wait_for_timeout(300)
+    page.screenshot(path=str(artifacts / "6-after-palette-opens-sidebar.png"))

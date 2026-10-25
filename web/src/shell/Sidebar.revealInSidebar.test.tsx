@@ -7,7 +7,7 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // scrolls to and flashes its row.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
@@ -15,7 +15,11 @@ import {
   COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY,
   EXPANDED_PROJECT_SECTIONS_STORAGE_KEY,
 } from "@/shell/sidebarNav";
-import { requestRevealSessionInSidebar, SIDEBAR_REVEAL_FLASH_CLASS } from "./sidebarReveal";
+import {
+  requestRevealSessionInSidebar,
+  SIDEBAR_REVEAL_FLASH_CLASS,
+  useSidebarRevealRequest,
+} from "./sidebarReveal";
 
 const { pinnedRef } = vi.hoisted(() => ({ pinnedRef: { current: [] as unknown[] } }));
 
@@ -77,9 +81,8 @@ function renderAt(initialEntry: string) {
 beforeEach(() => {
   useConvMock.mockReset();
   useProjectSessionsMock.mockReset();
-  // ProjectFolder fetches its own paginated list when expanded. The tests
-  // above already seed the top-level list; mirror it for the folder query so
-  // an expanded folder actually renders rows.
+  // ProjectFolder fetches its own paginated list when expanded; seed it so an
+  // expanded folder actually renders rows.
   useProjectSessionsMock.mockReturnValue({
     data: {
       pages: [
@@ -121,6 +124,8 @@ describe("reveal session in sidebar", () => {
     expect(JSON.parse(localStorage.getItem(EXPANDED_PROJECT_SECTIONS_STORAGE_KEY) ?? "[]")).toEqual(
       ["Alpha"],
     );
+    // The request is one-shot: a list that mounts later must not replay it.
+    expect(renderHook(() => useSidebarRevealRequest()).result.current).toBeNull();
   });
 
   it("expands a collapsed Pinned section for a pinned session", async () => {
