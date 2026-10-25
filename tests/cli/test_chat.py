@@ -1494,7 +1494,9 @@ class _FakeSessionsApi:
     def __init__(self, captured: dict[str, object]) -> None:
         self._captured = captured
 
-    async def create(self, bundle: bytes, *, filename: str, workspace: str) -> SimpleNamespace:
+    async def create(
+        self, bundle: bytes, *, filename: str, workspace: str, **_seed: object
+    ) -> SimpleNamespace:
         """Record a session create and return a stub with a new id."""
         self._captured["create"] = {"workspace": workspace, "filename": filename}
         return SimpleNamespace(id="conv_created")
@@ -1697,7 +1699,9 @@ def test_prepare_chat_session_via_daemon_reports_create_failure_as_click_error(
     captured: dict[str, object] = {}
     _patch_daemon_launch(monkeypatch, captured)
 
-    async def _boom(_self: object, _bundle: bytes, *, filename: str, workspace: str) -> object:
+    async def _boom(
+        _self: object, _bundle: bytes, *, filename: str, workspace: str, **_seed: object
+    ) -> object:
         raise ClientOmnigentError({"detail": "Method Not Allowed"}, 405, "")
 
     monkeypatch.setattr(_FakeSessionsApi, "create", _boom)
@@ -1757,7 +1761,9 @@ def test_prepare_chat_session_via_daemon_reports_unreachable_server_as_click_err
     captured: dict[str, object] = {}
     _patch_daemon_launch(monkeypatch, captured)
 
-    async def _refused(_self: object, _bundle: bytes, *, filename: str, workspace: str) -> object:
+    async def _refused(
+        _self: object, _bundle: bytes, *, filename: str, workspace: str, **_seed: object
+    ) -> object:
         raise transport_error
 
     monkeypatch.setattr(_FakeSessionsApi, "create", _refused)
@@ -4343,7 +4349,7 @@ def test_prepare_chat_session_via_daemon_reports_unparseable_proxy_env(
     _patch_daemon_launch(monkeypatch, captured)
 
     async def _invalid_proxy_env(
-        _self: object, _bundle: bytes, *, filename: str, workspace: str
+        _self: object, _bundle: bytes, *, filename: str, workspace: str, **_seed: object
     ) -> object:
         raise httpx.InvalidURL("Invalid port: ':'")
 
@@ -4690,7 +4696,15 @@ class _FakeSessionsNamespace:
         self._forbid_list_items = list_items_must_not_be_called
         self.list_items_calls = 0
 
-    async def create(self, bundle: bytes, *, filename: str, workspace: str) -> SimpleNamespace:
+    async def create(
+        self,
+        bundle: bytes,
+        *,
+        filename: str,
+        workspace: str,
+        title: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> SimpleNamespace:
         """Pretend to create a session; return an object with an ``id``."""
         return SimpleNamespace(id="conv_test")
 
