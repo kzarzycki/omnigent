@@ -1508,17 +1508,19 @@ describe("session id and details from the row menu", () => {
     git_branch: "feature/login",
   };
 
-  it("copies the session id with one click and confirms with a toast", async () => {
+  it("has no copy item; the details dialog copies the session id", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    showToast.mockReset();
     renderSidebar();
 
     fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
-    fireEvent.click(screen.getByTestId("copy-session-id"));
+    expect(screen.queryByTestId("copy-session-id")).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Copy session ID/i })).toBeNull();
+    fireEvent.click(screen.getByTestId("session-details"));
 
-    expect(writeText).toHaveBeenCalledWith("conv_1");
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith("Session ID copied"));
+    const dialog = screen.getByTestId("session-details-dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Copy session id/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("conv_1"));
   });
 
   it("opens a details dialog from the loaded row, with a copy button per value", () => {
@@ -1560,7 +1562,7 @@ describe("session id and details from the row menu", () => {
     await waitFor(() => expect(link).toHaveFocus());
   });
 
-  it("offers both items on a shared row the viewer doesn't own", () => {
+  it("offers Details… and no copy item on a shared row the viewer doesn't own", () => {
     mockConversations([{ ...CONV, owner: "other@example.com" }]);
     renderSidebar();
     fireEvent.pointerDown(screen.getByTestId("session-filter"), {
@@ -1572,7 +1574,7 @@ describe("session id and details from the row menu", () => {
 
     fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
 
-    expect(screen.getByTestId("copy-session-id")).not.toHaveAttribute("data-disabled");
+    expect(screen.queryByTestId("copy-session-id")).toBeNull();
     expect(screen.getByTestId("session-details")).not.toHaveAttribute("data-disabled");
   });
 });
