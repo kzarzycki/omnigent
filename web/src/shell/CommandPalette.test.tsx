@@ -5,10 +5,13 @@ import type { ComponentProps } from "react";
 import type * as UseConversationsModule from "@/hooks/useConversations";
 
 import { CommandPalette } from "./CommandPalette";
+import { useSidebarRevealRequest } from "./sidebarReveal";
 
 const navigate = vi.fn();
+const routeParams: { conversationId?: string } = {};
 vi.mock("@/lib/routing", () => ({
   useNavigate: () => navigate,
+  useParams: () => routeParams,
 }));
 
 const useConversations = vi.fn();
@@ -51,6 +54,7 @@ function renderPalette(overrides: Partial<ComponentProps<typeof CommandPalette>>
 
 beforeEach(() => {
   navigate.mockClear();
+  delete routeParams.conversationId;
   useConversations.mockReset();
   setSessions([]);
 });
@@ -517,6 +521,24 @@ describe("CommandPalette — actions", () => {
 
     fireEvent.click(screen.getByText("Toggle workspace sidebar"));
     expect(onToggleRightSidebar).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers revealing the current session in the sidebar only on a session route", () => {
+    renderPalette();
+    expect(screen.queryByText("Show current session in sidebar")).toBeNull();
+    cleanup();
+
+    routeParams.conversationId = "conv_1";
+    let request: ReturnType<typeof useSidebarRevealRequest> = null;
+    function RevealProbe() {
+      request = useSidebarRevealRequest();
+      return null;
+    }
+    render(<RevealProbe />);
+    renderPalette();
+
+    fireEvent.click(screen.getByText("Show current session in sidebar"));
+    expect(request).toMatchObject({ sessionId: "conv_1" });
   });
 
   it("filters actions client-side against the query", () => {

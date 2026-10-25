@@ -1644,6 +1644,25 @@ html[data-electron-mac] .breadcrumb-folder {
   border-radius: var(--radius-2xl);
 }
 
+/* "Show in sidebar" outlines the revealed session row; pulses twice. Keep in
+   sync with FLASH_MS in shell/sidebarReveal.ts. */
+@keyframes sidebar-reveal {
+  0%,
+  50%,
+  100% {
+    box-shadow: inset 0 0 0 0 transparent;
+  }
+  20%,
+  70% {
+    box-shadow: inset 0 0 0 2px var(--ring);
+  }
+}
+
+.animate-sidebar-reveal {
+  animation: sidebar-reveal 1600ms ease-in-out;
+  border-radius: var(--radius-md);
+}
+
 /* Reduced-motion: static highlights still signal the target. */
 @media (prefers-reduced-motion: reduce) {
   .animate-message-highlight {
@@ -1655,6 +1674,11 @@ html[data-electron-mac] .breadcrumb-folder {
   .animate-user-msg-flash {
     animation: none;
     box-shadow: 0 0 0 2px var(--ring);
+  }
+
+  .animate-sidebar-reveal {
+    animation: none;
+    box-shadow: inset 0 0 0 2px var(--ring);
   }
 }
 

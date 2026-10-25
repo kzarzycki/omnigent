@@ -307,6 +307,11 @@ import {
   newSessionAriaShortcut,
   newSessionShortcutKeys,
 } from "@/components/KeyboardShortcut";
+import {
+  clearSidebarRevealRequest,
+  scrollToAndFlashSidebarRow,
+  useSidebarRevealRequest,
+} from "./sidebarReveal";
 
 // Positioning for a row's trailing session-state badge. Anchored at the row's
 // trailing icon edge in every viewport: on desktop it fades on hover so the pin
@@ -2407,6 +2412,49 @@ function ConversationList({
     if (pinnedSet.has(activeId)) return;
     expandProject(activeProjectName);
   }, [activeId, activeProjectName, pinnedSet, expandProject]);
+
+  // "Show in sidebar": expand whichever sections hold the session (pinned rows
+  // stay in Pinned; a filed one also opens its project), then scroll to and
+  // flash its row once it renders.
+  const revealRequest = useSidebarRevealRequest();
+  // Held outside the effect: clearing the request re-runs it, which must not
+  // cancel the in-flight scroll.
+  const cancelRevealRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelRevealRef.current?.(), []);
+  useEffect(() => {
+    if (!revealRequest) return;
+    const { sessionId } = revealRequest;
+    clearSidebarRevealRequest(revealRequest.nonce);
+    const has = (list: readonly Conversation[]) => list.some((c) => c.id === sessionId);
+    const titles: string[] = [];
+    if (pinnedSet.has(sessionId)) titles.push("Pinned");
+    if (has(sections.shared)) titles.push("Shared");
+    if (sessionGroups) {
+      for (const g of sessionGroups) if (has(g.conversations)) titles.push(g.title);
+    } else if (has(sections.sessions)) {
+      titles.push("Chats");
+    }
+    const project = allConversations.find((c) => c.id === sessionId)?.labels?.[PROJECT_LABEL_KEY];
+    if (project && !pinnedSet.has(sessionId)) {
+      titles.push("Projects");
+      expandProject(project);
+    }
+    const uncollapse = (prev: string[]) => prev.filter((t) => !titles.includes(t));
+    if (searchQuery) {
+      setSearchCollapsedSections(uncollapse);
+    } else {
+      setCollapsedSections((prev) => {
+        const next = uncollapse(prev);
+        if (next.length === prev.length) return prev;
+        writeCollapsedSidebarSections(next);
+        return next;
+      });
+    }
+    cancelRevealRef.current?.();
+    cancelRevealRef.current = scrollToAndFlashSidebarRow(scrollContainerRef.current, sessionId);
+    // Fires per request only; the section lookups read the current render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest]);
 
   // Visible rows in render order (collapsed sections excluded) for the Cmd+↑/↓
   // session hotkey. Titles must match the <ConversationSection> props below.
