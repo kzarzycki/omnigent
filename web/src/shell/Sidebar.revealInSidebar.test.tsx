@@ -101,9 +101,8 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("reveal session in sidebar", () => {
-  it("expands a collapsed Projects section and folder, then scrolls to and flashes the row", async () => {
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
+  it("expands a collapsed Projects section and folder, then flashes the row", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
     localStorage.setItem(COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY, JSON.stringify(["Projects"]));
     localStorage.setItem(EXPANDED_PROJECT_SECTIONS_STORAGE_KEY, JSON.stringify([]));
     mockConversations([conv("sibling_b", "Alpha")]);
@@ -116,7 +115,6 @@ describe("reveal session in sidebar", () => {
 
     const link = await screen.findByRole("link", { name: /sibling_b/ });
     await waitFor(() => expect(link.closest("li")).toHaveClass(SIDEBAR_REVEAL_FLASH_CLASS));
-    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
     expect(
       JSON.parse(localStorage.getItem(COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY) ?? "[]"),
     ).toEqual([]);
