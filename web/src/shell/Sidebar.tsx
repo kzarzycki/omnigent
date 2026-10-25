@@ -41,7 +41,6 @@ import {
   ClockIcon,
   CircleAlertIcon,
   CircleStopIcon,
-  CopyIcon,
   FolderGit2Icon,
   FolderIcon,
   FolderInputIcon,
@@ -292,7 +291,6 @@ import { useDesktopHostId } from "./RevealInFileManager";
 import { ForkSessionDialog } from "./ForkSessionDialog";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
 import { SessionDetailsDialog } from "./SessionDetailsDialog";
-import { copyText } from "@/lib/clipboard";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
 import {
   SIDEBAR_ROW,
@@ -4188,19 +4186,7 @@ function ConversationMenuItems({
             </C.SubContent>
           </C.Sub>
         ))}
-      {/* Open to everyone: reading or copying an id changes nothing. */}
-      <C.Item
-        data-testid="copy-session-id"
-        onSelect={() => {
-          copyText(conversation.id).then(
-            () => showToast("Session ID copied"),
-            () => showToast("Couldn't copy the session ID"),
-          );
-        }}
-      >
-        <CopyIcon className="size-3.5" />
-        Copy session ID
-      </C.Item>
+      {/* Open to everyone: reading details changes nothing. The dialog copies the id. */}
       <C.Item data-testid="session-details" onSelect={() => setDetailsOpen(true)}>
         <InfoIcon className="size-3.5" />
         Details…
