@@ -74,9 +74,9 @@ def test_usage_growth_carries_harness_host_agent_project_role_and_user(
             {"output_tokens": 3, "total_cost_usd": 0.25},
             model="m",
             harness="claude-native",
-            host_name="macbook",
+            host_name="laptop",
             agent_name="claude",
-            project_name="homelab",
+            project_name="infra",
             role="verifier",
             user="alice",
         )
@@ -87,9 +87,9 @@ def test_usage_growth_carries_harness_host_agent_project_role_and_user(
     split = {
         "model": "m",
         "omnigent.harness": "claude-native",
-        "omnigent.host.name": "macbook",
+        "omnigent.host.name": "laptop",
         "omnigent.agent.name": "claude",
-        "omnigent.project.name": "homelab",
+        "omnigent.project.name": "infra",
         "omnigent.role": "verifier",
         "omnigent.user": "alice",
     }
