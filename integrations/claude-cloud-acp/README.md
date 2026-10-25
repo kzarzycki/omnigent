@@ -113,7 +113,18 @@ read-only, such as `Read` and `Grep`, never ask.
 - **Long tool calls:** while a turn waits on the cloud, the bridge sends an
   empty thought every 60 s, so Omnigent's 300 s idle timeout
   (`HARNESS_ACP_PROMPT_TIMEOUT_S`) never ends a turn whose tool call runs
-  longer. `CLAUDE_CLOUD_TURN_TIMEOUT_S` (1 hour) still bounds the whole turn.
+  longer.
+- **Stalled sessions:** a turn has no time limit while its cloud session shows
+  life: any event on its stream (a `tool_progress` heartbeat comes every 90 s
+  during a long `Bash` call), or a control request the bridge is still
+  answering, such as a long Omnigent tool call or an approval card. After
+  `CLAUDE_CLOUD_STALL_TIMEOUT_S` (30 minutes) with neither, the turn fails and
+  names the cloud session, which is left as it is.
+- **After a failed turn:** Omnigent drops a failed turn's output, `cloud session:`
+  line included, and replays the transcript into a new bridge. The bridge
+  records each cloud session it creates under the first prompt and working
+  directory, so the new bridge continues the same cloud session rather than
+  starting another.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.
@@ -130,4 +141,4 @@ read-only, such as `Read` and `Grep`, never ask.
   fails the next send or stream reconnect.
 
 Environment overrides: `CLAUDE_CLOUD_CLI`,
-`CLAUDE_CLOUD_TURN_TIMEOUT_S`, `CLAUDE_CLOUD_TOKEN`, `CLAUDE_CLOUD_API_BASE`.
+`CLAUDE_CLOUD_STALL_TIMEOUT_S`, `CLAUDE_CLOUD_TOKEN`, `CLAUDE_CLOUD_API_BASE`.

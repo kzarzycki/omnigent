@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import io
 import itertools
 import json
@@ -39,6 +40,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -52,7 +54,8 @@ API_BASE = os.environ.get("CLAUDE_CLOUD_API_BASE", "https://api.anthropic.com")
 CLAUDE_CLI = os.environ.get("CLAUDE_CLOUD_CLI", "claude")
 # The stream sends a keepalive every ~12 s; reconnect when it goes quiet for longer.
 STREAM_IDLE_S = 60
-TURN_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_TURN_TIMEOUT_S", "3600"))
+# A turn waits as long as its cloud session shows life; this long without any fails it.
+STALL_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_STALL_TIMEOUT_S", "1800"))
 # Omnigent ends a turn after HARNESS_ACP_PROMPT_TIMEOUT_S (300 s) with no message,
 # and one cloud tool call can run longer, so a waiting turn sends an empty update.
 KEEPALIVE_S = 60
@@ -69,13 +72,15 @@ PROTOCOL_VERSION = 1
 SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
 MARKER = "cloud session: https://claude.ai/code/"
 MARKER_RE = re.compile(re.escape(MARKER) + r"((?:session|cse)_[A-Za-z0-9]{10,})")
-# The tail of the transcript Omnigent's ACP executor replays into the first
-# prompt of a fresh session (``AcpExecutor._history_prefix``).
 # ACP session -> cloud session, for an Omnigent that re-prompts a respawned
-# bridge with the old ACP session id instead of opening a new one.
+# bridge with the old ACP session id instead of opening a new one; and first
+# prompt -> cloud session, for one that opens a new ACP session after a failed turn.
 STATE_FILE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / (
     "claude-cloud-acp/sessions.json"
 )
+# The head and tail of the transcript Omnigent's ACP executor replays into the
+# first prompt of a fresh session (``AcpExecutor._history_prefix``).
+REPLAY_HEAD = "Conversation so far:\nuser: "
 REPLAY_TAIL = (
     "Respond to the latest user message, using the conversation above as context.\n\nuser: "
 )
@@ -101,7 +106,7 @@ def keepalive(acp_id: str, turn_done: threading.Event) -> None:
     """Until *turn_done*, tell Omnigent the turn is alive after KEEPALIVE_S with nothing sent.
 
     Its own thread, so a slow CLI call or token refresh before the first event is covered too.
-    ponytail: time-based, not proof the cloud is progressing; TURN_TIMEOUT_S bounds a stuck turn.
+    ponytail: time-based, not proof the cloud is progressing; STALL_TIMEOUT_S bounds a stuck turn.
     """
     while not turn_done.is_set():
         idle = time.monotonic() - _last_sent
@@ -591,6 +596,8 @@ class Session:
         self.mcp_registered = False
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
+        # Control requests being answered: the cloud sends nothing while it waits on one.
+        self.answering: set[str] = set()
         self.cancelled = threading.Event()
         self.running = False
         self.interrupted = False
@@ -601,7 +608,7 @@ class Session:
 
         Control requests are answered as they arrive, between turns too: the CLI
         handshakes with MCP servers whenever it (re)connects, and gives up quickly.
-        The rest goes to :attr:`events` for the running turn.
+        Every event also goes to :attr:`events` for the running turn.
         """
         if self.reader is not None:
             return
@@ -611,16 +618,44 @@ class Session:
                 payload = (event or {}).get("payload") or {}
                 if payload.get("type") == "control_request":
                     # Off the reader: a tool call can outlast the CLI's wait for other events.
-                    threading.Thread(
-                        target=answer_control,
-                        args=(self, payload),
-                        daemon=True,
-                    ).start()
-                elif event is not None:
+                    threading.Thread(target=self.answer, args=(payload,), daemon=True).start()
+                if event is not None:
                     self.events.put(event)
 
         self.reader = threading.Thread(target=read, daemon=True)
         self.reader.start()
+
+    def answer(self, payload: dict) -> None:
+        request_id = payload.get("request_id") or str(uuid.uuid4())
+        self.answering.add(request_id)
+        try:
+            answer_control(self, payload)
+        finally:
+            self.answering.discard(request_id)
+
+    def events_while_alive(self) -> Iterator[dict | None]:
+        """Yield the session's events, and None each quiet second, while it shows life.
+
+        Life is an event, or a control request still being answered. After
+        STALL_TIMEOUT_S without either, raise: the session has stopped progressing.
+        """
+        alive = time.monotonic()
+        while True:
+            try:
+                event = self.events.get(timeout=1)
+            except queue.Empty:
+                if self.answering:
+                    alive = time.monotonic()
+                elif time.monotonic() - alive > STALL_TIMEOUT_S:
+                    raise RuntimeError(
+                        f"cloud session https://claude.ai/code/{self.cloud_id} made no progress "
+                        f"for {STALL_TIMEOUT_S:.0f}s; it is left as it is, and the next message "
+                        "continues it"
+                    ) from None
+                yield None
+                continue
+            alive = time.monotonic()
+            yield event
 
     def cancel(self) -> None:
         """Interrupt the running cloud turn, once.
@@ -673,19 +708,45 @@ def prompt_text(blocks: list[dict]) -> str:
     return "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
 
 
-def split_replay(text: str) -> tuple[str | None, str]:
-    """Return the cloud session a replayed transcript names, and the message to send.
+def first_prompt_key(cwd: str, text: str) -> str:
+    digest = hashlib.sha256(f"{cwd}\0{text}".encode()).hexdigest()
+    return f"first:{len(text)}:{digest}"
 
-    Without a marker the text is a fresh request and goes out whole. With one,
-    the cloud session already holds the conversation, so only the latest user
-    message is sent.
+
+def recall_first_prompt(cwd: str, replay: str) -> str | None:
+    """The cloud session this bridge created for the first message of *replay*.
+
+    Without its header, a replay starts with the fresh prompt that created the
+    session, then goes on to the next transcript line.
+    ponytail: two sessions in one cwd whose first prompts match up to a newline collide.
+    """
+    if REPLAY_HEAD not in replay:
+        return None
+    flat = replay.replace(REPLAY_HEAD, "", 1).lstrip()
+    found = None
+    for key, cloud_id in recall().items():
+        if key.startswith("first:"):
+            length = int(key.split(":")[1])
+            if flat[length : length + 1] == "\n" and first_prompt_key(cwd, flat[:length]) == key:
+                found = cloud_id  # the latest one created
+    return found
+
+
+def split_replay(text: str, cwd: str) -> tuple[str | None, str]:
+    """Return the cloud session a replayed transcript belongs to, and the message to send.
+
+    That is the session its marker names or, when the turn that would have
+    left the marker failed, the one created for its first message. Without
+    either the text is a fresh request and goes out whole. With one, the cloud
+    session already holds the conversation, so only the latest user message is sent.
     """
     ids = MARKER_RE.findall(text)
-    if not ids:
+    cloud_id = ids[-1] if ids else recall_first_prompt(cwd, text)
+    if cloud_id is None:
         return None, text
     latest = text.rsplit(REPLAY_TAIL, 1)[-1] if REPLAY_TAIL in text else text
     latest = "\n".join(line for line in latest.splitlines() if MARKER not in line).strip()
-    return ids[-1], latest
+    return cloud_id, latest
 
 
 def thought(acp_id: str, text: str) -> None:
@@ -716,6 +777,13 @@ def run_turn(acp_id: str, text: str) -> str:
     beat.start()
     try:
         return _mirror_turn(acp_id, s, text)
+    except Exception as exc:
+        # Omnigent drops a failed turn's output, marker included, so the error names it.
+        if s.cloud_id and s.cloud_id not in str(exc):
+            raise RuntimeError(
+                f"{exc} (cloud session https://claude.ai/code/{s.cloud_id})"
+            ) from exc
+        raise
     finally:
         # Joined before the prompt's response goes out, so no update follows it.
         turn_done.set()
@@ -737,16 +805,22 @@ def announce(acp_id: str, s: Session) -> None:
     )
 
 
+def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
+    """Start the cloud session, recorded under the Omnigent session's *first* prompt."""
+    s.cloud_id = create_cloud_session(cli_prompt, s.cwd)
+    log(f"created {s.cloud_id}")
+    remember(first_prompt_key(s.cwd, first), s.cloud_id)
+    announce(acp_id, s)
+
+
 def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
     if s.cloud_id is None:
-        s.cloud_id, text = split_replay(text)
+        s.cloud_id, text = split_replay(text, s.cwd)
         if s.cloud_id is None:
             if s.mcp:
                 after = _bootstrap(acp_id, s, text)
             else:
-                s.cloud_id = create_cloud_session(text, s.cwd)
-                log(f"created {s.cloud_id}")
-                announce(acp_id, s)
+                _create(acp_id, s, text, text)
                 after = 0
         else:
             log(f"re-attaching to {s.cloud_id}")
@@ -764,24 +838,19 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
                 acp_id, "[cloud] unarchived the session; files from before the archive are gone\n"
             )
     s.follow(after)
-    deadline = time.monotonic() + TURN_TIMEOUT_S
-    while time.monotonic() < deadline:
+    for event in s.events_while_alive():
         if s.cancelled.is_set():
             # A cancel that came before the session existed. Keep mirroring after
             # it: the interrupted turn still ends with a ``result`` event.
             s.cancel()
-        try:
-            event = s.events.get(timeout=1)
-        except queue.Empty:
-            continue
-        if int(event["sequence_num"]) <= after:
-            continue  # from before this turn's message
+        if event is None or int(event["sequence_num"]) <= after:
+            continue  # quiet, or from before this turn's message
         updates, done = to_updates(event.get("payload") or {})
         for upd in updates:
             update(acp_id, upd)
         if done:
             return "cancelled" if s.interrupted else "end_turn"
-    raise RuntimeError(f"no result from cloud session {s.cloud_id} within {TURN_TIMEOUT_S:.0f}s")
+    raise AssertionError("events_while_alive raises rather than ends")
 
 
 # The CLI starts a new session on its first prompt, before servers can be registered.
@@ -791,16 +860,10 @@ BOOTSTRAP_PROMPT = "Reply with the single word: ready"
 
 def _bootstrap(acp_id: str, s: Session, text: str) -> int:
     """Create the cloud session, register MCP servers, then post *text*; return its seq."""
-    s.cloud_id = create_cloud_session(BOOTSTRAP_PROMPT, s.cwd)
-    log(f"created {s.cloud_id}")
-    announce(acp_id, s)
+    _create(acp_id, s, BOOTSTRAP_PROMPT, text)
     s.follow(0)
-    deadline = time.monotonic() + TURN_TIMEOUT_S
-    while time.monotonic() < deadline:
-        try:
-            payload = s.events.get(timeout=1).get("payload") or {}
-        except queue.Empty:
-            continue
+    for event in s.events_while_alive():
+        payload = (event or {}).get("payload") or {}
         if payload.get("type") == "env_manager_log":
             for upd in to_updates(payload)[0]:
                 update(acp_id, upd)
@@ -912,6 +975,7 @@ for line in sys.stdin:
 
 
 def self_check() -> None:
+    globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
     upd, done = to_updates(
         {
             "type": "assistant",
@@ -960,14 +1024,14 @@ def self_check() -> None:
         and upd[1]["title"] == "[sub-agent] Read"
     )
     assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
-    assert split_replay("fix the bug") == (None, "fix the bug")
+    assert split_replay("fix the bug", "/") == (None, "fix the bug")
     replay = (
         "Conversation so far:\nuser: hi\nassistant: done\n\n"
         f"{MARKER}session_01AbCdEfGhIjKl\n\n{REPLAY_TAIL}and now this?"
     )
-    assert split_replay(replay) == ("session_01AbCdEfGhIjKl", "and now this?")
+    assert split_replay(replay, "/") == ("session_01AbCdEfGhIjKl", "and now this?")
     adopt = f"{MARKER}session_01AbCdEfGhIjKl\ncontinue the migration"
-    assert split_replay(adopt) == ("session_01AbCdEfGhIjKl", "continue the migration")
+    assert split_replay(adopt, "/") == ("session_01AbCdEfGhIjKl", "continue the migration")
     assert to_updates({"type": "user", "message": {"content": "plain prompt echo"}}) == ([], False)
     screen = "\x1b[32m✓\x1b[0m Created cloud session \x1b]8;;x\x07https://claude.ai/code/session_01DiUkqY2kzbUb"
     assert SESSION_ID_RE.search(ANSI_RE.sub("", screen)).group(1) == "session_01DiUkqY2kzbUb"
@@ -1027,7 +1091,7 @@ def self_check() -> None:
 
     globals()["_send"] = slow_send
     globals()["create_cloud_session"] = lambda *_: "session_01NewNewNewNew"
-    globals()["remember"] = lambda *_: None
+    real_remember, globals()["remember"] = remember, lambda *_: None
     globals()["KEEPALIVE_S"] = 0.5
     quiet = SESSIONS["acp-quiet"] = Session("/", "acp-quiet")
     quiet.cloud_id, quiet.reader = "session_q", threading.current_thread()
@@ -1038,11 +1102,58 @@ def self_check() -> None:
     assert before_events[0] >= 1 and out.getvalue().count('"session/update"') >= 3, out.getvalue()
     fresh = SESSIONS["acp-fresh"] = Session("/", "acp-fresh")
     fresh.reader = threading.current_thread()
-    globals()["TURN_TIMEOUT_S"] = 0.1
+    globals()["STALL_TIMEOUT_S"] = 0.1
     out = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.suppress(RuntimeError):
         run_turn("acp-fresh", "start")
     assert f"{MARKER}session_01NewNewNewNew" in out.getvalue(), out.getvalue()
+    # A turn outlives the stall timeout while its cloud session sends events or
+    # waits on a control request the bridge is answering.
+    globals()["STALL_TIMEOUT_S"] = 0.5
+    globals()["_send"] = lambda *_: (1, False)
+    working = SESSIONS["acp-working"] = Session("/", "acp-working")
+    working.cloud_id, working.reader = "session_w", threading.current_thread()
+    for seq in range(2, 10):
+        progress = {"sequence_num": str(seq), "payload": {"type": "tool_progress"}}
+        threading.Timer(0.3 * seq, working.events.put, [progress]).start()
+    threading.Timer(3.2, working.events.put, [result | {"sequence_num": "10"}]).start()
+    started = time.monotonic()
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert run_turn("acp-working", "build it") == "end_turn"
+    assert time.monotonic() - started > 3, "ended before the result"
+    working.answering.add("mcp-call")
+    threading.Timer(2.5, working.answering.discard, ["mcp-call"]).start()
+    threading.Timer(2.7, working.events.put, [result | {"sequence_num": "11"}]).start()
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert run_turn("acp-working", "wait on a child session") == "end_turn"
+    # A stalled one fails naming its cloud session; Omnigent then respawns the
+    # bridge and replays a transcript that lost the marker with the failed turn,
+    # and the new bridge continues that cloud session instead of creating one.
+    globals()["remember"] = real_remember
+    created: list[str] = []
+    globals()["create_cloud_session"] = lambda prompt, _cwd: (
+        created.append(prompt) or "session_01StalledStalled"
+    )
+    stalled = SESSIONS["acp-stalled"] = Session("/repo", "acp-stalled")
+    stalled.reader = threading.current_thread()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_turn("acp-stalled", "the brief")
+        raise AssertionError("a stalled turn ended")
+    except RuntimeError as exc:
+        assert "session_01StalledStalled made no progress" in str(exc), exc
+    posted: list[tuple[str, str]] = []
+    globals()["_send"] = lambda s, text: posted.append((s.cloud_id, text)) or (5, False)
+    retry = SESSIONS["acp-retry"] = Session("/repo", "acp-retry")
+    retry.reader = threading.current_thread()
+    retry.events.put(result | {"sequence_num": "6"})
+    replay = f"{REPLAY_HEAD}the brief\n\n{REPLAY_TAIL}and this too"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert run_turn("acp-retry", replay) == "end_turn"
+    assert created == ["the brief"] and posted == [("session_01StalledStalled", "and this too")]
+    assert split_replay(replay, "/other") == (None, replay)  # another workspace's session
+    longer = f"{REPLAY_HEAD}the brief, longer\n\n{REPLAY_TAIL}hi"
+    assert split_replay(longer, "/repo") == (None, longer)  # another first message
     # Each turn's keepalive has ended by the time the turn returns, however fast turns follow.
     globals()["_mirror_turn"] = lambda *_: time.sleep(0.1) or "end_turn"
     threads_before = threading.active_count()
