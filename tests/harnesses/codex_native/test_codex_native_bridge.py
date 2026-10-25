@@ -1109,6 +1109,17 @@ def test_prune_orphaned_bridge_dirs_retains_recent_dead_owner_bridge(
     ephemeral_dir.mkdir()
     runtime_token = ephemeral_dir / "token"
     runtime_token.write_text("secret", encoding="utf-8")
+    codex_home = dead_dir / "codex-home"
+    state_files = [codex_home / "thread_history_1.sqlite", codex_home / "state_5.sqlite"]
+    for state_file in state_files:
+        state_file.write_text("state", encoding="utf-8")
+    plugin_downloads = [
+        codex_home / ".tmp" / "marketplaces" / "market",
+        codex_home / "cache" / "remote_plugin_catalog",
+    ]
+    for download in plugin_downloads:
+        download.mkdir(parents=True)
+        (download / "blob").write_text("payload", encoding="utf-8")
     os.utime(owner_marker, (now - 60, now - 60))
 
     def _unexpected_walk(*_args: object, **_kwargs: object) -> object:
@@ -1122,6 +1133,43 @@ def test_prune_orphaned_bridge_dirs_retains_recent_dead_owner_bridge(
     assert bridge_config.read_text(encoding="utf-8") == "secret"
     assert policy_config.read_text(encoding="utf-8") == "secret"
     assert runtime_token.read_text(encoding="utf-8") == "secret"
+    # The ended session's plugin downloads go; its conversation state stays.
+    assert all(state_file.read_text(encoding="utf-8") == "state" for state_file in state_files)
+    assert not (codex_home / ".tmp" / "marketplaces").exists()
+    assert not (codex_home / "cache" / "remote_plugin_catalog").exists()
+
+
+@pytest.mark.parametrize("linked", ["codex-home", ".tmp", "cache"])
+def test_prune_orphaned_bridge_dirs_keeps_plugin_downloads_behind_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    linked: str,
+) -> None:
+    """A link anywhere on the path leads into a shared home, so its plugin downloads stay."""
+    root = tmp_path / "codex-native"
+    root.mkdir()
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", root)
+    monkeypatch.setattr("omnigent.inner.terminal._process_alive", lambda _pid: False)
+    shared_home = tmp_path / "real-codex-home"
+    shared_payloads = [
+        shared_home / ".tmp" / "marketplaces" / "blob",
+        shared_home / "cache" / "remote_plugin_catalog" / "blob",
+    ]
+    for payload in shared_payloads:
+        payload.parent.mkdir(parents=True)
+        payload.write_text("payload", encoding="utf-8")
+    dead_dir = root / "deadowner"
+    dead_dir.mkdir()
+    (dead_dir / "owner.pid").write_text("999999", encoding="utf-8")
+    codex_home = dead_dir / "codex-home"
+    if linked == "codex-home":
+        codex_home.symlink_to(shared_home)
+    else:
+        codex_home.mkdir()
+        (codex_home / linked).symlink_to(shared_home / linked)
+
+    assert codex_native_bridge.prune_orphaned_bridge_dirs() == 0
+    assert all(payload.read_text(encoding="utf-8") == "payload" for payload in shared_payloads)
 
 
 def test_prune_orphaned_bridge_dirs_removes_expired_bridge(
@@ -1256,6 +1304,8 @@ def test_prune_orphaned_bridge_dirs_keeps_live_and_unmarked_bridges(
     live_marker = live_dir / "owner.pid"
     live_marker.write_text(str(os.getpid()), encoding="utf-8")
     os.utime(live_marker, (expired_at, expired_at))
+    live_marketplaces = live_dir / "codex-home" / ".tmp" / "marketplaces"
+    live_marketplaces.mkdir(parents=True)
 
     unmarked_dir = root / "unmarked"
     unmarked_dir.mkdir()
@@ -1263,6 +1313,7 @@ def test_prune_orphaned_bridge_dirs_keeps_live_and_unmarked_bridges(
     assert codex_native_bridge.prune_orphaned_bridge_dirs() == 1
     assert not dead_dir.exists()
     assert live_dir.exists()
+    assert live_marketplaces.is_dir()
     assert unmarked_dir.exists()
 
 
