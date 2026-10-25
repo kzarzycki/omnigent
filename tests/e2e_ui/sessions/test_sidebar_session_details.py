@@ -1,7 +1,8 @@
-"""Browser e2e for copying a session id and reading its details from the sidebar row menu.
+"""Browser e2e for reading and copying a session's details from the sidebar row menu.
 
 The row menu is one component behind the desktop kebab, right-click and phone
-long-press, so the id is reachable without opening the session. Nothing here
+long-press. It has no copy item of its own: the details dialog copies the id,
+so the id is reachable without opening the session. Nothing here
 navigates into the session: the chat URL must stay on the landing page.
 """
 
@@ -28,10 +29,8 @@ def _seed_session(base_url: str, *, title: str) -> str:
     return session_id
 
 
-def test_row_menu_copies_id_and_shows_details_without_opening(
-    page: Page, live_server: str
-) -> None:
-    """Copy session ID and Details… work from the row menu and leave the page where it is."""
+def test_row_menu_details_copy_id_without_opening(page: Page, live_server: str) -> None:
+    """Details… copies the id and title from the row menu and leaves the page where it is."""
     title = f"e2e-details-{uuid.uuid4().hex[:6]}"
     session_id = _seed_session(live_server, title=title)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=live_server)
@@ -40,14 +39,13 @@ def test_row_menu_copies_id_and_shows_details_without_opening(
     expect(row).to_be_visible()
 
     row.click(button="right")
-    page.get_by_role("menuitem", name="Copy session ID").click()
-    expect(page.get_by_text("Session ID copied")).to_be_visible()
-    assert page.evaluate("navigator.clipboard.readText()") == session_id
-
-    row.click(button="right")
+    expect(page.get_by_role("menuitem", name="Details…")).to_be_visible()
+    expect(page.get_by_role("menuitem", name="Copy session ID")).to_have_count(0)
     page.get_by_role("menuitem", name="Details…").click()
     dialog = page.get_by_test_id("session-details-dialog")
     expect(dialog.get_by_test_id("session-detail-Session ID")).to_have_text(session_id)
+    dialog.get_by_test_id("copy-path-button").nth(0).click()
+    assert page.evaluate("navigator.clipboard.readText()") == session_id
     expect(dialog.get_by_test_id("session-detail-Title")).to_have_text(title)
     dialog.get_by_test_id("copy-path-button").nth(1).click()
     assert page.evaluate("navigator.clipboard.readText()") == title
