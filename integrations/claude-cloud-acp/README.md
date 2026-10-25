@@ -125,7 +125,7 @@ read-only, such as `Read` and `Grep`, never ask.
   records each cloud session it creates under the first prompt and working
   directory. A new bridge whose replay starts with exactly that prompt, in the
   same directory, continues the same cloud session rather than starting
-  another; a first message with a `word: ` line of its own never matches.
+  another.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.
