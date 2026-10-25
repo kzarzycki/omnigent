@@ -7486,6 +7486,67 @@ async def test_session_close_patches_tombstoned_title() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_close_closes_child_made_by_session_create() -> None:
+    """
+    ``sys_session_close`` closes a child ``sys_session_create`` made.
+
+    Create stores the caller's free-form title with no ``<agent>:``
+    prefix; close tombstones that title as is and reports the agent from
+    the snapshot's ``agent_name``.
+    """
+    from omnigent.runner.tool_dispatch import (
+        _build_session_create_body,
+        _execute_session_query_tool,
+    )
+
+    create_body = _build_session_create_body("ag_worker", "conv_caller", "followups-host", "start")
+    patched: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_target":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_target",
+                    "title": create_body["title"],
+                    "agent_name": "worker",
+                    "root_conversation_id": "conv_root",
+                    "parent_session_id": create_body["parent_session_id"],
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_caller":
+            return httpx.Response(
+                200,
+                json={"id": "conv_caller", "root_conversation_id": "conv_root"},
+            )
+        if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_target":
+            patched.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "conv_target"})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        out = json.loads(
+            await _execute_session_query_tool(
+                "sys_session_close",
+                json.dumps({"conversation_id": "conv_target"}),
+                conversation_id="conv_caller",
+                server_client=client,
+            )
+        )
+    assert patched == {
+        "title": "followups-host:closed:conv_target",
+        "labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
+        "archived": True,
+    }
+    assert out == {
+        "closed": True,
+        "conversation_id": "conv_target",
+        "agent": "worker",
+        "title": "followups-host",
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_close_rejects_out_of_tree_target_without_patch() -> None:
     """
     ``sys_session_close`` refuses a target in a different spawn tree and
