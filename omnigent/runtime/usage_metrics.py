@@ -73,7 +73,7 @@ def record_usage_growth(
         Missing, zero and negative entries are skipped.
     :param model: Model the growth is attributed to, e.g. ``"claude-opus-4-8"``.
     :param harness: The session's canonical harness, e.g. ``"claude-native"``.
-    :param host_name: Name of the host the session runs on, e.g. ``"macbook"``.
+    :param host_name: Name of the host the session runs on, e.g. ``"laptop"``.
     :param agent_name: Name of the session's agent, e.g. ``"claude"``.
     :param project_name: Name of the session's project; empty when it has none.
     :param role: The session's ``omni.role`` label, e.g. ``"verifier"``; ``other``
