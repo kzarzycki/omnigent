@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import shutil
 import stat
 import sys
 import tempfile
@@ -280,8 +281,38 @@ def prune_orphaned_bridge_dirs() -> int:
     """
     return native_bridge_common.prune_orphaned_dirs(
         bridge_root(),
-        should_prune=_codex_orphan_retention_expired,
+        should_prune=_reclaim_ended_bridge_dir,
     )
+
+
+def _reclaim_ended_bridge_dir(bridge_dir: Path) -> bool:
+    """Drop an ended session's private plugin downloads, then apply retention.
+
+    The sweep calls this under the bridge lock once the owner is proven dead
+    (or no marker exists). A resumed session links the shared copies again.
+    """
+    if (bridge_dir / native_bridge_common.OWNER_PID_FILENAME).exists():
+        _remove_private_plugin_downloads(codex_home_for_bridge_dir(bridge_dir))
+    return _codex_orphan_retention_expired(bridge_dir)
+
+
+def _remove_private_plugin_downloads(codex_home: Path) -> None:
+    """Remove a home's own copies of Codex's shareable plugin downloads.
+
+    Only real directories go; a path with a link anywhere from the home down
+    leads into a shared copy and stays, as does everything else in the home
+    (conversations, thread history, state).
+
+    :param codex_home: Private ``CODEX_HOME``, e.g.
+        ``Path("~/.omnigent/codex-native/<hash>/codex-home")``.
+    """
+    from omnigent.inner.codex_executor import CODEX_HOME_SHARED_PLUGIN_DIRS
+
+    for reldir in CODEX_HOME_SHARED_PLUGIN_DIRS:
+        path = codex_home / reldir
+        linked = any(p.is_symlink() for p in (path, *path.parents[: len(reldir.parts)]))
+        if path.is_dir() and not linked:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _codex_orphan_retention_expired(bridge_dir: Path) -> bool:
