@@ -199,6 +199,13 @@ _CODEX_HOOKS_FILENAME = "hooks.json"
 # shared ``~/.codex/config.toml``. This keeps model selection and cost-policy
 # enforcement isolated between concurrent sessions.
 _CODEX_HOME_COPY_FILES = ("config.toml",)
+# Plugin downloads Codex otherwise repeats in every private home: marketplace git
+# clones and the remote plugin catalog. Codex locks marketplace checkouts and
+# writes catalog files atomically for concurrent processes, so homes share them.
+CODEX_HOME_SHARED_PLUGIN_DIRS = (
+    Path(".tmp") / "marketplaces",
+    Path("cache") / "remote_plugin_catalog",
+)
 # Directories symlinked (not copied) from the real CODEX_HOME into the
 # per-session temp home. ``plugins/cache`` is codex's content-addressed
 # (versioned) plugin store — read-only reference data that codex would
@@ -214,6 +221,7 @@ _CODEX_HOME_SYMLINK_DIRS = (
     # same memories and rules as the real home without replicating them.
     Path("memories"),
     Path("rules"),
+    *CODEX_HOME_SHARED_PLUGIN_DIRS,
 )
 _CODEX_MINIMAL_CONFIG_ENV = "HARNESS_CODEX_MINIMAL_CONFIG"
 _CODEX_PROVIDER_CONFIG_PREFIX = "model_providers."
@@ -1144,6 +1152,9 @@ def _populate_codex_home_config(
       are respected.
     - ``memories/`` and ``rules/`` are **symlinked** so file-based memories
       and user-defined rules are visible in each session.
+    - ``.tmp/marketplaces/`` and ``cache/remote_plugin_catalog/`` are
+      **symlinked**, created in the source home if missing, so plugin
+      downloads are kept once rather than per session.
 
     :param target_dir: The per-conversation temp ``CODEX_HOME``
         directory. Must already exist.
@@ -1230,6 +1241,12 @@ def _populate_codex_home_config(
     if not minimal_config:
         for reldir in _CODEX_HOME_SYMLINK_DIRS:
             source_subdir = source_dir / reldir
+            if reldir in CODEX_HOME_SHARED_PLUGIN_DIRS:
+                # Create the shared copy up front, or each home downloads its own.
+                try:
+                    source_subdir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    logger.warning("could not create shared %s (%s)", source_subdir, exc)
             if not source_subdir.is_dir():
                 continue
             link_path = target_dir / reldir

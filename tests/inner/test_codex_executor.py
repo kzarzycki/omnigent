@@ -3934,6 +3934,30 @@ def test_populate_codex_home_config_symlinks_plugins_cache(tmp_path: Path) -> No
     assert not (target / "plugins" / ".remote-plugin-install-staging").exists()
 
 
+def test_populate_codex_home_config_shares_plugin_downloads(tmp_path: Path) -> None:
+    """Two homes link one marketplace and catalog copy, created if the source lacks it."""
+    from omnigent.inner.codex_executor import _populate_codex_home_config
+
+    source = tmp_path / "real_codex_home"
+    source.mkdir()
+    homes = [tmp_path / "home_a", tmp_path / "home_b"]
+    for home in homes:
+        home.mkdir()
+        _populate_codex_home_config(home, source)
+
+    for reldir in (Path(".tmp") / "marketplaces", Path("cache") / "remote_plugin_catalog"):
+        assert (source / reldir).is_dir()
+        for home in homes:
+            assert (home / reldir).is_symlink()
+            assert (home / reldir).resolve() == (source / reldir).resolve()
+    # A clone written through one home is the same file in the other.
+    (homes[0] / ".tmp" / "marketplaces" / "market").mkdir()
+    assert (homes[1] / ".tmp" / "marketplaces" / "market").is_dir()
+    # The rest of .tmp and cache stays per session.
+    assert not (homes[0] / ".tmp").is_symlink()
+    assert not (homes[0] / "cache").is_symlink()
+
+
 def test_populate_codex_home_config_minimal_mode_skips_plugins_cache(tmp_path: Path) -> None:
     """Minimal (title-sidecar) mode does not link plugins — it runs no plugins."""
     from omnigent.inner.codex_executor import _populate_codex_home_config
