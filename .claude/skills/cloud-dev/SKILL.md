@@ -86,6 +86,5 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   verifier as a `codex-native-ui` child with `sys_session_create`. A child always starts
   in your host workspace, so its brief names that worktree and a report path inside it.
   The helper reads the report back to you and posts it with `approvals.py verdict`.
-- **Closing children.** `sys_session_close` refuses a child a cloud session created (#110).
-  Until that's fixed, the helper archives them with the orchestrating-agents skill's
-  `omnigent_agent.py reap <session>…`.
+- **Closing children.** `sys_session_close` closes a child a cloud session created with
+  `sys_session_create`: it tombstones the child's free-form title and archives it.
