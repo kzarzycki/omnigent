@@ -888,6 +888,9 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
             for upd in to_updates(payload)[0]:
                 update(acp_id, upd)
         elif to_updates(payload)[1]:
+            if payload.get("is_error"):  # a failed setup script ends the session here
+                errors = payload.get("errors") or [str(payload.get("result") or "unknown error")]
+                raise RuntimeError(f"cloud session setup failed: {'; '.join(errors)}")
             break
     after, _ = _send(s, text)
     return after
@@ -1253,6 +1256,24 @@ def self_check() -> None:
         for _ in range(3):
             run_turn("acp-quiet", "again")
             assert threading.active_count() == threads_before, threading.enumerate()
+    # A bootstrap turn that ends in an error fails the turn and sends no prompt.
+    prompts: list[str] = []
+    globals()["_send"] = lambda _s, text: prompts.append(text) or (1, False)
+    broken = Session("/repo", "acp-broken")
+    broken.reader = threading.current_thread()
+    setup = {
+        "type": "result",
+        "is_error": True,
+        "errors": ["Setup script failed with exit code 1."],
+    }
+    broken.events.put({"sequence_num": "1", "payload": setup})
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            _bootstrap("acp-broken", broken, "go")
+        raise AssertionError("a failed setup sent the prompt")
+    except RuntimeError as exc:
+        assert str(exc) == "cloud session setup failed: Setup script failed with exit code 1.", exc
+    assert prompts == [], prompts
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")
