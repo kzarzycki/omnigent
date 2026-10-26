@@ -6824,6 +6824,110 @@ async def test_serve_mcp_survives_handler_exception_and_keeps_serving(
             proc.wait(timeout=5.0)
 
 
+@pytest.fixture
+def relay_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    """
+    Run an event loop in a background thread, as the runner does for the relay.
+
+    :returns: Iterator yielding the running loop.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5.0)
+        loop.close()
+
+
+def test_run_relay_tool_waits_past_ceiling_while_approval_pending(
+    relay_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch parked on an approval outlives the hang ceiling and returns its result."""
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.05)
+    approved = threading.Event()
+
+    async def _parked_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        while not approved.is_set():
+            await asyncio.sleep(0.01)
+        return {"result": f"{name} created"}
+
+    timer = threading.Timer(0.3, approved.set)
+    timer.start()
+    try:
+        response = claude_native_bridge._run_relay_tool(
+            _parked_executor,
+            relay_loop,
+            "sys_scheduled_task_create",
+            {},
+            awaiting_approval=lambda: not approved.is_set(),
+        )
+    finally:
+        timer.cancel()
+
+    assert response.get("isError") is not True
+    assert "sys_scheduled_task_create created" in json.dumps(response)
+
+
+def test_run_relay_tool_cancels_a_hung_dispatch_at_the_ceiling(
+    relay_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch that hangs with no approval pending is cancelled with a named error."""
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.05)
+    cancelled = threading.Event()
+
+    async def _hung_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {}
+
+    response = claude_native_bridge._run_relay_tool(
+        _hung_executor, relay_loop, "sys_os_shell", {}, awaiting_approval=lambda: False
+    )
+
+    assert response["isError"] is True
+    text = response["content"][0]["text"]
+    assert "sys_os_shell" in text
+    assert "did not finish within 0s" in text
+    # Cancelling the dispatch is what withdraws an approval prompt it opened.
+    assert cancelled.wait(timeout=2.0)
+
+
+def test_run_relay_tool_names_an_exception_without_a_message(
+    relay_loop: asyncio.AbstractEventLoop,
+) -> None:
+    """An exception whose message is empty reaches the agent as its type name."""
+
+    async def _failing_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise TimeoutError
+
+    response = claude_native_bridge._run_relay_tool(
+        _failing_executor, relay_loop, "sys_scheduled_task_create", {}
+    )
+
+    assert response["isError"] is True
+    error = json.loads(response["content"][0]["text"])["error"]
+    assert error == "Omnigent tool dispatch failed: TimeoutError"
+
+
+def test_relay_post_timeout_covers_the_approval_budget() -> None:
+    """The bridge's outer POST outlasts the longest approval wait, so the relay answers first."""
+    from omnigent.spec.types import DEFAULT_ASK_TIMEOUT
+
+    assert claude_native_bridge._TOOL_CALL_APPROVAL_BUDGET_S >= DEFAULT_ASK_TIMEOUT
+    assert (
+        claude_native_bridge._TOOL_RELAY_POST_TIMEOUT_S
+        > claude_native_bridge._TOOL_CALL_APPROVAL_BUDGET_S
+    )
+
+
 @pytest.mark.parametrize("concurrent_method", ["ping", "tools/call"])
 def test_serve_mcp_answers_while_relay_call_is_blocked(
     tmp_path: Path,
