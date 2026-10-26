@@ -1428,10 +1428,33 @@ def test_stop_runner_frame_round_trip() -> None:
         request_id="req_002",
         runner_id="runner_token_abc",
     )
-    decoded = decode_host_frame(encode_host_frame(original))
+    encoded = encode_host_frame(original)
+    # Unset optional fields stay off the wire, as an older server sends it.
+    assert set(json.loads(encoded)) == {"kind", "request_id", "runner_id"}
+    decoded = decode_host_frame(encoded)
     assert isinstance(decoded, HostStopRunnerFrame)
     assert decoded.request_id == "req_002"
     assert decoded.runner_id == "runner_token_abc"
+    assert (decoded.reason, decoded.session_id) == (None, None)
+
+
+def test_stop_runner_frame_carries_reason_and_session() -> None:
+    """The stop reason and session survive the wire, so the host can log why it stopped."""
+    original = HostStopRunnerFrame(
+        request_id="req_003",
+        runner_id="runner_token_abc",
+        reason="archive",
+        session_id="conv_abc",
+    )
+    decoded = decode_host_frame(encode_host_frame(original))
+    assert decoded == original
+
+
+def test_stop_runner_frame_from_older_server_decodes() -> None:
+    """A stop frame without ``reason`` or ``session_id`` (an older server's) still decodes."""
+    raw = json.dumps({"kind": "host.stop_runner", "request_id": "r", "runner_id": "runner_x"})
+    decoded = decode_host_frame(raw)
+    assert decoded == HostStopRunnerFrame(request_id="r", runner_id="runner_x")
 
 
 def test_stop_runner_result_frame_round_trip() -> None:

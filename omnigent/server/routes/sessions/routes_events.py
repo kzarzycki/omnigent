@@ -1909,6 +1909,7 @@ def register_events_routes(
                     stop_conv.runner_id,
                     stop_host_registry,
                     conversation_store,
+                    reason="stop",
                 )
                 if not host_stopped:
                     host_conn = (

@@ -280,17 +280,16 @@ async def _serve_one_launch(
     raise AssertionError("host never received a launch frame from the inline path")
 
 
-async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
+async def _serve_one_stop(comm: ApplicationCommunicator) -> HostStopRunnerFrame:
     """Answer the host's ``host.stop_runner`` round-trip for one Stop.
 
     Reads the host's outbound frames until a
     :class:`HostStopRunnerFrame` arrives (skipping interleaved pings),
     replies ``stopped`` so the server's pending-stop future resolves,
-    and returns the ``runner_id`` the server asked the host to stop.
+    and returns the stop frame the server sent.
 
     :param comm: The connected host communicator.
-    :returns: The ``runner_id`` carried by the stop frame, e.g.
-        ``"runner_token_abc123..."``.
+    :returns: The stop frame, naming the runner and why it stops.
     :raises AssertionError: If no stop frame arrives within the frame
         budget — i.e. the Stop handler did not ask the host to stop the
         runner (the regression this guards against).
@@ -314,7 +313,7 @@ async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
                     ),
                 }
             )
-            return frame.runner_id
+            return frame
     raise AssertionError("host never received a stop_runner frame from the stop path")
 
 
@@ -1507,7 +1506,7 @@ async def _stop_host_session(
     client: httpx.AsyncClient,
     comm: ApplicationCommunicator,
     session_id: str,
-) -> str:
+) -> HostStopRunnerFrame:
     """Drive ``stop_session`` and serve the host's stop_runner round-trip.
 
     Installs a fake global runner client that 204s the pane-kill forward
@@ -1519,7 +1518,7 @@ async def _stop_host_session(
     :param client: Test HTTP client.
     :param comm: Connected host communicator.
     :param session_id: Session to stop, e.g. ``"d1f9214d74c38b9f9a9db17ed8352dc4"``.
-    :returns: The ``runner_id`` the host was told to stop.
+    :returns: The stop frame the host received.
     """
     from omnigent.runtime import set_runner_client
 
@@ -1538,7 +1537,7 @@ async def _stop_host_session(
             f"/v1/sessions/{session_id}/events",
             json={"type": "stop_session", "data": {}},
         )
-        stopped_runner_id = await stop_responder
+        stop_frame = await stop_responder
     finally:
         await fake_runner.aclose()
         set_runner_client(None)
@@ -1546,7 +1545,7 @@ async def _stop_host_session(
     assert stop_resp.status_code == 202, stop_resp.text
     # stop_session is a control event, not a persisted item.
     assert stop_resp.json() == {"queued": False}, stop_resp.json()
-    return stopped_runner_id
+    return stop_frame
 
 
 async def test_stop_session_stops_host_launched_runner(
@@ -1567,7 +1566,10 @@ async def test_stop_session_stops_host_launched_runner(
     comm = await _connect_host(app)
     session = await _inline_launch_session(client, comm)
 
-    stopped_runner_id = await _stop_host_session(client, comm, session["id"])
+    stop_frame = await _stop_host_session(client, comm, session["id"])
+    stopped_runner_id = stop_frame.runner_id
+    # The host logs why the runner stopped and for which session.
+    assert (stop_frame.reason, stop_frame.session_id) == ("stop", session["id"])
 
     # The host was asked to stop the SAME runner the session is bound to —
     # proving the Stop handler read host_id/runner_id off the session row
@@ -4107,6 +4109,7 @@ async def test_relaunch_stops_the_superseded_runner(
         f"the stop must target the SUPERSEDED runner {original_runner_id!r}, "
         f"got {stop_frame.runner_id!r}"
     )
+    assert stop_frame.reason == "superseded"
 
 
 async def test_concurrent_relaunches_are_single_flight(

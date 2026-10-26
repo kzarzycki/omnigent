@@ -2440,7 +2440,12 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
-        _logger.info("Stopped runner %s", frame.runner_id)
+        _logger.info(
+            "Stopped runner %s (reason: %s, session %s)",
+            frame.runner_id,
+            frame.reason or "unknown",
+            frame.session_id or "unknown",
+        )
         _print_host_status(
             f"  ↓ Runner stopped: {frame.runner_id}",
             runner_id=frame.runner_id,

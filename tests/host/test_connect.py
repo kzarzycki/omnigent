@@ -2187,6 +2187,7 @@ async def test_watch_runner_silent_on_intentional_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_closed: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A host.stop_runner termination is NOT reported as a crash.
 
@@ -2234,12 +2235,19 @@ async def test_watch_runner_silent_on_intentional_stop(
     with (
         patch("omnigent.host.connect.print", side_effect=BrokenPipeError(), create=True)
         if console_closed
-        else contextlib.nullcontext()
+        else contextlib.nullcontext(),
+        caplog.at_level(logging.INFO, logger="omnigent.host.connect"),
     ):
         stop_result = await host._handle_stop(
-            HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
+            HostStopRunnerFrame(
+                request_id="req_stop_2",
+                runner_id=runner_id,
+                reason="archive",
+                session_id="conv_stop",
+            )
         )
     assert stop_result.status == "stopped"
+    assert f"Stopped runner {runner_id} (reason: archive, session conv_stop)" in caplog.text
 
     # Let the watcher observe the (intentional) death and finish.
     await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)

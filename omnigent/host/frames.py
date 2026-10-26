@@ -377,10 +377,16 @@ class HostStopRunnerFrame:
         e.g. ``"req_def456"``.
     :param runner_id: Runner to stop, e.g.
         ``"runner_token_abc123..."``.
+    :param reason: Why the server stops it, for the host's log:
+        ``"archive"``, ``"stop"`` or ``"superseded"``. ``None`` from an
+        older server.
+    :param session_id: Session whose action stopped the runner.
     """
 
     request_id: str
     runner_id: str
+    reason: str | None = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -1607,13 +1613,17 @@ def encode_host_frame(frame: HostFrame) -> str:
             }
         )
     if isinstance(frame, HostStopRunnerFrame):
-        return _encode_payload(
-            {
-                "kind": HostFrameKind.STOP_RUNNER.value,
-                "request_id": frame.request_id,
-                "runner_id": frame.runner_id,
-            }
-        )
+        stop_payload: _JsonObject = {
+            "kind": HostFrameKind.STOP_RUNNER.value,
+            "request_id": frame.request_id,
+            "runner_id": frame.runner_id,
+        }
+        # Sent only when set, so a frame without them matches an older server's.
+        if frame.reason is not None:
+            stop_payload["reason"] = frame.reason
+        if frame.session_id is not None:
+            stop_payload["session_id"] = frame.session_id
+        return _encode_payload(stop_payload)
     if isinstance(frame, HostStopRunnerResultFrame):
         return _encode_payload(
             {
@@ -2704,6 +2714,8 @@ def _decode_stop_runner(msg: _JsonObject) -> HostStopRunnerFrame:
     return HostStopRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
+        reason=_optional_nullable_str(msg, "reason"),
+        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 
