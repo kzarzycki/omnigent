@@ -295,6 +295,7 @@ async def test_archive_tears_down_host_spawned_runner(
             "a1b2c3d4e5f61234567890abcdef0123",
             "b1b2c3d4e5f61234567890abcdef0123",
         )
+        assert mock_teardown.await_args.kwargs["reason"] == "archive"
     finally:
         _sessions_common._session_status_cache.pop(session_id, None)
         _sessions_common._intentional_stop_sessions.pop(session_id, None)
