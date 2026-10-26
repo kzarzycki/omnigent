@@ -573,6 +573,10 @@ class AcpExecutor(Executor):
         self._image_supported = False
         self._authenticated = False
         self._auth_advertisement = {}
+        if self._proc is not None:
+            # A respawn: the new process knows none of the old one's sessions, so
+            # open a fresh one and replay the transcript into it.
+            self._reset_session_state()
         env = self._build_spawn_env()
         launch_path, argv = self._sandbox_launch(tuple(env.keys()))
         _STREAM_LIMIT = 16 * 1024 * 1024
