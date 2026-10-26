@@ -6242,6 +6242,7 @@ def _spawn_superseded_runner_stop(
                 runner_id,
                 host_registry,
                 expect_already_stopped=True,
+                reason="superseded",
             )
         except Exception:  # noqa: BLE001 — must never die unobserved
             _logger.warning(
@@ -7499,6 +7500,7 @@ async def _stop_session_host_runner(
     *,
     expect_already_stopped: bool = False,
     attempt: _HostRunnerStopAttempt | None = None,
+    reason: str | None = None,
 ) -> bool:
     """
     Terminate the host-launched runner backing a host-spawned session.
@@ -7541,6 +7543,8 @@ async def _stop_session_host_runner(
         runner (the relaunch belt: see
         :func:`_spawn_superseded_runner_stop`). Delivery failures still warn.
     :param attempt: Optional caller-owned progress record that survives cancellation.
+    :param reason: Why the runner stops, logged here and by the host,
+        e.g. ``"archive"``, ``"stop"`` or ``"superseded"``.
     :returns: ``True`` after a successful acknowledgement; ``False`` for an
         unavailable host, rejected send, timeout, or host-reported failure.
         A dispatched stop can still finish after a timeout or cancellation;
@@ -7566,7 +7570,12 @@ async def _stop_session_host_runner(
     future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
     conn.pending_stops[request_id] = future
     stop_frame = encode_host_frame(
-        HostStopRunnerFrame(request_id=request_id, runner_id=runner_id),
+        HostStopRunnerFrame(
+            request_id=request_id,
+            runner_id=runner_id,
+            reason=reason,
+            session_id=session_id,
+        ),
     )
     try:
         try:
@@ -7613,6 +7622,14 @@ async def _stop_session_host_runner(
             extra={"session_id": session_id},
         )
         return False
+    _logger.info(
+        "Host %s stopped runner %s for session %s (reason: %s)",
+        host_id,
+        runner_id,
+        session_id,
+        reason or "unknown",
+        extra={"session_id": session_id},
+    )
     return True
 
 
