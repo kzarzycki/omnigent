@@ -162,6 +162,8 @@ instructions:
 
 ## This fork: landing PRs into `mine`
 
+Open PRs against `mine`, the fork's default branch; `main` only mirrors upstream.
+
 Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
 commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR on a landing host
