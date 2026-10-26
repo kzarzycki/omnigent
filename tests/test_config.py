@@ -510,3 +510,60 @@ def test_the_telemetry_allowlist_opts_in_only_listed_origins(
     assert _config_module.telemetry_endpoint_for(plain) is None  # not a checkout
     (home / "telemetry-allowlist.json").write_text("{ not json")
     assert _config_module.telemetry_endpoint_for(ssh) is None  # unreadable: nobody opts in
+
+
+def test_the_servers_harness_telemetry_decision_wins_and_checks_repo_exclusions_on_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import subprocess
+
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR, HarnessTelemetry, harness_telemetry_for
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+
+    def checkout(name: str, origin: str) -> Path:
+        repo = tmp_path / name
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", origin], check=True)
+        return repo
+
+    private = checkout("private", "git@git.example.test:team/private.git")
+    public = checkout("public", "https://git.example.test/team/public")
+    no_origin = tmp_path / "no-origin"
+    no_origin.mkdir()
+    decision_path = tmp_path / "decision.json"
+
+    def decide(decision: object, workspace: Path) -> HarnessTelemetry | None:
+        decision_path.write_text(json.dumps(decision))
+        return harness_telemetry_for(workspace, "conv_root")
+
+    monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+    assert harness_telemetry_for(public) is None  # no decision, no allowlist: user settings
+    monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+    on = {
+        "enabled": True,
+        "endpoint": "https://otlp.example.test/",
+        "headers": {"x-ingest-token": "made-up"},
+        "exclude_repos": ["git.example.test/team/private"],
+        "resource_attributes": {
+            "omnigent.session.id": "conv_root",
+            "omnigent.root_session.id": "conv_root",
+        },
+    }
+    off = HarnessTelemetry(enabled=False, from_server=True)
+    assert decide(on, public) == HarnessTelemetry(
+        enabled=True,
+        endpoint="https://otlp.example.test",
+        headers={"x-ingest-token": "made-up"},
+        resource_attributes=on["resource_attributes"],
+        from_server=True,
+    )
+    # The runner's decision is its primary session's; another one never inherits it.
+    assert harness_telemetry_for(public, "conv_sub") == off
+    assert decide(on, private) == off
+    assert decide(on, no_origin) == off  # unreadable origin with repo exclusions: fail closed
+    assert decide({**on, "exclude_repos": []}, no_origin).enabled  # nothing to check
+    assert decide({"enabled": False}, public) == off
+    decision_path.write_text("{ not json")
+    assert harness_telemetry_for(public) == off

@@ -920,6 +920,45 @@ def test_launch_runner_superseded_runner_ids_round_trip() -> None:
     assert decoded.superseded_runner_ids is None
 
 
+def test_launch_runner_harness_telemetry_round_trips_and_is_absent_without_a_setting() -> None:
+    """The decision rides the frame; without one (or from an older server) the key is absent."""
+    decision = {"enabled": True, "endpoint": "https://otlp.example.test", "headers": {"k": "v"}}
+    frame = HostLaunchRunnerFrame(
+        request_id="req_t", binding_token="tok", workspace="/w", harness_telemetry=decision
+    )
+    assert decode_host_frame(encode_host_frame(frame)) == frame
+    legacy = HostLaunchRunnerFrame(request_id="req_l", binding_token="tok", workspace="/w")
+    assert "harness_telemetry" not in encode_host_frame(legacy)
+    decoded = decode_host_frame(encode_host_frame(legacy))
+    assert isinstance(decoded, HostLaunchRunnerFrame)
+    assert decoded.harness_telemetry is None
+    with pytest.raises(ValueError, match="harness_telemetry"):
+        decode_host_frame(
+            json.dumps(
+                {
+                    "kind": "host.launch_runner",
+                    "request_id": "r",
+                    "binding_token": "tok",
+                    "workspace": "/w",
+                    "harness_telemetry": "on",
+                }
+            )
+        )
+
+
+def test_harness_telemetry_headers_are_redacted_from_telemetry() -> None:
+    """The OTLP headers nested in the launch frame carry an ingest token."""
+    from omnigent.runtime import telemetry
+
+    redacted = telemetry._redact_payload(
+        {"harness_telemetry": {"endpoint": "https://otlp.example.test", "headers": {"k": "v"}}}
+    )
+    assert redacted["harness_telemetry"] == {
+        "endpoint": "https://otlp.example.test",
+        "headers": "[redacted]",
+    }
+
+
 def test_launch_runner_preserves_the_full_saved_inference_profile() -> None:
     config = {
         "providers": {
