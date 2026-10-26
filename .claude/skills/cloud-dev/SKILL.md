@@ -57,8 +57,6 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
     the limit.
   - `tests/harnesses/claude_native/test_claude_native_delivery_logging.py::test_delivery_diagnostics`
     has a 0.06 s budget the VM misses; it passes on a host. Don't count it against a PR.
-    Nor `tests/server/integration/test_runner_reconnect_recovery.py::test_large_mirror_tree_attaches_without_blocking_or_per_child_reads[False]`,
-    which times out on its own in the VM at `mine` too (#117).
   - Playwright: the preinstalled Chromium doesn't match the repo's Playwright build;
     launch it with `executable_path="/opt/pw-browsers/chromium"`.
 - **Workers** run as your native sub-agents in the VM, so they share your checkout and
