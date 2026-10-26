@@ -3742,6 +3742,35 @@ def test_augment_claude_args_applies_the_servers_telemetry_decision(
     }
 
 
+def test_the_ingest_token_reaches_claude_through_its_owner_only_settings_file_not_its_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other local users can read process arguments; only the settings file's path is on argv."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "https://otlp.example.test",
+                "headers": {"x-ingest-token": "synthetic-secret"},
+            }
+        )
+    )
+    monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+
+    args = augment_claude_args((), bridge_dir=tmp_path / "bridge", workspace=tmp_path)
+
+    assert not [arg for arg in args if "synthetic-secret" in arg]
+    settings_path = Path(args[args.index("--settings") + 1])
+    assert settings_path.stat().st_mode & 0o777 == 0o600
+    assert _load_invocation_settings(args)["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == (
+        "x-ingest-token=synthetic-secret"
+    )
+
+
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:
     """
     ``EnterWorktree`` / ``ExitWorktree`` PostToolUse events reach the observer hook.

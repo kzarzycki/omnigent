@@ -3485,9 +3485,11 @@ def _workspace_otel_overrides(
     decision is :func:`omnigent.config.harness_telemetry_for` (the server's
     setting, else the machine's allowlist). Logs and metrics go over OTLP/HTTP
     to its endpoint, with prompts and responses, the way dotagents writes the
-    user-level ``[otel]`` table; an excluded session gets ``none`` exporters,
-    which outrank the user's own ``[otel]``. Codex takes its resource
-    attributes from ``OTEL_RESOURCE_ATTRIBUTES`` in its environment.
+    user-level ``[otel]`` table; an excluded session gets ``none`` exporters.
+    :func:`~omnigent.inner.codex_executor.materialize_codex_provider_config`
+    moves the exporters, whose headers carry the ingest token, off argv into
+    the session's private ``config.toml``, replacing the user's own. Codex
+    takes its resource attributes from ``OTEL_RESOURCE_ATTRIBUTES`` in its environment.
 
     :param cwd: Session workspace.
     :param session_id: The launching session, reported as ``omnigent.session.id``.
