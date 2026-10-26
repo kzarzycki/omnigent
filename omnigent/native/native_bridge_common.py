@@ -26,7 +26,6 @@ from __future__ import annotations
 import contextlib
 import importlib
 import logging
-import os
 import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -35,10 +34,19 @@ from pathlib import Path
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
+from omnigent.native.owner_claim import (
+    OWNER_PID_FILENAME,
+    OwnerClaim,
+    owner_is_gone,
+    read_owner_claim,
+    write_owner_claim,
+)
+
 _logger = logging.getLogger(__name__)
 
-OWNER_PID_FILENAME = "owner.pid"
 _LOCK_DIR_NAME = ".locks"
+# A legacy integer-only or unparseable marker: its owner can't be proven gone.
+_UNPROVABLE = object()
 
 
 def _bridge_dir_lock(bridge_dir: Path) -> FileLock:
@@ -72,18 +80,30 @@ def _try_bridge_dir_cleanup_lock(bridge_dir: Path) -> Iterator[bool]:
 
 def write_owner_pid_marker(bridge_dir: Path) -> None:
     """
-    Record the current process pid as the owner of *bridge_dir*.
+    Record the current process as the owner of *bridge_dir*.
 
     Written on every bridge prep so the marker always names the live
-    runner; :func:`prune_orphaned_dirs` reaps only dirs whose marker
-    names a provably-dead process. Best-effort: a failed write (e.g. the
+    runner. It is an owner claim (pid, PID namespace and boot), so
+    :func:`prune_orphaned_dirs` running in another PID namespace never
+    reads a live owner as dead. Best-effort: a failed write (e.g. the
     dir vanished mid-crash) never raises, matching ``inner/terminal.py``'s
     owner.pid convention.
 
     :param bridge_dir: Per-session bridge directory to mark.
     """
     with contextlib.suppress(OSError):
-        (bridge_dir / OWNER_PID_FILENAME).write_text(str(os.getpid()), encoding="utf-8")
+        write_owner_claim(bridge_dir)
+
+
+def _read_owner(bridge_dir: Path) -> OwnerClaim | object | None:
+    """Return the dir's owner claim, None when unmarked, else :data:`_UNPROVABLE`."""
+    try:
+        (bridge_dir / OWNER_PID_FILENAME).stat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNPROVABLE
+    return read_owner_claim(bridge_dir) or _UNPROVABLE
 
 
 def prune_orphaned_dirs(
@@ -96,7 +116,8 @@ def prune_orphaned_dirs(
 
     The in-run analog of the terminal/process orphan sweeps: scans
     *bridge_root* and removes each immediate child dir whose ``owner.pid``
-    marker names a process that no longer exists. A harness may provide an
+    owner claim names a process that no longer exists in this PID namespace
+    and boot. A harness may provide an
     additional eligibility predicate, such as a minimum inactivity period.
     Conservative in the dangerous direction — a reused/foreign pid reads as
     alive and is left.
@@ -109,7 +130,8 @@ def prune_orphaned_dirs(
     A dir with no marker predates the marker or never had a bridge prepared,
     so there is no owner to prove dead: it is removed only when *should_prune*
     accepts it, and kept when the harness has no retention policy. A dir with
-    an unparseable marker is always kept.
+    a legacy integer-only or unparseable marker is always kept, as is one
+    whose claim comes from another PID namespace or boot.
 
     Reuses ``inner/terminal.py:_process_alive`` as the liveness predicate.
 
@@ -132,17 +154,12 @@ def prune_orphaned_dirs(
         with _try_bridge_dir_cleanup_lock(entry) as acquired:
             if not acquired:
                 continue
-            marker = entry / OWNER_PID_FILENAME
-            pid: int | None
-            try:
-                pid = int(marker.read_text(encoding="utf-8").strip())
-            except FileNotFoundError:
-                pid = None
-            except (OSError, ValueError):
+            claim = _read_owner(entry)
+            if claim is _UNPROVABLE or (claim is None and should_prune is None):
                 continue
-            if pid is None and should_prune is None:
-                continue
-            if pid is not None and _process_alive(pid):
+            if isinstance(claim, OwnerClaim) and not owner_is_gone(
+                claim, process_alive=_process_alive
+            ):
                 continue
             if should_prune is not None:
                 try:
@@ -152,15 +169,9 @@ def prune_orphaned_dirs(
                     continue
                 if not eligible:
                     continue
-            confirmed_pid: int | None
-            try:
-                confirmed_pid = int(marker.read_text(encoding="utf-8").strip())
-            except FileNotFoundError:
-                confirmed_pid = None
-            except (OSError, ValueError):
-                continue
-            if confirmed_pid != pid or (
-                confirmed_pid is not None and _process_alive(confirmed_pid)
+            if _read_owner(entry) != claim or (
+                isinstance(claim, OwnerClaim)
+                and not owner_is_gone(claim, process_alive=_process_alive)
             ):
                 continue
             cache_dir = attachment_cache_dir(entry)

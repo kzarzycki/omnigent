@@ -30,6 +30,7 @@ from omnigent.harnesses.opencode_native.bridge import (
     xdg_config_home_for_bridge_dir,
     xdg_data_home_for_bridge_dir,
 )
+from tests._helpers.owner_claim import claim_owner
 
 
 @pytest.fixture
@@ -305,7 +306,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
 
     bridge_dir = prepare_bridge_dir("bridge_owner")
 
-    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").split()[0] == str(os.getpid())
 
 
 def test_prepare_bridge_dir_excludes_concurrent_orphan_prune(
@@ -318,7 +319,7 @@ def test_prepare_bridge_dir_excludes_concurrent_orphan_prune(
     bridge_dir = bridge_dir_for_bridge_id("same-session")
     bridge_dir.mkdir(parents=True)
     owner_marker = bridge_dir / "owner.pid"
-    owner_marker.write_text("999999", encoding="utf-8")
+    claim_owner(owner_marker, 999999)
     session_data = xdg_data_home_for_bridge_dir(bridge_dir) / "storage" / "session.json"
     session_data.parent.mkdir(parents=True)
     session_data.write_text("preserve me", encoding="utf-8")
@@ -361,7 +362,7 @@ def test_prepare_bridge_dir_excludes_concurrent_orphan_prune(
     assert prepared_paths == [bridge_dir]
     assert bridge_dir.is_dir()
     assert session_data.read_text(encoding="utf-8") == "preserve me"
-    assert owner_marker.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert owner_marker.read_text(encoding="utf-8").split()[0] == str(os.getpid())
 
 
 def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
@@ -380,11 +381,11 @@ def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
     dead.wait()
     dead_dir = root / "deadowner"
     dead_dir.mkdir()
-    (dead_dir / "owner.pid").write_text(str(dead.pid), encoding="utf-8")
+    claim_owner(dead_dir / "owner.pid", dead.pid)
 
     live_dir = root / "liveowner"
     live_dir.mkdir()
-    (live_dir / "owner.pid").write_text(str(os.getpid()), encoding="utf-8")
+    claim_owner(live_dir / "owner.pid", os.getpid())
 
     unmarked_dir = root / "unmarked"
     unmarked_dir.mkdir()
