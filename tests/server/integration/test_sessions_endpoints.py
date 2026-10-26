@@ -48,6 +48,7 @@ from omnigent.server.routes._sessions.helpers import (
 )
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.spec.types import SkillSpec
+from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY, SIDE_CHAT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -1047,6 +1048,34 @@ async def test_list_sessions_kind_filter(
     # pattern, not silently passed through to the store.
     resp = await client.get("/v1/sessions", params={"kind": "bogus"})
     assert resp.status_code == 422
+
+
+async def test_list_sessions_include_side_chats(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Side chats are hidden from the default list and returned, with their source, on request."""
+    agent = await create_test_agent(client, name="side-chat-list-agent")
+    source = await _create_session(client, agent["id"], title="side-source")
+    side_chat = SqlAlchemyConversationStore(db_uri).create_conversation(
+        title="side",
+        agent_id=agent["id"],
+        labels={SIDE_CHAT_LABEL_KEY: "1", SIDE_CHAT_SOURCE_LABEL_KEY: source["id"]},
+    )
+
+    resp = await client.get("/v1/sessions", params={"agent_id": agent["id"]})
+    assert resp.status_code == 200
+    default_ids = {s["id"] for s in resp.json()["data"]}
+    assert source["id"] in default_ids
+    assert side_chat.id not in default_ids
+
+    resp = await client.get(
+        "/v1/sessions", params={"agent_id": agent["id"], "include_side_chats": "true"}
+    )
+    assert resp.status_code == 200
+    rows = {s["id"]: s for s in resp.json()["data"]}
+    assert source["id"] in rows
+    assert rows[side_chat.id]["labels"][SIDE_CHAT_SOURCE_LABEL_KEY] == source["id"]
 
 
 async def test_list_sessions_includes_title_and_status(
