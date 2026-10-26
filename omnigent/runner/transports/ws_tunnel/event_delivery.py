@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from omnigent.errors import ErrorCode
 from omnigent.runner.transports.ws_tunnel.frames import (
+    EVENT_INGEST_CAPABILITY,
     EventAckFrame,
     EventBatchFrame,
     encode_frame,
@@ -66,6 +67,7 @@ class RunnerEventDispatcher:
         self._workers: list[asyncio.Task[None]] = []
         self._outstanding = 0
         self._last_dispatch_at: float | None = None
+        self._accepted: frozenset[str] = frozenset()
 
     @property
     def has_pending(self) -> bool:
@@ -87,9 +89,19 @@ class RunnerEventDispatcher:
         self._state_changed = asyncio.Event()
         changed.set()
 
+    def accepts(self, capability: str) -> bool:
+        """Whether the current tunnel generation's server accepted *capability*."""
+        return capability in self._accepted
+
+    @property
+    def is_disconnected(self) -> bool:
+        """Whether the tunnel is down and the next generation has not connected yet."""
+        return self._state == "disconnected"
+
     def connected(self, send: Callable[[str], Awaitable[None]]) -> None:
         """Start capability negotiation for this connection generation."""
         self._send = send
+        self._accepted = frozenset()
         self._set_state("negotiating")
 
     async def _mode(self, *, initial_fallback: bool, preview: bool = False) -> bool:
@@ -124,8 +136,17 @@ class RunnerEventDispatcher:
             return True
         return await self._mode(initial_fallback=True)
 
-    def ready(self, send: Callable[[str], Awaitable[None]]) -> None:
-        """Enable delivery only after the current tunnel receives event.ready."""
+    def ready(
+        self, send: Callable[[str], Awaitable[None]], capabilities: Sequence[str] = ()
+    ) -> None:
+        """Record the capabilities the current tunnel's event.ready accepted.
+
+        An older server's event.ready lists none and means event ingestion only.
+        """
+        self._accepted = frozenset(capabilities or [EVENT_INGEST_CAPABILITY])
+        if EVENT_INGEST_CAPABILITY not in self._accepted:
+            self._set_state("unsupported")
+            return
         self._send = send
         self._ever_ready = True
         self._set_state("ready")
@@ -133,6 +154,7 @@ class RunnerEventDispatcher:
     def disconnected(self) -> None:
         """Wake pending attempts; source events remain queued for replay."""
         self._send = None
+        self._accepted = frozenset()
         self._set_state("disconnected")
         for future in self._pending.values():
             if not future.done():

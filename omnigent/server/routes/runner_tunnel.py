@@ -36,6 +36,7 @@ from omnigent.runner.transports.ws_tunnel.diagnostics import (
 )
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
+    TEXT_SEGMENT_CAPABILITY,
     EventAckFrame,
     EventBatchFrame,
     EventReadyFrame,
@@ -590,10 +591,19 @@ def create_runner_tunnel_router(
 
                 owned.extend((sender_task, ping_task, keepalive_task, receive_task))
 
-                if EVENT_INGEST_CAPABILITY in frame.capabilities and callable(
-                    getattr(ws.app.state, "runner_event_ingest", None)
-                ):
-                    await registry.send_text(session, encode_frame(EventReadyFrame()))
+                accepted = [
+                    capability
+                    for capability in frame.capabilities
+                    if capability == TEXT_SEGMENT_CAPABILITY
+                    or (
+                        capability == EVENT_INGEST_CAPABILITY
+                        and callable(getattr(ws.app.state, "runner_event_ingest", None))
+                    )
+                ]
+                if accepted:
+                    await registry.send_text(
+                        session, encode_frame(EventReadyFrame(capabilities=accepted))
+                    )
 
                 if on_runner_connect is not None:
                     owned.append(

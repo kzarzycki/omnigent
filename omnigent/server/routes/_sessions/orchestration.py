@@ -332,6 +332,7 @@ from omnigent.server.routes._sessions.helpers import (
     _record_daily_cost,
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
+    _relay_item_stable_id,
     _relay_persist,
     _relay_persist_error_once,
     _remove_session_worktree_best_effort,
@@ -9211,11 +9212,10 @@ async def _relay_runner_stream_once(
                         if isinstance(_model, str) and _model:
                             current_model = _model
 
-                    # Accumulate response-scoped (scaffold) text deltas for
-                    # persistence. Native message-scoped deltas (with a
-                    # message_id) persist via their own output_item.done(message),
-                    # so buffering them here would double-persist. Guard on
-                    # non-empty str (like inflight_text.record_publish) so a
+                    # Buffer id-less (scaffold) text deltas for a runner that does
+                    # not close its own segments; a segment item below replaces
+                    # this buffer. Message-scoped native deltas persist via their
+                    # own output_item.done(message). Guard on non-empty str so a
                     # malformed delta can't break the later "".join(text_acc).
                     if evt_type == "response.output_text.delta" and not event.get("message_id"):
                         _delta = event.get("delta")
@@ -9256,6 +9256,58 @@ async def _relay_runner_stream_once(
                     else:
                         _persist_rid = current_response_id
 
+                    # The runner closes each id-less text segment with a message
+                    # item, so text streamed before a relay drop still persists.
+                    # Gated like the buffered flush; the flush publishes the
+                    # persisted item in place of this raw frame.
+                    _segment_boundary = event.get("text_segment")
+                    if (
+                        evt_type == "response.output_item.done"
+                        and _item_type == "message"
+                        and isinstance(_segment_boundary, str)
+                    ):
+                        _segment_stable_id = _relay_item_stable_id(session_id, _item)
+                        # A segment re-delivered after a drop is already stored:
+                        # policies ran on it once, and the deny marker stays for
+                        # whatever text follows.
+                        if _segment_stable_id is not None and (
+                            await asyncio.to_thread(
+                                conversation_store.get_item, session_id, _segment_stable_id
+                            )
+                            is not None
+                        ):
+                            text_acc.clear()
+                            inflight_text.reset_text(session_id)
+                            continue
+                        _segment_content = _item.get("content")
+                        text_acc[:] = [
+                            part.get("text") or ""
+                            for part in (
+                                _segment_content if isinstance(_segment_content, list) else []
+                            )
+                            if isinstance(part, dict)
+                        ]
+                        _segment_agent = _item.get("agent")
+                        _segment_deny = _llm_response_denied_turns.pop(session_id, None)
+                        await _flush_relay_text(
+                            conversation_store,
+                            session_id,
+                            text_acc,
+                            current_response_id,
+                            _segment_agent
+                            if isinstance(_segment_agent, str) and _segment_agent
+                            else current_model,
+                            deny_reason=_segment_deny,
+                            evaluate_response_phase=_segment_deny is None,
+                            turn_final=_segment_boundary == "response.completed",
+                            stable_id=_segment_stable_id,
+                        )
+                        # A failed append leaves text_acc for the boundary
+                        # flush that follows — re-arm the marker for it.
+                        if _segment_deny is not None and text_acc:
+                            _llm_response_denied_turns[session_id] = _segment_deny
+                        continue
+
                     # Flush buffered narration as its own message BEFORE the
                     # function_call it preceded, so the transcript interleaves
                     # [text, tool, text, tool] instead of pooling a turn's text
@@ -9294,6 +9346,7 @@ async def _relay_runner_stream_once(
                     conv_item = _extract_persistent_item_from_sse(
                         event,
                         response_id=_persist_rid,
+                        session_id=session_id,
                     )
                     if conv_item is not None:
                         await _relay_persist(

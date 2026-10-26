@@ -507,6 +507,188 @@ async def test_relay_text_flush_publishes_persisted_item(db_uri: str) -> None:
         session_stream.close(session_id)
 
 
+@pytest.mark.asyncio
+async def test_relay_stores_a_redelivered_tool_frame_once(db_uri: str) -> None:
+    """A tool frame the runner stream delivers twice (same ``call_id``) is one row.
+
+    A dropped ``/stream`` puts its in-flight frame back on the runner's queue,
+    so the next relay attempt can receive a frame already persisted.
+    """
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    function_call = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "status": "completed",
+            "name": "Bash",
+            "arguments": "{}",
+            "call_id": "call_redelivered",
+            "agent": "test-agent",
+        },
+    }
+    function_call_output = {
+        "type": "response.output_item.done",
+        "item": {"type": "function_call_output", "call_id": "call_redelivered", "output": "ok"},
+    }
+    release = asyncio.Event()
+    release.set()
+    runner = _ScriptedRunnerClient(
+        release,
+        [
+            {"type": "response.in_progress", "response": {"id": "resp_redelivery"}},
+            function_call,
+            function_call,
+            function_call_output,
+            function_call_output,
+        ],
+    )
+    try:
+        await _relay_runner_stream_once(session_id, runner, store)  # type: ignore[arg-type]
+    finally:
+        session_stream.close(session_id)
+
+    assert [item.type for item in store.list_items(session_id).data] == [
+        "function_call",
+        "function_call_output",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_relay_stores_the_runner_closed_text_segment_once_in_place_of_its_deltas(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner's segment item is the stored text, persisted and published once.
+
+    The relay saw only the segment's last delta (it attached mid-segment), then
+    gets the runner's segment item twice. The full segment is stored once, ahead
+    of the tool call, live clients get one item carrying its store id, and its
+    RESPONSE-phase policies run once.
+    """
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes._sessions import helpers
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
+
+    evaluated: list[str] = []
+
+    async def _allow(_store: Any, _session_id: str, text: str, **_kwargs: Any) -> None:
+        evaluated.append(text)
+
+    monkeypatch.setattr(helpers, "_relay_response_policy_deny_reason", _allow)
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    published: list[dict[str, Any]] = []
+    real_publish = session_stream.publish
+
+    def _capture_publish(conversation_id: str, event: dict[str, Any]) -> None:
+        if conversation_id == session_id:
+            published.append(event)
+        real_publish(conversation_id, event)
+
+    monkeypatch.setattr(session_stream, "publish", _capture_publish)
+    segment = {
+        "type": "response.output_item.done",
+        "text_segment": "function_call",
+        "item": {
+            "id": "msg_segment_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "agent": "segment-agent",
+            "content": [{"type": "output_text", "text": "Checking the logs."}],
+        },
+    }
+    release = asyncio.Event()
+    release.set()
+    runner = _ScriptedRunnerClient(
+        release,
+        [
+            {"type": "response.in_progress", "response": {"id": "resp_segment"}},
+            {"type": "response.output_text.delta", "delta": " logs."},
+            segment,
+            segment,
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "status": "completed",
+                    "name": "Bash",
+                    "arguments": "{}",
+                    "call_id": "call_after_segment",
+                    "agent": "test-agent",
+                },
+            },
+            {"type": "response.completed", "response": {"id": "resp_segment"}},
+        ],
+    )
+    try:
+        await _relay_runner_stream_once(session_id, runner, store)  # type: ignore[arg-type]
+    finally:
+        session_stream.close(session_id)
+
+    items = store.list_items(session_id).data
+    assert [item.type for item in items] == ["message", "function_call"]
+    message = items[0].to_api_dict()
+    assert message["content"] == [{"type": "output_text", "text": "Checking the logs."}]
+    assert message["model"] == "segment-agent"
+    assert message["response_id"] == "resp_segment"
+    published_messages = [
+        event["item"]
+        for event in published
+        if event.get("type") == "response.output_item.done"
+        and event["item"].get("type") == "message"
+    ]
+    assert [item["id"] for item in published_messages] == [items[0].id]
+    assert evaluated == ["Checking the logs."]
+
+
+@pytest.mark.asyncio
+async def test_relay_stores_the_deny_sentinel_for_a_denied_runner_closed_segment(
+    db_uri: str,
+) -> None:
+    """A recorded LLM_RESPONSE deny replaces the runner's final segment text."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes._sessions.common import _llm_response_denied_turns
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    release = asyncio.Event()
+    release.set()
+    runner = _ScriptedRunnerClient(
+        release,
+        [
+            {"type": "response.in_progress", "response": {"id": "resp_denied_segment"}},
+            {
+                "type": "response.output_item.done",
+                "text_segment": "response.failed",
+                "item": {
+                    "id": "msg_denied_segment",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "synthetic denied text"}],
+                },
+            },
+            {"type": "response.failed", "response": {"id": "resp_denied_segment"}},
+        ],
+    )
+    _llm_response_denied_turns[session_id] = "tripwire"
+    try:
+        await _relay_runner_stream_once(session_id, runner, store)  # type: ignore[arg-type]
+    finally:
+        _llm_response_denied_turns.pop(session_id, None)
+        session_stream.close(session_id)
+
+    messages = [item for item in store.list_items(session_id).data if item.type == "message"]
+    assert [message.to_api_dict()["content"] for message in messages] == [
+        [{"type": "output_text", "text": "[Denied by policy: tripwire]"}]
+    ]
+
+
 def test_context_labels_from_turn_usage_shapes() -> None:
     """The label builder is in-process-only and degrades gracefully.
 
