@@ -55,6 +55,7 @@ export function ScheduledTaskRow({
   onRunNow,
   onDelete,
   busy,
+  projectName,
 }: {
   task: ScheduledTask;
   // The current wall-clock time, supplied by the parent's shared `useNow` ticker
@@ -67,6 +68,8 @@ export function ScheduledTaskRow({
   onRunNow: (task: ScheduledTask) => void;
   onDelete: (task: ScheduledTask) => void;
   busy: boolean;
+  // Name of the project the runs are filed into; absent when unfiled or deleted.
+  projectName?: string;
 }) {
   const navigate = useNavigate();
   const info = useServerInfo();
@@ -123,6 +126,12 @@ export function ScheduledTaskRow({
           <>
             {" · "}
             <span data-testid="task-next-run">Next run {nextRun}</span>
+          </>
+        )}
+        {projectName && (
+          <>
+            {" · "}
+            <span data-testid="task-project">{projectName}</span>
           </>
         )}
       </span>

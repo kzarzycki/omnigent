@@ -109,6 +109,16 @@ describe("next-run text (server-sourced, relative delta)", () => {
   });
 });
 
+describe("project", () => {
+  it("names the project the runs are filed into, and nothing when unfiled", () => {
+    renderRow(task({ projectId: "p1" }), { projectName: "Nightly" });
+    expect(screen.getByTestId("task-project").textContent).toBe("Nightly");
+    cleanup();
+    renderRow(task());
+    expect(screen.queryByTestId("task-project")).toBeNull();
+  });
+});
+
 describe("⋯ menu actions", () => {
   it("dispatches onRunNow when 'Run now' is selected", () => {
     const onRunNow = vi.fn();

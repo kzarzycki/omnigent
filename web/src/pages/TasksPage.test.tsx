@@ -17,6 +17,9 @@ import { showToast } from "@/components/ui/toast";
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 
 vi.mock("@/hooks/useViewerId", () => ({ useViewerId: vi.fn() }));
+vi.mock("@/hooks/useConversations", () => ({
+  useProjects: () => ({ data: [] }),
+}));
 
 vi.mock("@/hooks/useScheduledTasks", () => ({
   useScheduledTasks: vi.fn(),

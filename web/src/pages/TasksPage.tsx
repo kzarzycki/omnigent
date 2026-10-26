@@ -34,6 +34,7 @@ import {
   useUpdateScheduledTask,
 } from "@/hooks/useScheduledTasks";
 import { useNow } from "@/hooks/useNow";
+import { useProjects } from "@/hooks/useConversations";
 import { ScheduledTaskApiError, type ScheduledTask } from "@/lib/scheduledTasksApi";
 import { nextRunAtMs } from "@/lib/scheduleText";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,7 @@ export function TasksPage({ templatesOnly = false }: { templatesOnly?: boolean }
   const [introOpens, setIntroOpens] = useState(0);
   const [pointerTabInteraction, setPointerTabInteraction] = useState(false);
   const { data: tasks, isLoading, isError, refetch } = useScheduledTasks();
+  const { data: projects = [] } = useProjects();
   const { trackClick, trackValueChange } = useOmnigentAnalytics();
   // A single shared, slowly-ticking clock for the whole list. Passing it down to
   // each row (rather than each row owning a timer) keeps the relative next-run
@@ -386,6 +388,7 @@ export function TasksPage({ templatesOnly = false }: { templatesOnly?: boolean }
                   onPauseToggle={handlePauseToggle}
                   onRunNow={handleRunNow}
                   onDelete={handleDelete}
+                  projectName={projects.find((p) => p.id === task.projectId)?.name}
                 />
               ))}
             </div>
