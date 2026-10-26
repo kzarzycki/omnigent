@@ -465,7 +465,7 @@ async def test_child_relaunch_spares_ancestor_runner(db_uri: str, parent_shares:
         admit_launch=AsyncMock(),
         send_text=Mock(side_effect=ConnectionError("host gone")),
     )
-    host_conn = SimpleNamespace(pending_launches={})
+    host_conn = SimpleNamespace(pending_launches={}, hello=SimpleNamespace(capabilities=[]))
     stop = Mock()
     with patch.object(_sessions_helpers, "_spawn_superseded_runner_stop", stop):
         await _sessions_helpers._launch_runner_on_host_locked(

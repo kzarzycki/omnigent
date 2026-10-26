@@ -93,6 +93,7 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 if TYPE_CHECKING:
     import httpx
 
+    from omnigent.config import HarnessTelemetry
     from omnigent.inner.datamodel import OSEnvSandboxSpec
     from omnigent.inner.os_env import OSEnvironment
     from omnigent.inner.terminal import TerminalInstance
@@ -2768,6 +2769,7 @@ def augment_claude_args(
     allowed_tools: tuple[str, ...] = (),
     subagent_router_dir: Path | None = None,
     turn_routing: bool = False,
+    session_id: str | None = None,
 ) -> list[str]:
     """
     Return Claude CLI args with Omnigent MCP/hook/skill injection.
@@ -2821,6 +2823,8 @@ def augment_claude_args(
         Routing on, threaded to :func:`build_hook_settings` so the
         ``UserPromptSubmit`` first-message routing hook is registered.
         ``False`` keeps every prompt off the routing round trip.
+    :param session_id: The launching session, reported as
+        ``omnigent.session.id`` when the server's telemetry setting applies.
     :returns: Augmented argument list for the terminal resource.
     """
     mcp_config = build_mcp_config(bridge_dir, python_executable=python_executable)
@@ -2841,16 +2845,15 @@ def augment_claude_args(
     args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
     if workspace is not None:
-        from omnigent.config import telemetry_endpoint_for
+        from omnigent.config import harness_telemetry_for
 
-        # A machine that keeps telemetry off lists the repos that export; the
-        # invocation settings outrank the user's, so they turn it on per session.
-        if endpoint := telemetry_endpoint_for(workspace):
+        # The invocation settings outrank the user's, so they turn telemetry
+        # on or off per session.
+        if (telemetry := harness_telemetry_for(workspace, session_id)) is not None:
             env = hook_settings.get("env")
             hook_settings["env"] = {
                 **(env if isinstance(env, dict) else {}),
-                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-                "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+                **_claude_telemetry_env(telemetry),
             }
     settings_path = bridge_dir / _INVOCATION_SETTINGS_FILE
     _write_json_file(settings_path, hook_settings)
@@ -2880,6 +2883,29 @@ def augment_claude_args(
     from omnigent.harnesses.claude_native.diagnostics import augment_claude_debug_args
 
     return augment_claude_debug_args(args, bridge_dir)
+
+
+def _claude_telemetry_env(telemetry: HarnessTelemetry) -> dict[str, str]:
+    """Claude Code settings ``env`` for a telemetry decision."""
+    if not telemetry.enabled:
+        return {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}
+    from omnigent.config import otel_key_values
+
+    env = {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": telemetry.endpoint,
+    }
+    if telemetry.from_server:
+        env |= {
+            "OTEL_METRICS_EXPORTER": "otlp",
+            "OTEL_LOGS_EXPORTER": "otlp",
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+        }
+    if telemetry.headers:
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = otel_key_values(telemetry.headers)
+    if telemetry.resource_attributes:
+        env["OTEL_RESOURCE_ATTRIBUTES"] = otel_key_values(telemetry.resource_attributes)
+    return env
 
 
 def _arg_value(args: tuple[str, ...], flag: str) -> str | None:

@@ -62,6 +62,7 @@ from omnigent.runner.identity import token_bound_runner_id
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
@@ -1037,6 +1038,9 @@ def create_hosts_router(
             finally:
                 await _rollback_worktree()
 
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, target.conv, conn.hello.capabilities, conversation_store
+        )
         binding_token = secrets.token_urlsafe(32)
         runner_id = token_bound_runner_id(binding_token)
 
@@ -1190,6 +1194,7 @@ def create_hosts_router(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                harness_telemetry=harness_telemetry,
             )
         )
         try:

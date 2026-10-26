@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -16,6 +17,10 @@ from omnigent.entities import Conversation
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory, ErrorCode, ErrorImpact
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.server import session_revival
+from omnigent.server.harness_telemetry import (
+    harness_telemetry_decision,
+    record_host_harness_telemetry,
+)
 from omnigent.update_check import _read_build_info
 
 if TYPE_CHECKING:
@@ -37,6 +42,81 @@ def runner_inference_verified(conversation: Conversation, response: httpx.Respon
     except ValueError:
         return False
     return isinstance(payload, dict) and payload.get("inference_config_verified") is True
+
+
+async def post_runner_session_init(
+    conversation: Conversation,
+    conversation_store: ConversationStore | None,
+    post: Callable[[dict[str, object]], Awaitable[httpx.Response]],
+    *,
+    server_version: str | None = None,
+    payload_options: Callable[[], dict[str, Any]] = dict,
+    ids_only_without_decision: bool = False,
+    ids_only_on_build_error: bool = False,
+    store_slot: AbstractAsyncContextManager[object] | None = None,
+) -> httpx.Response:
+    """
+    POST one session-init to a runner with the session's harness telemetry decision.
+
+    Every server-to-runner session-init goes through here, so each carries a
+    fresh per-session decision and the runner's on/off answer is recorded.
+
+    :param conversation: The session being initialized.
+    :param conversation_store: Store for the decision and the recorded answer;
+        ``None`` sends no decision.
+    :param post: Sends the body to the runner and returns its response.
+    :param server_version: Version stamped on the envelope; defaults to this server's.
+    :param payload_options: Called after the decision is made and right before
+        the body is built, for the envelope's remaining keyword options.
+    :param ids_only_without_decision: Keep the legacy id-only body when no
+        decision exists, for callers that never sent an envelope.
+    :param ids_only_on_build_error: Send the id-only body, without a decision,
+        when the envelope cannot be built, for callers that must not fail.
+    :param store_slot: Bounds the store read, e.g. a reconnect-storm semaphore.
+    :returns: The runner's response.
+    """
+    decision = None
+    if conversation_store is not None and conversation.agent_id is not None:
+        async with store_slot or nullcontext():
+            decision = await asyncio.to_thread(
+                harness_telemetry_decision, conversation, conversation_store
+            )
+    ids_only: dict[str, object] = {
+        "session_id": conversation.id,
+        "agent_id": conversation.agent_id,
+        "sub_agent_name": conversation.sub_agent_name,
+    }
+    payload = ids_only
+    if conversation.agent_id is not None and not (decision is None and ids_only_without_decision):
+        if server_version is None:
+            from omnigent.version import VERSION
+
+            server_version = VERSION
+        try:
+            payload = build_runner_session_init_payload(
+                conversation,
+                server_version=server_version,
+                harness_telemetry=decision,
+                **payload_options(),
+            )
+        except Exception:
+            if not ids_only_on_build_error:
+                raise
+            # The degradation loses the seeded override and the decision, so
+            # surface it (a bare ValueError catch would swallow a pydantic error).
+            _logger.warning(
+                "session-init envelope build failed for %s; falling back to the "
+                "id-only body (a model-pinned first turn may respawn)",
+                conversation.id,
+                exc_info=True,
+            )
+            decision = None
+    response = await post(payload)
+    if decision is not None and conversation_store is not None:
+        await asyncio.to_thread(
+            record_host_harness_telemetry, conversation, response, conversation_store
+        )
+    return response
 
 
 _BODY_SNIPPET_MAX = 500
@@ -281,42 +361,58 @@ class RunnerSessionInitializer:
                             host_registry=None,
                             tunnel_registry=self._registry,
                         )
-                self.require_generation(runner_id, runner_client, generation)
-                # Decided here, with no await before the post: a session whose
-                # runner died mid-turn continues unless a person cancelled since.
-                taken = session_revival.take_resume(conversation)
-                resume = taken is not None or resume_interrupted_turn
-                recovery_id = self._recovery_ids.setdefault(key, uuid4().hex) if resume else None
-                payload = build_runner_session_init_payload(
-                    conversation,
-                    server_version=self._server_version,
-                    suppress_recovery_turn=suppress_recovery_turn,
-                    resume_interrupted_turn=resume,
-                    recovery_id=recovery_id,
-                )
-                try:
-                    response = await self._post_initialize(
-                        runner_client,
-                        session_id=conversation.id,
-                        runner_id=runner_id,
-                        payload=payload,
-                        timeout=timeout,
-                        resume_interrupted_turn=resume,
-                        suppress_recovery_turn=suppress_recovery_turn,
-                        recovery_id=recovery_id,
-                        generation=generation,
-                        trigger=trigger,
-                        init_attempt_id=init_attempt_id,
-                    )
-                except BaseException:
+                taken = None
+                recovery_id = None
+                resume = resume_interrupted_turn
+
+                def envelope_options() -> dict[str, Any]:
+                    nonlocal taken, recovery_id, resume
+                    self.require_generation(runner_id, runner_client, generation)
+                    # Decided here, with no await before the post: a session whose
+                    # runner died mid-turn continues unless a person cancelled since.
+                    taken = session_revival.take_resume(conversation)
+                    resume = taken is not None or resume_interrupted_turn
+                    if resume:
+                        recovery_id = self._recovery_ids.setdefault(key, uuid4().hex)
+                    return {
+                        "suppress_recovery_turn": suppress_recovery_turn,
+                        "resume_interrupted_turn": resume,
+                        "recovery_id": recovery_id,
+                    }
+
+                async def post(payload: dict[str, object]) -> httpx.Response:
+                    try:
+                        response = await self._post_initialize(
+                            runner_client,
+                            session_id=conversation.id,
+                            runner_id=runner_id,
+                            payload=payload,
+                            timeout=timeout,
+                            resume_interrupted_turn=resume,
+                            suppress_recovery_turn=suppress_recovery_turn,
+                            recovery_id=recovery_id,
+                            generation=generation,
+                            trigger=trigger,
+                            init_attempt_id=init_attempt_id,
+                        )
+                    except BaseException:
+                        if taken is not None:
+                            session_revival.settle_resume(conversation.id, taken, delivered=False)
+                        raise
                     if taken is not None:
-                        session_revival.settle_resume(conversation.id, taken, delivered=False)
-                    raise
-                if taken is not None:
-                    session_revival.settle_resume(
-                        conversation.id, taken, delivered=response.status_code < 400
-                    )
-                return response
+                        session_revival.settle_resume(
+                            conversation.id, taken, delivered=response.status_code < 400
+                        )
+                    return response
+
+                return await post_runner_session_init(
+                    conversation,
+                    self._conversation_store,
+                    post,
+                    server_version=self._server_version,
+                    payload_options=envelope_options,
+                    store_slot=store_slots,
+                )
 
             task = asyncio.create_task(
                 post_session_init(),
