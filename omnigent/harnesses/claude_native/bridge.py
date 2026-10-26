@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import hashlib
@@ -243,16 +244,20 @@ _TOOLS_CHANGED_BODY_MAX_BYTES = 4096
 # Ceiling the relay HTTP handler (``_run_relay_tool``) waits for a single
 # tool dispatch to complete on the harness event loop.
 _TOOL_CALL_TIMEOUT_S = 300.0
+# A dispatch parked on an approval prompt waits as long as the prompt can:
+# the default policy ``ask_timeout`` (one day, ``DEFAULT_ASK_TIMEOUT``) plus one
+# ceiling. ponytail: a policy with a longer ``ask_timeout`` is cut at this budget.
+_TOOL_CALL_APPROVAL_BUDGET_S = 86400.0 + _TOOL_CALL_TIMEOUT_S
 # Timeout for the bridge's POST to the active-turn relay server
 # (``_call_relay_tool``). This is the OUTER hop: it waits for the relay
-# handler's entire ``_TOOL_CALL_TIMEOUT_S`` dispatch, which itself fans out
-# to the Omnigent policy server and back. It MUST exceed ``_TOOL_CALL_TIMEOUT_S``
+# handler's entire dispatch, which itself fans out to the Omnigent policy
+# server and back. It MUST exceed ``_TOOL_CALL_APPROVAL_BUDGET_S``
 # so the inner handler times out first and returns a clean MCP error over
 # HTTP 200 — rather than the outer ``urlopen`` raising and tearing down the
 # stdio MCP server (see ``_stdio_jsonrpc_loop``). The previous flat 10s sat
 # below the real round-trip latency under load, so slow-but-healthy calls
 # (session history reads, shell) tripped it and crashed the bridge.
-_TOOL_RELAY_POST_TIMEOUT_S = _TOOL_CALL_TIMEOUT_S + 30.0
+_TOOL_RELAY_POST_TIMEOUT_S = _TOOL_CALL_APPROVAL_BUDGET_S + 30.0
 # Backstop per-request threads above any expected client tool-call fan-out.
 _MAX_CONCURRENT_MCP_REQUESTS = 64
 # Web-UI → Claude input now flows through tmux send-keys, not
@@ -6932,6 +6937,7 @@ def start_tool_relay(
     policy_client: httpx.AsyncClient | None = None,
     session_id: str | None = None,
     file_change_observer: Callable[[_JsonObject], Awaitable[None]] | None = None,
+    awaiting_approval: Callable[[], bool] | None = None,
 ) -> ClaudeNativeToolRelay:
     """
     Start the shared relay for native-harness Omnigent tool calls.
@@ -6973,6 +6979,7 @@ def start_tool_relay(
         session_id=session_id,
         bridge_dir=bridge_dir,
         file_change_observer=file_change_observer,
+        awaiting_approval=awaiting_approval,
     )
     httpd, advertised_url = _start_bridge_http_server(handler_cls)
     relay_info: _JsonObject = {
@@ -7273,6 +7280,7 @@ def _tool_relay_handler_factory(
     session_id: str | None = None,
     bridge_dir: Path | None = None,
     file_change_observer: Callable[[_JsonObject], Awaitable[None]] | None = None,
+    awaiting_approval: Callable[[], bool] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """
     Create an HTTP handler class for active-turn tool calls.
@@ -7360,7 +7368,11 @@ def _tool_relay_handler_factory(
                 return
             if not isinstance(arguments, dict):
                 arguments = {}
-            self._send_json(_run_relay_tool(tool_executor, loop, name, arguments))
+            self._send_json(
+                _run_relay_tool(
+                    tool_executor, loop, name, arguments, awaiting_approval=awaiting_approval
+                )
+            )
 
         def _respond_hook_output(self, output: dict[str, object] | None) -> None:
             """Answer a hook-evaluate request with final hook output JSON.
@@ -7612,24 +7624,40 @@ def _run_relay_tool(
     loop: asyncio.AbstractEventLoop,
     name: str,
     arguments: _JsonObject,
+    *,
+    awaiting_approval: Callable[[], bool] | None = None,
 ) -> _JsonObject:
     """
     Execute one relay tool call on the harness event loop.
+
+    A dispatch that outlives ``_TOOL_CALL_TIMEOUT_S`` is cancelled, which
+    also withdraws any approval prompt it opened, unless the session is
+    waiting on an approval: then it waits up to ``_TOOL_CALL_APPROVAL_BUDGET_S``.
 
     :param tool_executor: Existing harness callback used to
         dispatch one tool call.
     :param loop: Event loop that owns ``tool_executor``.
     :param name: Tool name, e.g. ``"sys_os_shell"``.
     :param arguments: Decoded tool arguments.
+    :param awaiting_approval: Whether the session has an approval prompt
+        pending; ``None`` applies the ceiling unconditionally.
     :returns: MCP tool-call response.
     """
     future = asyncio.run_coroutine_threadsafe(
         _await_tool_result(tool_executor(name, arguments)), loop
     )
+    deadline = time.monotonic() + _TOOL_CALL_APPROVAL_BUDGET_S
+    while not concurrent.futures.wait([future], timeout=_TOOL_CALL_TIMEOUT_S).done:
+        if awaiting_approval is None or not awaiting_approval() or time.monotonic() >= deadline:
+            future.cancel()
+            return _mcp_error(
+                f"Omnigent tool {name} did not finish within {_TOOL_CALL_TIMEOUT_S:.0f}s "
+                "and was cancelled"
+            )
     try:
-        result = future.result(timeout=_TOOL_CALL_TIMEOUT_S)
+        result = future.result()
     except Exception as exc:  # noqa: BLE001 - relay converts callback failures to MCP errors.
-        return _mcp_error(f"Omnigent tool dispatch failed: {exc}")
+        return _mcp_error(f"Omnigent tool dispatch failed: {str(exc) or type(exc).__name__}")
     return _mcp_response_from_tool_result(result)
 
 
@@ -7886,10 +7914,11 @@ def _handle_and_write_mcp_request(
     :returns: None after the response is written.
     """
     # A request failure must not tear down the long-lived MCP server.
-    # Heartbeat only relay-routed calls: the relay's own 300 s budget
-    # guarantees they terminate, so keep-alive is safe. A hung LOCAL tool
-    # must stay killable by the client's static timeout, so it gets no
-    # heartbeat that would reset that deadline forever.
+    # Heartbeat only relay-routed calls: the relay's own budget
+    # (``_TOOL_CALL_APPROVAL_BUDGET_S``) guarantees they terminate, so
+    # keep-alive is safe. A hung LOCAL tool must stay killable by the
+    # client's static timeout, so it gets no heartbeat that would reset that
+    # deadline forever.
     progress_token = (
         _extract_progress_token(params)
         if method == "tools/call" and _is_relay_tool_call(params, bridge_dir)

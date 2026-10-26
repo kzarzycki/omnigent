@@ -4816,6 +4816,7 @@ def create_runner_app(
                     policy_client=server_client,
                     session_id=session_id,
                     file_change_observer=_observe_native_file_changes,
+                    awaiting_approval=lambda: pending_approvals.has_pending(_captured_session_id),
                 )
         except (OSError, RuntimeError):
             _logger.warning(
