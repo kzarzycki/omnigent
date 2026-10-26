@@ -31,8 +31,12 @@ from tests.harnesses.codex_native.app_server._support import (
 _ROUTED_TOOL_APPROVALS = {
     "sys_session_rename": {"approval_mode": "approve"},
     "sys_session_keep": {"approval_mode": "approve"},
-    "sys_session_create": {"approval_mode": "approve"},
+    "sys_session_get_info": {"approval_mode": "approve"},
+    "sys_session_get_history": {"approval_mode": "approve"},
+    "sys_session_list": {"approval_mode": "approve"},
     "sys_agent_list": {"approval_mode": "approve"},
+    "sys_agent_get": {"approval_mode": "approve"},
+    "sys_session_create": {"approval_mode": "approve"},
     "sys_session_send": {"approval_mode": "approve"},
     "sys_read_inbox": {"approval_mode": "approve"},
 }
@@ -44,6 +48,20 @@ def test_the_framework_tool_approvals_are_scoped_to_the_session_class() -> None:
     # The base set is a subset of the routed one, so a routed session never
     # loses an approval a plain session has.
     assert set(_FRAMEWORK_APPROVED_TOOLS) <= set(_ROUTED_TOOL_APPROVALS)
+    # No tool twice: each is a TOML table, and a repeated table fails to parse.
+    for routed in (False, True):
+        tools = framework_approved_tools(routed_spawns=routed)
+        assert len(tools) == len(set(tools))
+
+
+def test_a_plain_session_pre_approves_only_tools_that_change_nothing() -> None:
+    plain = set(framework_approved_tools(routed_spawns=False))
+    assert not plain & {
+        "sys_session_create",
+        "sys_session_send",
+        "sys_session_close",
+        "sys_read_inbox",
+    }
 
 
 # ── The codex-native session classes ────────────────────────────────
@@ -52,7 +70,7 @@ def test_the_framework_tool_approvals_are_scoped_to_the_session_class() -> None:
 # codex-native session boots on. A plain session must be indistinguishable from
 # a pre-Smart-Routing one: codex's bundled model catalog (no ``codex debug
 # models`` probe), no ``spawn_agent`` routing gate in hooks.json, and only the
-# one framework tool approval.
+# plain framework tool approvals.
 #
 # Every Smart Routing session — pinned harness or auto — adds the extended
 # catalog, the spawn gate and the routed-spawn approvals, because on this arm
