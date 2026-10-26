@@ -1,9 +1,10 @@
 # Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `loop.ci: false`).
 [tasks."check:all"]
 alias = "check"
-description = "pre-commit on the files the branch changes since mine, then the fork-sync and cloud-dev skills' tests."
+description = "pre-commit on the files the branch changes since mine, then the fork-sync and cloud-dev skills' tests and the claude-cloud bridge's self-check."
 run = [
   'pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD',
   "bash .claude/skills/fork-sync/test.sh",
   "bash .claude/skills/cloud-dev/test.sh",
+  "python3 integrations/claude-cloud-acp/claude_cloud_acp.py --self-check",
 ]
