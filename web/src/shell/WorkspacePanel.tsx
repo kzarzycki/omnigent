@@ -404,7 +404,8 @@ function NewTabMenu({
 // FileTabsStrip — open file tabs rendered in the top rail tab strip, as peers
 // of the fixed Files/Terminals/Agents tabs. Each tab is a cell with the
 // file's basename and an "x" close button. Clicking the cell activates the
-// tab (opening its viewer); clicking the x closes it. No own scroll container
+// tab (opening its viewer); double-clicking toggles full screen; clicking the
+// x closes it. No own scroll container
 // or flex-1: the parent viewport scrolls the open tabs.
 // ---------------------------------------------------------------------------
 
@@ -413,6 +414,7 @@ function FileTabsStrip({
   activeFilePath,
   onFileSelect,
   onCloseFile,
+  onToggleMaximized,
 }: {
   /** Ordered list of open file paths. */
   openFiles: string[];
@@ -422,6 +424,8 @@ function FileTabsStrip({
   onFileSelect: (path: string) => void;
   /** Close a tab by path. */
   onCloseFile: (path: string) => void;
+  /** Toggle the rail's full-screen state (bound to double-click). */
+  onToggleMaximized: () => void;
 }) {
   // Scroll the active tab into view when it changes (e.g. a newly opened file
   // appended past the visible edge). `inline: "nearest"` scrolls whichever
@@ -449,6 +453,12 @@ function FileTabsStrip({
             aria-current={active}
             title={path}
             onClick={() => onFileSelect(path)}
+            onDoubleClick={(e) => {
+              // Rapid clicks on the close "x" must not toggle full screen.
+              if ((e.target as HTMLElement).closest("button")) return;
+              onFileSelect(path);
+              onToggleMaximized();
+            }}
             onAuxClick={(e) => {
               // Middle click (button 1) closes the tab, matching browser /
               // editor tab conventions.
@@ -1511,6 +1521,7 @@ function WorkspacePanelImpl({
                   activeFilePath={selectedFilePath}
                   onFileSelect={openFileViewer}
                   onCloseFile={onCloseFile}
+                  onToggleMaximized={onToggleMaximized}
                 />
                 <TerminalTabsStrip
                   openTerminals={openTerminals}
