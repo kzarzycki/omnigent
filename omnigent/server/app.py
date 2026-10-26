@@ -259,6 +259,8 @@ class ServerInfoResponse(BaseModel):
     agent_config_edit: bool = False
     # Absent on older servers, which clients treat as the default extensions.
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
+    # Scheduled tasks accept ``project_id`` / ``project_name``; older servers reject them.
+    scheduled_task_projects: bool = False
     branding: BrandingInfo
 
 
@@ -1949,6 +1951,7 @@ def create_app(
                 managed_launches=app_inst.state.managed_launches,
                 startup_inputs=app_inst.state.startup_inputs,
                 app_state=app_inst.state,
+                project_store=project_store,
             )
             on_fire = build_on_fire(fire_deps)
             # The manual "run now" trigger reuses the same fire path (dispatch /
@@ -3463,6 +3466,7 @@ def create_app(
                     "extensions": sorted(filesystem_attachment_policy.extensions),
                     "all_types": filesystem_attachment_policy.all_types,
                 },
+                "scheduled_task_projects": project_store is not None,
                 "branding": branding_snapshot.config(),
             }
         )
