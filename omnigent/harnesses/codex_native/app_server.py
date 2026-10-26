@@ -244,7 +244,18 @@ def _format_codex_version(version: tuple[int, int, int] | None) -> str:
 #: so codex never raises an interactive prompt for them. The rename keeps a
 #: session's title current, which the framework does unprompted on any session.
 #: The keep marks a scheduled run worth reading, and nobody watches a scheduled run.
-_FRAMEWORK_APPROVED_TOOLS: tuple[str, ...] = ("sys_session_rename", "sys_session_keep")
+#: The rest only read session and agent state, and under auto_review each ask
+#: is a reviewer model call. The list settles a dead runner's stale status, as
+#: every reader's list does. ``sys_read_inbox`` marks messages read, so it asks.
+_FRAMEWORK_APPROVED_TOOLS: tuple[str, ...] = (
+    "sys_session_rename",
+    "sys_session_keep",
+    "sys_session_get_info",
+    "sys_session_get_history",
+    "sys_session_list",
+    "sys_agent_list",
+    "sys_agent_get",
+)
 
 #: Additionally pre-approved for an auto-harness Smart Routing session, whose
 #: spawns the router may move onto the counterpart harness family: these four
@@ -272,7 +283,8 @@ def framework_approved_tools(*, routed_spawns: bool) -> tuple[str, ...]:
     """
     if not routed_spawns:
         return _FRAMEWORK_APPROVED_TOOLS
-    return (*_FRAMEWORK_APPROVED_TOOLS, *_ROUTED_SPAWN_APPROVED_TOOLS)
+    # dict.fromkeys drops sys_agent_list's repeat: a TOML table can't be written twice.
+    return tuple(dict.fromkeys((*_FRAMEWORK_APPROVED_TOOLS, *_ROUTED_SPAWN_APPROVED_TOOLS)))
 
 
 def _codex_mcp_server_config_section(
