@@ -79,6 +79,7 @@ from omnigent.inner.datamodel import (
 )
 from omnigent.native import native_cost_popup
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
+from tests._helpers.owner_claim import claim_owner
 
 
 @pytest.fixture(autouse=True)
@@ -14312,7 +14313,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
 
     bridge_dir = prepare_bridge_dir("conv_owner", workspace=tmp_path)
 
-    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").split()[0] == str(os.getpid())
 
 
 def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
@@ -14330,11 +14331,11 @@ def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
     dead.wait()
     dead_dir = root / "deadowner"
     dead_dir.mkdir()
-    (dead_dir / "owner.pid").write_text(str(dead.pid), encoding="utf-8")
+    claim_owner(dead_dir / "owner.pid", dead.pid)
 
     live_dir = root / "liveowner"
     live_dir.mkdir()
-    (live_dir / "owner.pid").write_text(str(os.getpid()), encoding="utf-8")
+    claim_owner(live_dir / "owner.pid", os.getpid())
 
     unmarked_dir = root / "unmarked"
     unmarked_dir.mkdir()
