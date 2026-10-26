@@ -1010,6 +1010,7 @@ for line in sys.stdin:
 
 def self_check() -> None:
     globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
+    os.environ.pop("CLAUDE_CLOUD_TOKEN", None)  # the token cases read the stubbed login
     # Outside a git repo the session fails plainly, before any `claude` runs.
     not_repo = Path(tempfile.mkdtemp())
     stub = not_repo / "claude"

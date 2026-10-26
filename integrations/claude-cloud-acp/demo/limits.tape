@@ -6,7 +6,7 @@ Set Height 1000
 Set TypingSpeed 20ms
 
 Hide
-Type "cd ~/dev/ext/omnigent/worktrees/claude-cloud-acp/integrations/claude-cloud-acp && export PS1='demo$ ' && clear" Enter
+Type "export PS1='demo$ ' && clear" Enter
 Show
 
 Type "python3 e2e.py untrusted" Sleep 300ms Enter

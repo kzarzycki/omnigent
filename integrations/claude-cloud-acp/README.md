@@ -68,9 +68,9 @@ Live scenarios, each starting real cloud sessions: `python3 e2e.py
 turns|restart|respawn|archived|cancel|teardown|subagent <checkout>` and
 `python3 e2e.py untrusted`. The
 tapes in `demo/` record them with [VHS](https://github.com/charmbracelet/vhs):
-`vhs demo/omnigent.tape -o "$tmp/omnigent.mp4"`. The tapes expect the spike
-checkout at `~/dev/ccr-spike-repo` and the agent specs at `~/dev/claude-cloud-agent`
-and `~/dev/claude-cloud-agent-sandboxed` (the same spec without `sandbox`).
+`vhs demo/omnigent.tape -o "$tmp/omnigent.mp4"`, run from this directory. The tapes
+read a trusted git checkout with a GitHub remote from `$DEMO_CHECKOUT`, and the agent
+specs from `$DEMO_AGENT` and `$DEMO_AGENT_SANDBOXED` (the same spec without `sandbox`).
 
 ## Policy
 

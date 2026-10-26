@@ -6,12 +6,12 @@ Set Height 700
 Set TypingSpeed 25ms
 
 Hide
-Type "cd ~/dev/ccr-spike-repo && export PS1='> ' && clear" Enter
+Type `cd "$DEMO_CHECKOUT" && export PS1='> ' && clear` Enter
 Show
 
-Type "cat ~/dev/claude-cloud-agent-sandboxed/config.yaml" Sleep 300ms Enter
+Type `cat "$DEMO_AGENT_SANDBOXED/config.yaml"` Sleep 300ms Enter
 Sleep 3s
-Type "omnigent run ~/dev/claude-cloud-agent-sandboxed -p 'Say hi.'" Sleep 300ms Enter
+Type `omnigent run "$DEMO_AGENT_SANDBOXED" -p 'Say hi.'` Sleep 300ms Enter
 Wait+Screen@180s /pty|rror/
 Sleep 6s
 Ctrl+C
