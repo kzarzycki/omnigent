@@ -295,3 +295,52 @@ async def test_runner_busy_check_counts_a_viewer_only_on_recent_input(
     assert await reaper._is_busy(pane)
     instance._last_client_interaction_at = time.monotonic() - PANE_OUTPUT_BUSY_WINDOW_S - 1.0
     assert not await reaper._is_busy(pane)
+
+
+async def test_runner_busy_check_ignores_output_that_leaves_the_screen_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Fresh pane output spares the pane only while its visible screen changes.
+
+    An idle codex TUI repaints its cursor every few seconds, which keeps tmux's
+    ``window_activity`` fresh forever; counting those bytes as busy kept idle
+    codex panes, and their app-servers, resident for the runner's lifetime.
+    """
+    clock = {"now": 1_000_000.0}
+    screen = {"text": "idle prompt"}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    monkeypatch.setattr(native_cost_popup, "_tmux_last_client_input_at", lambda *_args: None)
+    # Output keeps arriving: window_activity always reads one second old.
+    monkeypatch.setattr(
+        native_cost_popup, "_tmux_window_activity_at", lambda *_args: clock["now"] - 1.0
+    )
+    monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: screen["text"])
+    monkeypatch.setattr(claude_native_bridge, "_APPROVAL_WAIT_ROOT", tmp_path / "approval-waits")
+    registry = TerminalRegistry()
+    app = create_runner_app(
+        terminal_registry=registry,
+        resource_registry=SessionResourceRegistry(terminal_registry=registry),
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    reaper = app.state.native_pane_reaper
+    assert reaper is not None
+    pane = PaneRef(
+        "conv_codex", terminal_resource_id("codex", "main"), "codex", tmp_path / "tmux.sock"
+    )
+
+    # First sight counts as a change, and stays busy through the window.
+    assert await reaper._is_busy(pane)
+    clock["now"] += PANE_OUTPUT_BUSY_WINDOW_S - 1.0
+    assert await reaper._is_busy(pane)
+    # Cursor-only repaints past the window: the screen never changed, so idle.
+    clock["now"] += 2.0
+    assert not await reaper._is_busy(pane)
+    # A real screen change is busy again, for a full window.
+    screen["text"] = "working on it"
+    assert await reaper._is_busy(pane)
+    clock["now"] += PANE_OUTPUT_BUSY_WINDOW_S - 1.0
+    assert await reaper._is_busy(pane)
+    clock["now"] += 2.0
+    assert not await reaper._is_busy(pane)

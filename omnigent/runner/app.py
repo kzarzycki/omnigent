@@ -7893,7 +7893,10 @@ def create_runner_app(
         and _pane_reaper_registry is not None
         and hasattr(_pane_reaper_registry, "native_panes")
     ):
-        from omnigent.harnesses.claude_native.bridge import approval_wait_is_fresh
+        from omnigent.harnesses.claude_native.bridge import (
+            _capture_pane,
+            approval_wait_is_fresh,
+        )
         from omnigent.native.native_cost_popup import (
             _tmux_last_client_input_at,
             _tmux_window_activity_at,
@@ -7905,6 +7908,9 @@ def create_runner_app(
             PaneRef,
         )
 
+        # (conversation, terminal) -> (visible screen, when it last changed).
+        _pane_screens: dict[tuple[str, str], tuple[str, float]] = {}
+
         def _native_panes_for_reaper() -> list[PaneRef]:
             panes: list[PaneRef] = []
             for conv_id, name, socket_path in _pane_reaper_registry.native_panes():
@@ -7913,7 +7919,20 @@ def create_runner_app(
                     resource_registry.terminal_resource_role(conv_id, terminal_id)
                 ):
                     panes.append(PaneRef(conv_id, terminal_id, name, socket_path))
+            live = {(pane.conversation_id, pane.terminal_id) for pane in panes}
+            for key in _pane_screens.keys() - live:
+                del _pane_screens[key]
             return panes
+
+        def _screen_changed_recently(pane: PaneRef) -> bool:
+            screen = _capture_pane(str(pane.socket_path), "main")
+            key = (pane.conversation_id, pane.terminal_id)
+            now = time.time()
+            seen = _pane_screens.get(key)
+            if seen is None or seen[0] != screen:
+                _pane_screens[key] = (screen, now)
+                return True
+            return now - seen[1] < PANE_OUTPUT_BUSY_WINDOW_S
 
         async def _native_pane_is_busy(pane: PaneRef) -> bool:
             conv_id = pane.conversation_id
@@ -7941,16 +7960,18 @@ def create_runner_app(
                 PANE_OUTPUT_BUSY_WINDOW_S
             ):
                 return True
-            # Primary evidence: tmux stamps window_activity on every byte the
-            # pane emits, so a producing terminal stays busy even when the
+            # Primary evidence: a producing terminal stays busy even when the
             # status pipeline above has silently stalled (a stalled forwarder
-            # once froze the busy signal and got a live session reaped).
+            # once froze the busy signal and got a live session reaped). tmux
+            # stamps window_activity on every byte, though, and an idle codex
+            # TUI repaints its cursor every few seconds, so recent activity only
+            # counts when the visible screen changed within the window too.
             activity_at = await asyncio.to_thread(
                 _tmux_window_activity_at, str(pane.socket_path), "main"
             )
-            return (
-                activity_at is not None and time.time() - activity_at < PANE_OUTPUT_BUSY_WINDOW_S
-            )
+            if activity_at is None or time.time() - activity_at >= PANE_OUTPUT_BUSY_WINDOW_S:
+                return False
+            return await asyncio.to_thread(_screen_changed_recently, pane)
 
         async def _reap_native_pane(pane: PaneRef) -> None:
             # Captured before the close: a relaunch during it binds its own relay.
