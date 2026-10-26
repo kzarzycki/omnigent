@@ -15,6 +15,7 @@ from omnigent.entities import Conversation
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory, ErrorCode, ErrorImpact
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.server import session_revival
+from omnigent.server.harness_telemetry import harness_telemetry_decision
 
 if TYPE_CHECKING:
     from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
@@ -238,6 +239,12 @@ class RunnerSessionInitializer:
                             host_registry=None,
                             tunnel_registry=self._registry,
                         )
+                harness_telemetry = None
+                if self._conversation_store is not None:
+                    async with store_slots or nullcontext():
+                        harness_telemetry = await asyncio.to_thread(
+                            harness_telemetry_decision, conversation, self._conversation_store
+                        )
                 self.require_generation(runner_id, runner_client, generation)
                 # Decided here, with no await before the post: a session whose
                 # runner died mid-turn continues unless a person cancelled since.
@@ -250,6 +257,7 @@ class RunnerSessionInitializer:
                     suppress_recovery_turn=suppress_recovery_turn,
                     resume_interrupted_turn=resume,
                     recovery_id=recovery_id,
+                    harness_telemetry=harness_telemetry,
                 )
                 try:
                     response = await self._post_initialize(

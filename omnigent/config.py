@@ -96,6 +96,21 @@ def telemetry_endpoint_for(workspace: Path) -> str | None:
 
 
 HARNESS_TELEMETRY_ENV_VAR = "OMNIGENT_HARNESS_TELEMETRY"
+# The server's decision per session this runner serves, from its session-init.
+_session_harness_telemetry: dict[str, dict[str, object]] = {}
+
+
+def set_session_harness_telemetry(session_id: str, decision: object) -> None:
+    """
+    Record the server's harness telemetry decision for *session_id*.
+
+    :param session_id: A session this runner serves, e.g. a co-located sub-session.
+    :param decision: Its session-init ``harness_telemetry``; ``None`` forgets it.
+    """
+    if isinstance(decision, dict):
+        _session_harness_telemetry[session_id] = decision
+    else:
+        _session_harness_telemetry.pop(session_id, None)
 
 
 @dataclass(frozen=True)
@@ -124,46 +139,53 @@ def harness_telemetry_for(
     """
     The telemetry a harness launched in *workspace* runs with.
 
-    The server's decision, which the host saved for this runner at
-    :data:`HARNESS_TELEMETRY_ENV_VAR`, wins; its repository exclusions are
-    checked here against the checkout's ``origin``, and an ``origin`` that
-    can't be read while any exist means off, as does an unreadable decision.
-    Without one, :func:`telemetry_endpoint_for` decides as before.
+    The server's decision wins: the session's own, from its session-init,
+    else the one the host saved for the runner's primary session at
+    :data:`HARNESS_TELEMETRY_ENV_VAR`, which another session in the runner
+    never inherits (off instead). Its repository exclusions are checked here
+    against the checkout's ``origin``; an ``origin`` that can't be read while
+    any exist means off, as does an unreadable decision. Without one,
+    :func:`telemetry_endpoint_for` decides as before.
 
     :param workspace: Session workspace.
     :param session_id: The launching session, which may be a sub-session
-        co-located in its parent's runner; it becomes ``omnigent.session.id``.
+        co-located in its parent's runner; ``None`` (a background task) takes
+        the runner's decision.
     :returns: The decision, or ``None`` to leave the user's own settings alone.
     """
-    path = os.environ.get(HARNESS_TELEMETRY_ENV_VAR)
-    if not path:
-        endpoint = telemetry_endpoint_for(workspace)
-        return HarnessTelemetry(enabled=True, endpoint=endpoint) if endpoint else None
-    try:
-        decision = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(decision, dict):
-            raise ValueError("expected a mapping")
-    except (OSError, ValueError) as exc:
-        _log.warning("harness telemetry decision %s unreadable; telemetry off: %s", path, exc)
-        return HarnessTelemetry(enabled=False, from_server=True)
+    decision = _session_harness_telemetry.get(session_id) if session_id else None
+    if decision is None:
+        path = os.environ.get(HARNESS_TELEMETRY_ENV_VAR)
+        if not path:
+            endpoint = telemetry_endpoint_for(workspace)
+            return HarnessTelemetry(enabled=True, endpoint=endpoint) if endpoint else None
+        try:
+            loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("expected a mapping")
+        except (OSError, ValueError) as exc:
+            _log.warning("harness telemetry decision %s unreadable; telemetry off: %s", path, exc)
+            return HarnessTelemetry(enabled=False, from_server=True)
+        runner_session = _str_map(loaded.get("resource_attributes")).get("omnigent.session.id")
+        if session_id and runner_session != session_id:
+            return HarnessTelemetry(enabled=False, from_server=True)
+        decision = loaded
     endpoint = decision.get("endpoint")
     if decision.get("enabled") is not True or not isinstance(endpoint, str) or not endpoint:
         return HarnessTelemetry(enabled=False, from_server=True)
+    listed = decision.get("exclude_repos")
     excluded_repos = {
-        repo for repo in decision.get("exclude_repos") or () if isinstance(repo, str)
+        repo for repo in (listed if isinstance(listed, list) else ()) if isinstance(repo, str)
     }
     if excluded_repos:
         repo = _origin_repo(workspace)
         if repo is None or repo in excluded_repos:
             return HarnessTelemetry(enabled=False, from_server=True)
-    attributes = _str_map(decision.get("resource_attributes"))
-    if session_id:
-        attributes["omnigent.session.id"] = session_id
     return HarnessTelemetry(
         enabled=True,
         endpoint=endpoint.rstrip("/"),
         headers=_str_map(decision.get("headers")),
-        resource_attributes=attributes,
+        resource_attributes=_str_map(decision.get("resource_attributes")),
         from_server=True,
     )
 

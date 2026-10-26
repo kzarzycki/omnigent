@@ -162,6 +162,7 @@ from omnigent.server.bundles import (
 )
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.harness_telemetry import (
+    harness_telemetry_decision,
     harness_telemetry_setting,
     session_excluded,
     session_owner,
@@ -6219,12 +6220,16 @@ async def _ensure_runner_session_initialized(
         else:
             from omnigent.version import VERSION
 
+            harness_telemetry = await asyncio.to_thread(
+                harness_telemetry_decision, conv, conversation_store
+            )
             resp = await runner_client.post(
                 "/v1/sessions",
                 json=build_runner_session_init_payload(
                     conv,
                     server_version=VERSION,
                     suppress_recovery_turn=suppress_recovery_turn,
+                    harness_telemetry=harness_telemetry,
                 ),
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
             )

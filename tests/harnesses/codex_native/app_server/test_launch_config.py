@@ -941,7 +941,10 @@ def test_the_servers_telemetry_decision_sets_codex_otel_overrides_and_resource_a
             "enabled": True,
             "endpoint": "https://otlp.example.test",
             "headers": {"x-ingest-token": "made-up"},
-            "resource_attributes": {"omnigent.root_session.id": "conv_root"},
+            "resource_attributes": {
+                "omnigent.root_session.id": "conv_root",
+                "omnigent.session.id": "conv_sub",
+            },
         }
     )
     assert otel["otel.exporter"] == {

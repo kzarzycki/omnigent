@@ -536,7 +536,7 @@ def test_the_servers_harness_telemetry_decision_wins_and_checks_repo_exclusions_
 
     def decide(decision: object, workspace: Path) -> HarnessTelemetry | None:
         decision_path.write_text(json.dumps(decision))
-        return harness_telemetry_for(workspace, "conv_sub")
+        return harness_telemetry_for(workspace, "conv_root")
 
     monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
     assert harness_telemetry_for(public) is None  # no decision, no allowlist: user settings
@@ -556,13 +556,11 @@ def test_the_servers_harness_telemetry_decision_wins_and_checks_repo_exclusions_
         enabled=True,
         endpoint="https://otlp.example.test",
         headers={"x-ingest-token": "made-up"},
-        # A sub-session co-located in its parent's runner reports its own id.
-        resource_attributes={
-            "omnigent.session.id": "conv_sub",
-            "omnigent.root_session.id": "conv_root",
-        },
+        resource_attributes=on["resource_attributes"],
         from_server=True,
     )
+    # The runner's decision is its primary session's; another one never inherits it.
+    assert harness_telemetry_for(public, "conv_sub") == off
     assert decide(on, private) == off
     assert decide(on, no_origin) == off  # unreadable origin with repo exclusions: fail closed
     assert decide({**on, "exclude_repos": []}, no_origin).enabled  # nothing to check

@@ -74,7 +74,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
-from omnigent.server.harness_telemetry import harness_telemetry_launch
+from omnigent.server.harness_telemetry import harness_telemetry_decision, harness_telemetry_launch
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -1057,6 +1057,9 @@ def register_core_routes(
                         conv,
                         server_version=VERSION,
                         suppress_recovery_turn=True,
+                        harness_telemetry=await asyncio.to_thread(
+                            harness_telemetry_decision, conv, conversation_store
+                        ),
                     )
                 except Exception:
                     # Must not fail the create, but the degradation loses the
@@ -2956,12 +2959,16 @@ def register_core_routes(
                     # from the spec, and the recovery turn that executes seeded
                     # initial_items ran on the spec's harness. Recovery stays
                     # enabled: on rebind it is what runs the pending kickoff.
+                    harness_telemetry = await asyncio.to_thread(
+                        harness_telemetry_decision, conv, conversation_store
+                    )
                     try:
                         runner_init_resp = await _runner_client.post(
                             "/v1/sessions",
                             json=build_runner_session_init_payload(
                                 conv,
                                 server_version=VERSION,
+                                harness_telemetry=harness_telemetry,
                             ),
                             timeout=10.0,
                         )

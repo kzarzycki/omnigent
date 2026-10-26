@@ -129,15 +129,32 @@ def harness_telemetry_launch(
     :param conv: The session being launched.
     :param capabilities: The target host's advertised capabilities.
     :param conversation_store: Store used to resolve the session's owner.
-    :returns: ``None`` when no setting exists or the host predates the field
-        (it then launches as today); ``{"enabled": False}`` for an excluded
-        session; else the endpoint, headers, repository exclusions and the
-        ``omnigent.*`` resource attributes.
+    :returns: ``None`` when the host predates the field (it then launches as
+        today), else :func:`harness_telemetry_decision`.
     """
     from omnigent.host.frames import CAP_HARNESS_TELEMETRY
 
     if CAP_HARNESS_TELEMETRY not in capabilities:
         return None
+    return harness_telemetry_decision(conv, conversation_store)
+
+
+def harness_telemetry_decision(
+    conv: Conversation, conversation_store: ConversationStore
+) -> dict[str, Any] | None:
+    """
+    The server's harness telemetry decision for *conv*, as the host applies it.
+
+    It rides both the runner launch frame (the runner-wide file) and every
+    session-init envelope, which a sub-session co-located in its parent's
+    runner applies to its own harness launch.
+
+    :param conv: The session being launched or initialized.
+    :param conversation_store: Store used to resolve the session's owner.
+    :returns: ``None`` when no setting exists; ``{"enabled": False}`` for an
+        excluded session; else the endpoint, headers, repository exclusions
+        and the ``omnigent.*`` resource attributes.
+    """
     setting = harness_telemetry_setting()
     if setting is None:
         return None

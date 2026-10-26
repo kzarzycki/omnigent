@@ -3726,6 +3726,7 @@ def test_augment_claude_args_applies_the_servers_telemetry_decision(
             "resource_attributes": {
                 "omnigent.root_session.id": "conv_root",
                 "omnigent.project": "team project",
+                "omnigent.session.id": "conv_sub",
             },
         }
     ) == {

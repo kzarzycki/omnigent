@@ -2193,11 +2193,13 @@ def create_runner_app(
         session_id: str,
         agent_id: str,
     ) -> _SessionInitContext:
+        from omnigent.config import set_session_harness_telemetry
         from omnigent.runner.session_init_protocol import validate_runner_inference_config
 
         if envelope.session_id != session_id or envelope.agent_id != agent_id:
             raise ValueError("session initialization envelope identity mismatch")
         validate_runner_inference_config(envelope.snapshot.inference_config)
+        set_session_harness_telemetry(session_id, envelope.snapshot.harness_telemetry)
 
         global _server_version
         _server_version = envelope.server_version
