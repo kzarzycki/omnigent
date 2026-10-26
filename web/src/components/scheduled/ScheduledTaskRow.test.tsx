@@ -28,6 +28,7 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     workspace: null,
     hostId: null,
     executionTarget: "connected_host",
+    projectId: null,
     state: "active",
     lastRunAt: null,
     lastRunStatus: null,
@@ -76,6 +77,16 @@ describe("next-run text (server-sourced, relative delta)", () => {
   it("renders NO next-run text when nextRunAt is null (paused / unarmed)", () => {
     renderRow(task({ nextRunAt: null }));
     expect(screen.queryByTestId("task-next-run")).toBeNull();
+  });
+});
+
+describe("project", () => {
+  it("names the project the runs are filed into, and nothing when unfiled", () => {
+    renderRow(task({ projectId: "p1" }), { projectName: "Nightly" });
+    expect(screen.getByTestId("task-project").textContent).toBe("Nightly");
+    cleanup();
+    renderRow(task());
+    expect(screen.queryByTestId("task-project")).toBeNull();
   });
 });
 
