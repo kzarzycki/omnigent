@@ -685,13 +685,17 @@ class Session:
 SESSIONS: dict[str, Session] = {}
 
 
-def remember(key: str, cloud_id: str) -> None:
+def remember(key: str, cloud_id: str | None) -> None:
+    """Record *key*'s cloud session; None forgets it."""
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     # The bridges of other Omnigent sessions write the same file.
     with STATE_FILE.with_suffix(".lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         known = recall()
-        known[key] = cloud_id
+        if cloud_id is None:
+            known.pop(key, None)
+        else:
+            known[key] = cloud_id
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(known))
         tmp.replace(STATE_FILE)
@@ -890,6 +894,11 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
         elif to_updates(payload)[1]:
             if payload.get("is_error"):  # a failed setup script ends the session here
                 errors = payload.get("errors") or [str(payload.get("result") or "unknown error")]
+                # The cloud says to start a new session, so the next message makes one.
+                for key in (acp_id, first_prompt_key(s.cwd, text)):
+                    remember(key, None)
+                SESSIONS[acp_id] = Session(s.cwd, acp_id)
+                SESSIONS[acp_id].mcp = s.mcp
                 raise RuntimeError(f"cloud session setup failed: {'; '.join(errors)}")
             break
     after, _ = _send(s, text)
@@ -1274,6 +1283,8 @@ def self_check() -> None:
     except RuntimeError as exc:
         assert str(exc) == "cloud session setup failed: Setup script failed with exit code 1.", exc
     assert prompts == [], prompts
+    assert not {"acp-broken", first_prompt_key("/repo", "go")} & recall().keys(), recall()
+    assert SESSIONS["acp-broken"] is not broken and SESSIONS["acp-broken"].cloud_id is None
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")
