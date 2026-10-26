@@ -227,7 +227,8 @@ async def test_large_mirror_tree_attaches_without_blocking_or_per_child_reads(
     async def heartbeat() -> None:
         while not stop.is_set():
             heartbeats.append(len(relays))
-            await asyncio.sleep(0)
+            # A sleep(0) spin starves the worker threads recovery reads the store on.
+            await asyncio.sleep(0.001)
 
     async def respond(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content)["session_id"])
@@ -482,7 +483,7 @@ async def test_hosted_child_recovers_independently_while_parent_is_stalled(
 
     async def hosted_recovers() -> None:
         while sessions._session_status_cache.get(hosted.id) != "idle":
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
 
     async with _recover(app, monkeypatch, respond) as (relays, finished):
         await asyncio.wait_for(asyncio.gather(parent_entered.wait(), hosted_recovers()), budget(5))
