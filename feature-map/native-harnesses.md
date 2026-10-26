@@ -46,6 +46,8 @@ implements them separately, so a fix for one harness does not reach the others.
   composer or native terminal; a tool turn and follow-up retain history.
 - `approvals`: tool calls the harness gates show an approval card in chat, and
   the answer reaches the harness.
+- `questions`: Claude's questions show an answer form in chat. If its web
+  question wait expires, Claude receives a request to ask in chat text.
 - `resume`: resume a previous conversation from the CLI (`--resume`, or a bare
   `--resume` picker that lists only this host's sessions) or by reopening it.
 - `pi-rebuilt-tool-names`: Pi forks and cold resumes keep matching tool names
@@ -560,6 +562,10 @@ Cross-harness journeys:
   worktree symlink pointing outside that home, request two edits in that
   worktree, and approve directory access on the first prompt. The second edit
   in the granted directory should proceed with Auto still enabled.
+- **`questions` (`claude-native`):**
+  `tests/e2e_ui/approvals/test_native_claude_question.py::test_native_question_reaches_chat_and_returns_to_claude`
+  sends from both chat and the embedded terminal, answers the web form, and
+  separately expires the permission request to check the chat-text fallback.
 - **`approvals`, Kiro delivery and manual retry:**
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_manual_retry`
   (own environment, real browser/server/runner/tmux, fake Kiro) drops the first
