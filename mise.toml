@@ -1,4 +1,4 @@
-# Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `CI: none`).
+# Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `loop.ci: false`).
 [tasks."check:all"]
 alias = "check"
 description = "pre-commit on the files the branch changes since mine, then the fork-sync and cloud-dev skills' tests."
