@@ -1590,7 +1590,9 @@ async def test_relay_terminal_observation_tracks_stop_attempt(
     dispatched = asyncio.Event()
     acknowledgement = asyncio.Event()
 
-    async def stop_host(*_args: object, attempt: _HostRunnerStopAttempt) -> bool:
+    async def stop_host(
+        *_args: object, attempt: _HostRunnerStopAttempt, reason: str | None = None
+    ) -> bool:
         attempt.dispatched = True
         dispatched.set()
         if outcome == "rejected_while_running":
