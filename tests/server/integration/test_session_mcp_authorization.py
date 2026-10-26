@@ -215,10 +215,10 @@ async def test_shared_stdio_policy_preserves_owner_only_removal(
     initial = _bundle(_mcp_config("stdio"))
     session_id, headers = await _create_session(client, db_uri, initial, level)
     url = f"/v1/sessions/{session_id}/agent/mcp-servers"
-    for method, path in (("POST", url), ("PUT", f"{url}/service")):
-        response = await client.request(
-            method, path, headers=headers, json=_mcp_config("stdio", changed=True)
-        )
+    # POST a new name: a duplicate would answer 409 before the stdio policy runs.
+    for method, path, name in (("POST", url, "another"), ("PUT", f"{url}/service", "service")):
+        config = _mcp_config("stdio", changed=True) | {"name": name}
+        response = await client.request(method, path, headers=headers, json=config)
         assert response.status_code == 403, response.text
         expected = (
             "stdio MCP servers are not permitted"
