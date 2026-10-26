@@ -22,7 +22,7 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 import type * as SessionsApiModule from "@/lib/sessionsApi";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
@@ -44,6 +44,7 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => ({
 import { useConversations } from "@/hooks/useConversations";
 import { getSessionSlim } from "@/lib/sessionsApi";
 import { Sidebar } from "./Sidebar";
+import { requestRevealSessionInSidebar, SIDEBAR_REVEAL_FLASH_CLASS } from "./sidebarReveal";
 
 const useConvMock = vi.mocked(useConversations);
 const getSessionSlimMock = vi.mocked(getSessionSlim);
@@ -149,6 +150,23 @@ describe("sidebar highlight while viewing a sub-agent", () => {
     // Once the parent walk resolves, the root's row carries the highlight.
     await waitFor(() => expect(rowFor("conv_root")).toHaveClass("bg-[var(--sidebar-active)]"));
     expect(rowFor("conv_other")).not.toHaveClass("bg-[var(--sidebar-active)]");
+  });
+
+  it("reveals the top-level parent row when asked from a child's page", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    mockConversations([topLevelConv("conv_root"), topLevelConv("conv_other")]);
+    getSessionSlimMock.mockImplementation((id: string) => {
+      if (id === "conv_child") return Promise.resolve(snapshot("conv_child", "conv_root"));
+      return Promise.resolve(snapshot(id, null));
+    });
+
+    renderAt("/c/conv_child");
+    await waitFor(() => expect(rowFor("conv_root")).toHaveClass("bg-[var(--sidebar-active)]"));
+    act(() => requestRevealSessionInSidebar("conv_child"));
+
+    await waitFor(() =>
+      expect(rowFor("conv_root").closest("li")).toHaveClass(SIDEBAR_REVEAL_FLASH_CLASS),
+    );
   });
 
   it("still highlights a top-level session viewed directly", async () => {

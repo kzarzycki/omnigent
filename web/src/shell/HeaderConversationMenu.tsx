@@ -17,6 +17,7 @@ import {
   GitBranchIcon,
   GitForkIcon,
   InfoIcon,
+  LocateFixedIcon,
   MailIcon,
   PencilIcon,
   PinIcon,
@@ -89,6 +90,7 @@ import { useNavigate } from "@/lib/routing";
 import { USER_SESSION_TITLE_MAX_CHARS } from "@/lib/sessionTitles";
 import { showArchiveUndoToast } from "./archiveUndoToast";
 import { unpinWithUndo } from "./unpinUndoToast";
+import { requestRevealSessionInSidebar } from "./sidebarReveal";
 import { useArchiveWorktreePrompt } from "./ArchiveWorktreeDialog";
 import { cn } from "@/lib/utils";
 import { MOBILE_GLASS_SURFACE } from "./mobileGlass";
@@ -425,6 +427,14 @@ export function HeaderConversationMenu({
           Create automation
         </DropdownMenuItem>
       )}
+      <DropdownMenuItem
+        data-testid="header-reveal-in-sidebar"
+        className={itemClass}
+        onSelect={() => requestRevealSessionInSidebar(conversation.id)}
+      >
+        <LocateFixedIcon className="size-3.5" />
+        Show in sidebar
+      </DropdownMenuItem>
       {/* Move to project is also reachable on desktop via the breadcrumb's
           folder tag (HeaderProjectTag); on mobile the native shells hide the
           breadcrumb, so this menu is the sole entry point. */}

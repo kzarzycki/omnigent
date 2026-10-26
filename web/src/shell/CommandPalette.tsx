@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   CalendarClockIcon,
   InboxIcon,
+  LocateFixedIcon,
   type LucideIcon,
   PanelLeftIcon,
   PanelRightIcon,
@@ -16,7 +17,7 @@ import {
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
-import { useNavigate } from "@/lib/routing";
+import { useNavigate, useParams } from "@/lib/routing";
 import {
   type ConversationsPage,
   isSearchTimeout,
@@ -36,6 +37,7 @@ import {
   settingsShortcutKeys,
   sidebarToggleShortcutKeys,
 } from "@/components/KeyboardShortcut";
+import { requestRevealSessionInSidebar } from "./sidebarReveal";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -165,6 +167,7 @@ export function CommandPalette({
   onCloseSidebar,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { conversationId } = useParams<{ conversationId: string }>();
   const isMobile = useIsMobileViewport();
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -244,8 +247,19 @@ export function CommandPalette({
         run: onToggleRightSidebar,
         shortcut: rightSidebarShortcutEnabled ? rightSidebarToggleShortcutKeys() : undefined,
       },
+      ...(conversationId
+        ? [
+            {
+              id: "reveal-in-sidebar",
+              label: "Show current session in sidebar",
+              icon: LocateFixedIcon,
+              keywords: ["locate", "find", "reveal", "scroll", "highlight", "where"],
+              run: () => requestRevealSessionInSidebar(conversationId),
+            },
+          ]
+        : []),
     ],
-    [go, onToggleLeftSidebar, onToggleRightSidebar, rightSidebarShortcutEnabled],
+    [go, conversationId, onToggleLeftSidebar, onToggleRightSidebar, rightSidebarShortcutEnabled],
   );
 
   const filteredActions = useMemo(() => {
