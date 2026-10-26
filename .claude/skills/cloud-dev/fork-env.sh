@@ -1,6 +1,7 @@
 #!/bin/bash
 # Print one of the owner's machine-specific values, which stay out of this public repo:
 #   fork-env.sh OMNIGENT_BRIDGE_HOST | OMNIGENT_MACOS_BUILD_HOST | OMNIGENT_DEV_ENVIRONMENT_ID
+#             | OMNIGENT_AGENT_SKILLS (the bridge host's agent-skills checkout)
 # The environment variable wins (a Claude cloud environment sets it), else the overlay's
 # NAME=value line. Missing from both, it exits 1 naming the overlay.
 set -u
