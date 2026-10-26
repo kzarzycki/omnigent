@@ -997,6 +997,19 @@ for line in sys.stdin:
 
 def self_check() -> None:
     globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
+    # Outside a git repo the session fails plainly, before any `claude` runs.
+    not_repo = Path(tempfile.mkdtemp())
+    stub = not_repo / "claude"
+    stub.write_text(f"#!/bin/sh\ntouch {not_repo}/ran\n")
+    stub.chmod(0o755)
+    real_cli, globals()["CLAUDE_CLI"] = CLAUDE_CLI, str(stub)
+    try:
+        create_cloud_session("hi", str(not_repo))
+        raise AssertionError("a session started outside a git repo")
+    except RuntimeError as exc:
+        assert "is not a git repository" in str(exc), exc
+    assert not (not_repo / "ran").exists()
+    globals()["CLAUDE_CLI"] = real_cli
     upd, done = to_updates(
         {
             "type": "assistant",
