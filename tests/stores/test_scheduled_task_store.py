@@ -753,6 +753,49 @@ def test_update_host_id_can_be_cleared_to_null(store: SqlAlchemyScheduledTaskSto
     assert fetched.host_id is None
 
 
+def test_update_project_id_moves_and_clears(store: SqlAlchemyScheduledTaskStore) -> None:
+    store.create(
+        scheduled_task_id=_uid("st_project"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        project_id=_uid("proj_a"),
+    )
+    moved = store.update(_uid("st_project"), project_id=_uid("proj_b"))
+    assert moved is not None and moved.project_id == _uid("proj_b")
+    untouched = store.update(_uid("st_project"), name="renamed")
+    assert untouched is not None and untouched.project_id == _uid("proj_b")
+    store.update(_uid("st_project"), project_id=None)
+    fetched = store.get(_uid("st_project"))
+    assert fetched is not None and fetched.project_id is None
+
+
+def test_clear_project_id_only_clears_the_expected_project(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    store.create(
+        scheduled_task_id=_uid("st_clear_project"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        project_id=_uid("proj_new"),
+    )
+    # The task was moved off the stale project, so the conditional clear is a no-op.
+    assert store.clear_project_id(_uid("st_clear_project"), _uid("proj_stale")) is False
+    kept = store.get(_uid("st_clear_project"))
+    assert kept is not None and kept.project_id == _uid("proj_new")
+
+    assert store.clear_project_id(_uid("st_clear_project"), _uid("proj_new")) is True
+    cleared = store.get(_uid("st_clear_project"))
+    assert cleared is not None and cleared.project_id is None
+
+
 def test_update_overrides_can_be_cleared_to_null(store: SqlAlchemyScheduledTaskStore) -> None:
     """Passing ``None`` for an override clears it to NULL (set→agent default).
 

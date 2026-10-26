@@ -29,6 +29,7 @@ import {
   useUpdateScheduledTask,
 } from "@/hooks/useScheduledTasks";
 import { useNow } from "@/hooks/useNow";
+import { useProjects } from "@/hooks/useConversations";
 import type { ScheduledTask } from "@/lib/scheduledTasksApi";
 import { nextRunAtMs } from "@/lib/scheduleText";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,7 @@ export function TasksPage() {
   // each row (rather than each row owning a timer) keeps the relative next-run
   // labels fresh with ONE interval regardless of how many rows are on screen.
   const now = useNow();
+  const { data: projects = [] } = useProjects();
   const updateMutation = useUpdateScheduledTask();
   const deleteMutation = useDeleteScheduledTask();
   const runNowMutation = useRunScheduledTaskNow();
@@ -246,6 +248,7 @@ export function TasksPage() {
               key={task.id}
               task={task}
               now={now}
+              projectName={projects.find((p) => p.id === task.projectId)?.name}
               busy={busyId === task.id}
               onEdit={handleEdit}
               onPauseToggle={handlePauseToggle}
