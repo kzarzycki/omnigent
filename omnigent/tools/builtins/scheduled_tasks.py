@@ -104,10 +104,6 @@ class SysScheduledTaskCreateTool(Tool):
                                 "Omit for the agent default."
                             ),
                         },
-                        "project_id": {
-                            "type": "string",
-                            "description": "Optional project each run is filed into.",
-                        },
                         "archive_when_done": {
                             "type": "boolean",
                             "description": (
@@ -157,6 +153,21 @@ class SysScheduledTaskCreateTool(Tool):
                                 "a fresh server-managed sandbox per firing, using the server's "
                                 "sandbox lifecycle settings. Do not set host_id or workspace "
                                 "with it. Requires managed sandboxes configured on the server."
+                            ),
+                        },
+                        "project_name": {
+                            "type": "string",
+                            "description": (
+                                "Optional project to file every fired session into, by "
+                                "name: your existing project with this name, or a new one "
+                                "if you have none. Do not set project_id with it."
+                            ),
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional existing project id to file every fired session "
+                                "into. Do not set project_name with it."
                             ),
                         },
                     },
@@ -256,10 +267,6 @@ class SysScheduledTaskUpdateTool(Tool):
                                 "'dontAsk', or 'bypassPermissions'."
                             ),
                         },
-                        "project_id": {
-                            "type": "string",
-                            "description": "New project each run is filed into; '' clears it.",
-                        },
                         "archive_when_done": {
                             "type": "boolean",
                             "description": "Archive a run that succeeds unless it kept itself.",
@@ -304,6 +311,20 @@ class SysScheduledTaskUpdateTool(Tool):
                         "state": {
                             "type": "string",
                             "description": "'active' or 'paused'.",
+                        },
+                        "project_name": {
+                            "type": "string",
+                            "description": (
+                                "File future fired sessions into this project, by name: "
+                                "your existing project with this name, or a new one."
+                            ),
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": (
+                                "File future fired sessions into this existing project id. "
+                                "Null stops filing them into a project."
+                            ),
                         },
                     },
                     "required": ["scheduled_task_id"],

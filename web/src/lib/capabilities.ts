@@ -247,6 +247,8 @@ export interface ServerInfo {
    * older servers, whose policy is the default extension list.
    */
   filesystem_attachments?: FilesystemAttachmentsInfo | null;
+  /** Scheduled tasks accept a project; absent on older servers (off). */
+  scheduled_task_projects?: boolean;
   /** Operator branding, or null when the built-in identity should be used. */
   branding?: Branding | null;
 }
@@ -458,6 +460,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           agent_detail: data.agent_detail === true,
           agent_config_edit: data.agent_config_edit === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
+          scheduled_task_projects: data.scheduled_task_projects === true,
           branding: parseBranding(data.branding),
         };
         return cachedServerInfo;
