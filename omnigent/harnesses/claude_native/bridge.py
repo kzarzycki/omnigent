@@ -44,6 +44,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import shlex
 import socket
 import socketserver
@@ -63,7 +64,6 @@ from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast
-from urllib import request
 
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
@@ -111,6 +111,15 @@ _INJECTION_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
     "claude_native_injection_cancel_event", default=None
 )
 _INJECTION_LOCKS_GUARD = threading.Lock()
+# MCP request id of the call the current serve-mcp request thread is handling.
+_MCP_REQUEST_ID: ContextVar[str | int | None] = ContextVar(
+    "claude_native_mcp_request_id", default=None
+)
+# In-flight requests by MCP request id, with the relay connection a relayed call holds,
+# so a client's ``notifications/cancelled`` can close it; cancelled ids get no response.
+_INFLIGHT_REQUESTS_LOCK = threading.Lock()
+_INFLIGHT_REQUESTS: dict[str | int, HTTPConnection | None] = {}
+_CANCELLED_REQUESTS: set[str | int] = set()
 _INJECTION_LOCKS: dict[str, threading.Lock] = {}
 _INJECTION_LOCK_POLL_INTERVAL_S = 0.1
 _InjectionFunction = TypeVar("_InjectionFunction", bound=Callable[..., Any])
@@ -256,6 +265,8 @@ _TOOL_CALL_APPROVAL_BUDGET_S = 86400.0 + _TOOL_CALL_TIMEOUT_S
 # below the real round-trip latency under load, so slow-but-healthy calls
 # (session history reads, shell) tripped it and crashed the bridge.
 _TOOL_RELAY_POST_TIMEOUT_S = _TOOL_CALL_APPROVAL_BUDGET_S + 30.0
+# How often the relay handler checks that the caller still holds the connection.
+_TOOL_CALL_CALLER_POLL_S = 1.0
 # Backstop per-request threads above any expected client tool-call fan-out.
 _MAX_CONCURRENT_MCP_REQUESTS = 64
 # Web-UI → Claude input now flows through tmux send-keys, not
@@ -7329,11 +7340,25 @@ def _tool_relay_handler_factory(
                 return
             if not isinstance(arguments, dict):
                 arguments = {}
-            self._send_json(
-                _run_relay_tool(
-                    tool_executor, loop, name, arguments, awaiting_approval=awaiting_approval
-                )
+            response = _run_relay_tool(
+                tool_executor,
+                loop,
+                name,
+                arguments,
+                awaiting_approval=awaiting_approval,
+                caller_gone=self._caller_gone,
             )
+            # A caller that stopped waiting has closed the connection.
+            with contextlib.suppress(OSError):
+                self._send_json(response)
+
+        def _caller_gone(self) -> bool:
+            """Whether the client closed this request's connection (readable, zero bytes)."""
+            try:
+                readable, _, _ = select.select([self.connection], [], [], 0)
+                return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+            except OSError:
+                return True
 
         def _respond_hook_output(self, output: dict[str, object] | None) -> None:
             """Answer a hook-evaluate request with final hook output JSON.
@@ -7577,6 +7602,7 @@ def _run_relay_tool(
     arguments: _JsonObject,
     *,
     awaiting_approval: Callable[[], bool] | None = None,
+    caller_gone: Callable[[], bool] | None = None,
 ) -> _JsonObject:
     """
     Execute one relay tool call on the harness event loop.
@@ -7584,6 +7610,7 @@ def _run_relay_tool(
     A dispatch that outlives ``_TOOL_CALL_TIMEOUT_S`` is cancelled, which
     also withdraws any approval prompt it opened, unless the session is
     waiting on an approval: then it waits up to ``_TOOL_CALL_APPROVAL_BUDGET_S``.
+    A dispatch whose caller has gone is cancelled at once.
 
     :param tool_executor: Existing harness callback used to
         dispatch one tool call.
@@ -7592,14 +7619,31 @@ def _run_relay_tool(
     :param arguments: Decoded tool arguments.
     :param awaiting_approval: Whether the session has an approval prompt
         pending; ``None`` applies the ceiling unconditionally.
+    :param caller_gone: Whether the caller stopped waiting for the result,
+        checked every ``_TOOL_CALL_CALLER_POLL_S``.
     :returns: MCP tool-call response.
     """
     future = asyncio.run_coroutine_threadsafe(
         _await_tool_result(tool_executor(name, arguments)), loop
     )
-    deadline = time.monotonic() + _TOOL_CALL_APPROVAL_BUDGET_S
-    while not concurrent.futures.wait([future], timeout=_TOOL_CALL_TIMEOUT_S).done:
-        if awaiting_approval is None or not awaiting_approval() or time.monotonic() >= deadline:
+    started = time.monotonic()
+    checkpoint = started + _TOOL_CALL_TIMEOUT_S
+    poll_s = min(_TOOL_CALL_CALLER_POLL_S, _TOOL_CALL_TIMEOUT_S)
+    while not concurrent.futures.wait([future], timeout=poll_s).done:
+        if caller_gone is not None and caller_gone():
+            future.cancel()
+            return _mcp_error(f"Omnigent tool {name} was cancelled: the caller stopped waiting")
+        now = time.monotonic()
+        if now < checkpoint:
+            continue
+        # The ceiling and approval budget are judged once per ceiling, as before
+        # caller polling: work after an approval gets a full ceiling to finish.
+        checkpoint += _TOOL_CALL_TIMEOUT_S
+        if (
+            awaiting_approval is None
+            or not awaiting_approval()
+            or now - started >= _TOOL_CALL_APPROVAL_BUDGET_S
+        ):
             future.cancel()
             return _mcp_error(
                 f"Omnigent tool {name} did not finish within {_TOOL_CALL_TIMEOUT_S:.0f}s "
@@ -7690,9 +7734,17 @@ def _stdio_jsonrpc_loop(
             continue
         request_id = message.get("id")
         method = message.get("method")
+        if method == "notifications/cancelled":
+            _cancel_mcp_request(message.get("params"))
+            continue
         if request_id is None or not isinstance(method, str):
             continue
         if request_slots.acquire(blocking=False):
+            # Registered before the worker runs, so a cancel read next is never lost.
+            inflight_id = request_id if isinstance(request_id, (str, int)) else None
+            if inflight_id is not None:
+                with _INFLIGHT_REQUESTS_LOCK:
+                    _INFLIGHT_REQUESTS[inflight_id] = None
             request_thread = threading.Thread(
                 target=_handle_and_write_mcp_request,
                 args=(
@@ -7712,6 +7764,9 @@ def _stdio_jsonrpc_loop(
                 request_thread.start()
             except RuntimeError:
                 request_slots.release()
+                if inflight_id is not None:
+                    with _INFLIGHT_REQUESTS_LOCK:
+                        _INFLIGHT_REQUESTS.pop(inflight_id, None)
             else:
                 continue
         _write_jsonrpc(
@@ -7876,6 +7931,8 @@ def _handle_and_write_mcp_request(
         else None
     )
     heartbeat = _McpProgressHeartbeat(progress_token, stdout_lock, framed=framed)
+    inflight_id = request_id if isinstance(request_id, (str, int)) else None
+    _MCP_REQUEST_ID.set(inflight_id)
     try:
         with heartbeat:
             result = _handle_mcp_request(method, params, tools, bridge_dir)
@@ -7890,10 +7947,43 @@ def _handle_and_write_mcp_request(
             "id": request_id,
             "error": {"code": -32603, "message": f"internal error: {exc}"},
         }
+    cancelled = False
+    if inflight_id is not None:
+        with _INFLIGHT_REQUESTS_LOCK:
+            _INFLIGHT_REQUESTS.pop(inflight_id, None)
+            cancelled = inflight_id in _CANCELLED_REQUESTS
+            _CANCELLED_REQUESTS.discard(inflight_id)
     try:
-        _write_jsonrpc(response, stdout_lock, framed=framed)
+        # MCP: a cancelled request gets no response.
+        if not cancelled:
+            _write_jsonrpc(response, stdout_lock, framed=framed)
     finally:
         request_slots.release()
+
+
+def _cancel_mcp_request(params: object) -> None:
+    """
+    Handle a client's ``notifications/cancelled`` for an in-flight request.
+
+    Closing a relayed call's connection tells the relay its caller has gone, so
+    it cancels the dispatch and withdraws any approval prompt the call opened.
+
+    :param params: Notification params, e.g. ``{"requestId": 7, "reason": "..."}``.
+    :returns: None.
+    """
+    request_id = params.get("requestId") if isinstance(params, dict) else None
+    if not isinstance(request_id, (str, int)):
+        return
+    with _INFLIGHT_REQUESTS_LOCK:
+        if request_id not in _INFLIGHT_REQUESTS:
+            return
+        _CANCELLED_REQUESTS.add(request_id)
+        connection = _INFLIGHT_REQUESTS[request_id]
+    # Read once: the worker's ``close()`` may clear ``sock`` at any moment.
+    sock = connection.sock if connection is not None else None
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 def _handle_mcp_request(
@@ -8087,29 +8177,46 @@ def _call_relay_tool(
     if not isinstance(token, str) or not isinstance(url, str):
         return _mcp_error("active Omnigent tool relay is missing url/token")
     payload = json.dumps({"name": name, "arguments": arguments}).encode("utf-8")
-    req = request.Request(
-        f"{url}/tool",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+    parsed = urllib.parse.urlsplit(url)
+    connection = HTTPConnection(
+        parsed.hostname or "", parsed.port, timeout=_TOOL_RELAY_POST_TIMEOUT_S
     )
+    request_id = _MCP_REQUEST_ID.get()
     try:
-        with request.urlopen(req, timeout=_TOOL_RELAY_POST_TIMEOUT_S) as resp:
-            raw = resp.read().decode("utf-8")
-            if resp.status >= 400:
-                return _mcp_error(f"tool relay POST failed with HTTP {resp.status}")
-    # ``OSError`` (the base of ``error.URLError``) also covers the bare
-    # timeout / reset errors that ``urlopen`` raises mid-read —
-    # ``TimeoutError``, ``socket.timeout``, ``ConnectionResetError`` — which
-    # are NOT ``URLError`` instances. Catching the base class returns a clean
-    # MCP error for all of them instead of letting the exception propagate up
-    # through ``_call_mcp_tool`` → ``_stdio_jsonrpc_loop`` and kill the MCP
-    # server.
-    except OSError as exc:
+        connection.connect()
+        # Register the open connection so a client cancel can close it.
+        with _INFLIGHT_REQUESTS_LOCK:
+            cancelled = request_id in _CANCELLED_REQUESTS
+            if request_id in _INFLIGHT_REQUESTS:
+                _INFLIGHT_REQUESTS[request_id] = connection
+        if cancelled:
+            return _mcp_error(f"Omnigent tool {name} was cancelled by the client")
+        connection.request(
+            "POST",
+            f"{parsed.path.rstrip('/')}/tool",
+            body=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        resp = connection.getresponse()
+        raw = resp.read().decode("utf-8")
+        if resp.status >= 400:
+            return _mcp_error(f"tool relay POST failed with HTTP {resp.status}")
+    # ``OSError`` covers the bare timeout / reset errors raised mid-read —
+    # ``TimeoutError``, ``socket.timeout``, ``ConnectionResetError`` — and a
+    # connection a client cancel shut down; ``HTTPException`` a malformed or
+    # truncated response. Returning a clean MCP error for all of them keeps the
+    # exception from propagating up through ``_call_mcp_tool`` →
+    # ``_stdio_jsonrpc_loop`` and killing the MCP server.
+    except (OSError, HTTPException) as exc:
         return _mcp_error(f"failed to call Omnigent tool relay: {exc}")
+    finally:
+        with _INFLIGHT_REQUESTS_LOCK:
+            if request_id is not None and _INFLIGHT_REQUESTS.get(request_id) is connection:
+                _INFLIGHT_REQUESTS[request_id] = None
+        connection.close()
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError:
