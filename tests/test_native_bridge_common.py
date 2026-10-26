@@ -12,14 +12,16 @@ from types import SimpleNamespace
 import pytest
 
 from omnigent.inner.native_attachments import attachment_cache_dir, materialize_attachment
-from omnigent.native import native_bridge_common
+from omnigent.native import native_bridge_common, owner_claim
+from tests._helpers.owner_claim import claim_owner
 
 
 def test_write_owner_pid_marker_records_current_pid(tmp_path: Path) -> None:
     """The marker names the process that prepared the dir (owner-pid invariant)."""
     native_bridge_common.write_owner_pid_marker(tmp_path)
-    marker = tmp_path / native_bridge_common.OWNER_PID_FILENAME
-    assert marker.read_text(encoding="utf-8").strip() == str(os.getpid())
+    claim = owner_claim.read_owner_claim(tmp_path)
+    assert claim is not None
+    assert (claim.pid, claim.pid_ns) == (os.getpid(), owner_claim.current_pid_namespace())
 
 
 def test_write_owner_pid_marker_swallows_missing_dir(tmp_path: Path) -> None:
@@ -37,15 +39,11 @@ def test_prune_removes_dead_keeps_live_and_unmarked(tmp_path: Path) -> None:
     dead.wait()
     dead_dir = root / "deadowner"
     dead_dir.mkdir()
-    (dead_dir / native_bridge_common.OWNER_PID_FILENAME).write_text(
-        str(dead.pid), encoding="utf-8"
-    )
+    claim_owner(dead_dir / native_bridge_common.OWNER_PID_FILENAME, dead.pid)
 
     live_dir = root / "liveowner"
     live_dir.mkdir()
-    (live_dir / native_bridge_common.OWNER_PID_FILENAME).write_text(
-        str(os.getpid()), encoding="utf-8"
-    )
+    claim_owner(live_dir / native_bridge_common.OWNER_PID_FILENAME, os.getpid())
 
     unmarked_dir = root / "unmarked"
     unmarked_dir.mkdir()
@@ -67,6 +65,36 @@ def test_prune_removes_dead_keeps_live_and_unmarked(tmp_path: Path) -> None:
     assert not attachment_cache_dir(dead_dir).exists()
     assert attachment_cache_dir(live_dir).exists()
     assert attachment_cache_dir(unmarked_dir).exists()
+
+
+def test_prune_keeps_owners_it_cannot_prove_gone(tmp_path: Path) -> None:
+    """A dead pid from another PID namespace, or in a legacy integer marker, is kept.
+
+    The retention policy is never consulted for them: codex's reclaims plugin downloads.
+    """
+    root = tmp_path / "bridge-root"
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    foreign, legacy = root / "foreign", root / "legacy"
+    for bridge_dir in (foreign, legacy):
+        bridge_dir.mkdir(parents=True)
+    claim_owner(
+        foreign / native_bridge_common.OWNER_PID_FILENAME,
+        dead.pid,
+        pid_ns="pid:[4026531836]-elsewhere",
+    )
+    (legacy / native_bridge_common.OWNER_PID_FILENAME).write_text(str(dead.pid), encoding="utf-8")
+
+    consulted: list[str] = []
+
+    def _should_prune(bridge_dir: Path) -> bool:
+        consulted.append(bridge_dir.name)
+        return True
+
+    assert native_bridge_common.prune_orphaned_dirs(root, should_prune=_should_prune) == 0
+    assert consulted == []
+    assert foreign.exists()
+    assert legacy.exists()
 
 
 def test_prune_ignores_non_dir_entries_and_bad_markers(tmp_path: Path) -> None:
@@ -98,9 +126,7 @@ def test_prune_retains_entry_when_eligibility_check_fails(
     eligible_dir = root / "eligible"
     for bridge_dir in (failing_dir, eligible_dir):
         bridge_dir.mkdir(parents=True)
-        (bridge_dir / native_bridge_common.OWNER_PID_FILENAME).write_text(
-            "999999", encoding="utf-8"
-        )
+        claim_owner(bridge_dir / native_bridge_common.OWNER_PID_FILENAME, 999999)
     monkeypatch.setattr("omnigent.inner.terminal._process_alive", lambda _pid: False)
 
     def _should_prune(bridge_dir: Path) -> bool:
@@ -121,12 +147,11 @@ def test_prune_retains_entry_reclaimed_during_eligibility_check(
     root = tmp_path / "bridge-root"
     bridge_dir = root / "reclaimed"
     bridge_dir.mkdir(parents=True)
-    marker = bridge_dir / native_bridge_common.OWNER_PID_FILENAME
-    marker.write_text("999999", encoding="utf-8")
-    monkeypatch.setattr("omnigent.inner.terminal._process_alive", lambda _pid: False)
+    claim_owner(bridge_dir / native_bridge_common.OWNER_PID_FILENAME, 999999)
+    monkeypatch.setattr("omnigent.inner.terminal._process_alive", lambda pid: pid != 999999)
 
     def _reclaim(_bridge_dir: Path) -> bool:
-        marker.write_text(str(os.getpid()), encoding="utf-8")
+        native_bridge_common.write_owner_pid_marker(bridge_dir)
         return True
 
     assert native_bridge_common.prune_orphaned_dirs(root, should_prune=_reclaim) == 0
