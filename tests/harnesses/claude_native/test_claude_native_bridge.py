@@ -7406,10 +7406,19 @@ def test_cancel_mcp_request_tolerates_a_connection_closing_concurrently() -> Non
         peer.close()
 
 
+@pytest.mark.parametrize(
+    ("approved_at", "finished_at"),
+    [
+        (0.30, 0.35),  # approved mid-ceiling
+        (0.39, 0.55),  # approved just before a ceiling boundary, work runs past it
+    ],
+)
 def test_run_relay_tool_gives_approved_work_a_full_ceiling(
     monkeypatch: pytest.MonkeyPatch,
+    approved_at: float,
+    finished_at: float,
 ) -> None:
-    """Approval is judged once per ceiling: work that starts after approval gets to finish."""
+    """Work after an approval gets a full ceiling from the approval to finish."""
     future: concurrent.futures.Future[object] = concurrent.futures.Future()
     clock = [0.0]
 
@@ -7419,7 +7428,7 @@ def test_run_relay_tool_gives_approved_work_a_full_ceiling(
 
     def _wait(_futures: object, timeout: float) -> Any:
         clock[0] = round(clock[0] + timeout, 6)
-        if clock[0] >= 0.35:
+        if clock[0] >= finished_at:
             future.set_result({"result": "finished"})
         return types.SimpleNamespace(done={future} if future.done() else set())
 
@@ -7429,17 +7438,52 @@ def test_run_relay_tool_gives_approved_work_a_full_ceiling(
     monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.2)
     monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
 
-    # Approved at 0.30 s, work done at 0.35 s, next ceiling check at 0.40 s.
     response = claude_native_bridge._run_relay_tool(
         lambda *_args: None,
         cast(Any, None),
         "sys_scheduled_task_create",
         {},
-        awaiting_approval=lambda: clock[0] < 0.30,
+        awaiting_approval=lambda: clock[0] < approved_at,
     )
 
     assert response.get("isError") is not True
     assert "finished" in json.dumps(response)
+
+
+def test_run_relay_tool_names_the_approval_budget_when_it_runs_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval that never resolves is cancelled at the budget, which the error names."""
+    future: concurrent.futures.Future[object] = concurrent.futures.Future()
+    clock = [0.0]
+
+    def _submit(coroutine: Any, _loop: object) -> concurrent.futures.Future[object]:
+        coroutine.close()
+        return future
+
+    def _wait(_futures: object, timeout: float) -> Any:
+        clock[0] = round(clock[0] + timeout, 6)
+        return types.SimpleNamespace(done=set())
+
+    monkeypatch.setattr(claude_native_bridge.asyncio, "run_coroutine_threadsafe", _submit)
+    monkeypatch.setattr(claude_native_bridge.concurrent.futures, "wait", _wait)
+    monkeypatch.setattr(claude_native_bridge.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_APPROVAL_BUDGET_S", 0.5)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
+
+    response = claude_native_bridge._run_relay_tool(
+        lambda *_args: None,
+        cast(Any, None),
+        "sys_scheduled_task_create",
+        {},
+        awaiting_approval=lambda: True,
+    )
+
+    assert response.get("isError") is True
+    assert "approval budget" in json.dumps(response)
+    assert future.cancelled()
+    assert clock[0] == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("concurrent_method", ["ping", "tools/call"])

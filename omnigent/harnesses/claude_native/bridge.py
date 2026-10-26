@@ -7655,9 +7655,9 @@ def _run_relay_tool(
     """
     Execute one relay tool call on the harness event loop.
 
-    A dispatch that outlives ``_TOOL_CALL_TIMEOUT_S`` is cancelled, which
-    also withdraws any approval prompt it opened, unless the session is
-    waiting on an approval: then it waits up to ``_TOOL_CALL_APPROVAL_BUDGET_S``.
+    A dispatch that runs ``_TOOL_CALL_TIMEOUT_S`` past the last moment the
+    session had an approval pending is cancelled, which also withdraws any
+    approval prompt it opened; no dispatch outlives ``_TOOL_CALL_APPROVAL_BUDGET_S``.
     A dispatch whose caller has gone is cancelled at once.
 
     :param tool_executor: Existing harness callback used to
@@ -7675,23 +7675,24 @@ def _run_relay_tool(
         _await_tool_result(tool_executor(name, arguments)), loop
     )
     started = time.monotonic()
-    checkpoint = started + _TOOL_CALL_TIMEOUT_S
+    # The ceiling runs from the last moment an approval was pending, so work
+    # after an approval gets a full ceiling to finish.
+    approval_last_seen = started
     poll_s = min(_TOOL_CALL_CALLER_POLL_S, _TOOL_CALL_TIMEOUT_S)
     while not concurrent.futures.wait([future], timeout=poll_s).done:
         if caller_gone is not None and caller_gone():
             future.cancel()
             return _mcp_error(f"Omnigent tool {name} was cancelled: the caller stopped waiting")
         now = time.monotonic()
-        if now < checkpoint:
-            continue
-        # The ceiling and approval budget are judged once per ceiling, as before
-        # caller polling: work after an approval gets a full ceiling to finish.
-        checkpoint += _TOOL_CALL_TIMEOUT_S
-        if (
-            awaiting_approval is None
-            or not awaiting_approval()
-            or now - started >= _TOOL_CALL_APPROVAL_BUDGET_S
-        ):
+        if now - started >= _TOOL_CALL_APPROVAL_BUDGET_S:
+            future.cancel()
+            return _mcp_error(
+                f"Omnigent tool {name} did not finish within its approval budget of "
+                f"{_TOOL_CALL_APPROVAL_BUDGET_S:.0f}s and was cancelled"
+            )
+        if awaiting_approval is not None and awaiting_approval():
+            approval_last_seen = now
+        elif now - approval_last_seen >= _TOOL_CALL_TIMEOUT_S:
             future.cancel()
             return _mcp_error(
                 f"Omnigent tool {name} did not finish within {_TOOL_CALL_TIMEOUT_S:.0f}s "
