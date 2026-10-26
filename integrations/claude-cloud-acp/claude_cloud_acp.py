@@ -601,7 +601,6 @@ class Session:
         self.acp_id = acp_id
         self.cloud_id: str | None = None
         self.mcp: dict[str, McpProxy] = {}
-        self.mcp_registered = False
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
         # Control requests being answered: the cloud sends nothing while it waits on one.
@@ -895,11 +894,13 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
 
 
 def _send(s: Session, text: str) -> tuple[int, bool]:
-    """Post the prompt, registering MCP servers first when this bridge hasn't yet."""
-    if not s.mcp or s.mcp_registered:
+    """Post the prompt, registering MCP servers first.
+
+    Every time: a cloud session resumed in a new sandbox runs a new CLI without them.
+    """
+    if not s.mcp:
         return send_message(s.cloud_id, text)
     sent = register_mcp(s.cloud_id, s.mcp)
-    s.mcp_registered = True
     send_message(s.cloud_id, text)
     return sent
 
@@ -1113,6 +1114,20 @@ def self_check() -> None:
         assert access_token() == "new" and len(runs) == 1  # fresh token: no second refresh
     finally:
         subprocess.run = real_run
+    # Each prompt re-registers the MCP servers before it, for a CLI a new sandbox started.
+    posts: list[str] = []
+
+    def record(_id: str, payload: dict) -> tuple[int, bool]:
+        posts.append(payload.get("request", {}).get("subtype") or payload["type"])
+        return len(posts), False
+
+    real_posts = post_active, post_event
+    globals()["post_active"] = globals()["post_event"] = record
+    tools = Session("/", "acp-tools")
+    tools.cloud_id, tools.mcp = "session_01Tools", {"echo": proxy}
+    assert _send(tools, "one") == (1, False) and _send(tools, "two") == (4, False)
+    assert posts == ["mcp_set_servers", "mcp_set_servers", "user"] * 2, posts
+    globals()["post_active"], globals()["post_event"] = real_posts
     # A turn quiet for longer than KEEPALIVE_S still sends updates, so Omnigent
     # never idles it out; a turn that fails has already named its cloud session.
     out = io.StringIO()
