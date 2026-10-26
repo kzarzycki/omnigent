@@ -282,7 +282,7 @@ class RunnerSessionInitializer:
                     session_revival.settle_resume(
                         conversation.id, taken, delivered=response.status_code < 400
                     )
-                if self._conversation_store is not None:
+                if harness_telemetry is not None and self._conversation_store is not None:
                     await asyncio.to_thread(
                         record_host_harness_telemetry,
                         conversation,

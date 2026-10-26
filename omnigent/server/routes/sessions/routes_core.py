@@ -1052,8 +1052,12 @@ def register_core_routes(
                 "agent_id": conv.agent_id,
                 "sub_agent_name": conv.sub_agent_name,
             }
+            harness_telemetry = None
             if conv.agent_id is not None:
                 try:
+                    harness_telemetry = await asyncio.to_thread(
+                        harness_telemetry_decision, conv, conversation_store
+                    )
                     # ``initial_items`` are already persisted and forwarded by
                     # now, so suppress the runner's recovery turn or they run
                     # twice.
@@ -1061,9 +1065,7 @@ def register_core_routes(
                         conv,
                         server_version=VERSION,
                         suppress_recovery_turn=True,
-                        harness_telemetry=await asyncio.to_thread(
-                            harness_telemetry_decision, conv, conversation_store
-                        ),
+                        harness_telemetry=harness_telemetry,
                     )
                 except Exception:
                     # Must not fail the create, but the degradation loses the
@@ -1078,9 +1080,10 @@ def register_core_routes(
                     )
             try:
                 init_response = await _rc.post("/v1/sessions", json=init_body, timeout=10.0)
-                await asyncio.to_thread(
-                    record_host_harness_telemetry, conv, init_response, conversation_store
-                )
+                if harness_telemetry is not None:
+                    await asyncio.to_thread(
+                        record_host_harness_telemetry, conv, init_response, conversation_store
+                    )
             except (httpx.HTTPError, ConnectionError):
                 _logger.warning(
                     "Failed to notify runner about session %s",
@@ -2990,12 +2993,13 @@ def register_core_routes(
                     else:
                         from omnigent.server.runner_session_init import runner_inference_verified
 
-                        await asyncio.to_thread(
-                            record_host_harness_telemetry,
-                            conv,
-                            runner_init_resp,
-                            conversation_store,
-                        )
+                        if harness_telemetry is not None:
+                            await asyncio.to_thread(
+                                record_host_harness_telemetry,
+                                conv,
+                                runner_init_resp,
+                                conversation_store,
+                            )
                         parent_initialized = (
                             runner_init_resp.status_code < 400
                             and runner_inference_verified(conv, runner_init_resp)

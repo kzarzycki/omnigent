@@ -6233,7 +6233,10 @@ async def _ensure_runner_session_initialized(
                 ),
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
             )
-            await asyncio.to_thread(record_host_harness_telemetry, conv, resp, conversation_store)
+            if harness_telemetry is not None:
+                await asyncio.to_thread(
+                    record_host_harness_telemetry, conv, resp, conversation_store
+                )
         from omnigent.server.runner_session_init import (
             is_session_agent_removed,
             runner_inference_verified,
