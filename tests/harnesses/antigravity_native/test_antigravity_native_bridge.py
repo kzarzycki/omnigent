@@ -37,6 +37,7 @@ from omnigent.harnesses.antigravity_native.bridge import (
     write_mcp_config,
     write_tmux_target,
 )
+from tests._helpers.owner_claim import claim_owner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2510,7 +2511,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
 
     bridge_dir = _mod.prepare_bridge_dir("bridge_owner")
 
-    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").split()[0] == str(os.getpid())
 
 
 _RETENTION_NOW = 2_000_000_000.0
@@ -2534,7 +2535,7 @@ def _dead_owner_bridge(
     bridge_dir = root / "deadowner"
     bridge_dir.mkdir(parents=True)
     owner_marker = bridge_dir / "owner.pid"
-    owner_marker.write_text("999999", encoding="utf-8")
+    claim_owner(owner_marker, 999999)
     marked_at = _RETENTION_NOW - owner_marker_age_s
     os.utime(owner_marker, (marked_at, marked_at))
     return bridge_dir
@@ -2552,7 +2553,7 @@ def test_prune_orphaned_bridge_dirs_retains_recent_dead_owner_bridge(
     (dead_dir / "bridge.json").write_text("secret", encoding="utf-8")
 
     assert _mod.prune_orphaned_bridge_dirs() == 0
-    assert (dead_dir / "owner.pid").read_text(encoding="utf-8") == "999999"
+    assert (dead_dir / "owner.pid").read_text(encoding="utf-8").split()[0] == "999999"
     assert (dead_dir / "bridge.json").read_text(encoding="utf-8") == "secret"
 
 
@@ -2710,7 +2711,7 @@ def test_prune_orphaned_bridge_dirs_keeps_live_and_unmarked_bridges(
     live_dir = root / "liveowner"
     live_dir.mkdir()
     live_marker = live_dir / "owner.pid"
-    live_marker.write_text(str(os.getpid()), encoding="utf-8")
+    claim_owner(live_marker, os.getpid())
     os.utime(live_marker, (expired_at, expired_at))
 
     unmarked_dir = root / "unmarked"
