@@ -17104,6 +17104,17 @@
             }
           },
           {
+            "description": "When `True`, side chats stay in the page with their source label, for clients that need every session's live state; the sidebar omits them.",
+            "in": "query",
+            "name": "include_side_chats",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Side Chats",
+              "type": "boolean"
+            }
+          },
+          {
             "description": "Conversation kind to return. `\"default\"` (the default) returns only top-level user-initiated sessions \u2014 the sidebar's view. `\"sub_agent\"` returns only sub-agent child sessions. `\"any\"` returns both; this lets the new-session agent picker discover agents that are only bound to sub-agent sessions (e.g. ones uploaded via `sys_session_create`).",
             "in": "query",
             "name": "kind",
