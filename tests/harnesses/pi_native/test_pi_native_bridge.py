@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from omnigent.harnesses.pi_native import bridge as pi_native_bridge
+from tests._helpers.owner_claim import claim_owner
 
 
 def _inbox_files(bridge_dir: Path) -> list[str]:
@@ -404,7 +405,7 @@ def test_prepare_bridge_dir_writes_owner_pid_marker(
 
     bridge_dir = prepare_bridge_dir("conv_owner_marker")
 
-    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").split()[0] == str(os.getpid())
 
 
 def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
@@ -427,13 +428,13 @@ def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
     dead_dir = root / "deadowner"
     dead_dir.mkdir()
     marker = dead_dir / "owner.pid"
-    marker.write_text(str(dead.pid), encoding="utf-8")
+    claim_owner(marker, dead.pid)
     expired = pi_native_bridge.time.time() - pi_native_bridge._ORPHAN_RETENTION_SECONDS - 1
     os.utime(marker, (expired, expired))
 
     live_dir = root / "liveowner"
     live_dir.mkdir()
-    (live_dir / "owner.pid").write_text(str(os.getpid()), encoding="utf-8")
+    claim_owner(live_dir / "owner.pid", os.getpid())
 
     unmarked_dir = root / "unmarked"
     unmarked_dir.mkdir()
@@ -465,7 +466,7 @@ def test_prune_uses_latest_pi_session_activity(
     sessions.mkdir(parents=True)
     marker = bridge / "owner.pid"
     if recent_marker is not None:
-        marker.write_text("999999")
+        claim_owner(marker, 999999)
     native_session = sessions / "session.jsonl"
     native_session.write_text('{"type":"message","message":{"usage":{"totalTokens":800000}}}\n')
     monkeypatch.setattr(pi_native_bridge, "_BRIDGE_ROOT", root)
