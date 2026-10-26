@@ -1747,6 +1747,7 @@ def register_core_routes(
         search_query: str | None = Query(default=None),
         search_scope: str = Query(default="all", pattern="^(all|title|content)$"),
         include_archived: bool = Query(default=False),
+        include_side_chats: bool = Query(default=False),
         kind: str = Query(default="default", pattern="^(default|sub_agent|any)$"),
         project: str | None = Query(default=None),
         pinned: bool = Query(default=False),
@@ -1793,6 +1794,9 @@ def register_core_routes(
             are returned alongside active ones (the sidebar groups
             them into an "Archived" section). Powers the sidebar's
             "Show archived" toggle.
+        :param include_side_chats: When ``True``, side chats stay in
+            the page with their source label, for clients that need
+            every session's live state; the sidebar omits them.
         :param kind: Conversation kind to return. ``"default"``
             (the default) returns only top-level user-initiated
             sessions — the sidebar's view. ``"sub_agent"`` returns
@@ -1902,7 +1906,10 @@ def register_core_routes(
         # Side chats surface only as Workspace-rail tabs, so drop any
         # side-chat-labeled fork from the sidebar list (it is still a normal
         # session, just not listed as a top-level one here).
-        page.data = [conv for conv in page.data if SIDE_CHAT_LABEL_KEY not in (conv.labels or {})]
+        if not include_side_chats:
+            page.data = [
+                conv for conv in page.data if SIDE_CHAT_LABEL_KEY not in (conv.labels or {})
+            ]
         # list_conversations may return rows with agent_id=None for
         # legacy conversations; skip them before building the batch IDs.
         conv_ids = [conv.id for conv in page.data if conv.agent_id is not None]
