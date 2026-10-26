@@ -22,7 +22,8 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `{"remote": {"defaultEnvironmentId": "<that ID>"}}`. Without that the
   session lands in the account's default environment, which lacks the tools below.
 - `setup.sh` next to this file is the environment's setup script: `bubblewrap`,
-  `openssh-client`, `pre-commit` and `mise`, logged to `/tmp/omnigent-dev-init.log`. It
+  `openssh-client`, `pre-commit` and `mise`, plus a bounded warm-up of uv's cache for the
+  Gate's sync, logged to `/tmp/omnigent-dev-init.log`. It
   exits 0 even when an install fails, since a failed setup script fails the whole session
   and the bridge leaves the Omnigent turn hanging; the log says `FAILED` instead. The
   environment keeps its own copy, so after changing the file, apply it from a host with
@@ -42,13 +43,14 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `gh api`, which works for reads and writes:
   - draft PR: `gh api repos/kzarzycki/omnigent/pulls -f title=… -f head=<branch> -f base=mine -F draft=true -f body=…`
   - comments, labels, issue edits: the `issues/<n>/…` REST routes.
-- **Gate.** `mise trust -q && mise run check:all`, after the fetch above and after your
-  first commit: its pre-commit covers `merge-base origin/mine..HEAD`, so before a commit
-  it checks no files.
+- **Gate.** `mise trust -q && OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint && mise run check:all`,
+  after the fetch above and after your first commit: its pre-commit covers
+  `merge-base origin/mine..HEAD`, so before a commit it checks no files. The sync takes
+  seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish.
 - **Tests.** A tool call stops at 10 minutes. On the VM's 4 CPUs:
   - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
-    about 7 minutes cold. Without `--group lint` pre-commit's ruff hooks fail with "No
-    module named ruff".
+    seconds after setup's warm-up; cold, from 30 s to over 6 minutes, depending on the
+    network. Without `--group lint` pre-commit's ruff hooks fail with "No module named ruff".
   - pytest with `-n auto --dist=loadfile`, one directory per call: `tests/server` about
     6 minutes; `tests/inner` and `tests/harnesses` under 2 each.
   - vitest, all of `web/`: about 8 minutes. Run it alone, or in shards when a run nears
