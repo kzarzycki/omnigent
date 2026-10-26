@@ -350,7 +350,9 @@ class _Host(dict[str, Any]):
     """A host registry that launches nothing: it records each launch frame it is sent."""
 
     def __init__(self, on_admit: Any = None) -> None:
-        super().__init__({_HOST: SimpleNamespace(pending_launches={})})
+        super().__init__(
+            {_HOST: SimpleNamespace(pending_launches={}, hello=SimpleNamespace(capabilities=[]))}
+        )
         self.on_admit = on_admit
         self.sent: list[str] = []
 

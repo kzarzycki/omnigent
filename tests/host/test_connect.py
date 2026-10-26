@@ -1487,6 +1487,55 @@ async def test_handle_launch_configured_harness_proceeds_to_spawn(
             await _cancel(host._capability_init_task)
 
 
+@pytest.mark.parametrize(
+    "harness_telemetry", [None, {"enabled": True, "headers": {"x-ingest-token": "made-up"}}]
+)
+async def test_handle_launch_installs_the_servers_telemetry_decision_owner_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness_telemetry: dict | None,
+) -> None:
+    """The decision's headers carry a token, so the runner reads it from a private file."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+    from omnigent.process_logging import DATA_DIR_ENV_VAR
+
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path / "data"))
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: True)
+    host = _make_host_process()
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    spawned_env: dict[str, str] = {}
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        spawned_env.update(kwargs["env"])  # type: ignore[arg-type]
+        return original_popen(
+            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_telemetry",
+        binding_token="token_telemetry",
+        workspace=str(workspace),
+        session_id="conv_telemetry",
+        harness="claude-native",
+        harness_telemetry=harness_telemetry,
+    )
+    try:
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await asyncio.wait_for(host._handle_launch(frame), timeout=2.0)
+        assert result.status == "launched", result.error
+        if harness_telemetry is None:
+            assert HARNESS_TELEMETRY_ENV_VAR not in spawned_env  # an older server: as today
+        else:
+            path = Path(spawned_env[HARNESS_TELEMETRY_ENV_VAR])
+            assert json.loads(path.read_text()) == harness_telemetry
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert path.parent.stat().st_mode & 0o777 == 0o700
+    finally:
+        _cleanup_host(host)
+
+
 async def test_handle_launch_without_harness_skips_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

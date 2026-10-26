@@ -671,7 +671,8 @@ def _usage_series(
         data = reader.get_metrics_data()
     finally:
         usage_metrics._instruments.cache_clear()
-    assert data is not None
+    if data is None:  # nothing recorded
+        return {}
     return {
         metric.name: [dict(p.attributes or {}) for p in metric.data.data_points]
         for resource in data.resource_metrics
@@ -746,3 +747,61 @@ def test_usage_metrics_for_session_without_host_or_project(
     assert cost[0]["omnigent.project.name"] == ""
     assert cost[0]["omnigent.role"] == "other"
     assert cost[0]["omnigent.user"] == "unknown"
+
+
+def test_usage_metrics_record_no_point_for_a_session_the_harness_telemetry_setting_excludes(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    excluded = store.create_conversation(harness_override="claude-native")
+    child = store.create_conversation(parent_conversation_id=excluded.id)
+    allowed = store.create_conversation(harness_override="claude-native")
+    for name in ("_host_store", "_agent_store", "_project_store", "_conversation_store"):
+        monkeypatch.setattr(_globals, name, None)
+    config = tmp_path / "server.yaml"
+    config.write_text(
+        "harness_telemetry:\n"
+        "  endpoint: https://otlp.example.test\n"
+        f"  exclude:\n    threads: [{excluded.id}]\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG", str(config))
+
+    def points(conv_id: str) -> list[dict]:
+        return _usage_series(monkeypatch, store, conv_id).get(usage_metrics.COST_METRIC_NAME, [])
+
+    assert points(excluded.id) == []
+    assert points(child.id) == []  # a sub-session of an excluded thread
+    assert len(points(allowed.id)) == 1
+
+
+def test_usage_metrics_follow_the_hosts_answer_for_a_repository_excluded_session(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Only the host reads the checkout's origin; its runner's session-init answer decides."""
+    import httpx
+
+    from omnigent.server.harness_telemetry import record_host_harness_telemetry
+
+    store = SqlAlchemyConversationStore(db_uri)
+    unknown, excluded, allowed = (
+        store.create_conversation(harness_override="claude-native") for _ in range(3)
+    )
+    for name in ("_host_store", "_agent_store", "_project_store", "_conversation_store"):
+        monkeypatch.setattr(_globals, name, None)
+    config = tmp_path / "server.yaml"
+    config.write_text(
+        "harness_telemetry:\n"
+        "  endpoint: https://otlp.example.test\n"
+        "  exclude:\n    repos: [git.example.test/team/private]\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG", str(config))
+    for conv, enabled in ((excluded, False), (allowed, True)):
+        response = httpx.Response(201, json={"harness_telemetry_enabled": enabled})
+        record_host_harness_telemetry(conv, response, store)
+
+    def points(conv_id: str) -> list[dict]:
+        return _usage_series(monkeypatch, store, conv_id).get(usage_metrics.COST_METRIC_NAME, [])
+
+    assert points(excluded.id) == []
+    assert points(unknown.id) == []  # no answer yet: skipped, as the host fails closed
+    assert len(points(allowed.id)) == 1

@@ -3836,6 +3836,83 @@ def test_augment_claude_args_turns_telemetry_on_for_an_allowlisted_workspace(
     assert env(tmp_path / "other") == {}
 
 
+def test_augment_claude_args_applies_the_servers_telemetry_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On sends endpoint, headers and ``omnigent.*`` attributes; off overrides the user's on."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+
+    decision_path = tmp_path / "decision.json"
+
+    def env(decision: dict | None) -> dict:
+        if decision is None:
+            monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+        else:
+            decision_path.write_text(json.dumps(decision))
+            monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+        args = augment_claude_args(
+            (), bridge_dir=tmp_path / "bridge", workspace=tmp_path, session_id="conv_sub"
+        )
+        return _load_invocation_settings(args).get("env", {})
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    assert env(None) == {}  # no setting: the user's own settings decide
+    # The invocation settings outrank the user's settings.json, which turns it on.
+    assert env({"enabled": False}) == {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}
+    assert env(
+        {
+            "enabled": True,
+            "endpoint": "https://otlp.example.test",
+            "headers": {"x-ingest-token": "made-up"},
+            "resource_attributes": {
+                "omnigent.root_session.id": "conv_root",
+                "omnigent.project": "team project",
+                "omnigent.session.id": "conv_sub",
+            },
+        }
+    ) == {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.test",
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+        "OTEL_EXPORTER_OTLP_HEADERS": "x-ingest-token=made-up",
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            "omnigent.root_session.id=conv_root,omnigent.project=team%20project,"
+            "omnigent.session.id=conv_sub"
+        ),
+    }
+
+
+def test_the_ingest_token_reaches_claude_through_its_owner_only_settings_file_not_its_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other local users can read process arguments; only the settings file's path is on argv."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "https://otlp.example.test",
+                "headers": {"x-ingest-token": "synthetic-secret"},
+            }
+        )
+    )
+    monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+
+    args = augment_claude_args((), bridge_dir=tmp_path / "bridge", workspace=tmp_path)
+
+    assert not [arg for arg in args if "synthetic-secret" in arg]
+    settings_path = Path(args[args.index("--settings") + 1])
+    assert settings_path.stat().st_mode & 0o777 == 0o600
+    assert _load_invocation_settings(args)["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == (
+        "x-ingest-token=synthetic-secret"
+    )
+
+
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:
     """
     ``EnterWorktree`` / ``ExitWorktree`` PostToolUse events reach the observer hook.

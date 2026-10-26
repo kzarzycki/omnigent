@@ -1160,3 +1160,141 @@ def test_an_allowlisted_workspace_gets_codex_otel_overrides(
         == "http://collector:4318/v1/metrics"
     )
     assert otel["otel.log_user_prompt"] is True and otel["otel.trace_exporter"] == "none"
+
+
+def test_the_servers_telemetry_decision_sets_codex_otel_overrides_and_resource_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On exports headers and ``omnigent.*`` attributes; ``none`` outranks user ``[otel]``."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+    from omnigent.host import identity
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(identity, "load_host_identity_if_present", lambda: None)
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=dev")
+    decision_path = tmp_path / "decision.json"
+
+    def launch(decision: dict | None) -> tuple[dict[str, object], str]:
+        if decision is None:
+            monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+        else:
+            decision_path.write_text(json.dumps(decision))
+            monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+        server = build_codex_native_server(
+            socket_path=tmp_path / "codex.sock",
+            codex_home=tmp_path / "codex-home",
+            cwd=tmp_path,
+            model=None,
+            profile=None,
+            bridge_dir=tmp_path / "bridge",
+            codex_path=sys.executable,
+            session_id="conv_sub",
+        )
+        otel = {
+            key: tomllib.loads(f"v = {value}")["v"]
+            for key, value in (o.split("=", 1) for o in server.config_overrides)
+            if key.startswith("otel.")
+        }
+        return otel, server.env["OTEL_RESOURCE_ATTRIBUTES"]
+
+    assert launch(None) == ({}, "deployment.environment=dev,launch_mode=omni")
+    assert launch({"enabled": False}) == (
+        {"otel.exporter": "none", "otel.metrics_exporter": "none", "otel.trace_exporter": "none"},
+        "deployment.environment=dev,launch_mode=omni",
+    )
+    otel, attributes = launch(
+        {
+            "enabled": True,
+            "endpoint": "https://otlp.example.test",
+            "headers": {"x-ingest-token": "made-up"},
+            "resource_attributes": {
+                "omnigent.root_session.id": "conv_root",
+                "omnigent.session.id": "conv_sub",
+            },
+        }
+    )
+    assert otel["otel.exporter"] == {
+        "otlp-http": {
+            "endpoint": "https://otlp.example.test/v1/logs",
+            "protocol": "binary",
+            "headers": {"x-ingest-token": "made-up"},
+        }
+    }
+    assert otel["otel.metrics_exporter"]["otlp-http"]["headers"] == {"x-ingest-token": "made-up"}
+    assert attributes == (
+        "deployment.environment=dev,launch_mode=omni,"
+        "omnigent.root_session.id=conv_root,omnigent.session.id=conv_sub"
+    )
+
+
+async def test_the_ingest_token_reaches_codex_through_its_private_config_not_its_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other local users can read process arguments, so OTLP headers stay in config.toml."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+    from omnigent.harnesses.codex_native import app_server as module
+    from omnigent.harnesses.codex_native.app_server import CodexNativeAppServer
+    from omnigent.host import identity
+    from tests.harnesses.codex_native.app_server._support import _FakeStartupClient
+
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text('[otel]\nexporter = "none"\n')
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(identity, "load_host_identity_if_present", lambda: None)
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "https://otlp.example.test",
+                "headers": {"x-ingest-token": "synthetic-secret"},
+            }
+        )
+    )
+    monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+
+    async def supported_version(_codex_path: str) -> tuple[int, int, int]:
+        return (0, 147, 0)
+
+    async def ready(_self: CodexNativeAppServer) -> _FakeStartupClient:
+        return _FakeStartupClient()
+
+    async def trust(_self: CodexNativeAppServer, *, client: object = None) -> None:
+        del client
+
+    spawned: list[list[str]] = []
+    build_argv = module._build_native_codex_app_server_argv
+
+    def recording_argv(**kwargs: Any) -> list[str]:
+        spawned.append(build_argv(**kwargs))
+        return spawned[-1]
+
+    monkeypatch.setattr(module, "_codex_cli_version", supported_version)
+    monkeypatch.setattr(module, "_build_native_codex_app_server_argv", recording_argv)
+    monkeypatch.setattr(CodexNativeAppServer, "_wait_until_ready", ready)
+    monkeypatch.setattr(CodexNativeAppServer, "_trust_policy_hooks", trust)
+    server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=None,
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        codex_path=sys.executable,
+        reconcile_process_registry=False,
+    )
+
+    await server.start()
+    await server.close()
+
+    assert spawned and not [arg for arg in spawned[0] if "synthetic-secret" in arg]
+    assert "otel.log_user_prompt=true" in spawned[0]
+    config_path = tmp_path / "codex-home" / "config.toml"
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    otel = tomllib.loads(config_path.read_text())["otel"]
+    assert otel["exporter"]["otlp-http"]["headers"] == {"x-ingest-token": "synthetic-secret"}
+    assert otel["metrics_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.test/v1/metrics"
+    )

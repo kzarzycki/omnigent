@@ -75,6 +75,7 @@ from omnigent.server.feature_flags import (
     harness_install_enabled,
     resolve_feature_flags,
 )
+from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import (
     HarnessLoginState,
     HostConnection,
@@ -1228,6 +1229,9 @@ def create_hosts_router(
             finally:
                 await _rollback_worktree()
 
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, target.conv, conn.hello.capabilities, conversation_store
+        )
         binding_token = secrets.token_urlsafe(32)
         runner_id = token_bound_runner_id(binding_token)
 
@@ -1381,6 +1385,7 @@ def create_hosts_router(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                harness_telemetry=harness_telemetry,
             )
         )
         try:
