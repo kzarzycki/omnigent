@@ -981,17 +981,23 @@ def _build_runner_env(
     return env
 
 
-def _write_runner_inference_config(session_id: str, inference_config: dict[str, object]) -> Path:
-    """Materialize an immutable inference revision without changing host settings."""
+def _write_runner_session_config(
+    session_id: str, config: dict[str, object], kind: str = "session-inference"
+) -> Path:
+    """Materialize an immutable per-session revision, owner-only, without changing host settings.
+
+    :param kind: Data-dir subdirectory, e.g. ``"session-telemetry"`` for the
+        server's harness telemetry decision, whose headers carry a token.
+    """
     import hashlib
     import tempfile
 
     from omnigent.process_logging import data_dir
 
-    payload = json.dumps(inference_config, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(config, sort_keys=True, separators=(",", ":"))
     session_key = hashlib.sha256(session_id.encode()).hexdigest()
     revision = hashlib.sha256(payload.encode()).hexdigest()
-    directory = data_dir() / "session-inference" / session_key
+    directory = data_dir() / kind / session_key
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = directory / f"{revision}.json"
     fd, temp_name = tempfile.mkstemp(prefix=".config-", dir=directory)
@@ -1996,7 +2002,7 @@ class HostProcess:
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(
-                    _write_runner_inference_config,
+                    _write_runner_session_config,
                     frame.session_id or runner_id,
                     frame.inference_config,
                 )
@@ -2005,6 +2011,21 @@ class HostProcess:
                     frame, f"Cannot install session inference config: {exc}"
                 )
             env["OMNIGENT_INFERENCE_CONFIG"] = str(inference_path)
+        if frame.harness_telemetry is not None:
+            from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+
+            try:
+                telemetry_path = await asyncio.to_thread(
+                    _write_runner_session_config,
+                    frame.session_id or runner_id,
+                    frame.harness_telemetry,
+                    "session-telemetry",
+                )
+            except OSError as exc:
+                return self._launch_failed(
+                    frame, f"Cannot install session telemetry config: {exc}"
+                )
+            env[HARNESS_TELEMETRY_ENV_VAR] = str(telemetry_path)
         # The runner serves one primary session (plus any co-located subagents);
         # pass it so runner-level log records can be attributed to that session.
         if frame.session_id:

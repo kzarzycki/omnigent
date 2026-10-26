@@ -96,7 +96,6 @@ from omnigent.runner.mcp_execution_registry import (
     RUNNER_MCP_EXECUTION_DETACHED_MESSAGE,
 )
 from omnigent.runner.routing import RunnerRouter
-from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runner.subagent_routing import (
     ROUTING_DECISION_LABEL_KEY,
     auto_harness_session,
@@ -161,6 +160,11 @@ from omnigent.server.bundles import (
     validate_agent_bundle,
 )
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
+from omnigent.server.harness_telemetry import (
+    harness_telemetry_setting,
+    session_owner,
+    usage_metrics_excluded,
+)
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_REPO_LABEL_KEY,
@@ -379,7 +383,10 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_managed_runner_tunnel,
     _wait_for_runner_client,
 )
-from omnigent.server.runner_session_init import RunnerSessionInitializer
+from omnigent.server.runner_session_init import (
+    RunnerSessionInitializer,
+    post_runner_session_init,
+)
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -1684,10 +1691,11 @@ def _record_usage_metrics(
         if conv.project_id and _globals._project_store is not None:
             names["project_name"] = _globals._project_store.get_name(conv.project_id)
         if _globals._conversation_store is not None:
-            store = _globals._conversation_store
-            names["user"] = store.get_session_owner(conv.id)
-            if names["user"] is None and conv.root_conversation_id != conv.id:
-                names["user"] = store.get_session_owner(conv.root_conversation_id)
+            names["user"] = session_owner(conv, _globals._conversation_store)
+        # A session the harness telemetry setting excludes reports nothing here either.
+        setting = harness_telemetry_setting()
+        if setting is not None and usage_metrics_excluded(setting, conv, names.get("user")):
+            return
     usage_metrics.record_usage_growth(growth, model=model, **names)
 
 
@@ -6251,16 +6259,13 @@ async def _ensure_runner_session_initialized(
                 trigger=trigger,
             )
         else:
-            from omnigent.version import VERSION
-
-            resp = await runner_client.post(
-                "/v1/sessions",
-                json=build_runner_session_init_payload(
-                    conv,
-                    server_version=VERSION,
-                    suppress_recovery_turn=suppress_recovery_turn,
+            resp = await post_runner_session_init(
+                conv,
+                conversation_store,
+                lambda body: runner_client.post(
+                    "/v1/sessions", json=body, timeout=_RUNNER_SESSION_INIT_TIMEOUT_S
                 ),
-                timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
+                payload_options=lambda: {"suppress_recovery_turn": suppress_recovery_turn},
             )
         from omnigent.server.runner_session_init import (
             is_session_agent_removed,

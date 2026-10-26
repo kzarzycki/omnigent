@@ -22,7 +22,7 @@ from omnigent.harnesses.pi_native.credentials import (
     pi_native_model_options,
     resolve_pi_native_provider,
 )
-from omnigent.host.connect import _build_runner_env, _write_runner_inference_config
+from omnigent.host.connect import _build_runner_env, _write_runner_session_config
 from omnigent.inference_config import inference_config_scope, validate_inference_credentials
 from omnigent.models.model_catalog import (
     _acp_launch_model,
@@ -391,7 +391,7 @@ def test_saved_runner_config_keeps_old_route_after_host_profile_edit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = _profile()
-    saved = _write_runner_inference_config("old-session", original)
+    saved = _write_runner_session_config("old-session", original)
     edited = copy.deepcopy(original)
     edited["inference"] = {
         "harnesses": {
