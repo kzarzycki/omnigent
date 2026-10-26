@@ -20,6 +20,7 @@ import { isCanvasPathname } from "@/canvas/canvasNavigation";
 import { useCanvasSidebar } from "@/canvas/useCanvasSidebar";
 import { PROJECT_LABEL_KEY, type Conversation, useProjects } from "@/hooks/useConversations";
 import { conversationDisplayLabel, UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
+import { useSidebarRevealRequest } from "./sidebarReveal";
 import { useSessionAgent } from "@/hooks/useAgents";
 import { useApproveHotkey } from "@/hooks/useApproveHotkey";
 import { useSidebarToggleHotkeys } from "@/hooks/useSidebarToggleHotkeys";
@@ -373,6 +374,11 @@ function AppShellImpl() {
     next.delete("sidebar");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, setSidebarOpen]);
+  // "Show in sidebar" needs the list on screen; the Sidebar itself scrolls to the row.
+  const sidebarRevealRequest = useSidebarRevealRequest();
+  useEffect(() => {
+    if (sidebarRevealRequest) setSidebarOpen(true);
+  }, [sidebarRevealRequest, setSidebarOpen]);
   // Live open fraction (0→1) while the iOS edge-swipe drags the sidebar; null
   // when not dragging. Drives the mobile overlay's finger-tracking transform.
   const [sidebarDragProgress, setSidebarDragProgress] = useState<number | null>(null);

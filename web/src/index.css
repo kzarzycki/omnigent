@@ -1731,6 +1731,28 @@ html[data-electron-mac] .breadcrumb-folder {
   border-radius: var(--radius-2xl);
 }
 
+/* "Show in sidebar" outlines the revealed session row; pulses twice. Keep in
+   sync with FLASH_MS in shell/sidebarReveal.ts. An outline paints above the
+   row link's own background, which would hide a box-shadow. */
+@keyframes sidebar-reveal {
+  0%,
+  50%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  70% {
+    outline-color: var(--ring);
+  }
+}
+
+.animate-sidebar-reveal {
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
+  animation: sidebar-reveal 1600ms ease-in-out;
+}
+
 /* Reduced-motion: static highlights still signal the target. */
 @media (prefers-reduced-motion: reduce) {
   .animate-message-highlight {
@@ -1742,6 +1764,11 @@ html[data-electron-mac] .breadcrumb-folder {
   .animate-user-msg-flash {
     animation: none;
     box-shadow: 0 0 0 2px var(--ring);
+  }
+
+  .animate-sidebar-reveal {
+    animation: none;
+    outline-color: var(--ring);
   }
 }
 
