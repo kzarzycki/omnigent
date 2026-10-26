@@ -83,6 +83,7 @@ tests/e2e_ui/visual/snapshot_failures/
 # Web build outputs. Regenerated on demand; never committed.
 omnigent/server/static/web-ui/
 web/storybook-static/
+web/.build.lock
 
 # macOS Finder metadata — never useful to commit.
 .DS_Store
