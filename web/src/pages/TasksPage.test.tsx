@@ -24,6 +24,10 @@ vi.mock("@/hooks/useScheduledTasks", () => ({
 // Stub the create dialog — its internals are covered separately; here we only
 // need to know it opened and WHICH prefill (initialName/initialPrompt) TasksPage
 // passed, so we can assert chip-click seeds it and manual open does not.
+vi.mock("@/hooks/useConversations", () => ({
+  useProjects: () => ({ data: [] }),
+}));
+
 vi.mock("@/components/scheduled/CreateScheduledTaskDialog", () => ({
   CreateScheduledTaskDialog: ({
     open,
@@ -65,6 +69,7 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     workspace: null,
     hostId: null,
     executionTarget: "connected_host",
+    projectId: null,
     state: "active",
     lastRunAt: null,
     lastRunStatus: null,

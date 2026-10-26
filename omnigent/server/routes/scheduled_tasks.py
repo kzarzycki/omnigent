@@ -17,11 +17,11 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.db.account_authority import account_generation, current_account_user
 from omnigent.entities import Agent, ScheduledTask, ScheduledTaskRun
@@ -37,8 +37,10 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_model_metadata,
     validate_session_permission_mode,
 )
+from omnigent.server.routes.sessions import announce_projects_changed
 from omnigent.server.scheduled.rrule import RRuleSearchError, RRuleValidationError, validate_rrule
 from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
+from omnigent.server.schemas import validate_project_name
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.project_store import ProjectStore
@@ -53,6 +55,8 @@ _VALID_EXECUTION_TARGETS = frozenset({"connected_host", "managed_sandbox"})
 _MANAGED_SANDBOX_WITH_HOST_MSG = (
     "a managed_sandbox task runs in a fresh sandbox each fire; do not set host_id or workspace"
 )
+_PROJECT_ID_AND_NAME_MSG = "set project_id or project_name, not both"
+_ProjectName = Annotated[str, AfterValidator(validate_project_name)]
 
 
 class CreateScheduledTaskRequest(BaseModel):
@@ -70,8 +74,6 @@ class CreateScheduledTaskRequest(BaseModel):
     # Native-harness permission mode (Claude Code), e.g. "acceptEdits". The fire
     # path derives the runner's --permission-mode launch arg from it.
     permission_mode: str | None = None
-    # Project each fired run is filed into; "" or null leaves runs unfiled.
-    project_id: str | None = None
     # Archive a run that ends succeeded unless it set the omnigent.keep label.
     archive_when_done: bool = False
     max_cost_usd: float | None = Field(default=None, gt=0)
@@ -89,9 +91,14 @@ class CreateScheduledTaskRequest(BaseModel):
     # ``managed_sandbox`` runs the task in a fresh server-provisioned sandbox
     # (no host_id/workspace); default keeps the connected-host behavior.
     execution_target: str = "connected_host"
+    # File fired sessions into a project by id, or by name (get-or-create).
+    project_id: str | None = Field(default=None, min_length=1)
+    project_name: _ProjectName | None = None
 
     @model_validator(mode="after")
     def _validate_create(self) -> CreateScheduledTaskRequest:
+        if self.project_id is not None and self.project_name is not None:
+            raise ValueError(_PROJECT_ID_AND_NAME_MSG)
         if self.execution_target not in _VALID_EXECUTION_TARGETS:
             raise ValueError("execution_target must be 'connected_host' or 'managed_sandbox'")
         if self.execution_target == "managed_sandbox" and (
@@ -117,7 +124,6 @@ class UpdateScheduledTaskRequest(BaseModel):
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
-    project_id: str | None = None  # "" or null clears it
     archive_when_done: bool | None = None
     max_cost_usd: float | None = Field(default=None, gt=0)  # null clears the cap
     reuse_conversation: bool | None = None
@@ -128,10 +134,16 @@ class UpdateScheduledTaskRequest(BaseModel):
     host_id: str | None = Field(default=None, min_length=1)
     execution_target: str | None = Field(default=None, min_length=1)
     state: str | None = None
+    project_id: str | None = Field(default=None, min_length=1)  # null unfiles future runs
+    project_name: _ProjectName | None = None
 
     @model_validator(mode="after")
     def _validate_patch(self) -> UpdateScheduledTaskRequest:
         """Keep the public update surface to active/paused connected-host runs."""
+        if "project_name" in self.model_fields_set and self.project_name is None:
+            raise ValueError("project_name cannot be null; set project_id to null to unfile")
+        if self.project_name is not None and "project_id" in self.model_fields_set:
+            raise ValueError(_PROJECT_ID_AND_NAME_MSG)
         if self.state is not None and self.state not in {"active", "paused"}:
             raise ValueError("state must be 'active' or 'paused'; use DELETE to delete a task")
         if "workspace" in self.model_fields_set and self.workspace is None:
@@ -194,13 +206,13 @@ def _to_response(
         "model_override": task.model_override,
         "reasoning_effort": task.reasoning_effort,
         "permission_mode": task.permission_mode,
-        "project_id": task.project_id,
         "archive_when_done": task.archive_when_done,
         "max_cost_usd": task.max_cost_usd,
         "reuse_conversation": task.reuse_conversation,
         "workspace": task.workspace,
         "host_id": task.host_id,
         "execution_target": task.execution_target,
+        "project_id": task.project_id,
         "state": task.state,
         "last_run_at": task.last_run_at,
         "last_run_status": last_run_status,
@@ -264,7 +276,8 @@ def create_scheduled_tasks_router(
 
     :param store: The shared :class:`ScheduledTaskStore`.
     :param artifact_store: Holds the copy a task gets of another user's agent.
-    :param project_store: Resolves the project a task files its runs into.
+    :param project_store: Resolves the project fired sessions are filed into.
+        ``None`` rejects tasks that name a project.
     :param auth_provider: Auth provider used to identify the requesting user.
         ``None`` disables auth (owner resolves to ``"local"``).
     :returns: A configured :class:`APIRouter`.
@@ -370,21 +383,43 @@ def create_scheduled_tasks_router(
         )
         return agent, canonical_workspace, validated_model, validated_effort
 
-    async def _validate_project(project_id: str | None, request: Request) -> str | None:
-        """Return the owned project id, ``None`` for ``""``/``None``, or raise 404."""
-        if not project_id:
-            return None
-        # Projects are owned by the raw request identity (``"local"`` on a
-        # single-user runtime), not the task's ``None``-for-local owner id.
-        user_id = require_user(request, auth_provider)
-        project = (
-            None
-            if project_store is None
-            else await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+    def _project_owner(owner: str) -> str | None:
+        # Match /v1/projects owner scoping ("local" in single-user mode).
+        return None if auth_provider is None else owner
+
+    async def _resolve_project(
+        project_owner: str | None,
+        *,
+        project_id: str | None,
+        project_name: str | None,
+    ) -> tuple[str, bool]:
+        """Resolve a task's project to an id, and whether this call created it."""
+        if project_store is None:
+            raise OmnigentError(
+                "projects are not available on this server", code=ErrorCode.NOT_FOUND
+            )
+        if project_id is not None:
+            project = await asyncio.to_thread(project_store.get, project_id, user_id=project_owner)
+            if project is None:
+                raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+            return project.id, False
+        if project_name is None:
+            raise OmnigentError(
+                "project_id or project_name is required",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        project, created = await asyncio.to_thread(
+            project_store.get_or_create_by_name, uuid.uuid4().hex, project_name, project_owner
         )
-        if project is None:
-            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
-        return project_id
+        return project.id, created
+
+    def _discard_created_project(project_id: str, project_owner: str | None) -> None:
+        """Best-effort delete of a project made for a task write that then failed."""
+        try:
+            if project_store is not None:
+                project_store.delete(project_id, user_id=project_owner)
+        except Exception:
+            _logger.exception("could not delete unused project %s", project_id)
 
     async def _bind_agent(agent: Agent, owner_id: str | None) -> Agent:
         """A task runs another user's agent from its owner's own copy, taken now."""
@@ -435,9 +470,16 @@ def create_scheduled_tasks_router(
             execution_target=body.execution_target,
         )
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
-        project_id = await _validate_project(body.project_id, request)
+        project_owner = _project_owner(owner)
         bound = await _bind_agent(agent, owner_id)
+        project_id: str | None = None
+        created_project = False
         try:
+            # Resolved after validation so an invalid create makes no project.
+            if body.project_id is not None or body.project_name is not None:
+                project_id, created_project = await _resolve_project(
+                    project_owner, project_id=body.project_id, project_name=body.project_name
+                )
             task = store.create(
                 scheduled_task_id=uuid.uuid4().hex,
                 name=body.name,
@@ -449,17 +491,19 @@ def create_scheduled_tasks_router(
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
-                project_id=project_id,
                 archive_when_done=body.archive_when_done,
                 max_cost_usd=body.max_cost_usd,
                 reuse_conversation=body.reuse_conversation,
                 workspace=workspace,
                 host_id=body.host_id,
+                project_id=project_id,
                 execution_target=body.execution_target,
             )
         except Exception as exc:
             if bound.id != agent.id:
                 agent_store.delete(bound.id)
+            if created_project and project_id is not None:
+                _discard_created_project(project_id, project_owner)
             if isinstance(exc, RRuleSearchError):
                 raise OmnigentError(
                     "Could not calculate the next run time for this schedule. "
@@ -467,6 +511,8 @@ def create_scheduled_tasks_router(
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
             raise
+        if created_project:
+            announce_projects_changed(project_owner)
         scheduler = _scheduler(request)
         if scheduler is not None and not getattr(
             request.app.state, "scheduled_task_dispatch_enabled", False
@@ -626,12 +672,11 @@ def create_scheduled_tasks_router(
         if body.timezone is not None:
             _validate_timezone_or_400(body.timezone)
         fields = body.model_dump(exclude_unset=True)
-        if "project_id" in fields:
-            fields["project_id"] = await _validate_project(fields["project_id"], request)
         if "reuse_conversation" in fields and fields["reuse_conversation"] is None:
             del fields["reuse_conversation"]
         if fields.pop("reset_conversation", False):
             fields["last_run_conversation_id"] = None
+        project_name = fields.pop("project_name", None)
         target_agent_id = fields.get("agent_id") or existing.agent_id
         agent_changed = target_agent_id != existing.agent_id
         new_copy: Agent | None = None
@@ -716,7 +761,14 @@ def create_scheduled_tasks_router(
                 bound = await _bind_agent(agent, owner_id)
                 fields["agent_id"] = bound.id
                 new_copy = bound if bound.id != agent.id else None
+        project_owner = _project_owner(owner)
+        created_project = False
         try:
+            # Resolved after validation so an invalid update makes no project.
+            if project_name is not None or fields.get("project_id") is not None:
+                fields["project_id"], created_project = await _resolve_project(
+                    project_owner, project_id=fields.get("project_id"), project_name=project_name
+                )
             updated = store.update(scheduled_task_id, **fields)
             if updated is None:
                 raise OmnigentError("Scheduled task not found", code=ErrorCode.NOT_FOUND)
@@ -724,6 +776,8 @@ def create_scheduled_tasks_router(
             # The task never bound the copy, so nothing else uses it.
             if new_copy is not None:
                 agent_store.delete(new_copy.id)
+            if created_project:
+                _discard_created_project(fields["project_id"], project_owner)
             if isinstance(exc, RRuleSearchError):
                 raise OmnigentError(
                     "Could not calculate the next run time for this schedule. "
@@ -731,6 +785,8 @@ def create_scheduled_tasks_router(
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
             raise
+        if created_project:
+            announce_projects_changed(project_owner)
         scheduler = _scheduler(request)
         if scheduler is not None and not getattr(
             request.app.state, "scheduled_task_dispatch_enabled", False
