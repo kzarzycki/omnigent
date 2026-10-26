@@ -1270,6 +1270,7 @@ def self_check() -> None:
     globals()["_send"] = lambda _s, text: prompts.append(text) or (1, False)
     broken = Session("/repo", "acp-broken")
     broken.reader = threading.current_thread()
+    broken.mcp = {"echo": proxy}
     setup = {
         "type": "result",
         "is_error": True,
@@ -1284,7 +1285,8 @@ def self_check() -> None:
         assert str(exc) == "cloud session setup failed: Setup script failed with exit code 1.", exc
     assert prompts == [], prompts
     assert not {"acp-broken", first_prompt_key("/repo", "go")} & recall().keys(), recall()
-    assert SESSIONS["acp-broken"] is not broken and SESSIONS["acp-broken"].cloud_id is None
+    replaced = SESSIONS["acp-broken"]
+    assert replaced is not broken and replaced.cloud_id is None and replaced.mcp is broken.mcp
     sent: list[str] = []
     globals()["interrupt"] = sent.append
     idle = Session("/")
