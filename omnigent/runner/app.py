@@ -2193,11 +2193,13 @@ def create_runner_app(
         session_id: str,
         agent_id: str,
     ) -> _SessionInitContext:
+        from omnigent.config import set_session_harness_telemetry
         from omnigent.runner.session_init_protocol import validate_runner_inference_config
 
         if envelope.session_id != session_id or envelope.agent_id != agent_id:
             raise ValueError("session initialization envelope identity mismatch")
         validate_runner_inference_config(envelope.snapshot.inference_config)
+        set_session_harness_telemetry(session_id, envelope.snapshot.harness_telemetry)
 
         global _server_version
         _server_version = envelope.server_version
@@ -2245,6 +2247,25 @@ def create_runner_app(
         # The next turn respawns the harness with the new bridge dir.
         if process_manager is not None:
             await process_manager.release(session_id)
+
+    async def _harness_telemetry_report(
+        init_context: _SessionInitContext, session_id: str
+    ) -> dict[str, bool]:
+        """Whether the session's harness exports under the server's decision.
+
+        Only the host can check the repository exclusions, so the server's
+        usage metrics follow this answer.
+        """
+        if (
+            init_context.envelope is None
+            or init_context.envelope.snapshot.harness_telemetry is None
+        ):
+            return {}
+        from omnigent.config import harness_telemetry_for
+
+        cwd = await _session_runtime_cwd(session_id) or Path.cwd()
+        telemetry = await asyncio.to_thread(harness_telemetry_for, cwd, session_id)
+        return {"harness_telemetry_enabled": telemetry is not None and telemetry.enabled}
 
     async def _load_session_init_context(
         body: _JsonObject,
@@ -3285,6 +3306,7 @@ def create_runner_app(
                     and init_context.envelope.snapshot.inference_config is not None
                     else {}
                 ),
+                **(await _harness_telemetry_report(init_context, session_id)),
             },
         )
 

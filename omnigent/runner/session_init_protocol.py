@@ -32,6 +32,9 @@ class RunnerSessionInitSnapshot(BaseModel):  # type: ignore[explicit-any]  # Pyd
     parent_session_id: str | None = None
     root_session_id: str | None = None
     inference_config: dict[str, object] | None = None
+    # The server's harness telemetry decision for this session; see
+    # omnigent.server.harness_telemetry.harness_telemetry_decision.
+    harness_telemetry: dict[str, object] | None = None
 
 
 class RunnerSessionInitEnvelope(BaseModel):  # type: ignore[explicit-any]  # Pydantic uses Any
@@ -63,6 +66,7 @@ def build_runner_session_init_payload(
     suppress_recovery_turn: bool = False,
     resume_interrupted_turn: bool = False,
     recovery_id: str | None = None,
+    harness_telemetry: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the versioned initialization fields appended to the legacy body."""
     from omnigent.inference_config import snapshot_runtime_config
@@ -92,6 +96,7 @@ def build_runner_session_init_payload(
             parent_session_id=conversation.parent_conversation_id,
             root_session_id=conversation.root_conversation_id,
             inference_config=snapshot_runtime_config(conversation.inference_snapshot),
+            harness_telemetry=harness_telemetry,
         ),
     )
     return {

@@ -127,6 +127,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     RESERVED_USER_PUBLIC,
 )
+from omnigent.server.harness_telemetry import HARNESS_TELEMETRY_LABEL_KEY, harness_telemetry_launch
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_SANDBOX_LABEL_NAMESPACE,
@@ -6352,6 +6353,9 @@ async def _launch_runner_on_host_locked(
                 ),
             )
             return _HostLaunchAttempt(runner_id=new_runner_id)
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, conv, host_conn.hello.capabilities, conversation_store
+        )
         # An automatic relaunch yields to a stop or archive that landed meanwhile;
         # nothing awaits between this check and the frame going out.
         await session_revival.check_launch(
@@ -6378,6 +6382,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                harness_telemetry=harness_telemetry,
             )
         )
         try:
@@ -10616,6 +10621,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
             f"label {WORKTREE_ROOT_LABEL_KEY!r} is server-internal and cannot be set by clients",
             code=ErrorCode.INVALID_INPUT,
         )
+    # The host's harness telemetry answer, which gates the server's usage metrics.
+    if HARNESS_TELEMETRY_LABEL_KEY in labels:
+        raise OmnigentError(
+            f"label {HARNESS_TELEMETRY_LABEL_KEY!r} is server-internal"
+            " and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
     if _TURN_ACTOR_LABEL in labels:
         raise OmnigentError(
             f"label {_TURN_ACTOR_LABEL!r} is server-internal and cannot be set by clients",
@@ -10959,39 +10971,42 @@ async def _authorize_bundled_parent_and_inherit_runner(
 
 async def _notify_runner_of_bundled_child(
     session_id: str,
-    agent_id: str,
     runner_router: RunnerRouter | None,
+    conversation_store: ConversationStore,
 ) -> None:
     """
     Notify the inherited runner that a bundled child session exists.
 
     Lets the runner initialize per-session state (inbox queue,
-    agent-id cache) before the first forwarded event, mirroring the
-    JSON create path's post-create notify. Failures are logged and
-    swallowed — the notify is additive and must not fail the create.
+    agent-id cache, harness telemetry decision) before the first
+    forwarded event, mirroring the JSON create path's post-create
+    notify. Failures are logged and swallowed — the notify is additive
+    and must not fail the create.
 
     :param session_id: The new child session id, e.g. ``"conv_abc123"``.
-    :param agent_id: The child's session-scoped agent id,
-        e.g. ``"ag_abc123"``.
     :param runner_router: Router used to resolve the bound runner's
         client; ``None`` falls back to the in-process runner.
+    :param conversation_store: Store holding the child's row, its
+        telemetry decision inputs and the runner's recorded answer.
     :returns: None.
     """
+    from omnigent.server.runner_session_init import post_runner_session_init
+
     runner_client = await _get_runner_client(session_id, runner_router)
     if runner_client is None:
         return
+    conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    if conversation is None:
+        return
     try:
-        # Bundled children keep the legacy id-only body: bundle creation plumbs
-        # no harness/model override for a session-init envelope to seed. The
-        # create and rebind notifies send the full envelope instead.
-        await runner_client.post(
-            "/v1/sessions",
-            json={
-                "session_id": session_id,
-                "agent_id": agent_id,
-                "sub_agent_name": None,
-            },
-            timeout=10.0,
+        # Without a telemetry decision, bundled children keep the legacy
+        # id-only body: bundle creation plumbs no harness/model override for
+        # a session-init envelope to seed.
+        await post_runner_session_init(
+            conversation,
+            conversation_store,
+            lambda body: runner_client.post("/v1/sessions", json=body, timeout=10.0),
+            ids_only_without_decision=True,
         )
     except (httpx.HTTPError, ConnectionError):
         _logger.warning(

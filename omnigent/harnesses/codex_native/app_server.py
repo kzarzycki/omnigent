@@ -3475,28 +3475,44 @@ def _resolve_databricks_codex_model(
     return model_catalog.resolve_catalog_model("databricks", family="openai").model_id
 
 
-def _workspace_otel_overrides(cwd: Path) -> list[str]:
+def _workspace_otel_overrides(
+    cwd: Path, session_id: str | None = None
+) -> tuple[list[str], dict[str, str]]:
     """
-    Codex ``-c otel.*`` overrides for a workspace the machine's allowlist opts in.
+    Codex ``-c otel.*`` overrides and resource attributes for a workspace.
 
-    Codex ignores ``[otel]`` in a repo's own ``.codex/config.toml``, and a
-    machine that keeps telemetry off by default lists the repos allowed to
-    export (:func:`omnigent.config.telemetry_endpoint_for`). Logs and metrics go
-    over OTLP/HTTP to that endpoint, with prompts and responses, the way
-    dotagents writes the user-level ``[otel]`` table.
+    Codex ignores ``[otel]`` in a repo's own ``.codex/config.toml``; the
+    decision is :func:`omnigent.config.harness_telemetry_for` (the server's
+    setting, else the machine's allowlist). Logs and metrics go over OTLP/HTTP
+    to its endpoint, with prompts and responses, the way dotagents writes the
+    user-level ``[otel]`` table; an excluded session gets ``none`` exporters.
+    :func:`~omnigent.inner.codex_executor.materialize_codex_provider_config`
+    moves the exporters, whose headers carry the ingest token, off argv into
+    the session's private ``config.toml``, replacing the user's own. Codex
+    takes its resource attributes from ``OTEL_RESOURCE_ATTRIBUTES`` in its environment.
 
     :param cwd: Session workspace.
-    :returns: ``-c`` override values; empty when the workspace is not opted in.
+    :param session_id: The launching session, reported as ``omnigent.session.id``.
+    :returns: ``-c`` override values and resource attributes to add; both
+        empty when the user's own settings decide.
     """
-    from omnigent.config import telemetry_endpoint_for
+    from omnigent.config import harness_telemetry_for
     from omnigent.host.identity import load_host_identity_if_present
 
-    base = telemetry_endpoint_for(cwd)
-    if base is None:
-        return []
+    telemetry = harness_telemetry_for(cwd, session_id)
+    if telemetry is None:
+        return [], {}
+    if not telemetry.enabled:
+        return [
+            'otel.exporter="none"',
+            'otel.metrics_exporter="none"',
+            'otel.trace_exporter="none"',
+        ], {}
+    headers = f", headers = {_toml_inline_table(telemetry.headers)}" if telemetry.headers else ""
 
     def otlp(path: str) -> str:
-        return f'{{ otlp-http = {{ endpoint = {json.dumps(base + path)}, protocol = "binary" }} }}'
+        endpoint = json.dumps(telemetry.endpoint + path)
+        return f'{{ otlp-http = {{ endpoint = {endpoint}, protocol = "binary"{headers} }} }}'
 
     overrides = [
         "otel.log_user_prompt=true",
@@ -3509,7 +3525,12 @@ def _workspace_otel_overrides(cwd: Path) -> list[str]:
     if identity is not None:
         # Codex puts no host.name on metrics; the Collector copies ``environment`` into it.
         overrides.insert(0, f"otel.environment={json.dumps(identity.name)}")
-    return overrides
+    return overrides, dict(telemetry.resource_attributes)
+
+
+def _toml_inline_table(values: Mapping[str, str]) -> str:
+    """A TOML inline table of string values, with JSON-quoted keys and values."""
+    return "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in values.items()) + " }"
 
 
 def build_codex_native_server(
@@ -3634,7 +3655,16 @@ def build_codex_native_server(
         pinned_model = codex_spawn_model(databricks.model) or databricks.model
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
-    config_overrides.extend(_workspace_otel_overrides(cwd))
+    otel_overrides, otel_attributes = _workspace_otel_overrides(cwd, session_id)
+    config_overrides.extend(otel_overrides)
+    if otel_attributes:
+        from omnigent.config import otel_key_values
+
+        env["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(
+            item
+            for item in (env.get("OTEL_RESOURCE_ATTRIBUTES"), otel_key_values(otel_attributes))
+            if item
+        )
     if bypass_sandbox:
         # Mirror the --remote TUI's --dangerously-bypass-approvals-and-sandbox
         # on the app-server threads: never prompt for approval, and run
