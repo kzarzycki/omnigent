@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClockIcon,
   InboxIcon,
+  LocateFixedIcon,
   type LucideIcon,
   PanelLeftIcon,
   PanelRightIcon,
@@ -15,7 +16,7 @@ import {
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
-import { useNavigate } from "@/lib/routing";
+import { useNavigate, useParams } from "@/lib/routing";
 import {
   type ConversationsPage,
   isSearchTimeout,
@@ -26,6 +27,7 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { BOOT_PROBE_TIMEOUT_MS } from "@/lib/bootCapabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { cn } from "@/lib/utils";
+import { requestRevealSessionInSidebar } from "./sidebarReveal";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -141,6 +143,7 @@ export function CommandPalette({
   onCloseSidebar,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { conversationId } = useParams<{ conversationId: string }>();
   const isMobile = useIsMobileViewport();
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -216,8 +219,19 @@ export function CommandPalette({
         keywords: ["panel", "right", "files", "terminal"],
         run: onToggleRightSidebar,
       },
+      ...(conversationId
+        ? [
+            {
+              id: "reveal-in-sidebar",
+              label: "Show current session in sidebar",
+              icon: LocateFixedIcon,
+              keywords: ["locate", "find", "reveal", "scroll", "highlight", "where"],
+              run: () => requestRevealSessionInSidebar(conversationId),
+            },
+          ]
+        : []),
     ],
-    [go, onToggleLeftSidebar, onToggleRightSidebar],
+    [go, conversationId, onToggleLeftSidebar, onToggleRightSidebar],
   );
 
   const filteredActions = useMemo(() => {
