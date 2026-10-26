@@ -813,6 +813,8 @@ async def _stop_host_runner_intentionally(
     runner_id: str,
     host_registry: Any,
     conversation_store: ConversationStore,
+    *,
+    reason: str | None = None,
 ) -> bool:
     """Carry stop intent to the active sessions sharing the terminated runner.
 
@@ -878,7 +880,7 @@ async def _stop_host_runner_intentionally(
         attempt = _HostRunnerStopAttempt()
         try:
             acknowledged = await _facade._stop_session_host_runner(
-                session_id, host_id, runner_id, host_registry, attempt=attempt
+                session_id, host_id, runner_id, host_registry, attempt=attempt, reason=reason
             )
         finally:
             if not acknowledged and (not attempt.dispatched or attempt.rejected):
@@ -1004,6 +1006,7 @@ async def _archive_stop(
                 conv.runner_id,
                 host_registry,
                 conversation_store,
+                reason="archive",
             )
         except Exception:  # noqa: BLE001
             _logger.debug(
