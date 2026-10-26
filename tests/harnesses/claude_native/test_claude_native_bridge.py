@@ -3695,6 +3695,53 @@ def test_augment_claude_args_turns_telemetry_on_for_an_allowlisted_workspace(
     assert env(tmp_path / "other") == {}
 
 
+def test_augment_claude_args_applies_the_servers_telemetry_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On sends endpoint, headers and ``omnigent.*`` attributes; off overrides the user's on."""
+    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
+
+    decision_path = tmp_path / "decision.json"
+
+    def env(decision: dict | None) -> dict:
+        if decision is None:
+            monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+        else:
+            decision_path.write_text(json.dumps(decision))
+            monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(decision_path))
+        args = augment_claude_args(
+            (), bridge_dir=tmp_path / "bridge", workspace=tmp_path, session_id="conv_sub"
+        )
+        return _load_invocation_settings(args).get("env", {})
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    assert env(None) == {}  # no setting: the user's own settings decide
+    # The invocation settings outrank the user's settings.json, which turns it on.
+    assert env({"enabled": False}) == {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}
+    assert env(
+        {
+            "enabled": True,
+            "endpoint": "https://otlp.example.test",
+            "headers": {"x-ingest-token": "made-up"},
+            "resource_attributes": {
+                "omnigent.root_session.id": "conv_root",
+                "omnigent.project": "team project",
+            },
+        }
+    ) == {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.test",
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+        "OTEL_EXPORTER_OTLP_HEADERS": "x-ingest-token=made-up",
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            "omnigent.root_session.id=conv_root,omnigent.project=team%20project,"
+            "omnigent.session.id=conv_sub"
+        ),
+    }
+
+
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:
     """
     ``EnterWorktree`` / ``ExitWorktree`` PostToolUse events reach the observer hook.

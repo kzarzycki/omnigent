@@ -161,6 +161,11 @@ from omnigent.server.bundles import (
     validate_agent_bundle,
 )
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
+from omnigent.server.harness_telemetry import (
+    harness_telemetry_setting,
+    session_excluded,
+    session_owner,
+)
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_REPO_LABEL_KEY,
@@ -1681,10 +1686,12 @@ def _record_usage_metrics(
         if conv.project_id and _globals._project_store is not None:
             names["project_name"] = _globals._project_store.get_name(conv.project_id)
         if _globals._conversation_store is not None:
-            store = _globals._conversation_store
-            names["user"] = store.get_session_owner(conv.id)
-            if names["user"] is None and conv.root_conversation_id != conv.id:
-                names["user"] = store.get_session_owner(conv.root_conversation_id)
+            names["user"] = session_owner(conv, _globals._conversation_store)
+        # A session the harness telemetry setting excludes reports nothing here
+        # either; its repository exclusions need the checkout, so only the host applies them.
+        setting = harness_telemetry_setting()
+        if setting is not None and session_excluded(setting, conv, names.get("user")):
+            return
     usage_metrics.record_usage_growth(growth, model=model, **names)
 
 

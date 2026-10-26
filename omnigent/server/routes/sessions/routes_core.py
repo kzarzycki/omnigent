@@ -74,6 +74,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
+from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -791,6 +792,9 @@ def register_core_routes(
                 conversation=conversation,
             )
         conn = target.conn
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, target.conv, conn.hello.capabilities, conversation_store
+        )
         await host_registry.admit_launch(conn, session_id)
         binding_token = secrets.token_urlsafe(32)
         runner_id = token_bound_runner_id(binding_token)
@@ -843,6 +847,7 @@ def register_core_routes(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                harness_telemetry=harness_telemetry,
             )
         )
         launch_timeout_s = resolve_launch_timeout_s()

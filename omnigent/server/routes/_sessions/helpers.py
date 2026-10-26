@@ -127,6 +127,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     RESERVED_USER_PUBLIC,
 )
+from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_SANDBOX_LABEL_NAMESPACE,
@@ -6352,6 +6353,9 @@ async def _launch_runner_on_host_locked(
                 ),
             )
             return _HostLaunchAttempt(runner_id=new_runner_id)
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, conv, host_conn.hello.capabilities, conversation_store
+        )
         # An automatic relaunch yields to a stop or archive that landed meanwhile;
         # nothing awaits between this check and the frame going out.
         await session_revival.check_launch(
@@ -6378,6 +6382,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                harness_telemetry=harness_telemetry,
             )
         )
         try:

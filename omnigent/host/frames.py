@@ -73,6 +73,8 @@ CAP_SKILL_CONTENT = "skill_content"
 CAP_MCP_TOOLS = "mcp_tools"
 CAP_REFRESH_HARNESSES = "refresh_harnesses"
 CAP_MCP_REGISTRY = "mcp_registry"
+# The host applies ``HostLaunchRunnerFrame.harness_telemetry`` to the runner:
+CAP_HARNESS_TELEMETRY = "harness_telemetry"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
@@ -86,6 +88,7 @@ HOST_CAPABILITIES: list[str] = [
     CAP_MCP_INVENTORY,
     CAP_HARNESS_STARTUP,
     CAP_REFRESH_HARNESSES,
+    CAP_HARNESS_TELEMETRY,
 ]
 
 
@@ -304,6 +307,10 @@ class HostLaunchRunnerFrame:
         falls back to stopping every runner launched for ``session_id``; an
         empty tuple stops none, e.g. after /clear moved the old runner to
         another session.
+    :param harness_telemetry: The server's harness telemetry decision for the
+        session (:func:`omnigent.server.harness_telemetry.harness_telemetry_launch`),
+        e.g. ``{"enabled": False}``. ``None`` (no setting, or an older server)
+        leaves the host's own telemetry settings in charge.
     """
 
     request_id: str
@@ -313,6 +320,7 @@ class HostLaunchRunnerFrame:
     harness: str | None = None
     inference_config: dict[str, Any] | None = None
     superseded_runner_ids: tuple[str, ...] | None = None
+    harness_telemetry: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1458,6 +1466,8 @@ def encode_host_frame(frame: HostFrame) -> str:
         }
         if frame.superseded_runner_ids is not None:
             payload["superseded_runner_ids"] = list(frame.superseded_runner_ids)
+        if frame.harness_telemetry is not None:
+            payload["harness_telemetry"] = frame.harness_telemetry
         return _encode_payload(payload)
     if isinstance(frame, HostLaunchRunnerResultFrame):
         return _encode_payload(
@@ -2372,6 +2382,9 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
     inference_config = msg.get("inference_config")
     if inference_config is not None and not isinstance(inference_config, dict):
         raise ValueError("inference_config must be an object or null")
+    harness_telemetry = msg.get("harness_telemetry")
+    if harness_telemetry is not None and not isinstance(harness_telemetry, dict):
+        raise ValueError("harness_telemetry must be an object or null")
     return HostLaunchRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         binding_token=_required_str(msg, "binding_token"),
@@ -2385,6 +2398,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
             if "superseded_runner_ids" in msg
             else None
         ),
+        harness_telemetry=harness_telemetry,
     )
 
 

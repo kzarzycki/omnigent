@@ -95,6 +95,91 @@ def telemetry_endpoint_for(workspace: Path) -> str | None:
     return endpoint.strip().rstrip("/") if repo in listed else None
 
 
+HARNESS_TELEMETRY_ENV_VAR = "OMNIGENT_HARNESS_TELEMETRY"
+
+
+@dataclass(frozen=True)
+class HarnessTelemetry:
+    """
+    What a harness launch does about its own OTLP telemetry.
+
+    :param enabled: ``False`` forces telemetry off over the user's settings.
+    :param endpoint: OTLP/HTTP base URL when enabled, e.g. ``"https://otlp.example.test"``.
+    :param headers: OTLP request headers, e.g. an ingest token.
+    :param resource_attributes: OTel resource attributes, e.g. ``omnigent.session.id``.
+    :param from_server: The server decided, so the harness gets complete exporter
+        settings; the machine allowlist relies on the user's for the rest.
+    """
+
+    enabled: bool
+    endpoint: str = ""
+    headers: Mapping[str, str] = field(default_factory=dict)
+    resource_attributes: Mapping[str, str] = field(default_factory=dict)
+    from_server: bool = False
+
+
+def harness_telemetry_for(
+    workspace: Path, session_id: str | None = None
+) -> HarnessTelemetry | None:
+    """
+    The telemetry a harness launched in *workspace* runs with.
+
+    The server's decision, which the host saved for this runner at
+    :data:`HARNESS_TELEMETRY_ENV_VAR`, wins; its repository exclusions are
+    checked here against the checkout's ``origin``, and an ``origin`` that
+    can't be read while any exist means off, as does an unreadable decision.
+    Without one, :func:`telemetry_endpoint_for` decides as before.
+
+    :param workspace: Session workspace.
+    :param session_id: The launching session, which may be a sub-session
+        co-located in its parent's runner; it becomes ``omnigent.session.id``.
+    :returns: The decision, or ``None`` to leave the user's own settings alone.
+    """
+    path = os.environ.get(HARNESS_TELEMETRY_ENV_VAR)
+    if not path:
+        endpoint = telemetry_endpoint_for(workspace)
+        return HarnessTelemetry(enabled=True, endpoint=endpoint) if endpoint else None
+    try:
+        decision = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(decision, dict):
+            raise ValueError("expected a mapping")
+    except (OSError, ValueError) as exc:
+        _log.warning("harness telemetry decision %s unreadable; telemetry off: %s", path, exc)
+        return HarnessTelemetry(enabled=False, from_server=True)
+    endpoint = decision.get("endpoint")
+    if decision.get("enabled") is not True or not isinstance(endpoint, str) or not endpoint:
+        return HarnessTelemetry(enabled=False, from_server=True)
+    excluded_repos = {
+        repo for repo in decision.get("exclude_repos") or () if isinstance(repo, str)
+    }
+    if excluded_repos:
+        repo = _origin_repo(workspace)
+        if repo is None or repo in excluded_repos:
+            return HarnessTelemetry(enabled=False, from_server=True)
+    attributes = _str_map(decision.get("resource_attributes"))
+    if session_id:
+        attributes["omnigent.session.id"] = session_id
+    return HarnessTelemetry(
+        enabled=True,
+        endpoint=endpoint.rstrip("/"),
+        headers=_str_map(decision.get("headers")),
+        resource_attributes=attributes,
+        from_server=True,
+    )
+
+
+def _str_map(value: object) -> dict[str, str]:
+    """A JSON object's entries as strings; anything else is empty."""
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+def otel_key_values(values: Mapping[str, str]) -> str:
+    """Encode *values* as an OTel ``k=v,k2=v2`` env value, percent-encoding each value."""
+    from urllib.parse import quote
+
+    return ",".join(f"{key}={quote(value, safe='')}" for key, value in values.items())
+
+
 def load_global_config(path: Path | None = None) -> _Config:
     """Load the user-level config, returning an empty mapping when absent."""
     resolved_path = path or global_config_path()
