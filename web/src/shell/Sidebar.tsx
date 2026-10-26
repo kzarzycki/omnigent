@@ -307,6 +307,11 @@ import {
   newSessionAriaShortcut,
   newSessionShortcutKeys,
 } from "@/components/KeyboardShortcut";
+import {
+  clearSidebarRevealRequest,
+  scrollToAndFlashSidebarRow,
+  useSidebarRevealRequest,
+} from "./sidebarReveal";
 
 // Positioning for a row's trailing session-state badge. Anchored at the row's
 // trailing icon edge in every viewport: on desktop it fades on hover so the pin
@@ -2412,6 +2417,58 @@ function ConversationList({
     if (pinnedSet.has(activeId)) return;
     expandProject(activeProjectName);
   }, [activeId, activeProjectName, pinnedSet, expandProject]);
+
+  // "Show in sidebar": expand whichever sections hold the session (pinned rows
+  // stay in Pinned; a filed one also opens its project), then scroll to and
+  // flash its row once it renders.
+  const revealRequest = useSidebarRevealRequest();
+  // Held outside the effect: clearing the request re-runs it, which must not
+  // cancel the in-flight scroll.
+  const cancelRevealRef = useRef<(() => void) | null>(null);
+  const revealedSessionIdRef = useRef<string | null>(null);
+  useEffect(() => () => cancelRevealRef.current?.(), []);
+  // Opening another session drops a reveal still scrolling to (or ringing) the old one.
+  useEffect(() => {
+    if (activeId === revealedSessionIdRef.current) return;
+    cancelRevealRef.current?.();
+    cancelRevealRef.current = null;
+    revealedSessionIdRef.current = null;
+  }, [activeId]);
+  useEffect(() => {
+    if (!revealRequest) return;
+    // A sub-agent page reveals its top-level session, the row the sidebar lists.
+    const sessionId =
+      revealRequest.sessionId === activeId && resolvedActiveId
+        ? resolvedActiveId
+        : revealRequest.sessionId;
+    clearSidebarRevealRequest(revealRequest.nonce);
+    const has = (list: readonly Conversation[]) => list.some((c) => c.id === sessionId);
+    const titles: string[] = [];
+    if (pinnedSet.has(sessionId)) titles.push("Pinned");
+    if (has(sections.shared)) titles.push("Shared");
+    if (sessionGroups) {
+      for (const g of sessionGroups) if (has(g.conversations)) titles.push(g.title);
+    } else if (has(sections.sessions)) {
+      titles.push("Chats");
+    }
+    // The folder that renders the row: by `project_id` or the legacy label, never for a pinned one.
+    const project = sections.projectGroups.find((g) => has(g.conversations))?.name;
+    if (project) {
+      titles.push("Projects");
+      expandProject(project);
+    }
+    setCollapsedSections((prev) => {
+      const next = prev.filter((t) => !titles.includes(t));
+      if (next.length === prev.length) return prev;
+      writeCollapsedSidebarSections(next);
+      return next;
+    });
+    cancelRevealRef.current?.();
+    revealedSessionIdRef.current = sessionId;
+    cancelRevealRef.current = scrollToAndFlashSidebarRow(scrollContainerRef.current, sessionId);
+    // Fires per request only; the section lookups read the current render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest]);
 
   // Visible rows in render order (collapsed sections excluded) for the Cmd+↑/↓
   // session hotkey. Titles must match the <ConversationSection> props below.
