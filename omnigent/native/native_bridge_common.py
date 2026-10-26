@@ -45,8 +45,10 @@ from omnigent.native.owner_claim import (
 _logger = logging.getLogger(__name__)
 
 _LOCK_DIR_NAME = ".locks"
-# A legacy integer-only or unparseable marker: its owner can't be proven gone.
+# An unreadable or unparseable marker: its owner can't be proven gone.
 _UNPROVABLE = object()
+# A bare-pid marker written before owner claims: judged like an unmarked dir.
+_LEGACY = object()
 
 
 def _bridge_dir_lock(bridge_dir: Path) -> FileLock:
@@ -96,14 +98,19 @@ def write_owner_pid_marker(bridge_dir: Path) -> None:
 
 
 def _read_owner(bridge_dir: Path) -> OwnerClaim | object | None:
-    """Return the dir's owner claim, None when unmarked, else :data:`_UNPROVABLE`."""
+    """Return the dir's owner claim, None when unmarked, :data:`_LEGACY` for a
+    bare-pid marker, else :data:`_UNPROVABLE`."""
+    marker = bridge_dir / OWNER_PID_FILENAME
     try:
-        (bridge_dir / OWNER_PID_FILENAME).stat()
+        text = marker.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return _UNPROVABLE
-    return read_owner_claim(bridge_dir) or _UNPROVABLE
+    claim = read_owner_claim(bridge_dir)
+    if claim is not None:
+        return claim
+    return _LEGACY if text.strip().isdigit() else _UNPROVABLE
 
 
 def prune_orphaned_dirs(
@@ -129,9 +136,10 @@ def prune_orphaned_dirs(
     conservative guard against uncoordinated marker writers.
     A dir with no marker predates the marker or never had a bridge prepared,
     so there is no owner to prove dead: it is removed only when *should_prune*
-    accepts it, and kept when the harness has no retention policy. A dir with
-    a legacy integer-only or unparseable marker is always kept, as is one
-    whose claim comes from another PID namespace or boot.
+    accepts it, and kept when the harness has no retention policy. A legacy
+    bare-pid marker is judged the same way, since its pid can't be trusted
+    across PID namespaces. A dir with an unparseable marker is always kept, as
+    is one whose claim comes from another PID namespace or boot.
 
     Reuses ``inner/terminal.py:_process_alive`` as the liveness predicate.
 
@@ -155,7 +163,7 @@ def prune_orphaned_dirs(
             if not acquired:
                 continue
             claim = _read_owner(entry)
-            if claim is _UNPROVABLE or (claim is None and should_prune is None):
+            if claim is _UNPROVABLE or (claim in (None, _LEGACY) and should_prune is None):
                 continue
             if isinstance(claim, OwnerClaim) and not owner_is_gone(
                 claim, process_alive=_process_alive

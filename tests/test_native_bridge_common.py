@@ -68,22 +68,17 @@ def test_prune_removes_dead_keeps_live_and_unmarked(tmp_path: Path) -> None:
 
 
 def test_prune_keeps_owners_it_cannot_prove_gone(tmp_path: Path) -> None:
-    """A dead pid from another PID namespace, or in a legacy integer marker, is kept.
-
-    The retention policy is never consulted for them: codex's reclaims plugin downloads.
-    """
+    """A dead pid claimed from another PID namespace is kept without consulting retention."""
     root = tmp_path / "bridge-root"
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
-    foreign, legacy = root / "foreign", root / "legacy"
-    for bridge_dir in (foreign, legacy):
-        bridge_dir.mkdir(parents=True)
+    foreign = root / "foreign"
+    foreign.mkdir(parents=True)
     claim_owner(
         foreign / native_bridge_common.OWNER_PID_FILENAME,
         dead.pid,
         pid_ns="pid:[4026531836]-elsewhere",
     )
-    (legacy / native_bridge_common.OWNER_PID_FILENAME).write_text(str(dead.pid), encoding="utf-8")
 
     consulted: list[str] = []
 
@@ -94,7 +89,24 @@ def test_prune_keeps_owners_it_cannot_prove_gone(tmp_path: Path) -> None:
     assert native_bridge_common.prune_orphaned_dirs(root, should_prune=_should_prune) == 0
     assert consulted == []
     assert foreign.exists()
+
+
+@pytest.mark.parametrize("retained", [True, False])
+def test_prune_judges_a_legacy_marker_like_an_unmarked_dir(tmp_path: Path, retained: bool) -> None:
+    """A bare-pid marker from before owner claims is left to the retention policy."""
+    root = tmp_path / "bridge-root"
+    legacy = root / "legacy"
+    legacy.mkdir(parents=True)
+    (legacy / native_bridge_common.OWNER_PID_FILENAME).write_text(
+        str(os.getpid()), encoding="utf-8"
+    )
+
+    assert native_bridge_common.prune_orphaned_dirs(root) == 0
     assert legacy.exists()
+
+    pruned = native_bridge_common.prune_orphaned_dirs(root, should_prune=lambda _dir: not retained)
+    assert pruned == (0 if retained else 1)
+    assert legacy.exists() is retained
 
 
 def test_prune_ignores_non_dir_entries_and_bad_markers(tmp_path: Path) -> None:
