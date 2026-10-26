@@ -101,7 +101,6 @@ from omnigent.runner.identity import (
 )
 from omnigent.runner.launch_failure import classify_native_turn_error, diagnose_model_unavailable
 from omnigent.runner.routing import RunnerRouter
-from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runner.subagent_routing import ROUTING_DECISION_LABEL_KEY
 from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
 from omnigent.runtime import (
@@ -132,6 +131,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     RESERVED_USER_PUBLIC,
 )
+from omnigent.server.harness_telemetry import HARNESS_TELEMETRY_LABEL_KEY, harness_telemetry_launch
 from omnigent.server.host_registry import (
     HostConnection,
     HostLaunchResult,
@@ -350,7 +350,6 @@ from omnigent.util.session_lifecycle import (
     labels_with_closed_status,
     title_without_closed_marker,
 )
-from omnigent.version import VERSION
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -6646,6 +6645,9 @@ async def _launch_runner_on_host_locked(
                 ),
             )
             return _HostLaunchAttempt(runner_id=new_runner_id)
+        harness_telemetry = await asyncio.to_thread(
+            harness_telemetry_launch, conv, host_conn.hello.capabilities, conversation_store
+        )
         # An automatic relaunch yields to a stop or archive that landed meanwhile;
         # nothing awaits between this check and the frame going out.
         await session_revival.check_launch(
@@ -6670,6 +6672,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                harness_telemetry=harness_telemetry,
             )
         )
         for enqueue_attempt in range(2):
@@ -11110,6 +11113,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
             f"label {WORKTREE_ROOT_LABEL_KEY!r} is server-internal and cannot be set by clients",
             code=ErrorCode.INVALID_INPUT,
         )
+    # The host's harness telemetry answer, which gates the server's usage metrics.
+    if HARNESS_TELEMETRY_LABEL_KEY in labels:
+        raise OmnigentError(
+            f"label {HARNESS_TELEMETRY_LABEL_KEY!r} is server-internal"
+            " and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
     if _TURN_ACTOR_LABEL in labels:
         raise OmnigentError(
             f"label {_TURN_ACTOR_LABEL!r} is server-internal and cannot be set by clients",
@@ -11467,9 +11477,10 @@ async def _notify_runner_of_bundled_child(
     Notify the inherited runner that a bundled child session exists.
 
     Lets the runner initialize per-session state (inbox queue,
-    agent-id cache) before the first forwarded event, mirroring the
-    JSON create path's post-create notify. Failures are logged and
-    swallowed — the notify is additive and must not fail the create.
+    agent-id cache, harness telemetry decision) before the first
+    forwarded event, mirroring the JSON create path's post-create
+    notify. Failures are logged and swallowed — the notify is additive
+    and must not fail the create.
 
     :param session_id: The new child session id, e.g. ``"conv_abc123"``.
     :param agent_id: The child's session-scoped agent id,
@@ -11480,43 +11491,44 @@ async def _notify_runner_of_bundled_child(
         the full session-init envelope, so it seeds the requested model and
         effort instead of fetching them back; ``None`` sends the id-only body.
     :param conversation_store: Store to read the child row from when
-        *conversation* is not given. The read is best-effort like the envelope
-        build: the session is already persisted, so a failed read sends the
-        id-only body instead of failing the create.
+        *conversation* is not given, and holding its telemetry decision inputs
+        and the runner's recorded answer. The read is best-effort: the session
+        is already persisted, so a failed read sends the id-only body instead
+        of failing the create.
     :returns: None.
     """
+    from omnigent.server.runner_session_init import post_runner_session_init
+
     runner_client = await _get_runner_client(session_id, runner_router)
     if runner_client is None:
         return
-    body: dict[str, Any] = {
-        "session_id": session_id,
-        "agent_id": agent_id,
-        "sub_agent_name": None,
-    }
-    if conversation is not None or conversation_store is not None:
+    if conversation is None and conversation_store is not None:
         try:
-            if conversation is None and conversation_store is not None:
-                conversation = await asyncio.to_thread(
-                    conversation_store.get_conversation, session_id
-                )
-            if conversation is not None:
-                # The route forwards any initial input itself right after
-                # this notify, so a recovery turn would run it twice.
-                body = build_runner_session_init_payload(
-                    conversation,
-                    server_version=VERSION,
-                    suppress_recovery_turn=True,
-                )
+            conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         except Exception:  # noqa: BLE001 — must not fail the create, as on the JSON path.
-            # The runner falls back to fetching the row.
             _logger.warning(
-                "session-init envelope build failed for bundled session %s; "
-                "sending the id-only body",
+                "could not read bundled session %s to notify its runner",
                 session_id,
                 exc_info=True,
             )
     try:
-        await runner_client.post("/v1/sessions", json=body, timeout=10.0)
+        if conversation is None:
+            # The runner falls back to fetching the row.
+            await runner_client.post(
+                "/v1/sessions",
+                json={"session_id": session_id, "agent_id": agent_id, "sub_agent_name": None},
+                timeout=10.0,
+            )
+            return
+        # The route forwards any initial input itself right after this notify,
+        # so a recovery turn would run it twice.
+        await post_runner_session_init(
+            conversation,
+            conversation_store,
+            lambda body: runner_client.post("/v1/sessions", json=body, timeout=10.0),
+            payload_options=lambda: {"suppress_recovery_turn": True},
+            ids_only_on_build_error=True,
+        )
     except (httpx.HTTPError, ConnectionError):
         _logger.warning(
             "Failed to notify runner about bundled session %s",

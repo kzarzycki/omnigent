@@ -494,6 +494,7 @@ async def test_bundled_child_runner_notify_falls_back_to_the_id_only_body(
 ) -> None:
     """An envelope that cannot be built leaves the create alive and sends the id-only body."""
     from omnigent.runtime import get_conversation_store
+    from omnigent.server import runner_session_init
     from omnigent.server.routes._sessions import helpers
 
     resp = await _post_bundle_create(client, {})
@@ -509,7 +510,7 @@ async def test_bundled_child_runner_notify_falls_back_to_the_id_only_body(
         raise RuntimeError("envelope build failed")
 
     monkeypatch.setattr(helpers, "_get_runner_client", _stub)
-    monkeypatch.setattr(helpers, "build_runner_session_init_payload", _broken_envelope)
+    monkeypatch.setattr(runner_session_init, "build_runner_session_init_payload", _broken_envelope)
     await helpers._notify_runner_of_bundled_child(
         created["session_id"], created["agent_id"], None, conversation=conversation
     )

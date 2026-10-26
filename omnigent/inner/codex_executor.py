@@ -241,6 +241,8 @@ _CODEX_HOME_SYMLINK_DIRS = (
 )
 _CODEX_MINIMAL_CONFIG_ENV = "HARNESS_CODEX_MINIMAL_CONFIG"
 _CODEX_PROVIDER_CONFIG_PREFIX = "model_providers."
+# OTLP exporter tables, whose ``headers`` can carry an ingest token.
+_CODEX_PRIVATE_OTEL_KEYS = ("otel.exporter", "otel.metrics_exporter", "otel.trace_exporter")
 _BROKERED_CODEX_PROVIDER_NAME = "omnigent_brokered"
 
 # Environment variables explicitly excluded from the codex subprocess even
@@ -1368,6 +1370,9 @@ def materialize_codex_provider_config(
     commands. Persist them in the session-owned ``config.toml`` instead so
     process arguments contain only non-secret routing and behavior overrides.
 
+    OTLP exporter overrides (``otel.exporter`` and the like) go there too,
+    since their ``headers`` can carry an ingest token.
+
     Built-in provider tables (e.g. ``[model_providers.amazon-bedrock]``) stay
     untouched: Codex rejects unsupported fields there by discarding the whole config.
     Custom providers on a Databricks Unity Gateway also get the gateway's
@@ -1400,26 +1405,38 @@ def materialize_codex_provider_config(
     }
 
     provider_overrides: list[str] = []
+    otel_overrides: list[str] = []
     argv_overrides: list[str] = []
     for override in config_overrides:
-        if override.lstrip().startswith(_CODEX_PROVIDER_CONFIG_PREFIX):
+        key = override.partition("=")[0].strip()
+        if key.startswith(_CODEX_PROVIDER_CONFIG_PREFIX):
             provider_overrides.append(override)
+        elif key in _CODEX_PRIVATE_OTEL_KEYS:
+            otel_overrides.append(override)
         else:
             argv_overrides.append(override)
     if (
         not provider_overrides
+        and not otel_overrides
         and not config_path.is_file()
         and source_home is None
         and not gateway_providers
     ):
         return argv_overrides
-    if not provider_overrides and config_path.is_symlink():
+    if not provider_overrides and not otel_overrides and config_path.is_symlink():
         return argv_overrides
 
     import tomlkit
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     document = tomlkit.parse(existing) if existing else tomlkit.document()
+    if otel_overrides:
+        otel = document.get("otel")
+        if not isinstance(otel, MutableMapping):
+            otel = document["otel"] = tomlkit.table()
+        for override in otel_overrides:
+            for key, value in tomlkit.parse(override)["otel"].items():
+                otel[key] = value
     providers: MutableMapping[str, Any] | None = None
     declared_providers = document.get("model_providers")
     if declared_providers is not None:
@@ -1488,7 +1505,9 @@ def materialize_codex_provider_config(
         document["model_providers"] = providers
 
     if providers is None:
-        if config_path.is_file() and not config_path.is_symlink():
+        if otel_overrides:
+            _write_private_codex_config(codex_home, config_path, tomlkit.dumps(document))
+        elif config_path.is_file() and not config_path.is_symlink():
             os.chmod(config_path, 0o600)
         return argv_overrides
 
@@ -1552,17 +1571,22 @@ def materialize_codex_provider_config(
                 **attribution_headers,
             }
 
+    _write_private_codex_config(codex_home, config_path, tomlkit.dumps(document))
+    return argv_overrides
+
+
+def _write_private_codex_config(codex_home: Path, config_path: Path, text: str) -> None:
+    """Atomically replace *config_path* with *text*, owner-only."""
     fd, tmp_name = tempfile.mkstemp(prefix="config.toml.", dir=str(codex_home))
     try:
         os.chmod(tmp_name, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(tomlkit.dumps(document))
+            handle.write(text)
         os.replace(tmp_name, config_path)
         os.chmod(config_path, 0o600)
     finally:
         with suppress(FileNotFoundError):
             os.unlink(tmp_name)
-    return argv_overrides
 
 
 # Bridge directory holding the ``subagent_router.json`` advertisement. Its

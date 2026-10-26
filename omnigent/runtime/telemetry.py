@@ -149,9 +149,11 @@ _CONTENT_MAX_LEN = 4096
 
 # Substrings that mark a payload key as a secret to redact even when content
 # capture is on — a frame body like ``host.launch_runner`` carries a
-# ``binding_token``, and we never want a credential on a span.
+# ``binding_token``, and we never want a credential on a span. ``headers``
+# covers auth and OTLP ingest headers nested in a frame.
 _REDACT_KEY_SUBSTRINGS = (
     "token",
+    "headers",
     "secret",
     "password",
     "authorization",
@@ -167,7 +169,8 @@ def _redact_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     Drops the W3C propagation keys (they ride in the envelope, not the
     message) and replaces any value whose key looks like a credential
-    with ``"[redacted]"``. Non-secret values pass through unchanged.
+    with ``"[redacted]"``, in nested mappings too. Non-secret values pass
+    through unchanged.
 
     :param payload: The decoded frame / message dict.
     :returns: A shallow copy safe to serialize onto a span.
@@ -179,6 +182,8 @@ def _redact_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if any(token in lowered for token in _REDACT_KEY_SUBSTRINGS):
             redacted[key] = "[redacted]"
+        elif isinstance(value, Mapping):
+            redacted[key] = _redact_payload(value)
         else:
             redacted[key] = value
     return redacted
