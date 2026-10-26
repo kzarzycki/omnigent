@@ -775,6 +775,25 @@ async def test_patch_rejects_client_supplied_sandbox_labels(
         assert key not in conv.labels
 
 
+async def test_patch_rejects_a_client_supplied_harness_telemetry_answer(
+    client: httpx.AsyncClient,
+    session_id: str,
+    db_uri: str,
+) -> None:
+    """The host's harness telemetry answer gates the server's usage metrics; only it sets it."""
+    conv_store = SqlAlchemyConversationStore(db_uri)
+
+    resp = await client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"labels": {"omnigent.harness_telemetry": "on"}},
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+    conv = conv_store.get_conversation(session_id)
+    assert conv is not None
+    assert "omnigent.harness_telemetry" not in conv.labels
+
+
 async def test_patch_rejects_client_supplied_side_chat_thread_id_label(
     client: httpx.AsyncClient,
     session_id: str,

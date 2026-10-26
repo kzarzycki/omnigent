@@ -74,7 +74,11 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
-from omnigent.server.harness_telemetry import harness_telemetry_decision, harness_telemetry_launch
+from omnigent.server.harness_telemetry import (
+    harness_telemetry_decision,
+    harness_telemetry_launch,
+    record_host_harness_telemetry,
+)
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -1073,7 +1077,10 @@ def register_core_routes(
                         exc_info=True,
                     )
             try:
-                await _rc.post("/v1/sessions", json=init_body, timeout=10.0)
+                init_response = await _rc.post("/v1/sessions", json=init_body, timeout=10.0)
+                await asyncio.to_thread(
+                    record_host_harness_telemetry, conv, init_response, conversation_store
+                )
             except (httpx.HTTPError, ConnectionError):
                 _logger.warning(
                     "Failed to notify runner about session %s",
@@ -2983,6 +2990,12 @@ def register_core_routes(
                     else:
                         from omnigent.server.runner_session_init import runner_inference_verified
 
+                        await asyncio.to_thread(
+                            record_host_harness_telemetry,
+                            conv,
+                            runner_init_resp,
+                            conversation_store,
+                        )
                         parent_initialized = (
                             runner_init_resp.status_code < 400
                             and runner_inference_verified(conv, runner_init_resp)

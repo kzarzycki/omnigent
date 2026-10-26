@@ -127,7 +127,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     RESERVED_USER_PUBLIC,
 )
-from omnigent.server.harness_telemetry import harness_telemetry_launch
+from omnigent.server.harness_telemetry import HARNESS_TELEMETRY_LABEL_KEY, harness_telemetry_launch
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
     MANAGED_SANDBOX_LABEL_NAMESPACE,
@@ -10619,6 +10619,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     if WORKTREE_ROOT_LABEL_KEY in labels:
         raise OmnigentError(
             f"label {WORKTREE_ROOT_LABEL_KEY!r} is server-internal and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    # The host's harness telemetry answer, which gates the server's usage metrics.
+    if HARNESS_TELEMETRY_LABEL_KEY in labels:
+        raise OmnigentError(
+            f"label {HARNESS_TELEMETRY_LABEL_KEY!r} is server-internal"
+            " and cannot be set by clients",
             code=ErrorCode.INVALID_INPUT,
         )
     if _TURN_ACTOR_LABEL in labels:

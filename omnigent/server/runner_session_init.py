@@ -15,7 +15,10 @@ from omnigent.entities import Conversation
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory, ErrorCode, ErrorImpact
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.server import session_revival
-from omnigent.server.harness_telemetry import harness_telemetry_decision
+from omnigent.server.harness_telemetry import (
+    harness_telemetry_decision,
+    record_host_harness_telemetry,
+)
 
 if TYPE_CHECKING:
     from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
@@ -278,6 +281,13 @@ class RunnerSessionInitializer:
                 if taken is not None:
                     session_revival.settle_resume(
                         conversation.id, taken, delivered=response.status_code < 400
+                    )
+                if self._conversation_store is not None:
+                    await asyncio.to_thread(
+                        record_host_harness_telemetry,
+                        conversation,
+                        response,
+                        self._conversation_store,
                     )
                 return response
 

@@ -164,8 +164,9 @@ from omnigent.server.creation_logging import creation_metadata, creation_stage, 
 from omnigent.server.harness_telemetry import (
     harness_telemetry_decision,
     harness_telemetry_setting,
-    session_excluded,
+    record_host_harness_telemetry,
     session_owner,
+    usage_metrics_excluded,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
@@ -1688,10 +1689,9 @@ def _record_usage_metrics(
             names["project_name"] = _globals._project_store.get_name(conv.project_id)
         if _globals._conversation_store is not None:
             names["user"] = session_owner(conv, _globals._conversation_store)
-        # A session the harness telemetry setting excludes reports nothing here
-        # either; its repository exclusions need the checkout, so only the host applies them.
+        # A session the harness telemetry setting excludes reports nothing here either.
         setting = harness_telemetry_setting()
-        if setting is not None and session_excluded(setting, conv, names.get("user")):
+        if setting is not None and usage_metrics_excluded(setting, conv, names.get("user")):
             return
     usage_metrics.record_usage_growth(growth, model=model, **names)
 
@@ -6233,6 +6233,7 @@ async def _ensure_runner_session_initialized(
                 ),
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
             )
+            await asyncio.to_thread(record_host_harness_telemetry, conv, resp, conversation_store)
         from omnigent.server.runner_session_init import (
             is_session_agent_removed,
             runner_inference_verified,

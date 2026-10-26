@@ -21,12 +21,16 @@ from typing import TYPE_CHECKING, Any
 from omnigent.server.server_config import config_str_list, load_server_config
 
 if TYPE_CHECKING:
+    import httpx
+
     from omnigent.entities.conversation import Conversation
     from omnigent.stores.conversation_store import ConversationStore
 
 logger = logging.getLogger(__name__)
 
 HARNESS_TELEMETRY_KEY = "harness_telemetry"
+# Server-internal session label: ``on``/``off`` as the host applied the decision.
+HARNESS_TELEMETRY_LABEL_KEY = "omnigent.harness_telemetry"
 HARNESS_TELEMETRY_HEADERS_ENV_VAR = "OMNIGENT_HARNESS_TELEMETRY_HEADERS"
 
 
@@ -173,3 +177,47 @@ def harness_telemetry_decision(
         "exclude_repos": list(setting.repos),
         "resource_attributes": attributes,
     }
+
+
+def record_host_harness_telemetry(
+    conv: Conversation, response: httpx.Response, conversation_store: ConversationStore
+) -> None:
+    """
+    Save the host's on/off for *conv* from its runner's session-init *response*.
+
+    :param conv: The session the runner initialized.
+    :param response: The runner's reply, carrying ``harness_telemetry_enabled``
+        when the session had a server decision.
+    :param conversation_store: Store holding the session's labels.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    enabled = payload.get("harness_telemetry_enabled") if isinstance(payload, dict) else None
+    if not isinstance(enabled, bool):
+        return
+    value = "on" if enabled else "off"
+    if (conv.labels or {}).get(HARNESS_TELEMETRY_LABEL_KEY) == value:
+        return
+    try:
+        conversation_store.set_labels(conv.id, {HARNESS_TELEMETRY_LABEL_KEY: value})
+    except Exception:  # noqa: BLE001 — the session's metrics stay skipped if repos are excluded
+        logger.warning("could not save harness telemetry %s for %s", value, conv.id, exc_info=True)
+
+
+def usage_metrics_excluded(
+    setting: HarnessTelemetrySetting, conv: Conversation, owner: str | None
+) -> bool:
+    """
+    Whether the server's usage metrics skip *conv*, by the same rule as its harness.
+
+    The host decides the repository exclusions; until it has said ``on``
+    while any exist, the session is skipped, as the host fails closed.
+    """
+    host = (conv.labels or {}).get(HARNESS_TELEMETRY_LABEL_KEY)
+    return (
+        session_excluded(setting, conv, owner)
+        or host == "off"
+        or (bool(setting.repos) and host != "on")
+    )

@@ -59,7 +59,10 @@ async def test_a_co_located_sub_session_applies_its_own_decision_not_its_parents
     monkeypatch.setenv("OMNIGENT_CONFIG", str(server_config))
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(config, "_session_harness_telemetry", {})
-    store = SimpleNamespace(get_session_owner=lambda _session_id: "member@example.test")
+    store = SimpleNamespace(
+        get_session_owner=lambda _session_id: "member@example.test",
+        set_labels=lambda _session_id, _labels: None,
+    )
     parent = _session("conv_parent")
     # The host wrote the parent's launch-frame decision for the whole runner.
     runner_decision = tmp_path / "runner-decision.json"
@@ -105,3 +108,56 @@ async def test_a_co_located_sub_session_applies_its_own_decision_not_its_parents
 
     # A session this runner has no decision for never inherits the runner's.
     assert exports("conv_parent") and not exports("conv_unknown")
+
+
+@pytest.mark.asyncio
+async def test_the_runner_tells_the_server_whether_a_sessions_repository_is_excluded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the host reads the checkout's origin; the server saves its answer per session."""
+    import subprocess
+
+    def checkout(name: str, origin: str) -> Path:
+        repo = tmp_path / name
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", origin], check=True)
+        return repo
+
+    server_config = tmp_path / "server.yaml"
+    server_config.write_text(
+        "harness_telemetry:\n"
+        "  endpoint: https://otlp.example.test\n"
+        "  exclude:\n    repos: [git.example.test/team/private]\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG", str(server_config))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+    monkeypatch.setattr(config, "_session_harness_telemetry", {})
+    saved: dict[str, dict[str, str]] = {}
+    store = SimpleNamespace(
+        get_session_owner=lambda _session_id: None,
+        set_labels=lambda session_id, labels: saved.setdefault(session_id, {}).update(labels),
+    )
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    initializer = RunnerSessionInitializer(
+        _NoTunnels(),  # type: ignore[arg-type]
+        server_version="0.6.0",
+        conversation_store=store,  # type: ignore[arg-type]
+    )
+    private = checkout("private", "git@git.example.test:team/private.git")
+    public = checkout("public", "https://git.example.test/team/public.git")
+
+    async with _runner_client(app) as client:
+        for session_id, workspace in (("conv_private", private), ("conv_public", public)):
+            session = _session(session_id)
+            session.workspace = str(workspace)
+            response = await initializer.initialize(session, client, timeout=10)
+            assert response.status_code == 201, response.text
+
+    assert saved == {
+        "conv_private": {"omnigent.harness_telemetry": "off"},
+        "conv_public": {"omnigent.harness_telemetry": "on"},
+    }
