@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import io
 import itertools
 import json
@@ -17,8 +18,9 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unicodedata
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from http.client import BadStatusLine, RemoteDisconnected
@@ -26,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 from unittest.mock import Mock
 
 import httpx
@@ -80,6 +82,7 @@ from omnigent.inner.datamodel import (
 from omnigent.native import native_cost_popup
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 from tests._helpers.owner_claim import claim_owner
+from tests._helpers.polling import poll_until
 
 
 @pytest.fixture(autouse=True)
@@ -7204,6 +7207,308 @@ def test_relay_post_timeout_covers_the_approval_budget() -> None:
         claude_native_bridge._TOOL_RELAY_POST_TIMEOUT_S
         > claude_native_bridge._TOOL_CALL_APPROVAL_BUDGET_S
     )
+
+
+def _parked_on_approval(
+    elicitation_id: str, published: list[dict[str, Any]]
+) -> Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """
+    Build a relay executor that opens a real approval prompt and waits on it.
+
+    :param elicitation_id: Prompt id, also used as the session id.
+    :param published: Receives the events the prompt publishes.
+    :returns: Tool executor for the relay.
+    """
+    from omnigent.runner import pending_approvals
+
+    async def _executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        verdict = await pending_approvals.wait_for_user_verdict(
+            elicitation_id=elicitation_id,
+            conversation_id=elicitation_id,
+            publish_event=lambda _session, event: published.append(event),
+            timeout_seconds=60,
+        )
+        return {"result": f"{name} approved={verdict.approved}"}
+
+    return _executor
+
+
+def test_run_relay_tool_cancels_when_the_caller_goes_away(
+    relay_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that stops waiting cancels the dispatch, which withdraws its prompt."""
+    from omnigent.runner import pending_approvals
+
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
+    published: list[dict[str, Any]] = []
+
+    response = claude_native_bridge._run_relay_tool(
+        _parked_on_approval("caller-gone", published),
+        relay_loop,
+        "sys_scheduled_task_create",
+        {},
+        awaiting_approval=lambda: True,
+        caller_gone=lambda: pending_approvals.has_pending("caller-gone"),
+    )
+
+    assert response["isError"] is True
+    assert "sys_scheduled_task_create was cancelled" in response["content"][0]["text"]
+    poll_until(lambda: bool(published), timeout_s=5.0, interval_s=0.01)
+    assert published == [
+        {
+            "type": "response.elicitation_resolved",
+            "elicitation_id": "caller-gone",
+            "reason": "unanswered",
+        }
+    ]
+    assert not pending_approvals.has_pending("caller-gone")
+
+
+def test_serve_mcp_cancel_withdraws_a_relayed_calls_prompt(
+    tmp_path: Path,
+    relay_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``notifications/cancelled`` closes the relayed call, and the relay withdraws its prompt."""
+    from omnigent.runner import pending_approvals
+
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    published: list[dict[str, Any]] = []
+    requests: queue.Queue[bytes] = queue.Queue()
+    responses: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    class _QueuedStdin:
+        """Minimal binary stdin stream driven by a queue."""
+
+        buffer: _QueuedStdin
+
+        def __init__(self) -> None:
+            self.buffer = self
+
+        def readline(self) -> bytes:
+            return requests.get(timeout=10.0)
+
+    def _write_request(payload: dict[str, object]) -> None:
+        requests.put((json.dumps(payload) + "\n").encode("utf-8"))
+
+    relay = start_tool_relay(
+        bridge_dir=bridge_dir,
+        tools=[
+            {
+                "name": "sys_scheduled_task_create",
+                "description": "Create a scheduled task.",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        tool_executor=_parked_on_approval("mcp-cancel", published),
+        loop=relay_loop,
+    )
+    monkeypatch.setattr(claude_native_bridge.sys, "stdin", _QueuedStdin())
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "_write_jsonrpc",
+        lambda payload, _lock, **_kwargs: responses.put(payload),
+    )
+    server_thread = threading.Thread(
+        target=claude_native_bridge._stdio_jsonrpc_loop,
+        args=({}, threading.Lock(), bridge_dir),
+        daemon=True,
+    )
+    server_thread.start()
+    try:
+        _write_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "sys_scheduled_task_create", "arguments": {}},
+            }
+        )
+        poll_until(
+            lambda: pending_approvals.has_pending("mcp-cancel"), timeout_s=5.0, interval_s=0.01
+        )
+
+        _write_request(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 7, "reason": "user interrupted"},
+            }
+        )
+
+        poll_until(lambda: bool(published), timeout_s=5.0, interval_s=0.01)
+        assert published[0]["reason"] == "unanswered"
+        assert not pending_approvals.has_pending("mcp-cancel")
+        # The cancelled request gets no response; the next request's comes first.
+        _write_request({"jsonrpc": "2.0", "id": 8, "method": "ping"})
+        assert responses.get(timeout=5.0)["id"] == 8
+        assert responses.empty()
+    finally:
+        requests.put(b"")
+        server_thread.join(timeout=5.0)
+        relay.close()
+
+
+def test_serve_mcp_keeps_a_cancel_that_arrives_before_the_worker_runs(
+    tmp_path: Path,
+    relay_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel read before the request's worker starts still stops the call before dispatch."""
+    from omnigent.runner import pending_approvals
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    published: list[dict[str, Any]] = []
+    requests: queue.Queue[bytes] = queue.Queue()
+    responses: queue.Queue[dict[str, Any]] = queue.Queue()
+    worker_entered, release_worker = threading.Event(), threading.Event()
+
+    class _QueuedStdin:
+        """Minimal binary stdin stream driven by a queue."""
+
+        buffer: _QueuedStdin
+
+        def __init__(self) -> None:
+            self.buffer = self
+
+        def readline(self) -> bytes:
+            return requests.get(timeout=10.0)
+
+    def _write_request(payload: dict[str, object]) -> None:
+        requests.put((json.dumps(payload) + "\n").encode("utf-8"))
+
+    is_relay_tool_call = claude_native_bridge._is_relay_tool_call
+    handle_request = claude_native_bridge._handle_and_write_mcp_request
+    call_finished = threading.Event()
+
+    def _handle_and_signal(request_id: object, *args: Any) -> None:
+        handle_request(request_id, *args)
+        if request_id == 9:
+            call_finished.set()
+
+    def _held_preflight(params: object, directory: Path) -> bool:
+        worker_entered.set()
+        release_worker.wait(timeout=5.0)
+        return is_relay_tool_call(params, directory)
+
+    relay = start_tool_relay(
+        bridge_dir=bridge_dir,
+        tools=[
+            {
+                "name": "sys_scheduled_task_create",
+                "description": "Create a scheduled task.",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        tool_executor=_parked_on_approval("early-cancel", published),
+        loop=relay_loop,
+    )
+    monkeypatch.setattr(claude_native_bridge.sys, "stdin", _QueuedStdin())
+    monkeypatch.setattr(claude_native_bridge, "_is_relay_tool_call", _held_preflight)
+    monkeypatch.setattr(claude_native_bridge, "_handle_and_write_mcp_request", _handle_and_signal)
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "_write_jsonrpc",
+        lambda payload, _lock, **_kwargs: responses.put(payload),
+    )
+    server_thread = threading.Thread(
+        target=claude_native_bridge._stdio_jsonrpc_loop,
+        args=({}, threading.Lock(), bridge_dir),
+        daemon=True,
+    )
+    server_thread.start()
+    try:
+        _write_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "sys_scheduled_task_create", "arguments": {}},
+            }
+        )
+        assert worker_entered.wait(timeout=5.0)
+        _write_request(
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}}
+        )
+        _write_request({"jsonrpc": "2.0", "id": 10, "method": "ping"})
+        # The ping's answer proves the reader consumed the cancel first.
+        assert responses.get(timeout=5.0)["id"] == 10
+        release_worker.set()
+
+        # Stopped before dispatch, the call ends without opening a prompt.
+        assert call_finished.wait(timeout=5.0)
+        assert not pending_approvals.has_pending("early-cancel")
+        assert published == []
+        assert responses.empty()
+    finally:
+        release_worker.set()
+        requests.put(b"")
+        server_thread.join(timeout=5.0)
+        relay.close()
+
+
+def test_cancel_mcp_request_tolerates_a_connection_closing_concurrently() -> None:
+    """The worker's ``close()`` can clear ``sock`` mid-cancel; the cancel must not raise."""
+    client, peer = socket.socketpair()
+    reads: list[None] = []
+
+    class _ClosingConnection:
+        """Connection whose socket is gone after the first read, as after ``close()``."""
+
+        @property
+        def sock(self) -> socket.socket | None:
+            reads.append(None)
+            return client if len(reads) == 1 else None
+
+    claude_native_bridge._INFLIGHT_REQUESTS[11] = cast(Any, _ClosingConnection())
+    try:
+        claude_native_bridge._cancel_mcp_request({"requestId": 11})
+        assert peer.recv(1) == b""  # the caller's side of the connection was shut down
+    finally:
+        claude_native_bridge._INFLIGHT_REQUESTS.pop(11, None)
+        claude_native_bridge._CANCELLED_REQUESTS.discard(11)
+        client.close()
+        peer.close()
+
+
+def test_run_relay_tool_gives_approved_work_a_full_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval is judged once per ceiling: work that starts after approval gets to finish."""
+    future: concurrent.futures.Future[object] = concurrent.futures.Future()
+    clock = [0.0]
+
+    def _submit(coroutine: Any, _loop: object) -> concurrent.futures.Future[object]:
+        coroutine.close()
+        return future
+
+    def _wait(_futures: object, timeout: float) -> Any:
+        clock[0] = round(clock[0] + timeout, 6)
+        if clock[0] >= 0.35:
+            future.set_result({"result": "finished"})
+        return types.SimpleNamespace(done={future} if future.done() else set())
+
+    monkeypatch.setattr(claude_native_bridge.asyncio, "run_coroutine_threadsafe", _submit)
+    monkeypatch.setattr(claude_native_bridge.concurrent.futures, "wait", _wait)
+    monkeypatch.setattr(claude_native_bridge.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
+
+    # Approved at 0.30 s, work done at 0.35 s, next ceiling check at 0.40 s.
+    response = claude_native_bridge._run_relay_tool(
+        lambda *_args: None,
+        cast(Any, None),
+        "sys_scheduled_task_create",
+        {},
+        awaiting_approval=lambda: clock[0] < 0.30,
+    )
+
+    assert response.get("isError") is not True
+    assert "finished" in json.dumps(response)
 
 
 @pytest.mark.parametrize("concurrent_method", ["ping", "tools/call"])
