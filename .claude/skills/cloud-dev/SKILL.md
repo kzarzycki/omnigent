@@ -42,16 +42,21 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `gh api`, which works for reads and writes:
   - draft PR: `gh api repos/kzarzycki/omnigent/pulls -f title=… -f head=<branch> -f base=mine -F draft=true -f body=…`
   - comments, labels, issue edits: the `issues/<n>/…` REST routes.
-- **Gate.** `mise trust -q && mise run check:all`, after the fetch above.
+- **Gate.** `mise trust -q && mise run check:all`, after the fetch above and after your
+  first commit: its pre-commit covers `merge-base origin/mine..HEAD`, so before a commit
+  it checks no files.
 - **Tests.** A tool call stops at 10 minutes. On the VM's 4 CPUs:
-  - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test`: about 7 minutes
-    cold.
+  - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
+    about 7 minutes cold. Without `--group lint` pre-commit's ruff hooks fail with "No
+    module named ruff".
   - pytest with `-n auto --dist=loadfile`, one directory per call: `tests/server` about
     6 minutes; `tests/inner` and `tests/harnesses` under 2 each.
   - vitest, all of `web/`: about 8 minutes. Run it alone, or in shards when a run nears
     the limit.
   - `tests/harnesses/claude_native/test_claude_native_delivery_logging.py::test_delivery_diagnostics`
     has a 0.06 s budget the VM misses; it passes on a host. Don't count it against a PR.
+    Nor `tests/server/integration/test_runner_reconnect_recovery.py::test_large_mirror_tree_attaches_without_blocking_or_per_child_reads[False]`,
+    which times out on its own in the VM at `mine` too (#117).
   - Playwright: the preinstalled Chromium doesn't match the repo's Playwright build;
     launch it with `executable_path="/opt/pw-browsers/chromium"`.
 - **Workers** run as your native sub-agents in the VM, so they share your checkout and
@@ -61,6 +66,11 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   then `/tmp/agent-skills/engineering/skills/engineering-loop/`.
 
 ## On the host
+
+The engineering loop's scripts on the bridge host are in its agent-skills checkout, not an
+installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
+and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
+`engineering/skills/engineering-loop/scripts/approvals.py` under it.
 
 | Step | Why it can't run in the VM |
 |---|---|
@@ -76,11 +86,20 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 - **Host helper.** Start one `claude-native-ui` child with `mcp__omnigent__sys_session_create`
   (model `claude-sonnet-5-5`, title `<story>-host`). It runs on the bridge host in your host
   workspace, the checkout your session started from. Send it exact commands and ask for
-  their output and exit codes in its reply. It runs the engineering-loop scripts from the
-  host's installed skill. `local-ci` and `land` check the checkout's HEAD against the PR
-  head, so it runs both in a clean worktree of the PR head, after `mise trust` there
-  (AGENTS.md, landing PRs into `mine`). It also writes your final report to the host path
-  your brief names.
+  their output and exit codes in its reply. It runs the scripts at the host paths above.
+  `local-ci` and `land` check the checkout's HEAD against the PR head, so it runs both in
+  a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
+  `mise trust -q`, `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group lint` and
+  `pnpm install --frozen-lockfile --filter web` (the session-list lint is TypeScript).
+  Without them `local-ci` stops without checking anything. It also writes your final
+  report to the host path your brief names.
+- **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
+  new sandbox without the Omnigent tools (#116), and a full host `tests/server` run takes
+  about 24 minutes. Run long suites in the VM; send the helper steps that finish in a few
+  minutes, and `land --wait` only once `local-ci` has recorded its pass.
+- **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
+  `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
+  child's finish notice instead.
 - **Verifier.** Have the helper make a detached worktree of the PR head on the host
   (`git fetch origin <branch> && git worktree add --detach <path> <sha>`). Start the
   verifier as a `codex-native-ui` child with `sys_session_create`. A child always starts
