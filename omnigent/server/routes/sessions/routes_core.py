@@ -46,7 +46,6 @@ from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
 from omnigent.runner.routing import RunnerRouter, routing_host_id
-from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runtime import (
     pending_elicitations,
     user_session_stream,
@@ -74,11 +73,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
-from omnigent.server.harness_telemetry import (
-    harness_telemetry_decision,
-    harness_telemetry_launch,
-    record_host_harness_telemetry,
-)
+from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -194,6 +189,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _validate_session_model_selection,
     ensure_runner_connected,
 )
+from omnigent.server.runner_session_init import post_runner_session_init
 from omnigent.server.schemas import (
     AutomaticSessionRenameRequest,
     AutomaticSessionRenameResponse,
@@ -244,7 +240,6 @@ from omnigent.util.reasoning_effort import (
 from omnigent.util.session_lifecycle import (
     labels_with_closed_status,
 )
-from omnigent.version import VERSION
 
 
 def _require_attachment_compatible_history(
@@ -1046,44 +1041,17 @@ def register_core_routes(
             # respawn. Older runners ignore the extra ``session_init`` key and
             # still read the top-level id fields.
             # A session not yet bound to an agent keeps the id-only body: the
-            # envelope builder requires an agent_id.
-            init_body: dict[str, Any] = {
-                "session_id": resp.id,
-                "agent_id": conv.agent_id,
-                "sub_agent_name": conv.sub_agent_name,
-            }
-            harness_telemetry = None
-            if conv.agent_id is not None:
-                try:
-                    harness_telemetry = await asyncio.to_thread(
-                        harness_telemetry_decision, conv, conversation_store
-                    )
-                    # ``initial_items`` are already persisted and forwarded by
-                    # now, so suppress the runner's recovery turn or they run
-                    # twice.
-                    init_body = build_runner_session_init_payload(
-                        conv,
-                        server_version=VERSION,
-                        suppress_recovery_turn=True,
-                        harness_telemetry=harness_telemetry,
-                    )
-                except Exception:
-                    # Must not fail the create, but the degradation loses the
-                    # seeded override — surface it instead of silently
-                    # downgrading (a bare ValueError catch would swallow a
-                    # pydantic ValidationError here).
-                    _logger.warning(
-                        "session-init envelope build failed for %s; falling back to the "
-                        "id-only body (a model-pinned first turn may respawn)",
-                        resp.id,
-                        exc_info=True,
-                    )
+            # envelope builder requires an agent_id. ``initial_items`` are
+            # already persisted and forwarded by now, so suppress the runner's
+            # recovery turn or they run twice.
             try:
-                init_response = await _rc.post("/v1/sessions", json=init_body, timeout=10.0)
-                if harness_telemetry is not None:
-                    await asyncio.to_thread(
-                        record_host_harness_telemetry, conv, init_response, conversation_store
-                    )
+                await post_runner_session_init(
+                    conv,
+                    conversation_store,
+                    lambda body: _rc.post("/v1/sessions", json=body, timeout=10.0),
+                    payload_options=lambda: {"suppress_recovery_turn": True},
+                    ids_only_on_build_error=True,
+                )
             except (httpx.HTTPError, ConnectionError):
                 _logger.warning(
                     "Failed to notify runner about session %s",
@@ -1358,8 +1326,8 @@ def register_core_routes(
         if inherited_runner_id is not None:
             await _notify_runner_of_bundled_child(
                 result.session_id,
-                result.agent_id,
                 runner_router,
+                conversation_store,
             )
         # Grant the creator ownership BEFORE scheduling the managed
         # launch, mirroring the JSON path: a managed-guard failure
@@ -2969,18 +2937,13 @@ def register_core_routes(
                     # from the spec, and the recovery turn that executes seeded
                     # initial_items ran on the spec's harness. Recovery stays
                     # enabled: on rebind it is what runs the pending kickoff.
-                    harness_telemetry = await asyncio.to_thread(
-                        harness_telemetry_decision, conv, conversation_store
-                    )
                     try:
-                        runner_init_resp = await _runner_client.post(
-                            "/v1/sessions",
-                            json=build_runner_session_init_payload(
-                                conv,
-                                server_version=VERSION,
-                                harness_telemetry=harness_telemetry,
+                        runner_init_resp = await post_runner_session_init(
+                            conv,
+                            conversation_store,
+                            lambda body: _runner_client.post(
+                                "/v1/sessions", json=body, timeout=10.0
                             ),
-                            timeout=10.0,
                         )
                     except (httpx.HTTPError, ConnectionError):
                         # ConnectionError covers a tunnel close mid-POST
@@ -2993,13 +2956,6 @@ def register_core_routes(
                     else:
                         from omnigent.server.runner_session_init import runner_inference_verified
 
-                        if harness_telemetry is not None:
-                            await asyncio.to_thread(
-                                record_host_harness_telemetry,
-                                conv,
-                                runner_init_resp,
-                                conversation_store,
-                            )
                         parent_initialized = (
                             runner_init_resp.status_code < 400
                             and runner_inference_verified(conv, runner_init_resp)

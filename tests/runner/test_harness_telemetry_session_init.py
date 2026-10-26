@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -161,3 +162,96 @@ async def test_the_runner_tells_the_server_whether_a_sessions_repository_is_excl
         "conv_private": {"omnigent.harness_telemetry": "off"},
         "conv_public": {"omnigent.harness_telemetry": "on"},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("launch_file", "child", "exports"),
+    [
+        pytest.param(False, "conv_private", False, id="cli-runner-excluded-child"),
+        pytest.param(True, "conv_allowed", True, id="host-runner-allowed-child"),
+    ],
+)
+async def test_a_bundled_child_on_its_parents_runner_applies_its_own_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_file: bool,
+    child: str,
+    exports: bool,
+) -> None:
+    """The bundle-create notify carries the child's decision, with or without a launch file."""
+    import subprocess
+
+    from omnigent.server.routes._sessions import helpers
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://git.example.test/a/b.git",
+        ],
+        check=True,
+    )
+    server_config = tmp_path / "server.yaml"
+    monkeypatch.setenv("OMNIGENT_CONFIG", str(server_config))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv(HARNESS_TELEMETRY_ENV_VAR, raising=False)
+    monkeypatch.setattr(config, "_session_harness_telemetry", {})
+    # The runner's user allows this checkout locally.
+    allowlist = config.global_config_path().parent / "telemetry-allowlist.json"
+    allowlist.parent.mkdir(parents=True, exist_ok=True)
+    allowlist.write_text(
+        json.dumps({"endpoint": "https://local.example.test", "repos": ["git.example.test/a/b"]})
+    )
+    sessions = {
+        "conv_private": _session("conv_private", privacy="private"),
+        "conv_allowed": _session("conv_allowed"),
+        "conv_unset": _session("conv_unset", privacy="private"),
+    }
+    saved: dict[str, dict[str, str]] = {}
+    store = SimpleNamespace(
+        get_session_owner=lambda _session_id: None,
+        get_conversation=sessions.get,
+        set_labels=lambda session_id, labels: saved.setdefault(session_id, {}).update(labels),
+    )
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async def notify(session_id: str) -> Any:
+        await helpers._notify_runner_of_bundled_child(session_id, None, store)  # type: ignore[arg-type]
+        return harness_telemetry_for(tmp_path, session_id)
+
+    async with _runner_client(app) as client:
+
+        async def runner_client(*_args: object, **_kwargs: object) -> object:
+            return client
+
+        monkeypatch.setattr(helpers, "_get_runner_client", runner_client)
+        if not launch_file:
+            # No server setting: the runner's local allowlist decides, as before.
+            unset = await notify("conv_unset")
+            assert unset.enabled and not unset.from_server
+
+        server_config.write_text(
+            "harness_telemetry:\n"
+            "  endpoint: https://otlp.example.test\n"
+            "  exclude:\n    labels: [privacy=private]\n"
+        )
+        if launch_file:
+            # The host's launch-frame file decides only the session it was written for.
+            launch = tmp_path / "launch.json"
+            launch.write_text(
+                json.dumps(harness_telemetry_decision(_session("conv_parent"), store))
+            )
+            monkeypatch.setenv(HARNESS_TELEMETRY_ENV_VAR, str(launch))
+        telemetry = await notify(child)
+
+    assert telemetry.from_server and telemetry.enabled is exports
+    assert saved == {child: {"omnigent.harness_telemetry": "on" if exports else "off"}}

@@ -96,7 +96,6 @@ from omnigent.runner.mcp_execution_registry import (
     RUNNER_MCP_EXECUTION_DETACHED_MESSAGE,
 )
 from omnigent.runner.routing import RunnerRouter
-from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runner.subagent_routing import (
     ROUTING_DECISION_LABEL_KEY,
     auto_harness_session,
@@ -162,9 +161,7 @@ from omnigent.server.bundles import (
 )
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.harness_telemetry import (
-    harness_telemetry_decision,
     harness_telemetry_setting,
-    record_host_harness_telemetry,
     session_owner,
     usage_metrics_excluded,
 )
@@ -386,7 +383,10 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_managed_runner_tunnel,
     _wait_for_runner_client,
 )
-from omnigent.server.runner_session_init import RunnerSessionInitializer
+from omnigent.server.runner_session_init import (
+    RunnerSessionInitializer,
+    post_runner_session_init,
+)
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -6218,25 +6218,14 @@ async def _ensure_runner_session_initialized(
                 suppress_recovery_turn=suppress_recovery_turn,
             )
         else:
-            from omnigent.version import VERSION
-
-            harness_telemetry = await asyncio.to_thread(
-                harness_telemetry_decision, conv, conversation_store
-            )
-            resp = await runner_client.post(
-                "/v1/sessions",
-                json=build_runner_session_init_payload(
-                    conv,
-                    server_version=VERSION,
-                    suppress_recovery_turn=suppress_recovery_turn,
-                    harness_telemetry=harness_telemetry,
+            resp = await post_runner_session_init(
+                conv,
+                conversation_store,
+                lambda body: runner_client.post(
+                    "/v1/sessions", json=body, timeout=_RUNNER_SESSION_INIT_TIMEOUT_S
                 ),
-                timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
+                payload_options=lambda: {"suppress_recovery_turn": suppress_recovery_turn},
             )
-            if harness_telemetry is not None:
-                await asyncio.to_thread(
-                    record_host_harness_telemetry, conv, resp, conversation_store
-                )
         from omnigent.server.runner_session_init import (
             is_session_agent_removed,
             runner_inference_verified,
