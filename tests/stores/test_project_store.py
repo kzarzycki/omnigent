@@ -87,6 +87,21 @@ def test_get_name_stays_inside_its_workspace(store: SqlAlchemyProjectStore) -> N
         assert store.get_name(_uid("p1")) is None
 
 
+def test_get_or_create_by_name_reuses_the_owners_project(
+    store: SqlAlchemyProjectStore,
+) -> None:
+    store.create(_uid("p1"), "Nightly", "alice@example.com")
+    store.create(_uid("p2"), "Nightly", "bob@example.com")
+    existing, created = store.get_or_create_by_name(_uid("unused"), "Nightly", "alice@example.com")
+    assert (existing.id, created) == (_uid("p1"), False)
+
+    new, created = store.get_or_create_by_name(_uid("p3"), "Nightly", None)
+    assert (new.id, created) == (_uid("p3"), True)
+    again, created = store.get_or_create_by_name(_uid("p4"), "Nightly", None)
+    assert (again.id, created) == (_uid("p3"), False)
+    assert store.get(_uid("p4"), user_id=None) is None
+
+
 # ── list ──────────────────────────────────────────────────────────────────
 
 
