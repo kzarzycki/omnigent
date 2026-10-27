@@ -231,7 +231,7 @@ Native Claude and Codex sessions check every tool call with the Omnigent server 
 policy_unavailable_fallback: deny   # ask (default) | deny
 ```
 
-- `ask` (the default): the harness shows its approval prompt and the session waits for you.
+- `ask` (the default): Codex shows its approval prompt and the session waits for you. Claude gets no decision from Omnigent, so its own permission rules and auto-mode classifier decide, as they do when no Omnigent policy matches: a call your Claude settings allow runs, and any other shows Claude's approval prompt. That prompt reaches the web UI once the server answers again, unless you answered it in the terminal first. Your Omnigent policies (default, agent and session ones) don't apply until the server is back.
 - `deny`: the call is denied with a reason telling the agent the server is unavailable and to retry the same call shortly. Use it for sessions that run with nobody at the keyboard, where a prompt would stall the work until someone answers it.
 
 An unknown value counts as `ask`. A new user prompt (`UserPromptSubmit`) is blocked in both modes until the server answers again.

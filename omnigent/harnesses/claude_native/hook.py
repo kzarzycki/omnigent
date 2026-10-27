@@ -29,6 +29,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_permission_hook_config,
     read_seen_claude_session_ids,
     record_hook_event,
+    terminal_prompt_visible,
     transcript_has_forked_from_marker,
     transcript_has_recent_local_command,
     url_component,
@@ -756,6 +757,7 @@ def _post_hook_with_reattach(
     reauth: Callable[[], dict[str, str] | None] | None = None,
     wait_marker: Path | None = None,
     answer_window_s: float | None = None,
+    prompt_open: Callable[[], bool | None] | None = None,
 ) -> httpx.Response | None:
     """
     POST one permission-style hook payload, surviving severed long-polls.
@@ -852,10 +854,14 @@ def _post_hook_with_reattach(
         auth lapse that can't be renewed ends retries whatever the cap, while a
         parked wait still rides out an unreachable server. ``None`` keeps the
         count-based cap alone.
+    :param prompt_open: Checked after each failure: ``False`` (the terminal
+        dialog is gone, answered there) stops the retries, ``True`` holds the
+        prompt through the outage past the hard-failure cap, and ``None`` (the
+        pane can't be read) keeps the bounded retry.
     :returns: The successful (2xx) response, or ``None`` when the server
         rejects the request (a 4xx, including an auth rejection that can't be
         re-minted before any held poll), or when the hard-failure cap, answer
-        window, or deadline runs out.
+        window, or deadline runs out, or the terminal dialog is gone.
     """
     body = {
         **payload,
@@ -879,14 +885,33 @@ def _post_hook_with_reattach(
     # outage until the deadline so the re-POST re-publishes it on reconnect.
     parked = False
     answer_window_ends_at: float | None = None
+
+    def _holding() -> bool | None:
+        # Whether to hold through this failure; None once the dialog is gone.
+        if prompt_open is None:
+            return False
+        dialog = prompt_open()
+        if dialog is False:
+            print(
+                f"omnigent {hook_label} hook: the terminal dialog is gone; stopping retries",
+                file=sys.stderr,
+            )
+            return None
+        return dialog is True
+
     marker_scope = (
         hold_approval_wait_marker(wait_marker)
         if wait_marker is not None
         else contextlib.nullcontext()
     )
+    retrying = False
     with marker_scope:
         trust_env = not is_loopback_url(url)
         while True:
+            # A dialog answered in the terminal, even during a backoff, ends the wait.
+            if retrying and _holding() is None:
+                return None
+            retrying = True
             attempt_started = time.monotonic()
             remaining_s = deadline - attempt_started
             if remaining_s <= 0.0:
@@ -932,11 +957,13 @@ def _post_hook_with_reattach(
                     resp.raise_for_status()
                     return resp
             except httpx.HTTPStatusError as exc:
-                if (
-                    reauth is not None
-                    and parked
-                    and _is_login_redirect_or_unauthorized(exc.response)
-                ):
+                if reauth is not None and _is_login_redirect_or_unauthorized(exc.response):
+                    holding = parked or _holding()
+                    if holding is None:
+                        return None
+                else:
+                    holding = False
+                if holding:
                     # A parked prompt may outlive login; retry reauth until its deadline.
                     retry_by = deadline
                     if answer_window_ends_at is not None:
@@ -993,10 +1020,13 @@ def _post_hook_with_reattach(
                     f"({kind}); retrying: {exc}",
                     file=sys.stderr,
                 )
+            holding = _holding()
+            if holding is None:
+                return None
             if is_hard_failure:
                 # A connect that never reached the server cannot spin it, so a
                 # parked wait keeps backing off without counting toward the cap.
-                if not (parked and never_connected):
+                if not ((parked or holding) and never_connected):
                     consecutive_hard_failures += 1
             else:
                 parked = True
@@ -1025,10 +1055,14 @@ def _post_hook_with_reattach(
                     file=sys.stderr,
                 )
                 return None
-            elif consecutive_hard_failures >= _PERMISSION_MAX_CONSECUTIVE_FAILURES and not (
-                # Failures counted inside a question's window must not end a
-                # parked wait that then rides out an unreachable server.
-                parked and never_connected
+            elif (
+                not holding
+                and consecutive_hard_failures >= _PERMISSION_MAX_CONSECUTIVE_FAILURES
+                and not (
+                    # Failures counted inside a question's window must not end a
+                    # parked wait that then rides out an unreachable server.
+                    parked and never_connected
+                )
             ):
                 print(
                     f"omnigent {hook_label} hook: giving up after "
@@ -1094,6 +1128,14 @@ def _main_permission_request(argv: list[str]) -> int:
         f"{url_component(session_id)}/hooks/permission-request"
     )
     is_question = payload.get("tool_name") == "AskUserQuestion"
+    dialog_gone = False
+
+    def _dialog_open() -> bool | None:
+        nonlocal dialog_gone
+        visible = terminal_prompt_visible(bridge_dir)
+        dialog_gone = visible is False
+        return visible
+
     resp = _post_hook_with_reattach(
         url,
         headers,
@@ -1106,10 +1148,14 @@ def _main_permission_request(argv: list[str]) -> int:
             if is_question
             else None
         ),
+        # Claude's dialog stays answerable in the terminal while this waits, and
+        # the web card comes back as soon as Omnigent answers again.
+        prompt_open=_dialog_open,
     )
     # The server returns an empty 200 when the question wait expires.
     if resp is None or not resp.content:
-        if is_question:
+        # A dialog answered in the terminal needs no decision from the hook.
+        if is_question and not dialog_gone:
             decision = {"behavior": "deny", "message": _ASK_USER_QUESTION_UNAVAILABLE_MESSAGE}
             sys.stdout.write(
                 json.dumps(
@@ -1194,7 +1240,7 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     _skip_httpx_cli_import()
     from omnigent.native.native_policy_hook import (
         evaluation_response_to_hook_output,
-        fail_ask_hook_output,
+        fail_defer_hook_output,
         hook_payload_to_evaluation_request,
         policy_hook_reauth,
         post_evaluate_with_retry,
@@ -1236,7 +1282,7 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         context["model"] = status_model
 
     def _fail_closed(detail: str | None = None) -> int:
-        out = fail_ask_hook_output(hook_event, detail)
+        out = fail_defer_hook_output(hook_event, detail)
         if out is not None:
             sys.stdout.write(json.dumps(out))
         return 0
