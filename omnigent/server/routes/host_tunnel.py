@@ -63,6 +63,7 @@ from omnigent.host.frames import (
     HostStatResultFrame,
     HostStopRunnerResultFrame,
     HostStoreSecretResultFrame,
+    HostUpdateResultFrame,
     ImportLocalSessionChunkAssembler,
     decode_host_frame,
     encode_host_frame,
@@ -992,6 +993,12 @@ async def _receive_loop(
                         "error": frame.error,
                     }
                 )
+            continue
+
+        if isinstance(frame, HostUpdateResultFrame):
+            update_future = conn.pending_updates.pop(frame.request_id, None)
+            if update_future is not None and not update_future.done():
+                update_future.set_result({"exit_code": frame.exit_code, "output": frame.output})
             continue
 
         if isinstance(frame, HostDetectCredentialsResultFrame):

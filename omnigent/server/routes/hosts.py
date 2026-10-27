@@ -40,6 +40,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.frames import (
     CAP_REFRESH_HARNESSES,
+    CAP_SELF_UPDATE,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
@@ -50,6 +51,7 @@ from omnigent.host.frames import (
     HostListDirFrame,
     HostRefreshHarnessesFrame,
     HostStoreSecretFrame,
+    HostUpdateFrame,
     classify_launch_refusal,
     encode_host_frame,
     optional_str_bool_map,
@@ -211,6 +213,10 @@ def _host_update(hello: HostHelloFrame | None) -> dict[str, str] | None:
     if host_release is None or server_release is None or host_release >= server_release:
         return None
     return {"current": hello.version, "target": VERSION, "command": command}
+
+
+# The host's own timeout is 15 minutes; this leaves room for the reply to arrive.
+_HOST_UPDATE_TIMEOUT_S = 16 * 60
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -761,16 +767,114 @@ def create_hosts_router(
     """
     flags = feature_flags or resolve_feature_flags()
     router = APIRouter()
+    update_tasks: set[asyncio.Task[None]] = set()
+
+    # The last "Update now" per host on this replica: its state, the updater's
+    # output, and the connection it was sent on (a new one means the host restarted).
+    # ponytail: in memory per replica; a restart or another replica forgets it.
+    update_runs: dict[str, dict[str, Any]] = {}
+
+    def _update_run_status(host_id: str, conn: HostConnection | None) -> dict[str, Any] | None:
+        run = update_runs.get(host_id)
+        if run is None:
+            return None
+        state = run["state"]
+        if state == "running" and conn is not run["conn"]:
+            state = "restarted"
+        return {"state": state, "output": run["output"]}
 
     def _reported_build(host_id: str) -> dict[str, Any]:
         """Version, commit and update target from the live hello; ``None`` if not here."""
         conn = host_registry.get(host_id)
         hello = conn.hello if conn is not None else None
+        update = _host_update(hello)
+        if update is not None and hello is not None:
+            update = {
+                **update,
+                "can_update": CAP_SELF_UPDATE in hello.capabilities,
+                "run": _update_run_status(host_id, conn),
+            }
         return {
             "version": hello.version if hello else None,
             "commit": hello.commit if hello else None,
-            "update": _host_update(hello),
+            "update": update,
         }
+
+    async def _await_update(owner: str | None, conn: HostConnection, request_id: str) -> None:
+        """Record how the host's updater ended, then tell the owner's clients."""
+        from omnigent.server.routes.sessions import announce_hosts_changed
+
+        future = conn.pending_updates[request_id]
+        try:
+            result = await asyncio.wait_for(future, timeout=_HOST_UPDATE_TIMEOUT_S)
+        except TimeoutError:
+            result = {"exit_code": None, "output": "the host did not report back"}
+        finally:
+            conn.pending_updates.pop(request_id, None)
+        run = update_runs.get(conn.host_id)
+        if run is not None and run["request_id"] == request_id:
+            run["state"] = "finished" if result["exit_code"] == 0 else "failed"
+            run["output"] = result["output"]
+        announce_hosts_changed(owner)
+
+    @router.post("/hosts/{host_id}/update", status_code=202)
+    async def update_host(request: Request, host_id: str) -> dict[str, Any]:
+        """Ask an outdated host to run its own updater, aiming at the server's target.
+
+        Returns once the host has the request; the outcome shows in the host's
+        ``update.run`` in ``GET /v1/hosts`` and is pushed as ``hosts_changed``.
+
+        :param request: The incoming request (for auth).
+        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
+        :returns: ``{"state": "running"}``.
+        :raises HTTPException: 404 unknown host, 403 not the owner, 409 offline,
+            current, without an updater, or already updating; 502 connection lost.
+        """
+        from omnigent.server.routes.sessions import announce_hosts_changed
+
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        update = _host_update(conn.hello)
+        if update is None:
+            raise HTTPException(status_code=409, detail=f"host '{host.name}' is up to date")
+        if CAP_SELF_UPDATE not in conn.hello.capabilities:
+            raise HTTPException(
+                status_code=409,
+                detail=f"host '{host.name}' has no updater; run {update['command']} on it",
+            )
+        if (_update_run_status(host.host_id, conn) or {}).get("state") == "running":
+            raise HTTPException(status_code=409, detail=f"host '{host.name}' is already updating")
+
+        request_id = secrets.token_hex(8)
+        conn.pending_updates[request_id] = asyncio.get_running_loop().create_future()
+        try:
+            host_registry.send_text(
+                conn,
+                encode_host_frame(HostUpdateFrame(request_id=request_id, target=update["target"])),
+            )
+        except ConnectionError as exc:
+            conn.pending_updates.pop(request_id, None)
+            raise HTTPException(
+                status_code=502, detail=f"host '{host.name}' connection lost"
+            ) from exc
+        update_runs[host.host_id] = {
+            "state": "running",
+            "output": "",
+            "conn": conn,
+            "request_id": request_id,
+        }
+        task = asyncio.create_task(_await_update(host.user_id, conn, request_id))
+        update_tasks.add(task)
+        task.add_done_callback(update_tasks.discard)
+        announce_hosts_changed(host.user_id)
+        return {"state": "running"}
 
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:

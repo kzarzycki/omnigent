@@ -15,10 +15,14 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
+    CAP_SELF_UPDATE,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostHelloFrame,
     HostLaunchRunnerResultFrame,
+    HostUpdateFrame,
+    HostUpdateResultFrame,
+    decode_host_frame,
     encode_host_frame,
 )
 from omnigent.server.auth import LEVEL_OWNER
@@ -50,6 +54,7 @@ def _make_hello(
     gateway_inference: dict[str, bool] | None = None,
     commit: str | None = None,
     version: str = "0.1.0-test",
+    capabilities: list[str] | None = None,
 ) -> str:
     """Encode a HostHelloFrame for tests.
 
@@ -73,6 +78,7 @@ def _make_hello(
             configured_harnesses=configured_harnesses,
             gateway_inference=gateway_inference,
             commit=commit,
+            capabilities=capabilities or [],
         )
     )
 
@@ -138,6 +144,7 @@ async def _connect_host(
     gateway_inference: dict[str, bool] | None = None,
     commit: str | None = None,
     version: str = "0.1.0-test",
+    capabilities: list[str] | None = None,
 ) -> ApplicationCommunicator:
     """Connect a mock host via WebSocket tunnel.
 
@@ -161,7 +168,9 @@ async def _connect_host(
     await comm.send_input(
         {
             "type": "websocket.receive",
-            "text": _make_hello(name, configured_harnesses, gateway_inference, commit, version),
+            "text": _make_hello(
+                name, configured_harnesses, gateway_inference, commit, version, capabilities
+            ),
         },
     )
     while registry.get(host_id) is None:
@@ -437,7 +446,9 @@ async def test_hosts_api_reports_the_update_a_host_needs(
         single = await client.get(f"/v1/hosts/{_HOST_ID}")
 
     expected = (
-        None if expected_update is None else {**expected_update, "command": "update-host.sh"}
+        None
+        if expected_update is None
+        else {**expected_update, "command": "update-host.sh", "can_update": False, "run": None}
     )
     for body in (listing.json()["hosts"][0], single.json()):
         assert body["version"] == host_version
@@ -1609,3 +1620,109 @@ async def test_runner_exited_invokes_callback_with_runner_and_error(
     assert received == [(_HOST_ID, "runner_x", "exited with code 1")]
     # The callback owns the event; the tunnel must not log a session-less duplicate.
     assert not [r for r in caplog.records if getattr(r, "event_name", None) == "runner_exited"]
+
+
+async def _next_update_frame(comm: ApplicationCommunicator) -> HostUpdateFrame:
+    """Read frames the server sends the host until the update request arrives."""
+    for _ in range(20):
+        output = await comm.receive_output(timeout=budget(_LAUNCH_FRAME_TIMEOUT_S))
+        if output["type"] == "websocket.send":
+            frame = decode_host_frame(output["text"])
+            if isinstance(frame, HostUpdateFrame):
+                return frame
+    raise AssertionError("host never received host.update")
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "output", "expected_state"),
+    [(0, "updated to c25ddceb8; restarts in 20s", "finished"), (1, "not signed", "failed")],
+)
+async def test_update_now_asks_the_host_and_reports_how_it_ended(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    output: str,
+    expected_state: str,
+) -> None:
+    """
+    Verify "Update now" sends the host only the target build, and that the
+    updater's exit status and output show in the host's ``update.run``.
+
+    This is the whole one-click path the banner drives: a lost frame leaves the
+    banner spinning, a lost result leaves the owner without the reason.
+    """
+    monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", _TARGET_COMMIT)
+    app, registry, _hs, _cs = host_api_app
+    comm = await _connect_host(app, registry, commit="1a2b3c4d5", capabilities=[CAP_SELF_UPDATE])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        before = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()["update"]
+        resp = await client.post(f"/v1/hosts/{_HOST_ID}/update")
+        frame = await _next_update_frame(comm)
+        running = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()["update"]["run"]
+        again = await client.post(f"/v1/hosts/{_HOST_ID}/update")
+
+        result = HostUpdateResultFrame(
+            request_id=frame.request_id, exit_code=exit_code, output=output
+        )
+        await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(result)})
+        for _ in range(100):
+            run = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()["update"]["run"]
+            if run["state"] != "running":
+                break
+            await asyncio.sleep(0.01)
+
+    assert before["can_update"] is True
+    assert before["run"] is None
+    assert resp.status_code == 202
+    assert frame.target == "c25ddceb8"
+    assert running == {"state": "running", "output": ""}
+    assert again.status_code == 409
+    assert run == {"state": expected_state, "output": output}
+
+
+@pytest.mark.parametrize(
+    ("commit", "capabilities", "detail"),
+    [
+        ("c25ddceb8", [CAP_SELF_UPDATE], "up to date"),
+        ("1a2b3c4d5", [], "has no updater"),
+    ],
+)
+async def test_update_now_refuses_a_current_host_or_one_without_an_updater(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+    commit: str,
+    capabilities: list[str],
+    detail: str,
+) -> None:
+    """A host with nothing to update, or no updater of its own, gets a 409 and no frame."""
+    monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", _TARGET_COMMIT)
+    app, registry, _hs, _cs = host_api_app
+    _comm = await _connect_host(app, registry, commit=commit, capabilities=capabilities)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/v1/hosts/{_HOST_ID}/update")
+        listed = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()["update"]
+
+    assert resp.status_code == 409
+    assert detail in resp.json()["detail"]
+    if listed is not None:
+        assert listed["can_update"] is False
+
+
+async def test_update_now_refuses_another_users_host(
+    multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """Only the host's owner can make it run its updater."""
+    _app, _reg, host_store, _cs = multi_user_app
+    host_store.upsert_on_connect(
+        "294391bc835cde1130ef2a02dcd2b7b3", "alice-laptop", "alice@test.com"
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=_app), base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/hosts/294391bc835cde1130ef2a02dcd2b7b3/update",
+            headers={"x-test-user": "bob@test.com"},
+        )
+
+    assert resp.status_code == 403

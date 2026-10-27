@@ -1,6 +1,8 @@
 import { useReducer } from "react";
 import { ArrowUpCircleIcon } from "lucide-react";
-import { useHosts, type Host, type HostUpdate } from "@/hooks/useHosts";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { useHosts, useUpdateHost, type Host, type HostUpdate } from "@/hooks/useHosts";
 import { dateKey } from "@/lib/arcaShutdownWarning";
 import { cn } from "@/lib/utils";
 import { CommandCopyButton } from "./ArcaShutdownBanner";
@@ -54,8 +56,56 @@ export function useOutdatedHost(hostId: string | null | undefined) {
   };
 }
 
+// What the last "Update now" says, for every state but "running".
+function runSummary(host: Host, update: HostUpdate): string | null {
+  switch (update.run?.state) {
+    case "failed":
+      return "The update failed.";
+    case "finished":
+      return `The updater finished, but ${host.name} still runs ${update.current}.`;
+    case "restarted":
+      return `${host.name} restarted, but it still runs ${update.current}.`;
+    default:
+      return null;
+  }
+}
+
+function UpdateNow({ host, update }: OutdatedHost) {
+  const updateHost = useUpdateHost(host.host_id);
+  const running = update.run?.state === "running" || updateHost.isPending;
+  const summary = runSummary(host, update);
+  if (running) {
+    return (
+      <p className="mt-1.5 flex items-center gap-2 text-muted-foreground">
+        <Spinner className="size-3.5" />
+        Updating {host.name}. Running sessions finish first, so this can take a few minutes.
+      </p>
+    );
+  }
+  return (
+    <>
+      {summary && (
+        <div className="mt-1.5">
+          <p className="font-medium">{summary}</p>
+          {update.run?.output && (
+            <pre className="mt-1 max-h-32 overflow-auto rounded border border-border bg-background/70 px-2 py-1 text-xs whitespace-pre-wrap">
+              {update.run.output}
+            </pre>
+          )}
+        </div>
+      )}
+      {updateHost.error && <p className="mt-1.5 text-destructive">{updateHost.error.message}</p>}
+      <div className="mt-1.5 flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => updateHost.mutate()}>
+          {summary ? "Try again" : "Update now"}
+        </Button>
+      </div>
+    </>
+  );
+}
+
 export function HostUpdateBanner({
-  outdated: { host, update },
+  outdated,
   onDismiss,
   hasPinnedAbove = false,
 }: {
@@ -63,6 +113,7 @@ export function HostUpdateBanner({
   onDismiss: () => void;
   hasPinnedAbove?: boolean;
 }) {
+  const { host, update } = outdated;
   return (
     <div
       role="status"
@@ -77,13 +128,22 @@ export function HostUpdateBanner({
           <p className="font-medium">
             Omnigent {update.target} is available for {host.name}.
           </p>
-          <p className="mt-0.5 text-muted-foreground">
-            It runs {update.current}. Run this on {host.name} to get the latest fixes. Running
-            sessions finish first.
-          </p>
-          <div className="mt-1.5 flex flex-wrap gap-2">
-            <CommandCopyButton command={update.command} />
-          </div>
+          {update.can_update ? (
+            <>
+              <p className="mt-0.5 text-muted-foreground">It runs {update.current}.</p>
+              <UpdateNow host={host} update={update} />
+            </>
+          ) : (
+            <>
+              <p className="mt-0.5 text-muted-foreground">
+                It runs {update.current}. Run this on {host.name} to get the latest fixes. Running
+                sessions finish first.
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                <CommandCopyButton command={update.command} />
+              </div>
+            </>
+          )}
           <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
             <button
               type="button"

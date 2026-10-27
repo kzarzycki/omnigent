@@ -62,6 +62,8 @@ from omnigent.host.frames import (
     HostStopRunnerResultFrame,
     HostStoreSecretFrame,
     HostStoreSecretResultFrame,
+    HostUpdateFrame,
+    HostUpdateResultFrame,
     ImportLocalSessionChunkAssembler,
     ImportSessionChunkingUnsupportedError,
     classify_launch_refusal,
@@ -2701,3 +2703,23 @@ def test_runner_exit_rejects_non_boolean_connection_evidence(invalid: object) ->
                 }
             )
         )
+
+
+def test_update_round_trip() -> None:
+    """The update request names only a target; the result carries exit status and output."""
+    req = decode_host_frame(
+        encode_host_frame(HostUpdateFrame(request_id="r1", target="c25ddceb8"))
+    )
+    assert req == HostUpdateFrame(request_id="r1", target="c25ddceb8")
+
+    result = HostUpdateResultFrame(request_id="r1", exit_code=3, output="deferred: busy")
+    assert decode_host_frame(encode_host_frame(result)) == result
+
+
+@pytest.mark.parametrize("exit_code", [True, "0", 1.5])
+def test_update_result_drops_a_garbled_exit_code(exit_code: object) -> None:
+    """A non-integer exit status decodes as "never ran", not as success or failure."""
+    text = json.dumps({"kind": "host.update_result", "request_id": "r1", "exit_code": exit_code})
+    decoded = decode_host_frame(text)
+    assert isinstance(decoded, HostUpdateResultFrame)
+    assert decoded.exit_code is None

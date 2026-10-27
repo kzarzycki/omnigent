@@ -400,6 +400,8 @@ class HostConnection:
         succession) can't interleave the daemon's non-atomic
         load→merge→save of ``config.yaml`` and clobber a sibling ``providers:``
         entry. Held around the whole store-secret round-trip.
+    :param pending_updates: Per-``request_id`` futures for in-flight
+        ``host.update`` runs, resolved with ``exit_code`` and ``output``.
     :param pending_fs_requests: Per-``request_id`` futures for
         in-flight ``host.fs_request`` reads (the workspace file
         panel served from the host while the runner is offline).
@@ -477,6 +479,9 @@ class HostConnection:
         default_factory=dict,
     )
     credential_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending_updates: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
     pending_fs_requests: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
