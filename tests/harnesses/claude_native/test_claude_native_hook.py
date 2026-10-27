@@ -1103,20 +1103,33 @@ def test_permission_request_hook_moves_unforwarded_question_to_chat_text(
     assert holds == [True], "a question must be held through outages before it is denied"
 
 
-def test_permission_request_hook_holds_question_through_server_restart(
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Which fix?"}]},
+        },
+        {"tool_name": "Bash", "tool_input": {"command": "make deploy"}},
+    ],
+    ids=["question", "bash"],
+)
+def test_permission_request_hook_holds_prompt_through_server_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tool_input: dict[str, object],
 ) -> None:
     """
-    A question held while the server redeploys reaches the restarted server.
+    A prompt held while the server redeploys reaches the restarted server.
 
     The restart severs the held poll, then the gateway answers 5xx while the
-    server is down. Giving up there left the question in Claude's terminal
-    picker with no web card.
+    server is down. Giving up there left the prompt in Claude's terminal
+    dialog with no web card.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(claude_native_hook, "terminal_prompt_visible", lambda _bridge_dir: True)
     cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
     floor = claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S
     client = _scripted_client(
@@ -1125,11 +1138,7 @@ def test_permission_request_hook_holds_question_through_server_restart(
     )
     monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
     bridge_dir = _prepare_permission_bridge(tmp_path, "conv_ask_redeploy")
-    payload = {
-        "hook_event_name": "PermissionRequest",
-        "tool_name": "AskUserQuestion",
-        "tool_input": {"questions": [{"question": "Which fix?", "options": []}]},
-    }
+    payload = {"hook_event_name": "PermissionRequest", **tool_input}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["permission-request", "--bridge-dir", str(bridge_dir)])
@@ -1137,6 +1146,40 @@ def test_permission_request_hook_holds_question_through_server_restart(
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out) == {"ok": True}
     assert len(client.calls) == cap * 2 + 2
+
+
+@pytest.mark.parametrize("tool_name", ["AskUserQuestion", "Bash"])
+def test_permission_request_hook_stops_once_the_terminal_dialog_is_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tool_name: str,
+) -> None:
+    """
+    A prompt answered in the terminal during an outage is never re-posted.
+
+    Re-posting it once the server returned would raise a card for a call the
+    user already approved or denied.
+    """
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
+    answered_after = 3
+    client = _scripted_client(script=[("5xx", 0.0)], monkeypatch=monkeypatch)
+
+    def _dialog_visible(_bridge_dir: Path) -> bool:
+        return len(client.calls) < answered_after
+
+    monkeypatch.setattr(claude_native_hook, "terminal_prompt_visible", _dialog_visible)
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+    bridge_dir = _prepare_permission_bridge(tmp_path, "conv_answered_in_terminal")
+    payload = {"hook_event_name": "PermissionRequest", "tool_name": tool_name}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    exit_code = claude_native_hook.main(["permission-request", "--bridge-dir", str(bridge_dir)])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+    assert len(client.calls) == answered_after
 
 
 @pytest.mark.parametrize("empty_response", [False, True], ids=["transport-failed", "timed-out"])
@@ -1150,7 +1193,8 @@ def test_permission_request_hook_leaves_other_unforwarded_tools_to_the_terminal(
     Other tools the hook can't forward still fall back to Claude's own prompt.
 
     Denying them would block an edit or command the terminal user could
-    still approve.
+    still approve. They are held through outages only while their dialog
+    shows in the pane, which the hook checks between retries.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
@@ -1158,6 +1202,7 @@ def test_permission_request_hook_leaves_other_unforwarded_tools_to_the_terminal(
 
     def _no_verdict(*_args: object, **kwargs: object) -> httpx.Response | None:
         holds.append(kwargs.get("hold_through_outages"))
+        assert callable(kwargs.get("prompt_open"))
         return httpx.Response(200) if empty_response else None
 
     monkeypatch.setattr(claude_native_hook, "_post_hook_with_reattach", _no_verdict)
@@ -1169,7 +1214,7 @@ def test_permission_request_hook_leaves_other_unforwarded_tools_to_the_terminal(
 
     assert exit_code == 0
     assert capsys.readouterr().out == ""
-    assert holds == [False], "other tools keep the bounded retry and terminal fallback"
+    assert holds == [False], "other tools hold only while their dialog shows"
 
 
 def test_build_hook_settings_registers_policy_hooks_when_omnigent_server_url_set(
@@ -1650,18 +1695,18 @@ def test_ask_user_question_subcommand_is_a_silent_noop(
 
 
 @pytest.mark.parametrize("mode", ["connect_error", "non_2xx", "empty_body", "malformed_json"])
-def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
+def test_evaluate_policy_pre_tool_use_defers_when_verdict_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     mode: str,
 ) -> None:
     """
-    A governed PreToolUse call denies when no usable verdict is returned.
+    A PreToolUse call with no usable verdict is left to Claude's own rules.
 
-    For native harnesses this hook is the sole TOOL_CALL enforcement point,
-    so a server outage / non-2xx / empty / malformed response must fail
-    CLOSED (deny) instead of "no opinion" — the bypass reported in #536.
+    An ``ask`` overrode Claude's allow rules, so a server outage / non-2xx /
+    empty / malformed response prompted for every call, a read-only ``grep``
+    included. No output lets Claude's rules and classifier decide.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
@@ -1681,9 +1726,7 @@ def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    result = json.loads(captured.out)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "ask", result
-    assert result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert captured.out == ""
 
 
 def test_evaluate_policy_user_prompt_submit_fails_closed_on_error(
@@ -2018,17 +2061,16 @@ def test_evaluate_policy_reauths_on_403_invalid_token(
     assert "re-minted token and retrying" in captured.err
 
 
-def test_evaluate_policy_fails_closed_when_reauth_unavailable(
+def test_evaluate_policy_defers_when_reauth_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """
-    If the token can't be re-minted, the tool still fails CLOSED (safety net).
+    If the token can't be re-minted, the call is left to Claude's own rules.
 
-    Re-auth is best-effort. When no refresh mechanism is available, the
-    authoritative PreToolUse gate must still DENY rather than let an
-    unevaluated tool through — preserving the fail-closed guarantee from #163.
+    Re-auth is best-effort. With no refresh mechanism the hook gets no verdict,
+    and treats it as an outage: no output, so Claude's rules decide.
     """
 
     class _RedirectClient:
@@ -2074,11 +2116,7 @@ def test_evaluate_policy_fails_closed_when_reauth_unavailable(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    result = json.loads(captured.out)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert result["hookSpecificOutput"]["permissionDecisionReason"].startswith(
-        native_policy_hook._EVAL_UNAVAILABLE_ASK_REASON
-    )
+    assert captured.out == ""
 
 
 def test_generated_policy_command_delivers_its_verdict_through_the_fast_exit(
@@ -2266,6 +2304,79 @@ def test_reattach_bounds_consecutive_hard_failures(monkeypatch: pytest.MonkeyPat
     assert len(client.calls) == claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES, (
         "reattach must stop after the consecutive-hard-failure cap, not spin"
     )
+
+
+@pytest.mark.parametrize("failure", ["5xx", "auth-lapse-after-held-poll"])
+def test_reattach_never_reposts_a_prompt_answered_during_backoff(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A dialog answered in the terminal while the hook backs off is not re-posted.
+
+    The server may be back by the next attempt, so a re-POST would park a card
+    for a call the user already answered.
+    """
+    state = {"now": 0.0, "visible": True, "calls": 0}
+
+    def _sleep(seconds: float) -> None:
+        state["now"] += seconds
+        # The auth case answers in the auth-lapse backoff, after the held poll.
+        state["visible"] = failure != "5xx" and state["calls"] < 2
+
+    class _Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def post(self, url: str, **_kwargs: object) -> httpx.Response:
+            state["calls"] += 1
+            req = httpx.Request("POST", url)
+            if failure == "5xx":
+                status = 503 if state["calls"] == 1 else 200
+                return httpx.Response(status, json={"ok": True}, request=req)
+            if state["calls"] == 1:
+                state["now"] += claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S + 1
+                raise httpx.RemoteProtocolError("held poll severed", request=req)
+            return httpx.Response(401, request=req)
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _Client)
+    monkeypatch.setattr(claude_native_hook.time, "monotonic", lambda: state["now"])
+    monkeypatch.setattr(claude_native_hook.time, "sleep", _sleep)
+
+    resp = claude_native_hook._post_hook_with_reattach(
+        url="http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request",
+        headers={},
+        payload={"hook_event_name": "PermissionRequest", "tool_name": "Bash"},
+        hook_label="permission",
+        reauth=lambda: None,
+        prompt_open=lambda: state["visible"],
+    )
+
+    assert resp is None
+    assert state["calls"] == (1 if failure == "5xx" else 2)
+
+
+def test_reattach_unreadable_pane_keeps_the_hard_failure_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no pane to check, a prompt keeps the bounded retry against a down server."""
+    client = _scripted_client(script=[("5xx", 0.0)], monkeypatch=monkeypatch)
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+
+    resp = claude_native_hook._post_hook_with_reattach(
+        url="http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request",
+        headers={},
+        payload={"hook_event_name": "PermissionRequest"},
+        hook_label="permission",
+        prompt_open=lambda: None,
+    )
+
+    assert resp is None
+    assert len(client.calls) == claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
 
 
 @pytest.mark.parametrize("kind", ["connect", "5xx"])

@@ -6081,16 +6081,27 @@ def has_pending_user_prompt(bridge_dir: Path) -> bool:
     if _has_approval_wait(bridge_dir):
         delivery_diagnostics.record_pending_prompt("hook_wait")
         return True
-    info = _read_json_file(bridge_dir / _TMUX_FILE)
-    if not isinstance(info, dict):
-        return False
-    socket_path, target = info.get("socket_path"), info.get("tmux_target")
-    if not isinstance(socket_path, str) or not isinstance(target, str):
-        return False
-    pending = _user_prompt_visible(_capture_pane(socket_path, target))
+    pending = bool(terminal_prompt_visible(bridge_dir))
     if pending:
         delivery_diagnostics.record_pending_prompt("visible_prompt")
     return pending
+
+
+def terminal_prompt_visible(bridge_dir: Path) -> bool | None:
+    """Check the session's pane for a native decision dialog.
+
+    :param bridge_dir: The session's native bridge directory.
+    :returns: Whether a dialog is on screen, or ``None`` when the pane can't
+        be read (no tmux info, or an empty capture).
+    """
+    info = _read_json_file(bridge_dir / _TMUX_FILE)
+    if not isinstance(info, dict):
+        return None
+    socket_path, target = info.get("socket_path"), info.get("tmux_target")
+    if not isinstance(socket_path, str) or not isinstance(target, str):
+        return None
+    pane = _capture_pane(socket_path, target)
+    return _user_prompt_visible(pane) if pane.strip() else None
 
 
 def auto_mode_billing_notice_visible(pane: str) -> bool:
@@ -7776,7 +7787,7 @@ def _tool_relay_handler_factory(
                 _EVALUATE_POLICY_RETRY_INITIAL_BACKOFF_S,
                 _EVALUATE_POLICY_RETRY_MAX_BACKOFF_S,
                 evaluation_response_to_hook_output,
-                fail_ask_hook_output,
+                fail_defer_hook_output,
                 hook_payload_to_evaluation_request,
             )
 
@@ -7854,14 +7865,14 @@ def _tool_relay_handler_factory(
             if not isinstance(verdict, dict) or not verdict.get("result"):
                 _logger.warning(
                     "policy_eval_relay_failure: session=%s hook_event=%s "
-                    "attempts=%d last_error=%r; falling back to fail-closed",
+                    "attempts=%d last_error=%r; using the unavailable fallback",
                     session_id,
                     hook_event,
                     attempts,
                     last_error,
                     extra={"session_id": session_id},
                 )
-                self._respond_hook_output(fail_ask_hook_output(hook_event, last_error))
+                self._respond_hook_output(fail_defer_hook_output(hook_event, last_error))
                 return
             hook_output = evaluation_response_to_hook_output(hook_event, verdict)
             hook_specific = (hook_output or {}).get("hookSpecificOutput")
