@@ -40,6 +40,8 @@ export interface Host {
    *  `null`/absent while offline, on another replica, or on an older server. */
   version?: string | null;
   commit?: string | null;
+  /** Server version this host should update to; null when current or unknown. */
+  update_version?: string | null;
 }
 
 interface HostsResponse {

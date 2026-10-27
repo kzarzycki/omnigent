@@ -163,6 +163,27 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
     return (padded[0], padded[1], padded[2])
 
 
+def _update_version(host_version: str | None) -> str | None:
+    """Return the version a host should update to, or ``None`` when it needn't.
+
+    The answer is the server's own version when the host's release is older,
+    so a web banner can nudge the owner. ``None`` when the host is current,
+    not connected here, or reports an unparseable version.
+
+    :param host_version: Hello-reported version, e.g. ``"0.18.2"``.
+    :returns: Target version, e.g. ``"0.19.0"``, or ``None``.
+    """
+    from omnigent.version import VERSION
+
+    host_release = _release_tuple(host_version) if host_version is not None else None
+    server_release = _release_tuple(VERSION)
+    # ponytail: the target is the server's own version; an org-pinned target
+    # and a minimum version would replace it here.
+    if host_release is None or server_release is None or host_release >= server_release:
+        return None
+    return VERSION
+
+
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
     """Reject fast when the daemon predates the harness-setup frames.
 
@@ -713,12 +734,14 @@ def create_hosts_router(
     router = APIRouter()
 
     def _reported_build(host_id: str) -> dict[str, str | None]:
-        """Version and commit from the live hello; ``None`` when not connected here."""
+        """Version, commit and update target from the live hello; ``None`` if not here."""
         conn = host_registry.get(host_id)
         hello = conn.hello if conn is not None else None
+        version = hello.version if hello else None
         return {
-            "version": hello.version if hello else None,
+            "version": version,
             "commit": hello.commit if hello else None,
+            "update_version": _update_version(version),
         }
 
     @router.get("/hosts")
@@ -731,8 +754,9 @@ def create_hosts_router(
         :param request: The incoming request (for auth).
         :returns: ``{"hosts": [...]}`` with host details — ``host_id``,
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
-            ``configured_harnesses``, and ``gateway_inference`` (``None`` when
-            no connected host has reported it to this replica).
+            ``configured_harnesses``, ``gateway_inference`` (``None`` when
+            no connected host has reported it to this replica), and
+            ``version`` / ``commit`` / ``update_version`` (see :func:`_update_version`).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user

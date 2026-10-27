@@ -32,6 +32,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.version import VERSION
 from tests.budgets import budget
 from tests.server.helpers import websocket_scope as _websocket_scope
 
@@ -48,6 +49,7 @@ def _make_hello(
     configured_harnesses: dict[str, bool | str] | None = None,
     gateway_inference: dict[str, bool] | None = None,
     commit: str | None = None,
+    version: str = "0.1.0-test",
 ) -> str:
     """Encode a HostHelloFrame for tests.
 
@@ -60,11 +62,12 @@ def _make_hello(
     :param gateway_inference: Per-harness AI-Gateway-backed inference map to
         report, e.g. ``{"claude-native": True}``; ``None`` mimics a host that
         doesn't report it.
+    :param version: Host software version to report, e.g. ``"0.18.2"``.
     :returns: JSON-encoded hello frame.
     """
     return encode_host_frame(
         HostHelloFrame(
-            version="0.1.0-test",
+            version=version,
             frame_protocol_version=1,
             name=name,
             configured_harnesses=configured_harnesses,
@@ -134,6 +137,7 @@ async def _connect_host(
     configured_harnesses: dict[str, bool | str] | None = None,
     gateway_inference: dict[str, bool] | None = None,
     commit: str | None = None,
+    version: str = "0.1.0-test",
 ) -> ApplicationCommunicator:
     """Connect a mock host via WebSocket tunnel.
 
@@ -145,6 +149,7 @@ async def _connect_host(
         e.g. ``{"codex": False}``; ``None`` mimics an older host.
     :param gateway_inference: Gateway-inference map for the hello frame,
         e.g. ``{"codex": True}``; ``None`` mimics a host that doesn't report it.
+    :param version: Host software version for the hello frame.
     :returns: Connected ASGI communicator.
     """
     path = f"/v1/hosts/{host_id}/tunnel"
@@ -156,7 +161,7 @@ async def _connect_host(
     await comm.send_input(
         {
             "type": "websocket.receive",
-            "text": _make_hello(name, configured_harnesses, gateway_inference, commit),
+            "text": _make_hello(name, configured_harnesses, gateway_inference, commit, version),
         },
     )
     while registry.get(host_id) is None:
@@ -380,6 +385,34 @@ async def test_hosts_api_surfaces_gateway_inference(
     }
     assert single.status_code == 200
     assert single.json()["gateway_inference"] == {"claude-native": True, "codex": False}
+
+
+@pytest.mark.parametrize(
+    ("host_version", "expected_update"),
+    [("0.0.1", VERSION), (VERSION, None), ("not-a-version", None)],
+)
+async def test_hosts_api_reports_host_version_and_update(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    host_version: str,
+    expected_update: str | None,
+) -> None:
+    """
+    Verify both host endpoints report the host's version and, only for a host
+    older than the server, the server version it should update to.
+
+    The web update banner keys on ``update_version``; a wrong value either
+    nags an up-to-date host or stays silent for an outdated one.
+    """
+    app, registry, _hs, _cs = host_api_app
+    _comm = await _connect_host(app, registry, version=host_version)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listing = await client.get("/v1/hosts")
+        single = await client.get(f"/v1/hosts/{_HOST_ID}")
+
+    for body in (listing.json()["hosts"][0], single.json()):
+        assert body["version"] == host_version
+        assert body["update_version"] == expected_update
 
 
 async def test_hosts_api_gateway_inference_null_for_older_host(
