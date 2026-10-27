@@ -7780,10 +7780,15 @@ def test_cancel_mcp_request_tolerates_a_connection_closing_concurrently() -> Non
         peer.close()
 
 
-def test_run_relay_tool_gives_approved_work_a_full_ceiling(
+def _run_relay_tool_on_a_fake_clock(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Approval is judged once per ceiling: work that starts after approval gets to finish."""
+    *,
+    ceiling_s: float,
+    poll_s: float,
+    approved_at: float | None,
+    finished_at: float | None,
+) -> tuple[dict[str, Any], concurrent.futures.Future[object], float]:
+    """Run ``_run_relay_tool`` on a fake clock; ``None`` means never approved / never finished."""
     future: concurrent.futures.Future[object] = concurrent.futures.Future()
     clock = [0.0]
 
@@ -7793,27 +7798,81 @@ def test_run_relay_tool_gives_approved_work_a_full_ceiling(
 
     def _wait(_futures: object, timeout: float) -> Any:
         clock[0] = round(clock[0] + timeout, 6)
-        if clock[0] >= 0.35:
+        if finished_at is not None and clock[0] >= finished_at:
             future.set_result({"result": "finished"})
         return types.SimpleNamespace(done={future} if future.done() else set())
 
     monkeypatch.setattr(claude_native_bridge.asyncio, "run_coroutine_threadsafe", _submit)
     monkeypatch.setattr(claude_native_bridge.concurrent.futures, "wait", _wait)
     monkeypatch.setattr(claude_native_bridge.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", 0.01)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_TIMEOUT_S", ceiling_s)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_APPROVAL_BUDGET_S", 1.0)
+    monkeypatch.setattr(claude_native_bridge, "_TOOL_CALL_CALLER_POLL_S", poll_s)
 
-    # Approved at 0.30 s, work done at 0.35 s, next ceiling check at 0.40 s.
     response = claude_native_bridge._run_relay_tool(
         lambda *_args: None,
         cast(Any, None),
         "sys_scheduled_task_create",
         {},
-        awaiting_approval=lambda: clock[0] < 0.30,
+        awaiting_approval=lambda: approved_at is None or clock[0] < approved_at,
+    )
+    return response, future, clock[0]
+
+
+@pytest.mark.parametrize(
+    ("ceiling_s", "poll_s", "approved_at", "finished_at"),
+    [
+        (0.2, 0.01, 0.30, 0.35),  # approved mid-window
+        (0.2, 0.01, 0.39, 0.55),  # approved just before a ceiling check, work runs past it
+        (0.125, 0.125, 0.5, 0.55),  # ceiling equals the poll interval (binary-exact times)
+    ],
+)
+def test_run_relay_tool_gives_approved_work_a_full_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    ceiling_s: float,
+    poll_s: float,
+    approved_at: float,
+    finished_at: float,
+) -> None:
+    """Work after an approval gets a full ceiling, from the first poll that sees it cleared."""
+    response, _future, _now = _run_relay_tool_on_a_fake_clock(
+        monkeypatch,
+        ceiling_s=ceiling_s,
+        poll_s=poll_s,
+        approved_at=approved_at,
+        finished_at=finished_at,
     )
 
     assert response.get("isError") is not True
     assert "finished" in json.dumps(response)
+
+
+def test_run_relay_tool_cancels_approved_work_a_full_ceiling_after_the_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approved work that still runs a full ceiling later is cancelled at that ceiling."""
+    response, future, now = _run_relay_tool_on_a_fake_clock(
+        monkeypatch, ceiling_s=0.2, poll_s=0.01, approved_at=0.39, finished_at=None
+    )
+
+    assert response.get("isError") is True
+    assert "did not finish within 0s" in json.dumps(response)
+    assert future.cancelled()
+    assert now == pytest.approx(0.59, abs=0.011)  # one poll of float slack
+
+
+def test_run_relay_tool_names_the_approval_budget_when_it_runs_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval that never clears is cancelled at the budget, which the error names."""
+    response, future, now = _run_relay_tool_on_a_fake_clock(
+        monkeypatch, ceiling_s=0.2, poll_s=0.01, approved_at=None, finished_at=None
+    )
+
+    assert response.get("isError") is True
+    assert "approval budget of 1s" in json.dumps(response)
+    assert future.cancelled()
+    assert now == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("concurrent_method", ["ping", "tools/call"])
