@@ -167,8 +167,8 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
 
 # Deploy settings for the host update banner: the commit hosts should run (the
 # server image has no git, so only the deploy knows it) and the command to show.
-_HOST_TARGET_COMMIT_ENV = "OMNIGENT_HOST_TARGET_COMMIT"
-_HOST_UPDATE_COMMAND_ENV = "OMNIGENT_HOST_UPDATE_COMMAND"
+_DEPLOY_COMMIT_ENV = "OMNIGENT_DEPLOY_COMMIT"
+_DEPLOY_UPDATE_COMMAND_ENV = "OMNIGENT_DEPLOY_UPDATE_COMMAND"
 _DEFAULT_HOST_UPDATE_COMMAND = "omni upgrade"
 # Shortest commit prefix trusted to name one commit (git's own default abbreviation).
 _MIN_COMMIT_PREFIX = 7
@@ -199,8 +199,8 @@ def _host_update(hello: HostHelloFrame | None) -> dict[str, str] | None:
 
     if hello is None:
         return None
-    command = os.environ.get(_HOST_UPDATE_COMMAND_ENV) or _DEFAULT_HOST_UPDATE_COMMAND
-    target_commit = (os.environ.get(_HOST_TARGET_COMMIT_ENV) or "").strip()
+    command = os.environ.get(_DEPLOY_UPDATE_COMMAND_ENV) or _DEFAULT_HOST_UPDATE_COMMAND
+    target_commit = (os.environ.get(_DEPLOY_COMMIT_ENV) or "").strip()
     if target_commit:
         if hello.commit and _same_commit(hello.commit, target_commit):
             return None

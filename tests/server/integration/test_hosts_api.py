@@ -425,10 +425,10 @@ async def test_hosts_api_reports_the_update_a_host_needs(
     up-to-date host or stays silent for an outdated one.
     """
     if target_commit is None:
-        monkeypatch.delenv("OMNIGENT_HOST_TARGET_COMMIT", raising=False)
+        monkeypatch.delenv("OMNIGENT_DEPLOY_COMMIT", raising=False)
     else:
-        monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", target_commit)
-    monkeypatch.setenv("OMNIGENT_HOST_UPDATE_COMMAND", "update-host.sh")
+        monkeypatch.setenv("OMNIGENT_DEPLOY_COMMIT", target_commit)
+    monkeypatch.setenv("OMNIGENT_DEPLOY_UPDATE_COMMAND", "update-host.sh")
     app, registry, _hs, _cs = host_api_app
     _comm = await _connect_host(app, registry, commit=host_commit, version=host_version)
 
@@ -449,8 +449,8 @@ async def test_hosts_api_update_command_defaults_to_omni_upgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a configured command the banner falls back to ``omni upgrade``."""
-    monkeypatch.delenv("OMNIGENT_HOST_TARGET_COMMIT", raising=False)
-    monkeypatch.delenv("OMNIGENT_HOST_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("OMNIGENT_DEPLOY_COMMIT", raising=False)
+    monkeypatch.delenv("OMNIGENT_DEPLOY_UPDATE_COMMAND", raising=False)
     app, registry, _hs, _cs = host_api_app
     _comm = await _connect_host(app, registry, version="0.0.1")
 
