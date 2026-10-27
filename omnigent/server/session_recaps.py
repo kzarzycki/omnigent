@@ -166,7 +166,7 @@ class SessionRecapCoordinator:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - a recap is display metadata, never the turn's failure
+        except Exception:
             _logger.warning(
                 "session recap failed session=%s",
                 session_id,
@@ -317,5 +317,5 @@ def turn_ended(session_id: str, *, from_runner: bool, failed: bool = False) -> N
         return
     try:
         coordinator.turn_ended(session_id, from_runner=from_runner, failed=failed)
-    except Exception:  # noqa: BLE001 - the status edge must publish whatever happens here
+    except Exception:
         _logger.warning("session recap not scheduled session=%s", session_id, exc_info=True)

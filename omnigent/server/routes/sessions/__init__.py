@@ -904,10 +904,10 @@ def create_sessions_router(
     from omnigent.server.routes.sessions.routes_items import register_items_routes
     from omnigent.server.routes.sessions.routes_permissions import register_permissions_routes
     from omnigent.server.routes.sessions.routes_resources import register_resources_routes
-    from omnigent.server.routes.sessions.routes_ui import register_ui_routes
     from omnigent.server.routes.sessions.routes_subscriptions import (
         register_subscriptions_routes,
     )
+    from omnigent.server.routes.sessions.routes_ui import register_ui_routes
 
     register_core_routes(
         router,

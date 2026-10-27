@@ -288,11 +288,15 @@ describe("find in chat reveals each collapsible card", () => {
     expect(screen.getByText("zorblat thought")).toBeTruthy();
   });
 
-  it("expands a tool output whose match lies past the preview", () => {
+  it.each([
+    ["generic", "{}"],
+    ["shell", '{"command":"echo probe"}'],
+  ])("expands a %s tool output whose match lies past the preview", (_kind, args) => {
     const longOutput = `${"line\n".repeat(100)}zorblat`;
-    const items = toolTurn.map((item) =>
-      item.id === "fco_1" ? { ...item, output: longOutput } : item,
-    ) as ConversationItem[];
+    const items = toolTurn.map((item) => {
+      if (item.id === "fco_1") return { ...item, output: longOutput };
+      return item.id === "fc_1" ? { ...item, arguments: args } : item;
+    }) as ConversationItem[];
     const reveal = { anchor: "resp_1", itemIds: ["fco_1"], query: "zorblat" };
     render(<Transcript bubbles={bubblesOf(items)} reveal={reveal} />);
     expect(screen.getByText(/Showing full output/)).toBeTruthy();
