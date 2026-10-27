@@ -630,6 +630,27 @@ def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str
     return fail_closed_hook_output(hook_event, detail)
 
 
+def fail_defer_hook_output(hook_event: str, detail: str | None = None) -> dict[str, object] | None:
+    """
+    Build the claude-native hook output for an unobtainable policy verdict.
+
+    ``PreToolUse`` gets no decision, so Claude's own permission rules and
+    auto-mode classifier decide, as they do when the server answers ALLOW (no
+    policy matched): a call they allow runs, any other prompts. A ``"ask"``
+    here would override those rules and prompt for every call while the
+    server is down. ``policy_unavailable_fallback: deny`` still denies.
+
+    :param hook_event: Hook event name, e.g. ``"PreToolUse"``.
+    :param detail: Optional diagnostic string, forwarded to
+        :func:`fail_ask_hook_output` for every output it builds.
+    :returns: ``None`` for ``PreToolUse`` under the default fallback; otherwise
+        :func:`fail_ask_hook_output`'s output.
+    """
+    if hook_event == _PRE_TOOL_USE and _unavailable_fallback() != "deny":
+        return None
+    return fail_ask_hook_output(hook_event, detail)
+
+
 def post_evaluate_with_retry(
     url: str,
     headers: dict[str, str],
