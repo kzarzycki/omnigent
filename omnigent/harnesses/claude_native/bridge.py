@@ -2885,6 +2885,26 @@ def augment_claude_args(
     return augment_claude_debug_args(args, bridge_dir)
 
 
+def _claude_otlp_headers(headers: Mapping[str, str]) -> str:
+    """
+    ``OTEL_EXPORTER_OTLP_HEADERS`` as Claude Code reads it: unencoded ``k=v`` pairs.
+
+    Claude Code's HTTP exporters split the value on ``,`` and the first ``=`` and
+    send the rest as is, so a percent-encoded value reaches the Collector still
+    encoded. Its gRPC exporters decode instead, so the server's decision pins
+    HTTP for every signal. A header holding ``,`` can't be written and is left out.
+    """
+    pairs = []
+    for name, value in headers.items():
+        if "," in name or "," in value:
+            _logger.warning(
+                "OTLP header %s holds a comma, which Claude Code can't read; left out", name
+            )
+            continue
+        pairs.append(f"{name}={value}")
+    return ",".join(pairs)
+
+
 def _claude_telemetry_env(telemetry: HarnessTelemetry) -> dict[str, str]:
     """Claude Code settings ``env`` for a telemetry decision."""
     if not telemetry.enabled:
@@ -2900,9 +2920,12 @@ def _claude_telemetry_env(telemetry: HarnessTelemetry) -> dict[str, str]:
             "OTEL_METRICS_EXPORTER": "otlp",
             "OTEL_LOGS_EXPORTER": "otlp",
             "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            # A user's per-signal gRPC setting would read the headers another way.
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/protobuf",
+            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
         }
-    if telemetry.headers:
-        env["OTEL_EXPORTER_OTLP_HEADERS"] = otel_key_values(telemetry.headers)
+    if headers := _claude_otlp_headers(telemetry.headers):
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = headers
     if telemetry.resource_attributes:
         env["OTEL_RESOURCE_ATTRIBUTES"] = otel_key_values(telemetry.resource_attributes)
     return env
