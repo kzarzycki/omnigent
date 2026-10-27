@@ -10,6 +10,8 @@
 
 import { withBasePath } from "./basePath";
 import { authenticatedFetch } from "./identity";
+import type { PullRequestLabel } from "@/hooks/usePullRequests";
+import type { GithubLinkRef } from "./linkPreview";
 
 /** Shape of ``GET /v1/connections/github/status``. */
 export interface GithubConnectionStatus {
@@ -100,6 +102,45 @@ export async function fetchGithubBranches(fullName: string): Promise<GithubBranc
     throw new Error(`GitHub branches failed: ${res.status}`);
   }
   return (await res.json()) as GithubBranchList;
+}
+
+/** What a chat link preview shows for a GitHub issue, PR, commit or Actions run. */
+export interface GithubLinkPreview {
+  kind: "pull" | "issue" | "commit" | "run";
+  title: string;
+  /**
+   * `open`, `closed`, `merged`, `draft` or `not_planned`; a run's conclusion
+   * once completed, else its status; `null` for a commit.
+   */
+  state: string | null;
+  labels: PullRequestLabel[];
+  /** Check-run counts for a PR's head or a commit; `null` when it has none. */
+  checks: { passed: number; failed: number; pending: number } | null;
+}
+
+/** Shape of ``GET .../github/repos/{owner}/{repo}/previews/{kind}/{ref}``. */
+export interface GithubLinkPreviewResult {
+  /** False when the user hasn't connected GitHub. */
+  connected: boolean;
+  /** Null when the user's connection can't read it. */
+  preview: GithubLinkPreview | null;
+}
+
+/**
+ * Fetch a chat link's preview from this server, which reads GitHub with the
+ * user's own connection. Takes parsed parts, never the link itself.
+ */
+export async function fetchGithubLinkPreview(
+  link: GithubLinkRef,
+): Promise<GithubLinkPreviewResult> {
+  const path = [link.owner, link.repo, "previews", link.kind, link.ref]
+    .map(encodeURIComponent)
+    .join("/");
+  const res = await authenticatedFetch(`/v1/connections/github/repos/${path}`);
+  if (!res.ok) {
+    throw new Error(`GitHub link preview failed: ${res.status}`);
+  }
+  return (await res.json()) as GithubLinkPreviewResult;
 }
 
 /** Disconnect the current user's GitHub account. */

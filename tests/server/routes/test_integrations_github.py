@@ -92,6 +92,15 @@ class _FakeClient:
         self.branch_calls.append(full_name)
         return ["main", "dev"]
 
+    async def fetch_link_preview(
+        self, access_token: str, full_name: str, kind: str, ref: str
+    ) -> dict[str, object] | None:
+        self.preview_calls: list[tuple[str, str, str]] = getattr(self, "preview_calls", [])
+        self.preview_calls.append((full_name, kind, ref))
+        if full_name == "acme/private":
+            return None
+        return {"kind": kind, "title": "Fix", "state": "open", "labels": [], "checks": None}
+
 
 def _config() -> GitHubAppConfig:
     return GitHubAppConfig(
@@ -346,3 +355,78 @@ def test_repo_branches_rejects_bad_name(db_uri: str) -> None:
     # A dot-run in a charset-valid segment is also rejected (no traversal).
     resp = tc.get("/v1/connections/github/repos/o..o/app/branches", headers=_USER)
     assert resp.status_code == 400
+
+
+def _connect_alice(store: GithubConnectionStore) -> None:
+    store.upsert(
+        "alice@example.com",
+        github_login="octocat",
+        github_user_id=42,
+        tokens=GitHubTokenSet("ghu_a", "ghr_a", None, None, "repo"),
+    )
+
+
+def test_link_preview_unconnected_returns_false(db_uri: str) -> None:
+    tc, _store, _config, client = _app(db_uri)
+    resp = tc.get("/v1/connections/github/repos/acme/app/previews/pull/42", headers=_USER)
+    assert resp.status_code == 200
+    assert resp.json() == {"connected": False, "preview": None}
+    assert not getattr(client, "preview_calls", [])
+
+
+def test_link_preview_reads_once_per_minute_per_user(db_uri: str) -> None:
+    tc, store, _config, client = _app(db_uri)
+    _connect_alice(store)
+    url = "/v1/connections/github/repos/acme/app/previews/pull/42"
+
+    first = tc.get(url, headers=_USER)
+    second = tc.get(url, headers=_USER)
+
+    assert first.json() == second.json()
+    assert first.json()["preview"]["title"] == "Fix"
+    assert client.preview_calls == [("acme/app", "pull", "42")]
+
+
+def test_link_preview_cache_never_outlives_the_connection(db_uri: str) -> None:
+    tc, store, _config, client = _app(db_uri)
+    _connect_alice(store)
+    url = "/v1/connections/github/repos/acme/app/previews/pull/42"
+    assert tc.get(url, headers=_USER).json()["preview"] is not None
+
+    store.delete("alice@example.com")
+    assert tc.get(url, headers=_USER).json() == {"connected": False, "preview": None}
+
+    store.upsert(
+        "alice@example.com",
+        github_login="other",
+        github_user_id=7,
+        tokens=GitHubTokenSet("ghu_other", "ghr_other", None, None, "repo"),
+    )
+    tc.get(url, headers=_USER)
+    assert len(client.preview_calls) == 2
+
+
+def test_link_preview_of_an_unreadable_repo_is_null(db_uri: str) -> None:
+    tc, store, _config, _client = _app(db_uri)
+    _connect_alice(store)
+    resp = tc.get("/v1/connections/github/repos/acme/private/previews/issue/1", headers=_USER)
+    assert resp.json() == {"connected": True, "preview": None}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "acme/app/previews/page/1",
+        "acme/app/previews/pull/abc",
+        "acme/app/previews/commit/xyz1234",
+        "acme/app/previews/commit/abc",
+        "o..o/app/previews/pull/1",
+        "acme/app/previews/pull/1%3Fx=1",
+    ],
+)
+def test_link_preview_rejects_anything_but_validated_parts(db_uri: str, path: str) -> None:
+    tc, store, _config, client = _app(db_uri)
+    _connect_alice(store)
+    resp = tc.get(f"/v1/connections/github/repos/{path}", headers=_USER)
+    assert resp.status_code in (400, 404)
+    assert not getattr(client, "preview_calls", [])
