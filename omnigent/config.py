@@ -196,7 +196,14 @@ def _str_map(value: object) -> dict[str, str]:
 
 
 def otel_key_values(values: Mapping[str, str]) -> str:
-    """Encode *values* as an OTel ``k=v,k2=v2`` env value, percent-encoding each value."""
+    """
+    Encode *values* as an OTel ``k=v,k2=v2`` env value, percent-encoding each value.
+
+    For a reader that decodes, as the OTel spec asks: the OTel SDKs' resource
+    detectors (``OTEL_RESOURCE_ATTRIBUTES``, Claude Code's and Codex's). Claude
+    Code's HTTP exporters don't decode ``OTEL_EXPORTER_OTLP_HEADERS``; the claude
+    harness writes that one unencoded.
+    """
     from urllib.parse import quote
 
     return ",".join(f"{key}={quote(value, safe='')}" for key, value in values.items())
