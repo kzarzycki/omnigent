@@ -221,19 +221,19 @@ describe("markdown links to workspace files", () => {
     const link = screen.getByRole("link", { name: "Fix rendering on narrow screens" });
     expect(link).toHaveAttribute("href", href);
     expect(link.querySelector('[data-streamdown="strong"]')).toHaveTextContent("Fix");
-    expect(link.parentElement).toHaveTextContent(
+    expect(link.closest("p")).toHaveTextContent(
       "See Fix rendering on narrow screens before merging.",
     );
   });
 
   it.each([
-    "https://github.com/acme/app/pull/42/files",
-    "https://github.com.example.com/acme/app/pull/42",
-    "https://example.com/acme/app/pull/42",
-  ])("preserves ordinary URL labels for %s", (href) => {
+    ["https://github.com/acme/app/pull/42/files", "github.com/acme/app/pull/42/files"],
+    ["https://github.com.example.com/acme/app/pull/42", "github.com.example.com/acme/app/pull/42"],
+    ["https://example.com/acme/app/pull/42", "example.com/acme/app/pull/42"],
+  ])("shows %s as its host and path, without a PR icon", (href, label) => {
     renderMarkdown(href);
 
-    const link = screen.getByRole("link", { name: href });
+    const link = screen.getByRole("link", { name: label });
     expect(link).toHaveAttribute("href", href);
     expect(link.querySelector("svg")).toBeNull();
   });

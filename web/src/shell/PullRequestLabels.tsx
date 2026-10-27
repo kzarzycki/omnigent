@@ -46,7 +46,7 @@ function LabelDot({ label }: { label: PullRequestLabel }) {
 }
 
 /** A tinted chip, so any label color stays readable in both themes. */
-function PullRequestLabelChip({
+export function PullRequestLabelChip({
   label,
   onRemove,
 }: {
