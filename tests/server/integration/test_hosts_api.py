@@ -1651,7 +1651,7 @@ async def test_update_now_asks_the_host_and_reports_how_it_ended(
     This is the whole one-click path the banner drives: a lost frame leaves the
     banner spinning, a lost result leaves the owner without the reason.
     """
-    monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", _TARGET_COMMIT)
+    monkeypatch.setenv("OMNIGENT_DEPLOY_COMMIT", _TARGET_COMMIT)
     app, registry, _hs, _cs = host_api_app
     comm = await _connect_host(app, registry, commit="1a2b3c4d5", capabilities=[CAP_SELF_UPDATE])
 
@@ -1696,7 +1696,7 @@ async def test_update_now_refuses_a_current_host_or_one_without_an_updater(
     detail: str,
 ) -> None:
     """A host with nothing to update, or no updater of its own, gets a 409 and no frame."""
-    monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", _TARGET_COMMIT)
+    monkeypatch.setenv("OMNIGENT_DEPLOY_COMMIT", _TARGET_COMMIT)
     app, registry, _hs, _cs = host_api_app
     _comm = await _connect_host(app, registry, commit=commit, capabilities=capabilities)
 
