@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import logging
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -49,6 +50,19 @@ _STATE_KEY_INFO = b"omnigent.connections.github.oauth-state.v1"
 # URL so a caller can never smuggle a path or query. A dot is allowed but a
 # dot-run (``..``) is not, so ``owner``/``repo`` can never be a traversal segment.
 _GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+# Each link-preview kind and the shape of its ref (a number, or a commit SHA).
+_PREVIEW_REF_RE = {
+    "pull": re.compile(r"^[0-9]{1,12}$"),
+    "issue": re.compile(r"^[0-9]{1,12}$"),
+    "run": re.compile(r"^[0-9]{1,20}$"),
+    "commit": re.compile(r"^[0-9a-fA-F]{7,40}$"),
+}
+# A minute, so an open PR's state and checks stay close to live.
+_PREVIEW_TTL_S = 60.0
+# ponytail: cleared whole when full; an LRU if many users preview at once.
+_PREVIEW_CACHE_MAX = 2048
 
 
 def _valid_github_name(name: str) -> bool:
@@ -180,5 +194,46 @@ def create_connections_github_router(
                     status_code=502, detail="Failed to list GitHub branches"
                 ) from exc
             return {"connected": True, "branches": branches}
+
+        preview_cache: dict[tuple[str, ...], tuple[float, dict[str, object] | None]] = {}
+
+        @router.get("/connections/github/repos/{owner}/{repo}/previews/{kind}/{ref}")
+        async def link_preview(
+            request: Request, owner: str, repo: str, kind: str, ref: str
+        ) -> dict[str, object]:
+            """Preview a GitHub issue, PR, commit or Actions run for a chat link.
+
+            Read with the caller's own GitHub connection. ``preview: null``
+            when that connection can't read it; ``connected: false`` without a
+            connection. Takes validated parts, never a URL.
+            """
+            user_id = _current_user(request)
+            ref_re = _PREVIEW_REF_RE.get(kind)
+            if (
+                ref_re is None
+                or not ref_re.match(ref)
+                or not _valid_github_name(owner)
+                or not _valid_github_name(repo)
+            ):
+                raise HTTPException(status_code=400, detail="Invalid preview reference")
+            token = await resolve_access_token(user_id, store=store, client=api)
+            if token is None:
+                return {"connected": False, "preview": None}
+            # Keyed by the token too, so a disconnect or another account never
+            # sees what the previous connection could read.
+            token_id = hashlib.sha256(token.encode()).hexdigest()
+            key = (user_id, token_id, owner.lower(), repo.lower(), kind, ref.lower())
+            cached = preview_cache.get(key)
+            if cached is not None and cached[0] > time.monotonic():
+                return {"connected": True, "preview": cached[1]}
+            try:
+                preview = await api.fetch_link_preview(token, f"{owner}/{repo}", kind, ref)
+            except (GitHubAppError, HTTPError, ValueError) as exc:
+                _logger.warning("GitHub preview failed for %s/%s: %s", owner, repo, exc)
+                raise HTTPException(status_code=502, detail="Failed to read from GitHub") from exc
+            if len(preview_cache) >= _PREVIEW_CACHE_MAX:
+                preview_cache.clear()
+            preview_cache[key] = (time.monotonic() + _PREVIEW_TTL_S, preview)
+            return {"connected": True, "preview": preview}
 
     return create_connection_router(hooks, auth_provider=auth_provider, extra_routes=_repo_routes)

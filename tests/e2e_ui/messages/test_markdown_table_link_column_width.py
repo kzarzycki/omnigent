@@ -39,10 +39,12 @@ _LINK = '[data-streamdown="link"]'
 _SHORT_LINK_TEXT = "#3090"
 _DESCRIPTIVE_PR_TEXT = "Fix the rendering of markdown tables and code blocks on narrow screens"
 
-# Rendered as its own link text, and too long to fit one line in a cell.
+# Too long to fit one line in a cell. A bare URL now shows as host and a short
+# path, so the link carries this as its own text.
 _LONG_URL = (
     "https://github.com/omnigent-ai/omnigent/pull/3350/files#diff-markdown-table-link-column"
 )
+_LONG_LINK_TEXT = "omnigent-ai/omnigent/pull/3350/files#diff-markdown-table-link-column"
 
 
 def _row(num: str, title: str, author: str, waiting: str) -> str:
@@ -55,7 +57,7 @@ def _row(num: str, title: str, author: str, waiting: str) -> str:
     :returns: the pipe-delimited markdown row.
     """
     href = f"https://github.com/omnigent-ai/omnigent/pull/{num.lstrip('#')}"
-    cells = (f"[{num}]({href})", title, author, waiting, f"[{_LONG_URL}]({_LONG_URL})")
+    cells = (f"[{num}]({href})", title, author, waiting, f"[{_LONG_LINK_TEXT}]({_LONG_URL})")
     return f"| {' | '.join(cells)} |"
 
 
@@ -149,7 +151,7 @@ def test_table_link_column_keeps_its_natural_width(
     )
 
     # The counterpart: a full URL soft-wraps inside its cell.
-    long_link = page.locator(_LINK, has_text=_LONG_URL).first
+    long_link = page.locator(_LINK, has_text=_LONG_LINK_TEXT).first
     expect(long_link).to_be_visible(timeout=30_000)
     long_boxes = long_link.evaluate(_LINE_BOXES)
     assert long_boxes > 1, f"long URL should wrap across multiple lines, got {long_boxes}"

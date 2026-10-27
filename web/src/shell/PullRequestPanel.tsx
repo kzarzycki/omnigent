@@ -64,7 +64,6 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -123,6 +122,7 @@ import { mergeButtonState, PullRequestMerge } from "./PullRequestMerge";
 import { PullRequestReviewers } from "./PullRequestReviewers";
 import { PanelMessage, PullRequestChangesTab } from "./PullRequestChangesTab";
 import { IconButton } from "./PullRequestFileSection";
+import { PullRequestStatus } from "./PullRequestStatus";
 
 export { LARGE_DIFF_THRESHOLD } from "./PullRequestFileSection";
 
@@ -306,39 +306,6 @@ function PullRequestProviderIcon({ copy }: { copy: GitProviderCopy }) {
 }
 
 /** Compact PR state shown beside the title in the shared panel header. */
-function PullRequestStatus({ state, isDraft = false }: { state: string; isDraft?: boolean }) {
-  const normalized = state.toUpperCase();
-  const visual =
-    normalized === "OPEN" && isDraft
-      ? { label: "Draft", className: "border-border bg-muted text-muted-foreground" }
-      : normalized === "OPEN"
-        ? {
-            label: "Open",
-            className: "border-green-500/25 bg-green-500/10 text-green-700 dark:text-green-400",
-          }
-        : normalized === "MERGED"
-          ? {
-              label: "Merged",
-              className:
-                "border-purple-500/25 bg-purple-500/10 text-purple-700 dark:text-purple-400",
-            }
-          : normalized === "CLOSED"
-            ? {
-                label: "Closed",
-                className: "border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400",
-              }
-            : { label: state, className: "border-border bg-muted text-muted-foreground" };
-
-  return (
-    <Badge
-      aria-label={`Pull request status: ${visual.label}`}
-      className={cn("h-5 rounded-full border px-2 py-px text-xs leading-none", visual.className)}
-    >
-      {visual.label}
-    </Badge>
-  );
-}
-
 /** React keys for items that can match on every identifying field (ADO replies share their
  *  thread's URL): the fields plus a repeat count stay unique and keep their value across polls. */
 function listKeys<T>(items: readonly T[], identity: (item: T) => readonly unknown[]): string[] {

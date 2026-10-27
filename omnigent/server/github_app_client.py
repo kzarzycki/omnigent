@@ -36,6 +36,14 @@ _BRANCHES_PER_PAGE = 100
 # branches, but the picker only needs a bounded, fast list.
 _BRANCHES_MAX_PAGES = 3
 
+_REPO_API = "https://api.github.com/repos/{full_name}"
+# Check-run conclusions that count as passed; any other completed one failed.
+_PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+# A commit status context's state and the bucket it counts in; error fails.
+_STATUS_BUCKETS = {"success": "passed", "pending": "pending"}
+# GitHub's answers for a repo or object this token can't read.
+_UNREADABLE_STATUSES = frozenset({403, 404, 410, 422})
+
 _HTTP_TIMEOUT_S = 15.0
 
 
@@ -192,6 +200,119 @@ class GitHubAppClient:
                     break
         return branches
 
+    async def fetch_link_preview(
+        self, access_token: str, full_name: str, kind: str, ref: str
+    ) -> dict[str, object] | None:
+        """Read the preview of a GitHub issue, PR, commit or Actions run.
+
+        Every URL is built here from ``full_name`` and ``ref``, which the
+        caller has validated; no caller-supplied URL is ever fetched.
+
+        :param access_token: A valid user access token.
+        :param full_name: The repository's ``owner/name``.
+        :param kind: ``pull``, ``issue``, ``commit`` or ``run``.
+        :param ref: The number, SHA or run id.
+        :returns: ``kind``, ``title``, ``state``, ``labels`` and ``checks``
+            (``None`` when there are none or they can't be read), or ``None``
+            when the token can't read the object.
+        :raises GitHubAppError: When GitHub answers with another error.
+        """
+        repo_api = _REPO_API.format(full_name=full_name)
+        async with self._http_client() as client:
+
+            async def get(path: str) -> dict | None:
+                resp = await client.get(
+                    repo_api + path,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+                if resp.status_code in _UNREADABLE_STATUSES:
+                    return None
+                if resp.status_code != 200:
+                    raise GitHubAppError(f"GitHub {full_name}{path} returned {resp.status_code}")
+                data = resp.json()
+                return data if isinstance(data, dict) else None
+
+            async def checks(sha: str) -> dict[str, int] | None:
+                # GitHub's rollup is check runs plus commit status contexts.
+                # ponytail: first 100 of each; page on if a repo runs more.
+                runs = ((await get(f"/commits/{sha}/check-runs?per_page=100")) or {}).get(
+                    "check_runs"
+                ) or []
+                statuses = ((await get(f"/commits/{sha}/status?per_page=100")) or {}).get(
+                    "statuses"
+                ) or []
+                if not runs and not statuses:
+                    return None
+                counts = {"passed": 0, "failed": 0, "pending": 0}
+                for run in runs:
+                    if run.get("status") != "completed":
+                        counts["pending"] += 1
+                    elif run.get("conclusion") in _PASSING_CONCLUSIONS:
+                        counts["passed"] += 1
+                    else:
+                        counts["failed"] += 1
+                for status in statuses:
+                    counts[_STATUS_BUCKETS.get(status.get("state"), "failed")] += 1
+                return counts
+
+            if kind == "issue":
+                issue = await get(f"/issues/{ref}")
+                if issue is None:
+                    return None
+                if not issue.get("pull_request"):
+                    closed_as = "not_planned" if issue.get("state_reason") == "not_planned" else ""
+                    return {
+                        "kind": "issue",
+                        "title": str(issue.get("title") or ""),
+                        "state": closed_as or str(issue.get("state") or ""),
+                        "labels": _labels(issue),
+                        "checks": None,
+                    }
+                kind = "pull"
+            if kind == "pull":
+                pull = await get(f"/pulls/{ref}")
+                if pull is None:
+                    return None
+                state = str(pull.get("state") or "")
+                if pull.get("merged"):
+                    state = "merged"
+                elif state == "open" and pull.get("draft"):
+                    state = "draft"
+                head_sha = str((pull.get("head") or {}).get("sha") or "")
+                return {
+                    "kind": "pull",
+                    "title": str(pull.get("title") or ""),
+                    "state": state,
+                    "labels": _labels(pull),
+                    "checks": await checks(head_sha) if head_sha else None,
+                }
+            if kind == "commit":
+                commit = await get(f"/commits/{ref}")
+                if commit is None:
+                    return None
+                message = str((commit.get("commit") or {}).get("message") or "")
+                return {
+                    "kind": "commit",
+                    "title": message.split("\n", 1)[0],
+                    "state": None,
+                    "labels": [],
+                    "checks": await checks(str(commit.get("sha") or ref)),
+                }
+            run = await get(f"/actions/runs/{ref}")
+            if run is None:
+                return None
+            status = str(run.get("status") or "")
+            return {
+                "kind": "run",
+                "title": str(run.get("display_title") or run.get("name") or ""),
+                "state": str(run.get("conclusion") or status) if status == "completed" else status,
+                "labels": [],
+                "checks": None,
+            }
+
     async def _token_request(self, fields: dict[str, str]) -> GitHubTokenSet:
         """POST the given form fields to the token endpoint and parse the reply."""
         async with self._http_client() as client:
@@ -203,3 +324,16 @@ class GitHubAppClient:
         if resp.status_code != 200:
             raise GitHubAppError(f"GitHub token endpoint returned {resp.status_code}")
         return token_set_from_payload(resp.json())
+
+
+def _labels(item: dict) -> list[dict[str, str | None]]:
+    """An issue's or PR's labels as ``{name, color, description}``."""
+    return [
+        {
+            "name": str(label.get("name")),
+            "color": label.get("color") or None,
+            "description": label.get("description") or None,
+        }
+        for label in item.get("labels") or []
+        if isinstance(label, dict) and label.get("name")
+    ]
