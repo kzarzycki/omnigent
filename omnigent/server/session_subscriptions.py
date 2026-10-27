@@ -299,7 +299,7 @@ async def _retain_recording(target_id: str, record: Callable[[], Awaitable[None]
         try:
             await record()
             return
-        except Exception:  # noqa: BLE001 — retried below
+        except Exception:
             failures += 1
             _logger.warning(
                 "Could not record notices from %s (attempt %d)", target_id, failures, exc_info=True
@@ -424,7 +424,7 @@ async def _claim_and_retry(
                 leased_until=leased_until,
                 lease_until=int(time.time()) + _LEASE_S,
             )
-        except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
+        except Exception:
             _logger.warning(
                 "Could not claim a notice to %s", delivery.subscriber_id, exc_info=True
             )
@@ -435,7 +435,7 @@ async def _claim_and_retry(
 
 async def _deliverable(
     store: ConversationStore, subscriber_id: str, target_id: str
-) -> str | None | object:
+) -> str | object | None:
     """The subscriber's owner to post as, or ``_SKIP`` when it must not hear the target."""
     subscriber = await asyncio.to_thread(store.get_conversation, subscriber_id)
     if subscriber is None or subscriber.archived:
@@ -479,7 +479,7 @@ async def _attempt(
             # fails, after this post leaves the row to be posted again once its
             # lease expires; closing that needs idempotency at message acceptance.
             await post(subscriber_id, owner, notice)
-    except Exception:  # noqa: BLE001 — the row stays pending for the retry sweep
+    except Exception:
         _logger.warning(
             "Could not deliver a notice from %s to %s (attempt %d)",
             target_id,
@@ -498,7 +498,7 @@ async def _attempt(
                 due_at=due,
             )
             _wake_at(due)
-        except Exception:  # noqa: BLE001 — the lease hands the row to the sweep
+        except Exception:
             _logger.warning("Could not reschedule a notice to %s", subscriber_id, exc_info=True)
         return
     try:
@@ -509,7 +509,7 @@ async def _attempt(
             event_key,
             settled_at=int(time.time()),
         )
-    except Exception:  # noqa: BLE001 — the lease hands the row to the sweep (a duplicate)
+    except Exception:
         _logger.warning("Could not settle a notice to %s", subscriber_id, exc_info=True)
 
 
@@ -559,7 +559,7 @@ async def retry_due_deliveries() -> int:
             attempted += len(batch)
             if len(batch) < _SWEEP_BATCH:
                 break
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.warning("Subscription notice retry sweep failed", exc_info=True)
     return attempted
 
@@ -580,7 +580,7 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
                     store.settle_subscription_delivery, *key, settled_at=int(time.time())
                 )
                 return
-        except Exception:  # noqa: BLE001 — the lease hands the row to a later sweep
+        except Exception:
             _logger.warning(
                 "Could not prepare a retried notice to %s", delivery.subscriber_id, exc_info=True
             )
@@ -647,6 +647,6 @@ async def run_retry_loop() -> None:
         try:
             await retry_due_deliveries()
             await prune_settled_deliveries()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _logger.warning("Subscription notice maintenance failed", exc_info=True)
         await asyncio.sleep(_SWEEP_INTERVAL_S)

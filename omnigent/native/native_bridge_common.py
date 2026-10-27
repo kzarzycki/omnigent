@@ -95,7 +95,7 @@ def write_owner_pid_marker(bridge_dir: Path) -> None:
         write_owner_claim(bridge_dir)
 
 
-def _read_owner(bridge_dir: Path) -> OwnerClaim | None | object:
+def _read_owner(bridge_dir: Path) -> OwnerClaim | object | None:
     """Return the dir's owner claim, None when unmarked, else :data:`_UNPROVABLE`."""
     try:
         (bridge_dir / OWNER_PID_FILENAME).stat()
