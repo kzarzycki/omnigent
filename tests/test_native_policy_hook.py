@@ -13,6 +13,7 @@ from omnigent.native.native_policy_hook import (
     evaluation_response_to_hook_output,
     fail_ask_hook_output,
     fail_closed_hook_output,
+    fail_defer_hook_output,
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
 )
@@ -446,6 +447,38 @@ def test_fail_ask_follows_the_unavailable_fallback_setting(
     if decision == "deny":
         assert "retry the same call shortly" in hook["permissionDecisionReason"]
     assert fail_ask_hook_output("UserPromptSubmit")["decision"] == "block"
+
+
+@pytest.mark.parametrize(
+    ("config_text", "decision"),
+    [
+        (None, None),
+        ("policy_unavailable_fallback: ask\n", None),
+        ("policy_unavailable_fallback: deny\n", "deny"),
+    ],
+)
+def test_fail_defer_leaves_pre_tool_use_to_the_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_text: str | None,
+    decision: str | None,
+) -> None:
+    """Claude's own rules decide an unverified call; ``deny`` still denies it."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    if config_text is not None:
+        (tmp_path / "config.yaml").write_text(config_text)
+
+    output = fail_defer_hook_output("PreToolUse", "ConnectError")
+
+    if decision is None:
+        assert output is None
+    else:
+        assert output["hookSpecificOutput"]["permissionDecision"] == decision
+    assert fail_defer_hook_output("UserPromptSubmit")["decision"] == "block"
+    assert fail_defer_hook_output("PostToolUse") is None
+    assert fail_ask_hook_output("PreToolUse")["hookSpecificOutput"]["permissionDecision"] == (
+        decision or "ask"
+    )
 
 
 def test_fail_ask_unknown_event_fails_open() -> None:

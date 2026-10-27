@@ -1226,9 +1226,8 @@ def live_server(
     # store (see :func:`seed_committed_turn`) instead of driving the LLM.
     _server_state["database_uri"] = f"sqlite:///{db_path}"
 
-    def _restart_server() -> None:
-        """Replace only the server process, preserving its runner and database."""
-        nonlocal proc
+    def _stop_server() -> None:
+        """Stop only the server process, leaving its runner running."""
         if proc.poll() is None:
             proc.send_signal(signal.SIGTERM)
             try:
@@ -1236,6 +1235,11 @@ def live_server(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+    def _restart_server() -> None:
+        """Replace only the server process, preserving its runner and database."""
+        nonlocal proc
+        _stop_server()
         proc = _spawn_server()
         ready, restart_error = _wait_until_ready(proc, timeout_s=120.0)
         if not ready:
@@ -1247,6 +1251,7 @@ def live_server(
         _server_state["pid"] = proc.pid
 
     _server_state["restart_server"] = _restart_server
+    _server_state["stop_server"] = _stop_server
 
     # Set a non-resettable fallback for the policy-classifier LLM queue so
     # every per-test reset leaves the server's guardrails path functional.
