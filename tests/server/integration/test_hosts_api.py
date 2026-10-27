@@ -387,32 +387,77 @@ async def test_hosts_api_surfaces_gateway_inference(
     assert single.json()["gateway_inference"] == {"claude-native": True, "codex": False}
 
 
+_TARGET_COMMIT = "c25ddceb8b1d9e87baa033a18a77df1b7ed68a97"
+
+
 @pytest.mark.parametrize(
-    ("host_version", "expected_update"),
-    [("0.0.1", VERSION), (VERSION, None), ("not-a-version", None)],
+    ("target_commit", "host_version", "host_commit", "expected_update"),
+    [
+        # No target commit: release versions decide.
+        (None, "0.0.1", None, {"current": "0.0.1", "target": VERSION}),
+        (None, VERSION, None, None),
+        (None, "not-a-version", None, None),
+        # A target commit: only the commit decides; versions match on the fork.
+        (_TARGET_COMMIT, VERSION, "c25ddceb8", None),
+        (_TARGET_COMMIT, VERSION, "1a2b3c4d5", {"current": "1a2b3c4d5", "target": "c25ddceb8"}),
+        # A host that reports no commit predates the build that reports one.
+        (
+            _TARGET_COMMIT,
+            VERSION,
+            None,
+            {"current": f"{VERSION} (unknown commit)", "target": "c25ddceb8"},
+        ),
+    ],
 )
-async def test_hosts_api_reports_host_version_and_update(
+async def test_hosts_api_reports_the_update_a_host_needs(
     host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+    target_commit: str | None,
     host_version: str,
-    expected_update: str | None,
+    host_commit: str | None,
+    expected_update: dict[str, str] | None,
 ) -> None:
     """
-    Verify both host endpoints report the host's version and, only for a host
-    older than the server, the server version it should update to.
+    Verify both host endpoints report the update a host needs, by commit when
+    the deploy sets a target commit and by release version otherwise.
 
-    The web update banner keys on ``update_version``; a wrong value either
-    nags an up-to-date host or stays silent for an outdated one.
+    The web update banner keys on ``update``; a wrong value either nags an
+    up-to-date host or stays silent for an outdated one.
     """
+    if target_commit is None:
+        monkeypatch.delenv("OMNIGENT_HOST_TARGET_COMMIT", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_HOST_TARGET_COMMIT", target_commit)
+    monkeypatch.setenv("OMNIGENT_HOST_UPDATE_COMMAND", "update-host.sh")
     app, registry, _hs, _cs = host_api_app
-    _comm = await _connect_host(app, registry, version=host_version)
+    _comm = await _connect_host(app, registry, commit=host_commit, version=host_version)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         listing = await client.get("/v1/hosts")
         single = await client.get(f"/v1/hosts/{_HOST_ID}")
 
+    expected = (
+        None if expected_update is None else {**expected_update, "command": "update-host.sh"}
+    )
     for body in (listing.json()["hosts"][0], single.json()):
         assert body["version"] == host_version
-        assert body["update_version"] == expected_update
+        assert body["update"] == expected
+
+
+async def test_hosts_api_update_command_defaults_to_omni_upgrade(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a configured command the banner falls back to ``omni upgrade``."""
+    monkeypatch.delenv("OMNIGENT_HOST_TARGET_COMMIT", raising=False)
+    monkeypatch.delenv("OMNIGENT_HOST_UPDATE_COMMAND", raising=False)
+    app, registry, _hs, _cs = host_api_app
+    _comm = await _connect_host(app, registry, version="0.0.1")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listing = await client.get("/v1/hosts")
+
+    assert listing.json()["hosts"][0]["update"]["command"] == "omni upgrade"
 
 
 async def test_hosts_api_gateway_inference_null_for_older_host(

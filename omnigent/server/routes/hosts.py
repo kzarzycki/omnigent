@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import weakref
 from typing import Any
@@ -43,6 +44,7 @@ from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
+    HostHelloFrame,
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
@@ -163,25 +165,52 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
     return (padded[0], padded[1], padded[2])
 
 
-def _update_version(host_version: str | None) -> str | None:
-    """Return the version a host should update to, or ``None`` when it needn't.
+# Deploy settings for the host update banner: the commit hosts should run (the
+# server image has no git, so only the deploy knows it) and the command to show.
+_HOST_TARGET_COMMIT_ENV = "OMNIGENT_HOST_TARGET_COMMIT"
+_HOST_UPDATE_COMMAND_ENV = "OMNIGENT_HOST_UPDATE_COMMAND"
+_DEFAULT_HOST_UPDATE_COMMAND = "omni upgrade"
+# Shortest commit prefix trusted to name one commit (git's own default abbreviation).
+_MIN_COMMIT_PREFIX = 7
 
-    The answer is the server's own version when the host's release is older,
-    so a web banner can nudge the owner. ``None`` when the host is current,
-    not connected here, or reports an unparseable version.
 
-    :param host_version: Hello-reported version, e.g. ``"0.18.2"``.
-    :returns: Target version, e.g. ``"0.19.0"``, or ``None``.
+def _same_commit(left: str, right: str) -> bool:
+    """Whether two commit ids, either possibly abbreviated, name the same commit."""
+    left, right = left.lower(), right.lower()
+    if min(len(left), len(right)) < _MIN_COMMIT_PREFIX:
+        return False
+    return left.startswith(right) or right.startswith(left)
+
+
+def _host_update(hello: HostHelloFrame | None) -> dict[str, str] | None:
+    """Describe the update a connected host needs, or ``None`` when it needs none.
+
+    With a target commit configured, a host on any other commit is outdated, and
+    so is one that reports no commit: it predates the build that reports one.
+    Without a target commit, a host whose release is older than the server's is
+    outdated. ``None`` for a host not connected here or with an unparseable version.
+
+    :param hello: The host's connect hello, ``None`` when not connected here.
+    :returns: ``{"current": ..., "target": ..., "command": ...}`` — the build the
+        host runs and should run (a short commit or a version) and the command
+        that updates it — or ``None``.
     """
     from omnigent.version import VERSION
 
-    host_release = _release_tuple(host_version) if host_version is not None else None
+    if hello is None:
+        return None
+    command = os.environ.get(_HOST_UPDATE_COMMAND_ENV) or _DEFAULT_HOST_UPDATE_COMMAND
+    target_commit = (os.environ.get(_HOST_TARGET_COMMIT_ENV) or "").strip()
+    if target_commit:
+        if hello.commit and _same_commit(hello.commit, target_commit):
+            return None
+        current = hello.commit[:9] if hello.commit else f"{hello.version} (unknown commit)"
+        return {"current": current, "target": target_commit[:9], "command": command}
+    host_release = _release_tuple(hello.version)
     server_release = _release_tuple(VERSION)
-    # ponytail: the target is the server's own version; an org-pinned target
-    # and a minimum version would replace it here.
     if host_release is None or server_release is None or host_release >= server_release:
         return None
-    return VERSION
+    return {"current": hello.version, "target": VERSION, "command": command}
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -733,15 +762,14 @@ def create_hosts_router(
     flags = feature_flags or resolve_feature_flags()
     router = APIRouter()
 
-    def _reported_build(host_id: str) -> dict[str, str | None]:
+    def _reported_build(host_id: str) -> dict[str, Any]:
         """Version, commit and update target from the live hello; ``None`` if not here."""
         conn = host_registry.get(host_id)
         hello = conn.hello if conn is not None else None
-        version = hello.version if hello else None
         return {
-            "version": version,
+            "version": hello.version if hello else None,
             "commit": hello.commit if hello else None,
-            "update_version": _update_version(version),
+            "update": _host_update(hello),
         }
 
     @router.get("/hosts")
@@ -756,7 +784,7 @@ def create_hosts_router(
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
             ``configured_harnesses``, ``gateway_inference`` (``None`` when
             no connected host has reported it to this replica), and
-            ``version`` / ``commit`` / ``update_version`` (see :func:`_update_version`).
+            ``version`` / ``commit`` / ``update`` (see :func:`_host_update`).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user

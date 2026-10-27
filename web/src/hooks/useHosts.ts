@@ -40,8 +40,17 @@ export interface Host {
    *  `null`/absent while offline, on another replica, or on an older server. */
   version?: string | null;
   commit?: string | null;
-  /** Server version this host should update to; null when current or unknown. */
-  update_version?: string | null;
+  /** The update this host needs; null when it is current or not connected. */
+  update?: HostUpdate | null;
+}
+
+export interface HostUpdate {
+  /** Build the host runs: a short commit, or a version when no commit is pinned. */
+  current: string;
+  /** Build the server wants it on, in the same form. */
+  target: string;
+  /** Command that updates the host, e.g. `omni upgrade`. */
+  command: string;
 }
 
 interface HostsResponse {

@@ -23,6 +23,7 @@ from omnigent.update_check import (
     _run_check,
     _write_cache,
     maybe_show_update_notice,
+    source_install_commit,
 )
 
 # ------------------------------------------------------------------
@@ -2499,3 +2500,32 @@ def test_read_installed_wheel_info_reads_pipx_metadata(
     assert info.installer == "pip"
     assert info.detected_installer == "pipx"
     assert info.extras == ("all",)
+
+
+@pytest.mark.parametrize(
+    ("head_sha", "build_info", "expected"),
+    [
+        # A git checkout reports its HEAD, ahead of any stale build info.
+        ("abcdef0123456789", (0.0, "1234567890abcdef"), "abcdef012"),
+        # An installed package (no checkout) reports the commit it was built from.
+        (None, (0.0, "1234567890abcdef"), "123456789"),
+        # A build made without git, or no build info at all, is unknown.
+        (None, (0.0, ""), None),
+        (None, None, None),
+    ],
+)
+def test_source_install_commit_falls_back_to_build_info(
+    tmp_path: Path,
+    head_sha: str | None,
+    build_info: tuple[float, str] | None,
+    expected: str | None,
+) -> None:
+    with (
+        patch(
+            "omnigent.update_check._find_repo_root",
+            return_value=tmp_path if head_sha else None,
+        ),
+        patch("omnigent.update_check._get_head_sha", return_value=head_sha),
+        patch("omnigent.update_check._read_build_info", return_value=build_info),
+    ):
+        assert source_install_commit() == expected

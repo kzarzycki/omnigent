@@ -14,16 +14,15 @@ function host(overrides: Partial<Host> = {}): Host {
     name: "zarz-mbp",
     owner: "me",
     status: "online",
-    version: "0.18.2",
-    update_version: "0.19.0",
+    update: { current: "1a2b3c4d5", target: "c25ddceb8", command: "update-host.sh" },
     ...overrides,
   };
 }
 
 function Banner({ hostId = "laptop" }: { hostId?: string }) {
-  const update = useOutdatedHost(hostId);
-  return update.host ? (
-    <HostUpdateBanner host={update.host} onDismiss={() => update.dismissToday(update.host!)} />
+  const { outdated, dismissToday } = useOutdatedHost(hostId);
+  return outdated ? (
+    <HostUpdateBanner outdated={outdated} onDismiss={() => dismissToday(outdated)} />
   ) : null;
 }
 
@@ -39,15 +38,15 @@ afterEach(() => {
 });
 
 describe("HostUpdateBanner", () => {
-  it("names the machine, both versions and the upgrade command", () => {
+  it("names the machine, both builds and the server's update command", () => {
     render(<Banner />);
-    expect(screen.getByText("Omnigent 0.19.0 is available for zarz-mbp.")).toBeTruthy();
-    expect(screen.getByText(/It runs 0\.18\.2/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Copy omni upgrade" })).toBeTruthy();
+    expect(screen.getByText("Omnigent c25ddceb8 is available for zarz-mbp.")).toBeTruthy();
+    expect(screen.getByText(/It runs 1a2b3c4d5/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy update-host.sh" })).toBeTruthy();
   });
 
   it.each([
-    ["is current", host({ update_version: null })],
+    ["is current", host({ update: null })],
     ["is offline", host({ status: "offline" })],
     ["is another host", host({ host_id: "other" })],
   ])("stays hidden when the session's host %s", (_label, listed) => {
@@ -56,14 +55,14 @@ describe("HostUpdateBanner", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("'Not now' hides it for the day and for that version only", () => {
+  it("'Not now' hides it for the day and for that target only", () => {
     const { rerender } = render(<Banner />);
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(screen.queryByRole("status")).toBeNull();
 
-    state.hosts = [host({ update_version: "0.20.0" })];
+    state.hosts = [host({ update: { current: "1a2b3c4d5", target: "d00dfeed1", command: "x" } })];
     rerender(<Banner />);
-    expect(screen.getByText("Omnigent 0.20.0 is available for zarz-mbp.")).toBeTruthy();
+    expect(screen.getByText("Omnigent d00dfeed1 is available for zarz-mbp.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     vi.setSystemTime(new Date(2026, 9, 28, 10, 0));

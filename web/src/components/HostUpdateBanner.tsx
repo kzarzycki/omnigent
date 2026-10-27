@@ -1,11 +1,10 @@
 import { useReducer } from "react";
 import { ArrowUpCircleIcon } from "lucide-react";
-import { useHosts, type Host } from "@/hooks/useHosts";
+import { useHosts, type Host, type HostUpdate } from "@/hooks/useHosts";
 import { dateKey } from "@/lib/arcaShutdownWarning";
 import { cn } from "@/lib/utils";
 import { CommandCopyButton } from "./ArcaShutdownBanner";
 
-const UPGRADE_COMMAND = "omni upgrade";
 // Tab-local fallback keeps "Not now" working when localStorage throws, as in private mode.
 const unavailableStorage = new Map<string, string>();
 
@@ -13,33 +12,38 @@ function dismissalKey(host: Host): string {
   return `omnigent:host-update:dismissed:${host.host_id}`;
 }
 
-// A dismissal holds for one target version on one day, so the nudge returns
+// A dismissal holds for one target build on one day, so the nudge returns
 // tomorrow and whenever the server moves ahead again.
-function dismissalValue(host: Host, now: Date): string {
-  return `${host.update_version}@${dateKey(now)}`;
+function dismissalValue(update: HostUpdate, now: Date): string {
+  return `${update.target}@${dateKey(now)}`;
 }
 
-function isDismissed(host: Host): boolean {
+function isDismissed(host: Host, update: HostUpdate): boolean {
+  const key = dismissalKey(host);
+  const expected = dismissalValue(update, new Date());
   try {
-    const key = dismissalKey(host);
-    const stored = unavailableStorage.get(key) ?? localStorage.getItem(key);
-    return stored === dismissalValue(host, new Date());
+    return (unavailableStorage.get(key) ?? localStorage.getItem(key)) === expected;
   } catch {
-    return unavailableStorage.get(dismissalKey(host)) === dismissalValue(host, new Date());
+    return unavailableStorage.get(key) === expected;
   }
 }
 
-/** The session's host when it runs an older Omnigent than the server, else null. */
+export interface OutdatedHost {
+  host: Host;
+  update: HostUpdate;
+}
+
+/** The session's host and the update it needs, while it runs a build the server doesn't want. */
 export function useOutdatedHost(hostId: string | null | undefined) {
   const { data: hosts } = useHosts({ enabled: Boolean(hostId) });
   const [, refresh] = useReducer((value: number) => value + 1, 0);
   const host = hosts?.find((candidate) => candidate.host_id === hostId);
-  const outdated = host?.status === "online" && host.update_version && !isDismissed(host);
+  const update = host?.status === "online" ? host.update : null;
   return {
-    host: outdated ? host : null,
-    dismissToday(target: Host) {
+    outdated: host && update && !isDismissed(host, update) ? { host, update } : null,
+    dismissToday({ host: target, update: targetUpdate }: OutdatedHost) {
       const key = dismissalKey(target);
-      const value = dismissalValue(target, new Date());
+      const value = dismissalValue(targetUpdate, new Date());
       try {
         localStorage.setItem(key, value);
       } catch {
@@ -51,11 +55,11 @@ export function useOutdatedHost(hostId: string | null | undefined) {
 }
 
 export function HostUpdateBanner({
-  host,
+  outdated: { host, update },
   onDismiss,
   hasPinnedAbove = false,
 }: {
-  host: Host;
+  outdated: OutdatedHost;
   onDismiss: () => void;
   hasPinnedAbove?: boolean;
 }) {
@@ -71,14 +75,14 @@ export function HostUpdateBanner({
         <ArrowUpCircleIcon className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden="true" />
         <div className="min-w-0 flex-1 text-ui">
           <p className="font-medium">
-            Omnigent {host.update_version} is available for {host.name}.
+            Omnigent {update.target} is available for {host.name}.
           </p>
           <p className="mt-0.5 text-muted-foreground">
-            It runs {host.version}. Run this on {host.name} to get the latest fixes. Running
+            It runs {update.current}. Run this on {host.name} to get the latest fixes. Running
             sessions finish first.
           </p>
           <div className="mt-1.5 flex flex-wrap gap-2">
-            <CommandCopyButton command={UPGRADE_COMMAND} />
+            <CommandCopyButton command={update.command} />
           </div>
           <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
             <button

@@ -372,7 +372,7 @@ function TranscriptImpl({
   const arcaWarning = useArcaShutdownBanner();
   const showArcaBanner = arcaWarning.showForHost(hostId);
   const hostUpdate = useOutdatedHost(hostId);
-  const outdatedHost = hostUpdate.host;
+  const outdatedHost = hostUpdate.outdated;
   const hasPinnedBanner = display.hasTasks || showArcaBanner || outdatedHost !== null;
   return (
     <>
@@ -383,7 +383,7 @@ function TranscriptImpl({
       {showArcaBanner && <ArcaShutdownBanner warning={arcaWarning} hasTasks={display.hasTasks} />}
       {outdatedHost && (
         <HostUpdateBanner
-          host={outdatedHost}
+          outdated={outdatedHost}
           onDismiss={() => hostUpdate.dismissToday(outdatedHost)}
           hasPinnedAbove={display.hasTasks || showArcaBanner}
         />
