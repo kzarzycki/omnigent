@@ -14394,7 +14394,11 @@ async def test_hook_evaluate_endpoint_returns_deny_hook_output(
 async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upstream failure asks for PreToolUse approval and stays open for PostToolUse."""
+    """Upstream failure leaves PreToolUse to Claude's own rules and PostToolUse open.
+
+    An ``ask`` would override Claude's allow rules and prompt for every call
+    while the server is down.
+    """
     client = _ScriptedPolicyClient(None)
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
@@ -14404,8 +14408,7 @@ async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
             "/hook/claude/evaluate-policy",
             _PRE_TOOL_USE_PAYLOAD,
         )
-        output = json.loads(body)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert body == "", f"PreToolUse must defer to Claude's rules, got {body!r}"
 
         post_body = await asyncio.to_thread(
             _relay_request_raw,
@@ -14480,10 +14483,8 @@ async def test_hook_evaluate_endpoint_exhausts_connect_retry_budget(
             output = json.loads(body)
             assert output["decision"] == "block"
             assert "failing closed for this request" in output["reason"]
-        elif hook_event == "PreToolUse":
-            assert json.loads(body)["hookSpecificOutput"]["permissionDecision"] == "ask"
         else:
-            assert body == "", "PostToolUse must still fail open"
+            assert body == "", f"{hook_event} must leave the call to Claude's own rules"
         assert client.calls == 6
         assert [call.args[0] for call in _policy_retry_clock.sleep.call_args_list] == [
             1,
@@ -14532,8 +14533,7 @@ async def test_hook_evaluate_endpoint_preserves_non_connect_retries(
             "/hook/claude/evaluate-policy",
             _PRE_TOOL_USE_PAYLOAD,
         )
-        output = json.loads(body)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert body == "", f"PreToolUse must defer to Claude's rules, got {body!r}"
         assert client.calls == 3
         assert [call.args[0] for call in _policy_retry_clock.sleep.call_args_list] == [0.4, 0.4]
     finally:
@@ -14583,8 +14583,8 @@ async def test_curl_evaluate_policy_command_round_trips(
 
     # No relay env file (fresh session before its first dispatched turn,
     # or runner gone): stdin replays into the Python hook, which takes
-    # its direct-server path (unreachable here) and fails closed with
-    # its own shaping — the pre-curl behavior.
+    # its direct-server path (unreachable here) and leaves the call to
+    # Claude's own rules, as the relay does.
     bare_dir = tmp_path / "no-relay"
     bare_dir.mkdir()
     args = augment_claude_args((), bridge_dir=bare_dir, ap_server_url="http://127.0.0.1:9")
@@ -14601,9 +14601,7 @@ async def test_curl_evaluate_policy_command_round_trips(
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    output = json.loads(result.stdout)
-    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert result.stdout == ""
 
 
 @pytest.mark.asyncio
