@@ -3824,6 +3824,8 @@ def test_augment_claude_args_turns_telemetry_on_for_an_allowlisted_workspace(
 
     allowed = {tmp_path / "listed": "http://collector:4318"}
     monkeypatch.setattr(config, "telemetry_endpoint_for", lambda ws: allowed.get(ws))
+    # A session launched with the server's decision carries it in its env; this case has none.
+    monkeypatch.delenv(config.HARNESS_TELEMETRY_ENV_VAR, raising=False)
 
     def env(workspace: Path) -> dict:
         args = augment_claude_args((), bridge_dir=tmp_path / workspace.name, workspace=workspace)
@@ -3837,7 +3839,7 @@ def test_augment_claude_args_turns_telemetry_on_for_an_allowlisted_workspace(
 
 
 def test_augment_claude_args_applies_the_servers_telemetry_decision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """On sends endpoint, headers and ``omnigent.*`` attributes; off overrides the user's on."""
     from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
@@ -3863,7 +3865,9 @@ def test_augment_claude_args_applies_the_servers_telemetry_decision(
         {
             "enabled": True,
             "endpoint": "https://otlp.example.test",
-            "headers": {"x-ingest-token": "made-up"},
+            # Claude Code's HTTP exporters send header values undecoded: written raw, and
+            # one holding a comma, which it would split, is left out.
+            "headers": {"authorization": "Bearer made-up", "x-list": "a,b"},
             "resource_attributes": {
                 "omnigent.root_session.id": "conv_root",
                 "omnigent.project": "team project",
@@ -3876,12 +3880,16 @@ def test_augment_claude_args_applies_the_servers_telemetry_decision(
         "OTEL_METRICS_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        "OTEL_EXPORTER_OTLP_HEADERS": "x-ingest-token=made-up",
+        "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/protobuf",
+        "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
+        "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer made-up",
         "OTEL_RESOURCE_ATTRIBUTES": (
             "omnigent.root_session.id=conv_root,omnigent.project=team%20project,"
             "omnigent.session.id=conv_sub"
         ),
     }
+    # The left-out header is named, and its value never logged.
+    assert "x-list" in caplog.text and "a,b" not in caplog.text
 
 
 def test_the_ingest_token_reaches_claude_through_its_owner_only_settings_file_not_its_argv(
