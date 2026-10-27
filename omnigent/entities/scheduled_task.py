@@ -93,7 +93,6 @@ class ScheduledTask:
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
-    project_id: str | None = None
     archive_when_done: bool = False
     max_cost_usd: float | None = None
     reuse_conversation: bool = False

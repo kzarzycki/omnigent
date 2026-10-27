@@ -233,6 +233,7 @@ export function ToolCard({
             inputJson={inputJson}
             output={output}
             state={state}
+            revealed={findReveal !== undefined}
           />
         ) : (
           <>
@@ -439,6 +440,7 @@ function ShellTerminalPanel({
   inputJson,
   output,
   state,
+  revealed,
 }: {
   command: string;
   outputFormat: ShellOutputFormat;
@@ -447,6 +449,8 @@ function ShellTerminalPanel({
   inputJson: string;
   output: string | null;
   state: ToolState;
+  /** Find in chat has a match in this card. */
+  revealed: boolean;
 }) {
   const [wrap, setWrap] = useState(true);
   const [showRaw, setShowRaw] = useState(false);
@@ -542,6 +546,7 @@ function ShellTerminalPanel({
         {hasOutput && (
           <OutputSection
             output={parsed.text}
+            revealed={revealed}
             renderPanel={(text) => (
               <CodeBlockContent
                 code={dropTrailingPartialEscape(text)}

@@ -180,7 +180,10 @@ describe("useMessageDeepLink", () => {
     });
 
     // A jump pages toward its target in large pages, not the scroll-up page.
-    expect(loadMoreHistory).toHaveBeenCalledExactlyOnceWith(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
+    expect(loadMoreHistory).toHaveBeenCalledExactlyOnceWith(
+      undefined,
+      SESSION_HISTORY_SEEK_PAGE_SIZE,
+    );
     expect(scrollSpy).not.toHaveBeenCalled();
     await act(async () => {
       await loadMoreHistory.mock.results[0]?.value;

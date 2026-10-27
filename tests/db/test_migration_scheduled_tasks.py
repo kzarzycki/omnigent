@@ -96,7 +96,6 @@ def test_scheduled_tasks_columns(db_engine: Engine) -> None:
         "model_override",
         "reasoning_effort",
         "permission_mode",
-        "project_id",
         "archive_when_done",
         "reuse_conversation",
         "max_cost_usd",
@@ -797,3 +796,41 @@ def test_completed_state_migration_round_trips(dispatch_migration_engine: Engine
         command.upgrade(config, _COMPLETED_STATE_REVISION)
     with engine.begin() as conn:
         conn.execute(tasks.insert().values(id=b"c" * 16, state=4, **values))
+
+
+def test_dispatch_migration_keeps_the_fork_project_id(tmp_path: Path) -> None:
+    """A database at the fork's earlier head keeps its ``project_id`` up and rolled back."""
+    uri = f"sqlite:///{tmp_path / 'fork.db'}"
+    config = _build_alembic_config(uri)
+    engine = sa.create_engine(uri)
+    try:
+        with engine.begin() as conn:
+            config.attributes["connection"] = conn
+            command.upgrade(config, "ta1b2c3d4e5f")
+            tasks = sa.Table("scheduled_tasks", sa.MetaData(), autoload_with=conn)
+            conn.execute(
+                tasks.insert().values(
+                    id=b"a" * 16,
+                    name="daily",
+                    prompt=b"p",
+                    rrule="FREQ=DAILY",
+                    agent_id=b"g" * 16,
+                    timezone="UTC",
+                    created_at=1,
+                    project_id=b"p" * 16,
+                    archive_when_done=True,
+                )
+            )
+            command.upgrade(config, "head")
+            upgraded = conn.execute(sa.text("SELECT project_id, next_run_at FROM scheduled_tasks"))
+            assert upgraded.one() == (b"p" * 16, None)
+            # The documented rollback: undo the dispatch branch, keep the fork chain.
+            command.downgrade(config, _DISPATCH_PREVIOUS)
+            columns = {c["name"] for c in sa.inspect(conn).get_columns("scheduled_tasks")}
+            assert "next_run_at" not in columns
+            command.upgrade(config, "ta1b2c3d4e5f")
+        with engine.connect() as conn:
+            kept = sa.text("SELECT project_id, archive_when_done FROM scheduled_tasks")
+            assert conn.execute(kept).one() == (b"p" * 16, 1)
+    finally:
+        engine.dispose()
