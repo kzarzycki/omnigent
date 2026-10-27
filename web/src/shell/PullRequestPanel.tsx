@@ -59,7 +59,6 @@ import {
 import { FileDiff } from "@pierre/diffs/react";
 import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -107,6 +106,7 @@ import {
 import { PullRequestLabels } from "./PullRequestLabels";
 import { PullRequestMerge } from "./PullRequestMerge";
 import { PullRequestReviewers } from "./PullRequestReviewers";
+import { PullRequestStatus } from "./PullRequestStatus";
 
 // Shiki bundled themes matching the app's editor look; the concrete side is
 // chosen by `themeType` from the app's resolved light/dark mode.
@@ -326,36 +326,6 @@ function IconButton({
 }
 
 /** Compact PR state shown beside the title in the shared panel header. */
-function PullRequestStatus({ state }: { state: string }) {
-  const normalized = state.toUpperCase();
-  const visual =
-    normalized === "OPEN"
-      ? {
-          label: "Open",
-          className: "border-green-500/25 bg-green-500/10 text-green-700 dark:text-green-400",
-        }
-      : normalized === "MERGED"
-        ? {
-            label: "Merged",
-            className: "border-purple-500/25 bg-purple-500/10 text-purple-700 dark:text-purple-400",
-          }
-        : normalized === "CLOSED"
-          ? {
-              label: "Closed",
-              className: "border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400",
-            }
-          : { label: state, className: "border-border bg-muted text-muted-foreground" };
-
-  return (
-    <Badge
-      aria-label={`Pull request status: ${visual.label}`}
-      className={cn("h-5 rounded-full border px-2 py-px text-xs leading-none", visual.className)}
-    >
-      {visual.label}
-    </Badge>
-  );
-}
-
 // GitHub-style status icons (a file glyph carrying the change kind) instead of
 // bare A/M/D/R letters — quicker to recognize at a glance.
 const STATUS_META: Record<

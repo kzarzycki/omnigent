@@ -12,7 +12,14 @@
 
 import type React from "react";
 import { useMemo } from "react";
-import { CopyIcon, GitPullRequestIcon } from "lucide-react";
+import {
+  CircleDotIcon,
+  CirclePlayIcon,
+  CopyIcon,
+  GitCommitHorizontalIcon,
+  GitPullRequestIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import { defaultRemarkPlugins } from "streamdown";
 import remarkBreaks from "remark-breaks";
@@ -31,11 +38,18 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { VideoPlayer } from "@/components/VideoPlayer";
+import { ChatLinkPreview } from "./ChatLinkPreview";
 import { isRemoteVideoUrl, isVideoFile } from "@/lib/video";
 import { useThrottledValue } from "@/hooks/useThrottledValue";
 import { withBasePath } from "@/lib/basePath";
 import { copyText } from "@/lib/clipboard";
 import { absoluteWorkspacePath } from "@/lib/composerContext";
+import {
+  githubLinkLabel,
+  parseGithubLink,
+  shortLinkLabel,
+  type GithubLinkRef,
+} from "@/lib/linkPreview";
 import { followLinkWithPopupFallback } from "@/lib/openLinkInApp";
 import { cn } from "@/lib/utils";
 import {
@@ -233,23 +247,25 @@ function WorkspacePathInlineCode({
 // (which stops a link-only table column collapsing to ~2ch) on the attribute.
 const STREAMDOWN_LINK_CLASS = "wrap-anywhere font-medium text-link underline";
 
-function githubPullRequest(href: string | undefined): string | null {
-  if (!href) return null;
-  try {
-    const url = new URL(href);
-    if (url.protocol !== "https:" || url.hostname !== "github.com") return null;
-    const match = url.pathname.match(/^\/[^/]+\/([^/]+)\/pull\/(\d+)\/?$/);
-    return match ? `${match[1]}#${match[2]}` : null;
-  } catch {
-    return null;
-  }
-}
+const GITHUB_LINK_ICONS: Record<GithubLinkRef["kind"], LucideIcon> = {
+  pull: GitPullRequestIcon,
+  issue: CircleDotIcon,
+  commit: GitCommitHorizontalIcon,
+  run: CirclePlayIcon,
+};
 
-function PullRequestLinkLabel({ children }: { children: React.ReactNode }) {
+function GithubLinkLabel({
+  kind,
+  children,
+}: {
+  kind: GithubLinkRef["kind"];
+  children: React.ReactNode;
+}) {
+  const Icon = GITHUB_LINK_ICONS[kind];
   const words = typeof children === "string" ? children.match(/^(\S+)([\s\S]*)$/) : null;
   const prefix = (
     <>
-      <GitPullRequestIcon aria-hidden="true" className="inline-block size-[1em] align-[-0.125em]" />
+      <Icon aria-hidden="true" className="inline-block size-[1em] align-[-0.125em]" />
       {"\u00a0"}
       {words?.[1]}
     </>
@@ -314,12 +330,20 @@ function WorkspaceFileLink({
     // Streamdown renders external links with target="_blank"; those need the
     // popup fallback so a click still works where new tabs can't open.
     const blankHref = props.target === "_blank" && typeof rebased === "string" ? rebased : null;
-    const pullRequest = githubPullRequest(rebased);
-    return (
+    const github = parseGithubLink(rebased);
+    const bare = typeof href === "string" && children === href;
+    const label = github
+      ? bare
+        ? githubLinkLabel(github)
+        : children
+      : bare && /^https?:\/\//.test(href)
+        ? shortLinkLabel(href)
+        : children;
+    const anchor = (
       <a
         href={rebased}
         className={cn(STREAMDOWN_LINK_CLASS, className)}
-        title={title ?? (pullRequest ? rebased : undefined)}
+        title={title ?? (github || label !== children ? rebased : undefined)}
         data-streamdown="link"
         {...props}
         onClick={
@@ -331,13 +355,10 @@ function WorkspaceFileLink({
               }
         }
       >
-        {pullRequest ? (
-          <PullRequestLinkLabel>{children === href ? pullRequest : children}</PullRequestLinkLabel>
-        ) : (
-          children
-        )}
+        {github ? <GithubLinkLabel kind={github.kind}>{label}</GithubLinkLabel> : label}
       </a>
     );
+    return <ChatLinkPreview href={rebased}>{anchor}</ChatLinkPreview>;
   }
 
   // Marked but not an openable file. Never leave a link on the parked
