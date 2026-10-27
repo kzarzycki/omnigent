@@ -9,7 +9,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, cast
 
-from sqlalchemy import and_, asc, delete, desc, func, or_, select, tuple_, update
+from sqlalchemy import and_, asc, desc, func, or_, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -121,7 +121,6 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
         model_override=row.model_override,
         reasoning_effort=row.reasoning_effort,
         permission_mode=row.permission_mode,
-        project_id=row.project_id,
         archive_when_done=row.archive_when_done,
         max_cost_usd=row.max_cost_usd,
         reuse_conversation=row.reuse_conversation,
