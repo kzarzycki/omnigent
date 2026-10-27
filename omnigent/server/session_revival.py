@@ -252,7 +252,7 @@ async def _relaunch(session_id: str) -> None:
             session_id,
             extra={"session_id": session_id},
         )
-    except Exception:  # noqa: BLE001 - a session that can't come back stays down, logged
+    except Exception:
         _logger.warning(
             "Could not relaunch session %s's runner",
             session_id,

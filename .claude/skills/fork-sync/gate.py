@@ -21,7 +21,6 @@ that proves too loose.
 import re
 import subprocess
 import sys
-
 import tomllib
 
 ROOT = "omnigent"

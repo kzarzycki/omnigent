@@ -202,7 +202,7 @@ def record_host_harness_telemetry(
         return
     try:
         conversation_store.set_labels(conv.id, {HARNESS_TELEMETRY_LABEL_KEY: value})
-    except Exception:  # noqa: BLE001 — the session's metrics stay skipped if repos are excluded
+    except Exception:
         logger.warning("could not save harness telemetry %s for %s", value, conv.id, exc_info=True)
 
 
