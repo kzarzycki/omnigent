@@ -7,6 +7,8 @@ the httpx sink there) mirrors the module split in the source.
 
 from __future__ import annotations
 
+import logging
+
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -22,6 +24,7 @@ from omnigent.server.github_app import (
     build_authorize_url,
     token_set_from_payload,
 )
+from omnigent.stores.credential_store import cipher_missing_hint
 from tests.server.github_app_fixtures import make_config
 
 
@@ -43,9 +46,22 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── from_env ─────────────────────────────────────────────────────
 
 
-def test_from_env_disabled_without_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_from_env_disabled_without_client(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     _clear_env(monkeypatch)
-    assert GitHubAppConfig.from_env() is None
+    with caplog.at_level(logging.INFO, logger="omnigent.server.github_app"):
+        assert GitHubAppConfig.from_env() is None
+    records = [r for r in caplog.records if r.name == "omnigent.server.github_app"]
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "GitHub connect is off" in records[0].getMessage()
+    assert "OMNIGENT_GITHUB_APP_CLIENT_ID" in records[0].getMessage()
+
+
+def test_cipher_missing_hint_names_both_backends() -> None:
+    hint = cipher_missing_hint()
+    assert "OMNIGENT_CREDENTIAL_KMS_KEY_ID" in hint
+    assert "OMNIGENT_CREDENTIAL_VAULT_KEY" in hint
 
 
 def test_from_env_disabled_without_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,7 +73,7 @@ def test_from_env_disabled_without_redirect(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_from_env_enabled_without_store_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # Token-at-rest encryption is the credential store's concern
-    # (OMNIGENT_CREDENTIAL_ENC_KEY), not GitHub's: client id/secret + a
+    # (OMNIGENT_CREDENTIAL_KMS_KEY_ID), not GitHub's: client id/secret + a
     # resolvable redirect are enough for a valid GitHub App config. Whether
     # a connection store is wired is decided separately by the caller.
     _clear_env(monkeypatch)
