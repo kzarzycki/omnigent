@@ -9500,7 +9500,9 @@ async def _relay_runner_stream_once(
         it is synchronous and does not create a helper task.
     """
     text_acc: list[str] = []
-    current_response_id: str | None = None
+    # A turn still in flight across a transport retry keeps its id for the
+    # items still to come; after a restart the runner's first heartbeat names it.
+    current_response_id: str | None = _session_active_response_cache.get(session_id)
     pending_subagent_return_id: str | None = None
     pending_subagent_return_status = "completed"
     # Subscribers already heard this turn end; a repeated status must not re-notify.
@@ -9581,6 +9583,11 @@ async def _relay_runner_stream_once(
                     if evt_type == "session.heartbeat":
                         if not heartbeat_seen:
                             heartbeat_seen = True
+                            # The first heartbeat precedes every event of this
+                            # attempt, so it never overrides its own in_progress.
+                            _heartbeat_rid = event.get("response_id")
+                            if isinstance(_heartbeat_rid, str) and _heartbeat_rid:
+                                current_response_id = _heartbeat_rid
                             _logger.info(
                                 "Relay: runner stream ready for session=%s",
                                 session_id,

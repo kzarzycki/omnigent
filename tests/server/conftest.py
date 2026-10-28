@@ -411,7 +411,7 @@ def mock_llm() -> Iterator[ControllableMockClient]:
 @pytest.fixture(autouse=True)
 def _reset_elicitation_state() -> Iterator[None]:
     """
-    Clear the module-global elicitation state after every test.
+    Clear the module-global elicitation and session state after every test.
 
     ``pending_elicitations`` and the harness elicitation registries are
     process-global and keyed by ``elicitation_id`` / session id, so an
@@ -435,6 +435,9 @@ def _reset_elicitation_state() -> Iterator[None]:
     # Presence is likewise module-global (keyed by conversation/user)
     # with pending leave-grace timers that would fire into later tests.
     presence.reset_for_tests()
+    # A relay seeds its turn id from this cache, so a turn a test left open
+    # would claim a later test's items on the same session id.
+    sessions_routes._session_active_response_cache.clear()
 
 
 # Originals of the sessions-module globals that many tests monkeypatch.
