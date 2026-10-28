@@ -4333,15 +4333,24 @@ async def _resend_lost_subagent_notices(
     """
     Re-send loss notices for the children of sessions on a reconnected runner.
 
+    A child bound to that same runner is skipped: its parent's runner is back,
+    so its notice would be a no-op that still reads the parent row.
+
     :param parent_ids: Sessions bound to the runner that just connected.
     :param conversation_store: Store used to list and read the children.
     :returns: None. Best-effort: never raises.
     """
+    on_this_runner = set(parent_ids)
     try:
         children = await asyncio.to_thread(
             conversation_store.list_child_conversation_ids_by_parent, list(parent_ids)
         )
-        child_ids = [child_id for ids in children.values() for child_id in ids]
+        child_ids = [
+            child_id
+            for ids in children.values()
+            for child_id in ids
+            if child_id not in on_this_runner
+        ]
         if not child_ids:
             return
         rows = await asyncio.to_thread(conversation_store.get_conversations, child_ids)
