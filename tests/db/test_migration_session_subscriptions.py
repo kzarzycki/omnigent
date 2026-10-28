@@ -1,4 +1,5 @@
-"""Migrations ``nn1a2b3c4d5e`` and ``oo1a2b3c4d5e`` add the session subscription tables."""
+"""Migrations ``nn1a2b3c4d5e`` and ``oo1a2b3c4d5e`` add the session subscription tables;
+``va1b2c3d4e5f`` adds their quiet period."""
 
 from __future__ import annotations
 
@@ -112,6 +113,48 @@ def test_the_delivery_outbox_stores_no_notice_text(tmp_path: Path) -> None:
             "attempts",
             "outcome",
         }
+    finally:
+        engine.dispose()
+        clear_engine_cache()
+
+
+def test_quiet_seconds_is_added_nullable_reruns_as_a_no_op_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    uri = f"sqlite:///{tmp_path / 'quiet.db'}"
+    engine = sa.create_engine(uri)
+
+    def quiet_column() -> dict[str, object] | None:
+        columns = sa.inspect(engine).get_columns("session_subscriptions")
+        return next((dict(c) for c in columns if c["name"] == "quiet_seconds"), None)
+
+    try:
+        _run(uri, engine, "upgrade", "ua1b2c3d4e5f")
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO session_subscriptions (workspace_id, subscriber_id, target_id)"
+                    " VALUES (1, :a, :b)"
+                ),
+                {"a": b"a" * 16, "b": b"b" * 16},
+            )
+        _run(uri, engine, "upgrade", "va1b2c3d4e5f")
+        column = quiet_column()
+        assert column is not None
+        assert isinstance(column["type"], sa.Integer)
+        assert column["nullable"] is True
+        with engine.connect() as conn:
+            assert conn.execute(
+                sa.text("SELECT quiet_seconds FROM session_subscriptions")
+            ).all() == [(None,)]
+
+        # A rerun over a database that already has the column changes nothing.
+        _run(uri, engine, "stamp", "ua1b2c3d4e5f")
+        _run(uri, engine, "upgrade", "va1b2c3d4e5f")
+        assert quiet_column() is not None
+
+        _run(uri, engine, "downgrade", "ua1b2c3d4e5f")
+        assert quiet_column() is None
     finally:
         engine.dispose()
         clear_engine_cache()
