@@ -107,6 +107,8 @@ from omnigent.inner.databricks_executor import (
 )
 from omnigent.models.codex_model_vocabulary import codex_reachable_model_slug, codex_spawn_model
 from omnigent.process_logging import (
+    DATA_DIR_ENV_VAR,
+    data_dir,
     harness_stderr_capture_enabled,
     log_info_once,
     log_once,
@@ -325,7 +327,8 @@ def _codex_mcp_server_config_section(
     return (
         f"[mcp_servers.omnigent]\n"
         f"command = {json.dumps(python)}\n"
-        f"args = [{args_toml}]\n\n"
+        f"args = [{args_toml}]\n"
+        f"env = {{ {DATA_DIR_ENV_VAR} = {json.dumps(str(data_dir()))} }}\n\n"
         f"{approvals}"
     )
 
@@ -1746,7 +1749,7 @@ def _probe_codex_home(
             (str(source_home.resolve()), *config_overrides, *filter(None, [config_profile]))
         ).encode("utf-8")
     ).hexdigest()[:12]
-    home = Path.home() / ".omnigent" / "cache" / "codex-model-probe" / key
+    home = data_dir() / "cache" / "codex-model-probe" / key
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     # The bridge skips files that already exist, and config.toml is copied
     # (not symlinked), so drop the copy to re-read an edited source config.

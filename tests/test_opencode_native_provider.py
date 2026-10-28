@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from omnigent.harnesses.claude_native.bridge import _TOOL_RELAY_POST_TIMEOUT_S
 from omnigent.harnesses.opencode_native.provider import (
     OpenCodeGatewayResolution,
     _gateway_endpoint_for_model,
@@ -23,6 +24,7 @@ from omnigent.harnesses.opencode_native.provider import (
     resolve_databricks_gateway,
     write_opencode_provider_config,
 )
+from omnigent.process_logging import data_dir
 
 
 @pytest.fixture(autouse=True)
@@ -41,14 +43,15 @@ def test_build_omnigent_mcp_server_points_serve_mcp_at_bridge_dir() -> None:
     entry = block["omnigent"]
     assert entry["type"] == "local"
     assert entry["enabled"] is True
-    # Milliseconds: must exceed the bridge's outer relay hop (330 s) so the
+    # Milliseconds: must exceed the bridge's outer relay hop so the
     # relay's clean timeout error beats opencode's client-side kill.
-    assert entry["timeout"] == 360_000
+    assert entry["timeout"] > _TOOL_RELAY_POST_TIMEOUT_S * 1000
     cmd = entry["command"]
     # Launches the SHARED serve-mcp relay, pointed at THIS bridge dir.
     assert cmd[-3:] == ["serve-mcp", "--bridge-dir", "/tmp/bridge-xyz"]
     assert "omnigent.harnesses.claude_native.bridge" in cmd
     assert entry.get("environment", {}).get("PYTHONUNBUFFERED") == "1"
+    assert entry["environment"]["OMNIGENT_DATA_DIR"] == str(data_dir())
 
 
 def test_build_omnigent_mcp_server_honors_python_executable() -> None:

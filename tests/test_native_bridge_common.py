@@ -367,3 +367,55 @@ def test_reap_still_errors_on_a_module_that_raises_on_import(
 
     records = [r for r in caplog.records if "broken_native" in r.getMessage()]
     assert [r.levelno for r in records] == [logging.ERROR]
+
+
+@pytest.mark.parametrize(
+    ("harness", "dirname"),
+    [
+        ("antigravity_native", "antigravity-native"),
+        ("codex_native", "codex-native"),
+        ("opencode_native", "opencode-native"),
+        ("pi_native", "pi-native"),
+    ],
+)
+def test_bridge_root_follows_the_configured_data_dir(
+    tmp_path: Path, harness: str, dirname: str
+) -> None:
+    """Two instances with their own data dir never share, or sweep, one bridge root."""
+    imported = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"from omnigent.harnesses.{harness} import bridge; print(bridge._BRIDGE_ROOT)",
+        ],
+        env={**os.environ, "OMNIGENT_DATA_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert Path(imported.stdout.strip()) == tmp_path / dirname
+
+
+@pytest.mark.parametrize(
+    "harness", ["antigravity_native", "codex_native", "opencode_native", "pi_native"]
+)
+def test_bridge_root_stays_in_the_home_omnigent_dir_without_a_data_dir(
+    tmp_path: Path, harness: str
+) -> None:
+    """A single instance with no ``OMNIGENT_DATA_DIR`` keeps its bridge dirs where they were."""
+    env = {key: value for key, value in os.environ.items() if key != "OMNIGENT_DATA_DIR"}
+    imported = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"from omnigent.harnesses.{harness} import bridge; print(bridge._BRIDGE_ROOT)",
+        ],
+        env={**env, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    dirname = harness.replace("_", "-")
+    assert Path(imported.stdout.strip()) == tmp_path / ".omnigent" / dirname
