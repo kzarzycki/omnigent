@@ -5289,6 +5289,7 @@ function ConversationRowImpl({
               projectName={projectFlyoutName}
               projectIcon={projectFlyoutIcon}
               gitBranch={gitBranch}
+              conversation={conversation}
               hasError={sessionState?.kind === "error"}
             />
           </HoverCard>
@@ -5323,6 +5324,7 @@ function ConversationRowImpl({
             projectName={projectFlyoutName}
             projectIcon={projectFlyoutIcon}
             gitBranch={gitBranch}
+            conversation={conversation}
             hasError={sessionState?.kind === "error"}
           />
         </HoverCard>
@@ -5833,12 +5835,14 @@ function PinnedProjectFlyoutContent({
   projectName,
   projectIcon,
   gitBranch,
+  conversation,
   hasError,
 }: {
   title: string;
   projectName: string;
   projectIcon: string | null;
   gitBranch: string | null;
+  conversation: Pick<Conversation, "labels">;
   hasError: boolean;
 }) {
   return (
@@ -5866,6 +5870,11 @@ function PinnedProjectFlyoutContent({
           <span className="truncate">{gitBranch}</span>
         </p>
       )}
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-tooltip-status"
+        className="mt-1 block text-sm text-muted-foreground"
+      />
       {hasError && <SessionErrorHint />}
     </HoverCardContent>
   );
