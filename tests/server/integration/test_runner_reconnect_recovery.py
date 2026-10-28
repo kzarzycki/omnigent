@@ -244,6 +244,8 @@ async def test_large_mirror_tree_attaches_without_blocking_or_per_child_reads(
             monkeypatch.setattr(registry, "get", registry_get)
         assert relays[0] == parent.id
         assert not set(mirrors).intersection(sid for sid, _ in reads)
+        # No row, the parent's included, is read once per mirror child.
+        assert len(reads) <= 4, len(reads)
         assert all(thread != loop_thread for _, thread in reads)
         assert all(0 < len(ids) <= batch_size for ids in attachment_batches)
         assert any(1 < count <= batch_size + 1 for count in heartbeats)
