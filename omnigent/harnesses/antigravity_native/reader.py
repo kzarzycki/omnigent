@@ -56,6 +56,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,11 +98,20 @@ from omnigent.harnesses.antigravity_native.steps import (
     pending_interaction,
 )
 from omnigent.harnesses.claude_native.bridge import url_component
-from omnigent.native._native_post_delivery import post_session_event_with_retry
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    post_session_event_with_retry,
+    raise_for_subagent_delivery_not_confirmed,
+)
 from omnigent.native._native_supersession import post_clear_supersession
 from omnigent.server.schemas import ElicitationRequestParams, ElicitationResult
 
 _logger = logging.getLogger(__name__)
+
+# Retries status edges the runner refuses as not delivered to a parent; set per reader.
+_status_retry: ContextVar[SubagentStatusRetry | None] = ContextVar(
+    "_antigravity_status_retry", default=None
+)
 
 # Default seconds between RPC polls. The RPC returns a full snapshot each call
 # and steps finalize only at DONE (no token streaming), so a sub-second cadence
@@ -741,17 +751,28 @@ async def _post_event(
     """
     url = f"/v1/sessions/{url_component(session_id)}/events"
     payload: dict[str, object] = {"type": event.event_type, "data": event.data}
-    await post_session_event_with_retry(
-        client=client,
-        url=url,
-        payload=payload,
-        event_type=event.event_type,
-        max_attempts=_POST_MAX_ATTEMPTS,
-        retry_status_codes=_POST_RETRY_STATUS_CODES,
-        sleep=_sleep,
-        retry_delay=lambda attempt: _POST_RETRY_DELAY_SECONDS * attempt,
-        logger_name=__name__,
-    )
+    status_retry = _status_retry.get() if event.event_type == "external_session_status" else None
+
+    async def _post_once() -> None:
+        response = await post_session_event_with_retry(
+            client=client,
+            url=url,
+            payload=payload,
+            event_type=event.event_type,
+            max_attempts=_POST_MAX_ATTEMPTS,
+            retry_status_codes=_POST_RETRY_STATUS_CODES,
+            sleep=_sleep,
+            retry_delay=lambda attempt: _POST_RETRY_DELAY_SECONDS * attempt,
+            logger_name=__name__,
+        )
+        if status_retry is not None:
+            raise_for_subagent_delivery_not_confirmed(response)
+
+    if status_retry is None:
+        await _post_once()
+    else:
+        # A refused parent delivery retries in the background.
+        await status_retry.send(session_id, _post_once)
 
 
 def _resolve_cascade_id(bridge_dir: Path) -> str | None:
@@ -3289,12 +3310,16 @@ async def run_reader_with_bridge(
 
     from omnigent.cli_auth import open_server_client
 
-    async with open_server_client(
-        base_url,
-        headers=headers,
-        auth=auth,
-        timeout=httpx.Timeout(_READER_CLIENT_TIMEOUT_SECONDS),
-    ) as client:
+    async with (
+        open_server_client(
+            base_url,
+            headers=headers,
+            auth=auth,
+            timeout=httpx.Timeout(_READER_CLIENT_TIMEOUT_SECONDS),
+        ) as client,
+        SubagentStatusRetry() as status_retry,
+    ):
+        _status_retry.set(status_retry)
 
         async def _on_pending(cascade_id: str, port: int, pending: PendingInteraction) -> None:
             """Drive the interaction bridge for one WAITING interaction."""

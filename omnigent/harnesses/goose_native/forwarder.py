@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -49,7 +50,10 @@ from pathlib import Path
 import httpx
 
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
-from omnigent.native._native_post_delivery import post_external_session_status
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    post_external_session_status,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -541,8 +545,30 @@ def _read_open_turn_rows(
         con.close()
 
 
+async def _post_status(
+    client: httpx.AsyncClient,
+    status_retry: SubagentStatusRetry,
+    *,
+    session_id: str,
+    status: str,
+    response_id: str | None,
+) -> None:
+    """Post one status edge; a refused parent delivery retries in the background."""
+    await status_retry.send(
+        session_id,
+        functools.partial(
+            post_external_session_status,
+            client,
+            session_id=session_id,
+            status=status,
+            response_id=response_id,
+        ),
+    )
+
+
 async def _replay_open_turn(
     client: httpx.AsyncClient,
+    status_retry: SubagentStatusRetry,
     *,
     db: Path,
     goose_session_id: str,
@@ -578,8 +604,12 @@ async def _replay_open_turn(
         state.reset()
         return
     if completed:
-        await post_external_session_status(
-            client, session_id=session_id, status="idle", response_id=state.response_id
+        await _post_status(
+            client,
+            status_retry,
+            session_id=session_id,
+            status="idle",
+            response_id=state.response_id,
         )
         state.reset()
     else:
@@ -650,12 +680,16 @@ async def forward_goose_store_to_session(
 
     from omnigent.cli_auth import open_server_client
 
-    async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
+    async with (
+        open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client,
+        SubagentStatusRetry() as status_retry,
+    ):
         while True:
             try:
                 if needs_replay and goose_session_id is not None:
                     await _replay_open_turn(
                         client,
+                        status_retry,
                         db=db,
                         goose_session_id=goose_session_id,
                         last_id=last_id,
@@ -683,8 +717,9 @@ async def forward_goose_store_to_session(
                         if role == "user":
                             # A new user turn authoritatively closes the previous one.
                             if state.live:
-                                await post_external_session_status(
+                                await _post_status(
                                     client,
+                                    status_retry,
                                     session_id=session_id,
                                     status="idle",
                                     response_id=state.response_id,
@@ -701,8 +736,9 @@ async def forward_goose_store_to_session(
 
                         # Post running once per turn, before the turn's first item.
                         if items and role in ("assistant", "tool") and not state.live:
-                            await post_external_session_status(
+                            await _post_status(
                                 client,
+                                status_retry,
                                 session_id=session_id,
                                 status="running",
                                 response_id=state.response_id,
@@ -714,8 +750,9 @@ async def forward_goose_store_to_session(
 
                         # The turn's final prose row closes its live card at once.
                         if _row_completes_turn(state, role, items) and state.live:
-                            await post_external_session_status(
+                            await _post_status(
                                 client,
+                                status_retry,
                                 session_id=session_id,
                                 status="idle",
                                 response_id=state.response_id,
@@ -740,8 +777,9 @@ async def forward_goose_store_to_session(
                         and state.last_activity_ts is not None
                         and time.monotonic() - state.last_activity_ts > _STALLED_TURN_IDLE_S
                     ):
-                        await post_external_session_status(
+                        await _post_status(
                             client,
+                            status_retry,
                             session_id=session_id,
                             status="idle",
                             response_id=state.response_id,
