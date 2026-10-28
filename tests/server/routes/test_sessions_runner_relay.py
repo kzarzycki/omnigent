@@ -4478,3 +4478,232 @@ async def test_relay_leaves_a_turn_on_an_offline_host_to_the_disconnect_hold(
         sessions_module._runner_relay_tasks.clear()
         sessions_module._session_status_cache.pop(session_id, None)
         session_stream.close(session_id)
+
+
+class _AttemptStreamResponse:
+    """One relay attempt: a first heartbeat, scripted events, then ``[DONE]`` or a drop."""
+
+    def __init__(
+        self, heartbeat: dict[str, Any], events: list[dict[str, Any]], drop: bool
+    ) -> None:
+        self._heartbeat = heartbeat
+        self._events = events
+        self._drop = drop
+
+    async def __aenter__(self) -> _AttemptStreamResponse:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+
+    def raise_for_status(self) -> None:
+        """The scripted stream represents a successful HTTP response."""
+
+    async def aiter_text(self) -> AsyncIterator[str]:
+        for event in [self._heartbeat, *self._events]:
+            yield f"data: {json.dumps(event)}\n\n"
+        if self._drop:
+            raise ConnectionError("tunnel closed before request completed")
+        yield "data: [DONE]\n\n"
+
+
+class _ReconnectingRunnerClient:
+    """Serves one scripted attempt per ``stream`` call; records the cached turn id at each."""
+
+    def __init__(self, session_id: str, attempts: list[_AttemptStreamResponse]) -> None:
+        self._session_id = session_id
+        self._attempts = attempts
+        self.cached_turn_ids: list[str | None] = []
+
+    def stream(self, method: str, path: str, *, timeout: Any) -> _AttemptStreamResponse:
+        from omnigent.server.routes import sessions as sessions_module
+
+        del method, path, timeout
+        self.cached_turn_ids.append(
+            sessions_module._session_active_response_cache.get(self._session_id)
+        )
+        return self._attempts.pop(0)
+
+
+_BARE_HEARTBEAT: dict[str, Any] = {"type": "session.heartbeat"}
+
+
+def _tool_call(call_id: str) -> dict[str, Any]:
+    return {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "status": "completed",
+            "name": "Bash",
+            "arguments": "{}",
+            "call_id": call_id,
+            "agent": "test-agent",
+        },
+    }
+
+
+def _tool_output(call_id: str) -> dict[str, Any]:
+    return {
+        "type": "response.output_item.done",
+        "item": {"type": "function_call_output", "call_id": call_id, "output": "ok"},
+    }
+
+
+def _turn_start(response_id: str) -> list[dict[str, Any]]:
+    """An SDK turn up to its first tool call."""
+    return [
+        {"type": "session.status", "status": "running"},
+        {"type": "response.in_progress", "response": {"id": response_id}},
+        _tool_call(f"{response_id}_call_1"),
+    ]
+
+
+def _turn_rest(response_id: str) -> list[dict[str, Any]]:
+    """An SDK turn after its first tool call: its output, narration, a tool, the end."""
+    return [
+        _tool_output(f"{response_id}_call_1"),
+        {
+            "type": "response.output_item.done",
+            "text_segment": "function_call",
+            "item": {
+                "id": f"{response_id}_msg",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Now the second step."}],
+            },
+        },
+        _tool_call(f"{response_id}_call_2"),
+        _tool_output(f"{response_id}_call_2"),
+        {"type": "response.completed", "response": {"id": response_id}},
+        {"type": "session.status", "status": "idle"},
+    ]
+
+
+def _stored_response_ids(store: SqlAlchemyConversationStore, session_id: str) -> list[str]:
+    return [item.to_api_dict()["response_id"] for item in store.list_items(session_id).data]
+
+
+def _clear_relay_session_state(session_id: str) -> None:
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+
+    sessions_module._session_active_response_cache.pop(session_id, None)
+    sessions_module._session_status_cache.pop(session_id, None)
+    session_stream.close(session_id)
+
+
+async def _relay_attempts(
+    store: SqlAlchemyConversationStore,
+    session_id: str,
+    attempts: list[_AttemptStreamResponse],
+) -> list[str | None]:
+    """Run the retrying relay over *attempts*; return the cached turn id each attempt saw."""
+    from omnigent.server.routes._sessions.orchestration import _relay_runner_stream
+
+    runner = _ReconnectingRunnerClient(session_id, attempts)
+    try:
+        await asyncio.wait_for(
+            _relay_runner_stream(session_id, runner, store),  # type: ignore[arg-type]
+            timeout=_TASK_TIMEOUT_S,
+        )
+    finally:
+        _clear_relay_session_state(session_id)
+    return runner.cached_turn_ids
+
+
+@pytest.mark.asyncio
+async def test_relay_drop_mid_turn_keeps_the_turn_id_for_the_rest_of_the_turn(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Items the retried attempt stores for the turn in flight carry the turn's id."""
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._RELAY_RETRY_INTERVAL_S", 0.01
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+
+    cached_turn_ids = await _relay_attempts(
+        store,
+        session_id,
+        [
+            _AttemptStreamResponse(_BARE_HEARTBEAT, _turn_start("resp_1"), drop=True),
+            _AttemptStreamResponse(_BARE_HEARTBEAT, _turn_rest("resp_1"), drop=False),
+        ],
+    )
+
+    # The supervisor's grace handling publishes no status between attempts.
+    assert cached_turn_ids == [None, "resp_1"]
+    assert _stored_response_ids(store, session_id) == ["resp_1"] * 5
+
+
+@pytest.mark.asyncio
+async def test_relay_after_a_server_restart_takes_the_turn_id_from_the_runner_heartbeat(
+    db_uri: str,
+) -> None:
+    """With no cached turn, the runner's first heartbeat names the turn in flight."""
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    _clear_relay_session_state(session_id)
+    heartbeat = {"type": "session.heartbeat", "response_id": "resp_1"}
+
+    cached_turn_ids = await _relay_attempts(
+        store, session_id, [_AttemptStreamResponse(heartbeat, _turn_rest("resp_1"), drop=False)]
+    )
+
+    assert cached_turn_ids == [None]
+    assert _stored_response_ids(store, session_id) == ["resp_1"] * 4
+
+
+@pytest.mark.asyncio
+async def test_relay_prefers_the_runner_heartbeat_turn_id_over_a_stale_cached_one(
+    db_uri: str,
+) -> None:
+    """The runner knows the live turn: its heartbeat id wins over an older cached id."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+    _clear_relay_session_state(session_id)
+    sessions_module._session_active_response_cache[session_id] = "resp_0"
+    heartbeat = {"type": "session.heartbeat", "response_id": "resp_1"}
+
+    await _relay_attempts(
+        store, session_id, [_AttemptStreamResponse(heartbeat, _turn_rest("resp_1"), drop=False)]
+    )
+
+    assert _stored_response_ids(store, session_id) == ["resp_1"] * 4
+
+
+@pytest.mark.asyncio
+async def test_relay_reconnect_between_turns_does_not_reuse_the_finished_turn_id(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop after the turn's terminal status leaves the next turn its own id."""
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._RELAY_RETRY_INTERVAL_S", 0.01
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    session_id = store.create_conversation().id
+
+    cached_turn_ids = await _relay_attempts(
+        store,
+        session_id,
+        [
+            _AttemptStreamResponse(
+                _BARE_HEARTBEAT, [*_turn_start("resp_1"), *_turn_rest("resp_1")], drop=True
+            ),
+            _AttemptStreamResponse(
+                _BARE_HEARTBEAT, [*_turn_start("resp_2"), *_turn_rest("resp_2")], drop=False
+            ),
+        ],
+    )
+
+    # The first turn's idle status cleared the cache before the reconnect.
+    assert cached_turn_ids == [None, None]
+    assert _stored_response_ids(store, session_id) == ["resp_1"] * 5 + ["resp_2"] * 5
