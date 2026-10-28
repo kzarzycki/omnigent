@@ -3377,7 +3377,14 @@ def create_runner_app(
                 queue = asyncio.Queue()
                 _session_event_queues[session_id] = queue
             heartbeat_frame = b'data: {"type": "session.heartbeat"}\n\n'
-            yield heartbeat_frame
+            # The first heartbeat names the turn in flight, so a relay that
+            # reconnects mid-turn, even after a server restart, keeps its id.
+            live_response_id = _live_response_id.get(session_id)
+            if live_response_id is None:
+                yield heartbeat_frame
+            else:
+                first_heartbeat = {"type": "session.heartbeat", "response_id": live_response_id}
+                yield f"data: {json.dumps(first_heartbeat)}\n\n".encode()
             while True:
                 try:
                     event = await asyncio.wait_for(
