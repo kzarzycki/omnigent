@@ -58,9 +58,15 @@ from omnigent.harnesses.claude_native.status import sync_raw_status_context
 from omnigent.inner.hook_scripts.subagent_router import AGENT_TOOL_NAMES
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native._native_post_delivery import (
+    SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS as _SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS,
+)
+from omnigent.native._native_post_delivery import (
     append_dead_letter,
     post_external_session_status,
     post_may_have_been_delivered,
+)
+from omnigent.native._native_post_delivery import (
+    is_subagent_delivery_not_confirmed as _is_subagent_delivery_not_confirmed,
 )
 from omnigent.native._native_supersession import (
     post_clear_supersession as _post_clear_supersession,
@@ -210,14 +216,6 @@ _FORWARDER_REJECTION_REASONS = frozenset(
         "invalid session event",
     }
 )
-# A 503 ``subagent_delivery_not_confirmed`` means the runner could not deliver a
-# terminal sub-agent result to the parent inbox. It is retried (the work entry can
-# be created slightly after the child reports terminal — a short dispatch race), but
-# UNLIKE a generic 5xx it must NOT retry forever: when the parent host is gone the
-# condition is permanent. Bounded so a single orphaned sub-agent cannot flood the
-# shared server. The budget spans the backoff schedule (capped at 30 s) ⇒ a few
-# minutes, comfortably covering the dispatch race.
-_SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS = 12
 _SUBAGENT_DROPPED_ITEM_REASON = "sub-agent transcript incomplete: an item could not be delivered"
 _SUPERVISOR_INITIAL_BACKOFF_S = 1.0
 _SUPERVISOR_MAX_BACKOFF_S = 30.0
@@ -7268,36 +7266,6 @@ def _is_session_not_bound(exc: httpx.HTTPError) -> bool:
     :returns: ``True`` for a 403 status response, otherwise ``False``.
     """
     return _http_status_for_log(exc) == 403
-
-
-def _is_subagent_delivery_not_confirmed(exc: httpx.HTTPError) -> bool:
-    """
-    Return whether ``exc`` is a ``subagent_delivery_not_confirmed`` 503.
-
-    The runner returns this application-level 503 when a terminal sub-agent
-    payload could not be delivered to the parent inbox (no work entry / inbox),
-    and the server relays it as its ``error.code`` envelope. It is a
-    bounded-retry class, distinct from a generic transient 5xx.
-
-    :param exc: HTTP exception raised while posting an Omnigent event.
-    :returns: ``True`` only for a 503 whose JSON body carries
-        ``error == "subagent_delivery_not_confirmed"`` (runner) or
-        ``error.code == "subagent_delivery_not_confirmed"`` (server).
-    """
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return False
-    if exc.response.status_code != 503:
-        return False
-    try:
-        body = exc.response.json()
-    except Exception:  # noqa: BLE001 — best-effort body parse
-        return False
-    if not isinstance(body, dict):
-        return False
-    error = body.get("error")
-    if isinstance(error, dict):
-        error = error.get("code")
-    return error == "subagent_delivery_not_confirmed"
 
 
 def _http_status_for_log(exc: httpx.HTTPError) -> int | None:

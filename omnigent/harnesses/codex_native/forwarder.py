@@ -74,8 +74,11 @@ from omnigent.native._native_forwarder_health import (
 )
 from omnigent.native._native_post_delivery import (
     RepostResult,
+    SubagentStatusRetry,
     append_dead_letter,
+    is_subagent_delivery_not_confirmed_response,
     post_may_have_been_delivered,
+    raise_for_subagent_delivery_not_confirmed,
     replay_dead_letters,
 )
 from omnigent.native._native_supersession import post_clear_supersession
@@ -2347,13 +2350,17 @@ async def supervise_forwarder(
         await client.connect()
     from omnigent.cli_auth import open_server_client
 
-    async with open_server_client(
-        base_url,
-        headers=headers,
-        auth=auth,
-        timeout=httpx.Timeout(30.0),
-        transport=ap_transport,
-    ) as ap_client:
+    async with (
+        open_server_client(
+            base_url,
+            headers=headers,
+            auth=auth,
+            timeout=httpx.Timeout(30.0),
+            transport=ap_transport,
+        ) as ap_client,
+        SubagentStatusRetry() as status_retry,
+    ):
+        _status_retry.set(status_retry)
         # Synthesize the thread's MCP startup round (see the comment on
         # _CODEX_MCP_STARTUP_STATUS_METHOD): the fresh-launch forwarder
         # starts right at thread creation, which is when codex boots its
@@ -7205,13 +7212,24 @@ async def _post_status(
     if compaction_model is not None and selected_model is not None:
         data["compaction_model"] = compaction_model
         data["selected_model"] = selected_model
-    response = await _post_session_event(
-        client,
-        session_id,
-        event_type="external_session_status",
-        data=data,
-    )
-    _log_failed_session_event_post("external_session_status", response)
+    status_retry = _status_retry.get()
+
+    async def _post_once() -> None:
+        response = await _post_session_event(
+            client,
+            session_id,
+            event_type="external_session_status",
+            data=data,
+        )
+        if status_retry is not None:
+            raise_for_subagent_delivery_not_confirmed(response)
+        _log_failed_session_event_post("external_session_status", response)
+
+    if status_retry is None:
+        await _post_once()
+    else:
+        # A refused parent delivery retries in the background.
+        await status_retry.send(session_id, _post_once)
 
 
 async def _post_turn_status_edge(
@@ -7994,6 +8012,10 @@ _forward_health = _ForwardHealth()
 
 # Bridge dir for dead-lettering undeliverable durable events; set per-forwarder (#1120).
 _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir", default=None)
+# Retries status edges the runner refuses as not delivered to a parent; set per-forwarder.
+_status_retry: ContextVar[SubagentStatusRetry | None] = ContextVar(
+    "_codex_status_retry", default=None
+)
 
 
 class _ReentrantAsyncLock:
@@ -8391,6 +8413,9 @@ def _post_response_is_final(
     if response.status_code < 400:
         return True
     if not _should_retry_post_status(response.status_code):
+        return True
+    if is_subagent_delivery_not_confirmed_response(response):
+        # Retried by SubagentStatusRetry on its own bounded schedule.
         return True
     return _is_final_post_attempt(attempt, max_attempts)
 
