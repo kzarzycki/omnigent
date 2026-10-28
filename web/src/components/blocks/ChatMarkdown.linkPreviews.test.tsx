@@ -7,6 +7,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import type { ServerInfo } from "@/lib/capabilities";
 import { FilePathAwareMessageResponse } from "./ChatMarkdown";
 
 const fetchMock = vi.fn();
@@ -46,12 +48,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderMarkdown(markdown: string): QueryClient {
+function renderMarkdown(markdown: string, enabledConnections: string[] = []): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
-    <QueryClientProvider client={client}>
-      <FilePathAwareMessageResponse>{markdown}</FilePathAwareMessageResponse>
-    </QueryClientProvider>,
+    <CapabilitiesProvider info={{ enabled_connections: enabledConnections } as ServerInfo}>
+      <QueryClientProvider client={client}>
+        <FilePathAwareMessageResponse>{markdown}</FilePathAwareMessageResponse>
+      </QueryClientProvider>
+    </CapabilitiesProvider>,
   );
   return client;
 }
@@ -98,7 +102,9 @@ describe("chat link previews at the fetch layer", () => {
         },
       }),
     );
-    renderMarkdown("See https://github.com/acme/app/pull/42 and https://attacker.example/x");
+    renderMarkdown("See https://github.com/acme/app/pull/42 and https://attacker.example/x", [
+      "github",
+    ]);
 
     expect(await screen.findByLabelText("Pull request status: Merged")).toBeVisible();
     const urls = requestedUrls();
@@ -112,9 +118,21 @@ describe("chat link previews at the fetch layer", () => {
     expect(card).toHaveTextContent("Checks: 1 failed, 5 passed");
   });
 
+  it("sends no GitHub preview request when the GitHub connection is off", async () => {
+    renderMarkdown("https://github.com/acme/app/pull/42", []);
+
+    expect(await screen.findByRole("link", { name: "app#42" })).toBeVisible();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(
+      requestedUrls().filter((url) => url.pathname.startsWith("/v1/connections/github/")),
+    ).toEqual([]);
+  });
+
   it("leaves a GitHub link plain when the viewer's connection can't read it", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ connected: true, preview: null }));
-    renderMarkdown("https://github.com/acme/private/issues/3");
+    renderMarkdown("https://github.com/acme/private/issues/3", ["github"]);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("link", { name: "private#3" })).toBeVisible();

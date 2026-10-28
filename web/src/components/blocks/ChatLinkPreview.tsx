@@ -10,6 +10,7 @@ import { fetchGithubLinkPreview, type GithubLinkPreview } from "@/lib/githubInte
 import { parseGithubLink, parseSessionLink, type GithubLinkRef } from "@/lib/linkPreview";
 import { PullRequestLabelChip } from "@/shell/PullRequestLabels";
 import { PullRequestStatus } from "@/shell/PullRequestStatus";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { getSessionSlim } from "@/lib/sessionsApi";
 
 // A preview's state and checks change; a minute keeps them close to live.
@@ -120,7 +121,10 @@ export function ChatLinkPreview({
   const sessionId = github ? null : parseSessionLink(href, window.location.origin);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const seen = useSeen(triggerRef, github !== null || sessionId !== null);
-  const preview = useGithubPreview(github, seen);
+  // Without the GitHub connection the preview route doesn't exist: ask nothing.
+  const info = useServerInfo();
+  const githubEnabled = info !== "loading" && (info.enabled_connections ?? []).includes("github");
+  const preview = useGithubPreview(github, seen && githubEnabled);
   const session = useSessionPreview(sessionId, seen);
 
   if (!github && !sessionId) return children;
