@@ -662,9 +662,11 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
     monkeypatch.setattr(
         _globals, "_project_store", type("P", (), {"get_name": lambda self, i: "infra"})()
     )
-    # A sub-agent has no grant of its own and is attributed to its root's owner.
+    # A sub-agent without a grant of its own is attributed to its root's owner;
+    # one with its own grant keeps it.
     child = store.create_conversation(agent_id=_AGENT_ID, parent_conversation_id=conv.id)
-    owners = {conv.id: "alice"}
+    granted = store.create_conversation(agent_id=_AGENT_ID, parent_conversation_id=conv.id)
+    owners = {conv.id: "alice", granted.id: "bob"}
     monkeypatch.setattr(
         _globals,
         "_conversation_store",
@@ -673,6 +675,7 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
 
     cost = _usage_series(monkeypatch, store, conv.id)[usage_metrics.COST_METRIC_NAME]
     child_cost = _usage_series(monkeypatch, store, child.id)[usage_metrics.COST_METRIC_NAME]
+    granted_cost = _usage_series(monkeypatch, store, granted.id)[usage_metrics.COST_METRIC_NAME]
 
     assert cost == [
         {
@@ -687,6 +690,8 @@ def test_usage_metrics_carry_harness_host_agent_project_role_and_user(
     ]
     assert child.root_conversation_id == conv.id
     assert child_cost[0]["omnigent.user"] == "alice"
+    assert granted.root_conversation_id == conv.id
+    assert granted_cost[0]["omnigent.user"] == "bob"
 
 
 def test_usage_metrics_for_session_without_host_or_project(
