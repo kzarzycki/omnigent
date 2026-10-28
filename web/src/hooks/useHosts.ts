@@ -47,6 +47,17 @@ export interface Host {
    *  `null`/absent while offline, on another replica, or on an older server. */
   version?: string | null;
   commit?: string | null;
+  /** The update this host needs; null when it is current or not connected. */
+  update?: HostUpdate | null;
+}
+
+export interface HostUpdate {
+  /** Short commit the host runs, or its version when it reports no commit. */
+  current: string;
+  /** Short commit the deploy wants hosts on (`OMNIGENT_DEPLOY_COMMIT`). */
+  target: string;
+  /** The deploy's command that updates a host; null when it sets none. */
+  command: string | null;
 }
 
 export interface HarnessAccountProvider {
