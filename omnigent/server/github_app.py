@@ -85,7 +85,8 @@ class GitHubAppConfig:
 
     Token-at-rest encryption is not configured here: stored tokens are
     encrypted by the shared credential store's cipher
-    (``OMNIGENT_CREDENTIAL_ENC_KEY``), not by any GitHub-specific key.
+    (``OMNIGENT_CREDENTIAL_KMS_KEY_ID`` or ``OMNIGENT_CREDENTIAL_VAULT_KEY``), not by
+    any GitHub-specific key.
     """
 
     app_id: str | None
@@ -158,8 +159,8 @@ class GitHubAppConfig:
         resolvable redirect URI (explicit, or derived from
         ``OMNIGENT_DOMAIN``). Missing any of these disables it. Token-at-rest
         encryption is the credential store's concern
-        (``OMNIGENT_CREDENTIAL_ENC_KEY``), not GitHub's — the caller only
-        wires a connection store when that key is present.
+        (``OMNIGENT_CREDENTIAL_KMS_KEY_ID`` or ``OMNIGENT_CREDENTIAL_VAULT_KEY``), not
+        GitHub's — the caller only wires a connection store when one is present.
 
         :returns: A validated config, or ``None`` when GitHub App
             integration is not configured.
@@ -170,6 +171,10 @@ class GitHubAppConfig:
         client_id = os.environ.get("OMNIGENT_GITHUB_APP_CLIENT_ID", "").strip()
         client_secret = os.environ.get("OMNIGENT_GITHUB_APP_CLIENT_SECRET", "").strip()
         if not client_id or not client_secret:
+            _logger.info(
+                "GitHub connect is off: OMNIGENT_GITHUB_APP_CLIENT_ID and "
+                "OMNIGENT_GITHUB_APP_CLIENT_SECRET are unset."
+            )
             return None
 
         redirect_uri = os.environ.get("OMNIGENT_GITHUB_APP_REDIRECT_URI", "").strip()

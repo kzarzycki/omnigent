@@ -85,6 +85,19 @@ def build_kms_secret_cipher() -> KmsSecretCipher | None:
     return KmsSecretCipher(key_id) if key_id else None
 
 
+def cipher_missing_hint() -> str:
+    """Tell an operator which env vars enable the credential store's cipher.
+
+    Shared by every "configured but disabled" message so they name the same keys.
+    """
+    from omnigent.stores.credential_store.vault_cipher import CREDENTIAL_VAULT_KEY_ENV_VAR
+
+    return (
+        f"set {CREDENTIAL_KMS_KEY_ENV_VAR} (AWS KMS) or {CREDENTIAL_VAULT_KEY_ENV_VAR} "
+        "(Vault Transit) to enable the credential store's encryption"
+    )
+
+
 def build_secret_cipher() -> SecretCipher | None:
     """Construct the credential store's cipher from deployment config, or ``None``.
 
