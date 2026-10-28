@@ -120,6 +120,7 @@ from omnigent.stores.conversation_store import (
     CreatedSession,
     DailyCostState,
     SessionConnectivity,
+    SessionSubscription,
     SubscriptionCycleError,
     SubscriptionDelivery,
     SubscriptionLimitError,
@@ -5707,7 +5708,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                 is not None
             )
 
-    def add_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+    def add_session_subscription(
+        self, subscriber_id: str, target_id: str, *, quiet_seconds: int | None = None
+    ) -> bool:
         """Subscribe *subscriber_id* to *target_id*, refusing a loop. See base class."""
         from sqlalchemy.exc import IntegrityError
 
@@ -5716,7 +5719,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                 # SQLite's BEGIN IMMEDIATE already admits one writer at a time.
                 session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
             key = (current_workspace_id(), subscriber_id, target_id)
-            if session.get(SqlSessionSubscription, key) is not None:
+            existing = session.get(SqlSessionSubscription, key)
+            if existing is not None:
+                existing.quiet_seconds = quiet_seconds
                 return False
             # Counted on the primary key's (workspace, subscriber) prefix, and
             # never past the cap.
@@ -5734,7 +5739,11 @@ class SqlAlchemyConversationStore(ConversationStore):
             if held is not None and held >= MAX_SUBSCRIPTIONS_PER_SESSION:
                 raise SubscriptionLimitError()
             self._refuse_subscription_cycle(session, subscriber_id, target_id)
-            session.add(SqlSessionSubscription(subscriber_id=subscriber_id, target_id=target_id))
+            session.add(
+                SqlSessionSubscription(
+                    subscriber_id=subscriber_id, target_id=target_id, quiet_seconds=quiet_seconds
+                )
+            )
             return True
 
         from sqlalchemy.exc import DBAPIError
@@ -5745,8 +5754,10 @@ class SqlAlchemyConversationStore(ConversationStore):
                     self._session_immediate, "add_session_subscription", write
                 )
             except IntegrityError:
-                # A concurrent subscribe inserted the same pair first.
-                return False
+                # A concurrent subscribe inserted the same pair first; the
+                # next attempt finds it and sets this call's settings on it.
+                if attempt == _SUBSCRIPTION_SERIALIZATION_RETRIES:
+                    return False
             except DBAPIError as exc:
                 # A concurrent subscribe raced this one's loop check: check again.
                 if attempt == _SUBSCRIPTION_SERIALIZATION_RETRIES or not (
@@ -5836,6 +5847,42 @@ class SqlAlchemyConversationStore(ConversationStore):
                 session.scalars(query.order_by(SqlSessionSubscription.subscriber_id).limit(limit))
             )
 
+    def list_session_subscriber_settings(
+        self, target_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[SessionSubscription]:
+        """One page of the subscriptions watching *target_id*. See base class."""
+        row = SqlSessionSubscription
+        query = select(row.subscriber_id, row.quiet_seconds).where(
+            row.workspace_id == current_workspace_id(), row.target_id == target_id
+        )
+        if after is not None:
+            query = query.where(row.subscriber_id > after)
+        with self._session("list_session_subscriber_settings") as session:
+            return [
+                SessionSubscription(item.subscriber_id, target_id, item.quiet_seconds)
+                for item in session.execute(query.order_by(row.subscriber_id).limit(limit))
+            ]
+
+    def get_session_subscriptions(
+        self, subscriber_id: str, target_ids: list[str]
+    ) -> dict[str, SessionSubscription]:
+        """The subscriber's subscriptions to the given targets. See base class."""
+        if not target_ids:
+            return {}
+        row = SqlSessionSubscription
+        query = select(row.target_id, row.quiet_seconds).where(
+            row.workspace_id == current_workspace_id(),
+            row.subscriber_id == subscriber_id,
+            row.target_id.in_(target_ids),
+        )
+        with self._session("get_session_subscriptions") as session:
+            return {
+                item.target_id: SessionSubscription(
+                    subscriber_id, item.target_id, item.quiet_seconds
+                )
+                for item in session.execute(query)
+            }
+
     def delete_session_subscriptions_for(self, conversation_id: str) -> int:
         """Drop subscriptions held by or aimed at a session. See base class."""
         held = (SqlSessionSubscription.subscriber_id, SqlSessionSubscription.target_id)
@@ -5879,6 +5926,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         outcome: int,
         *,
         due_at: int,
+        attempts: int = 1,
+        supersede_at: int | None = None,
+        superseded_outcome: int | None = None,
     ) -> list[str]:
         """Record a notice owed to each subscriber, once. See base class."""
         from sqlalchemy.exc import IntegrityError
@@ -5897,6 +5947,19 @@ class SqlAlchemyConversationStore(ConversationStore):
                 ).all()
             )
             created = [sid for sid in dict.fromkeys(subscriber_ids) if sid not in recorded]
+            if supersede_at is not None and created:
+                stale = outcome if superseded_outcome is None else superseded_outcome
+                session.execute(
+                    update(row)
+                    .where(
+                        row.workspace_id == current_workspace_id(),
+                        row.subscriber_id.in_(created),
+                        row.target_id == target_id,
+                        row.state == _DELIVERY_PENDING,
+                        row.outcome == stale,
+                    )
+                    .values(state=_DELIVERY_SETTLED, due_at=supersede_at)
+                )
             session.add_all(
                 row(
                     subscriber_id=subscriber_id,
@@ -5904,7 +5967,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     event_key=event_key,
                     state=_DELIVERY_PENDING,
                     due_at=due_at,
-                    attempts=1,
+                    attempts=attempts,
                     outcome=outcome,
                 )
                 for subscriber_id in created
@@ -6041,15 +6104,20 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
 
     def reschedule_subscription_delivery(
-        self, subscriber_id: str, target_id: str, event_key: str, *, due_at: int
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        due_at: int,
+        attempts: int | None = None,
     ) -> None:
-        """Leave a failed delivery pending. See base class."""
+        """Leave a delivery pending. See base class."""
+        values = (
+            {"due_at": due_at} if attempts is None else {"due_at": due_at, "attempts": attempts}
+        )
         self._update_subscription_delivery(
-            "reschedule_subscription_delivery",
-            subscriber_id,
-            target_id,
-            event_key,
-            due_at=due_at,
+            "reschedule_subscription_delivery", subscriber_id, target_id, event_key, **values
         )
 
     def list_settled_subscription_deliveries(

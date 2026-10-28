@@ -440,6 +440,19 @@ class SubscriptionCycleError(Exception):
 
 
 @dataclass(frozen=True)
+class SessionSubscription:
+    """One subscription row.
+
+    :param quiet_seconds: How long a settled-looking turn end is held before it
+        is posted; ``None`` posts every notice at once.
+    """
+
+    subscriber_id: str
+    target_id: str
+    quiet_seconds: int | None = None
+
+
+@dataclass(frozen=True)
 class SubscriptionDelivery:
     """One subscription outbox row, as the retry sweep and the prune see it."""
 
@@ -2190,19 +2203,23 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def add_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
+    def add_session_subscription(
+        self, subscriber_id: str, target_id: str, *, quiet_seconds: int | None = None
+    ) -> bool:
         """
         Subscribe one session to another's turn ends and prompts.
 
-        Refuses a subscription that would close a loop: *subscriber_id* already
-        reachable from *target_id* along subscriptions (the target hears the
-        subscriber, directly or through others), or one past
+        Subscribing again keeps the row and sets its *quiet_seconds*. Refuses a
+        subscription that would close a loop: *subscriber_id* already reachable
+        from *target_id* along subscriptions (the target hears the subscriber,
+        directly or through others), or one past
         :data:`MAX_SUBSCRIPTIONS_PER_SESSION` for the subscriber. The checks and
         the insert run in one serialized transaction, so concurrent creations
         cannot close a loop or overshoot the cap between them.
 
         :param subscriber_id: Session that receives the notices.
         :param target_id: Session being watched.
+        :param quiet_seconds: Hold for a completed turn end's notice, or ``None``.
         :returns: ``True`` when the row was created, ``False`` when it existed.
         :raises SubscriptionCycleError: The subscription would close a loop, or
             the search hit its bound first.
@@ -2249,6 +2266,24 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def list_session_subscriber_settings(
+        self, target_id: str, *, after: str | None = None, limit: int = 100
+    ) -> list[SessionSubscription]:
+        """:meth:`list_session_subscribers` with each subscription's settings."""
+        ...
+
+    @abstractmethod
+    def get_session_subscriptions(
+        self, subscriber_id: str, target_ids: list[str]
+    ) -> dict[str, SessionSubscription]:
+        """
+        The subscriptions *subscriber_id* holds to *target_ids*, by target id.
+
+        :param target_ids: Watched sessions to look up; one not watched is left out.
+        """
+        ...
+
+    @abstractmethod
     def delete_session_subscriptions_for(self, conversation_id: str) -> int:
         """
         Drop every subscription the session holds or is the target of, in
@@ -2267,17 +2302,25 @@ class ConversationStore(ABC):
         outcome: int,
         *,
         due_at: int,
+        attempts: int = 1,
+        supersede_at: int | None = None,
+        superseded_outcome: int | None = None,
     ) -> list[str]:
         """
         Record a notice owed to each subscriber, once per event, in one transaction.
 
-        Each new row is pending with one attempt started; *due_at* is when the
+        Each new row is pending with *attempts* started; *due_at* is when the
         retry sweep may take it over if the caller never finishes the attempt.
 
         :param subscriber_ids: Subscribers of *target_id* to record the event for.
         :param event_key: Digest identifying the event (at most 64 chars).
         :param outcome: Small code for what happened; the caller owns its meaning.
         :param due_at: Unix epoch seconds.
+        :param attempts: Attempts counted as started; ``0`` for a row only held.
+        :param supersede_at: When set, each created row settles, at this time,
+            its subscriber's other pending rows for *target_id* with *outcome*.
+        :param superseded_outcome: The outcome of the rows *supersede_at* settles,
+            when it is not *outcome*.
         :returns: The subscribers whose row this call created; one that already
             had the event (delivered, pending or dropped) is left out.
         """
@@ -2321,9 +2364,15 @@ class ConversationStore(ABC):
 
     @abstractmethod
     def reschedule_subscription_delivery(
-        self, subscriber_id: str, target_id: str, event_key: str, *, due_at: int
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        due_at: int,
+        attempts: int | None = None,
     ) -> None:
-        """Leave a failed delivery pending until *due_at*."""
+        """Leave a delivery pending until *due_at*, resetting its count to *attempts* if set."""
         ...
 
     @abstractmethod

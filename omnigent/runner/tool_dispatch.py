@@ -6115,11 +6115,21 @@ async def _session_subscription_via_rest(
         not isinstance(target, str) or not target.strip()
     ):
         return json.dumps({"error": f"{tool_name} requires a string 'session_id'"})
+    quiet_seconds = args.get("quiet_seconds")
+    if quiet_seconds is not None and (
+        tool_name != SysSessionSubscribeTool.name()
+        or not isinstance(quiet_seconds, int)
+        or isinstance(quiet_seconds, bool)
+    ):
+        return json.dumps(
+            {"error": f"{tool_name}: 'quiet_seconds' must be an integer on sys_session_subscribe"}
+        )
     try:
         if tool_name == SysSessionSubscribeTool.name():
-            response = await server_client.post(
-                base, json={"session_id": cast(str, target).strip()}, timeout=30.0
-            )
+            body: _JsonObject = {"session_id": cast(str, target).strip()}
+            if quiet_seconds is not None:
+                body["quiet_seconds"] = quiet_seconds
+            response = await server_client.post(base, json=body, timeout=30.0)
         elif tool_name == SysSessionUnsubscribeTool.name():
             response = await server_client.delete(
                 f"{base}/{quote(cast(str, target).strip(), safe='')}", timeout=30.0
