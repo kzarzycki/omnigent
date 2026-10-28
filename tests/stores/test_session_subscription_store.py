@@ -9,6 +9,7 @@ import pytest
 
 from omnigent.stores.conversation_store import (
     MAX_SUBSCRIPTIONS_PER_SESSION,
+    SessionSubscription,
     SubscriptionCycleError,
     SubscriptionLimitError,
     sqlalchemy_store,
@@ -171,6 +172,50 @@ def test_due_deliveries_are_claimed_once_and_only_settled_ones_listed_for_the_pr
     assert conversation_store.delete_subscription_deliveries([settled]) == 1
     # Pending rows are never listed for the prune.
     assert old(settled_before=10**9, limit=10) == []
+
+
+def test_quiet_seconds_is_set_on_subscribe_and_read_from_both_sides(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    watcher, target, other = (conversation_store.create_conversation().id for _ in range(3))
+    assert conversation_store.add_session_subscription(watcher, target, quiet_seconds=300)
+    assert not conversation_store.add_session_subscription(watcher, target, quiet_seconds=60)
+    conversation_store.add_session_subscription(other, target)
+
+    assert conversation_store.get_session_subscriptions(watcher, [target, other]) == {
+        target: SessionSubscription(watcher, target, 60)
+    }
+    assert sorted(
+        conversation_store.list_session_subscriber_settings(target), key=lambda s: s.subscriber_id
+    ) == sorted(
+        [SessionSubscription(watcher, target, 60), SessionSubscription(other, target, None)],
+        key=lambda s: s.subscriber_id,
+    )
+
+
+def test_a_superseding_row_settles_only_older_pending_rows_of_its_outcome_and_pair(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    watcher, other, target = (conversation_store.create_conversation().id for _ in range(3))
+    enqueue = conversation_store.enqueue_subscription_deliveries
+    enqueue([watcher, other], target, "a" * 64, 4, due_at=100, attempts=0)
+    enqueue([watcher], target, "p" * 64, 0, due_at=100)
+
+    assert enqueue([watcher], target, "b" * 64, 4, due_at=200, attempts=0, supersede_at=50) == [
+        watcher
+    ]
+
+    due = conversation_store.claim_due_subscription_deliveries(now=10**9, lease_until=0, limit=10)
+    # The watcher's older held row is settled; its prompt and the other's row are not.
+    assert sorted((d.subscriber_id, d.event_key, d.attempts) for d in due) == sorted(
+        [(watcher, "b" * 64, 1), (watcher, "p" * 64, 2), (other, "a" * 64, 1)]
+    )
+    # A row of another outcome settles the held rows it names, and only those.
+    enqueue([other], target, "f" * 64, 3, due_at=0, supersede_at=60, superseded_outcome=4)
+    due = conversation_store.claim_due_subscription_deliveries(now=10**9, lease_until=0, limit=10)
+    assert sorted((d.subscriber_id, d.event_key) for d in due) == sorted(
+        [(watcher, "b" * 64), (watcher, "p" * 64), (other, "f" * 64)]
+    )
 
 
 def test_deleting_either_session_drops_its_subscriptions(

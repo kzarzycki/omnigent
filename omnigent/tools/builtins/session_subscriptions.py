@@ -6,17 +6,35 @@ from typing import Any
 
 from omnigent.tools.base import Tool
 
+_SESSION_ID_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": "Id of the session to watch, e.g. from sys_session_list.",
+    "minLength": 1,
+}
+
 _SESSION_ID_PARAMETERS = {
     "type": "object",
-    "properties": {
-        "session_id": {
-            "type": "string",
-            "description": "Id of the session to watch, e.g. from sys_session_list.",
-            "minLength": 1,
-        }
-    },
+    "properties": {"session_id": _SESSION_ID_PROPERTY},
     "required": ["session_id"],
     "additionalProperties": False,
+}
+
+_SUBSCRIBE_PARAMETERS = {
+    **_SESSION_ID_PARAMETERS,
+    "properties": {
+        "session_id": _SESSION_ID_PROPERTY,
+        "quiet_seconds": {
+            "type": "integer",
+            "description": (
+                "Optional quiet period, e.g. 300: hold each completed turn end that long "
+                "and report it only once the session and its sub-agents have stopped "
+                "running, so a busy session wakes you once per settled stretch. 0 or "
+                "absent reports every turn end at once."
+            ),
+            "minimum": 0,
+            "maximum": 86400,
+        },
+    },
 }
 
 
@@ -35,9 +53,11 @@ class SysSessionSubscribeTool(Tool):
             "Watch another session. From now on you get a one-line [System: ...] message "
             "whenever it ends a turn (completed, cancelled or failed) or blocks on a "
             "prompt; a prompt it is already blocked on is reported at once. Read what it "
-            "did with sys_session_get_history. Subscribing twice is a no-op; the watched "
-            "session is not changed. A session that already watches you cannot be "
-            "watched back."
+            "did with sys_session_get_history. With quiet_seconds, a completed turn end "
+            "is held and replaced by a newer one; failures, cancels, prompts and a reply "
+            "with a line starting DONE, USER NEEDED or PARKED are still reported at once. "
+            "Subscribing again only sets quiet_seconds; the watched session is not "
+            "changed. A session that already watches you cannot be watched back."
         )
 
     def get_schema(self) -> dict[str, Any]:
@@ -47,7 +67,7 @@ class SysSessionSubscribeTool(Tool):
             "function": {
                 "name": self.name(),
                 "description": self.description(),
-                "parameters": _SESSION_ID_PARAMETERS,
+                "parameters": _SUBSCRIBE_PARAMETERS,
             },
         }
 

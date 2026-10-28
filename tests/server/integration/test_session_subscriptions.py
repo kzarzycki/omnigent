@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest.mock import patch
 
@@ -12,6 +12,7 @@ import httpx
 import pytest
 import sqlalchemy as sa
 
+from omnigent.entities import MessageData, NewConversationItem
 from omnigent.runner.tool_dispatch import execute_tool
 from omnigent.runtime import pending_elicitations
 from omnigent.server import session_subscriptions
@@ -1070,3 +1071,277 @@ async def test_a_bare_runner_failure_status_reaches_subscribers_once(db_uri: str
 
     notice = session_subscriptions.turn_notice("worker", worker.id, "failed")
     assert poster.posted == [(watcher.id, notice)]
+
+
+_QUIET_S = 300
+_T0 = 10**10
+
+
+@pytest.fixture
+def quiet_outbox(
+    outbox: tuple[SqlAlchemyConversationStore, str, str], monkeypatch: pytest.MonkeyPatch
+) -> tuple[SqlAlchemyConversationStore, str, str]:
+    """The outbox with a debounced subscription and no in-process timers."""
+    store, watcher, target = outbox
+    store.add_session_subscription(watcher, target, quiet_seconds=_QUIET_S)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    return store, watcher, target
+
+
+async def _at(seconds: int, step: Callable[[], Awaitable[Any]]) -> Any:
+    """Run *step* with the delivery module's clock at ``_T0 + seconds``."""
+    with patch.object(session_subscriptions.time, "time", lambda: _T0 + seconds):
+        return await step()
+
+
+def _sweep(seconds: int) -> Awaitable[int]:
+    return _at(seconds, session_subscriptions.retry_due_deliveries)
+
+
+def _deliveries(store: SqlAlchemyConversationStore) -> dict[str, tuple[int, int, int]]:
+    """Each outbox row's event key mapped to its (state, due_at, attempts)."""
+    query = "SELECT event_key, state, due_at, attempts FROM session_subscription_deliveries"
+    with store._session("read outbox") as session:
+        rows = session.execute(sa.text(query)).all()
+    return {row.event_key: (row.state, row.due_at, row.attempts) for row in rows}
+
+
+def _completed(target: str) -> str:
+    return session_subscriptions.turn_notice("worker", target, "completed")
+
+
+def _reply(store: SqlAlchemyConversationStore, target: str, text: str) -> None:
+    """Append an assistant reply to the target's transcript."""
+    content = [{"type": "output_text", "text": text}]
+    reply = MessageData(role="assistant", agent="worker", content=content)
+    store.append(target, [NewConversationItem(type="message", response_id="r1", data=reply)])
+
+
+async def test_quiet_seconds_is_stored_listed_updated_and_bounded(
+    client: httpx.AsyncClient,
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client))["id"]
+    url = f"/v1/sessions/{watcher}/subscriptions"
+    debounced = {"subscriber_id": watcher, "session_id": worker, "quiet_seconds": 300}
+
+    subscribed = await client.post(url, json={"session_id": worker, "quiet_seconds": 300})
+    assert subscribed.status_code == 200, subscribed.text
+    assert subscribed.json() == debounced
+    assert (await client.get(url)).json()["data"] == [debounced]
+
+    await client.post(url, json={"session_id": worker, "quiet_seconds": 60})
+    assert (await client.get(url)).json()["data"][0]["quiet_seconds"] == 60
+    for cleared in ({"quiet_seconds": 0}, {}):
+        await client.post(url, json={"session_id": worker, **cleared})
+        assert (await client.get(url)).json()["data"] == [
+            {"subscriber_id": watcher, "session_id": worker}
+        ]
+    for invalid in (-1, 86401, "soon"):
+        refused = await client.post(url, json={"session_id": worker, "quiet_seconds": invalid})
+        assert refused.status_code in (400, 422), refused.text
+
+
+async def test_a_debounced_subscriber_hears_once_for_two_quick_turn_ends(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    await _at(10, lambda: _turn_end(target, "completed", "resp_2"))
+    assert poster.posted == []
+
+    # The first end's hold is over, but the second end replaced it.
+    assert await _sweep(_QUIET_S + 1) == 0
+    assert await _sweep(10 + _QUIET_S) == 1
+    assert await _sweep(10**6) == 0
+
+    assert poster.posted == [(watcher, _completed(target))]
+    second = session_subscriptions._event_key("turn", "resp_2")
+    assert _deliveries(store)[second][0] == 1
+
+
+@pytest.mark.parametrize(("edge", "last_reply"), [("completed", "DONE: merged"), ("failed", None)])
+async def test_a_later_end_posted_at_once_settles_the_held_end(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str], edge: str, last_reply: str | None
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    if last_reply is not None:
+        _reply(store, target, last_reply)
+    await _at(10, lambda: _turn_end(target, edge, "resp_2"))
+    assert await _sweep(10**6) == 0
+
+    assert poster.posted == [(watcher, session_subscriptions.turn_notice("worker", target, edge))]
+
+
+async def test_a_hold_is_extended_while_a_child_of_the_target_runs_without_inflating_backoff(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    child = store.create_conversation(kind="sub_agent", parent_conversation_id=target).id
+    store.set_session_live_status(child, "running")
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    key = session_subscriptions._event_key("turn", "resp_1")
+
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    assert await _sweep(_QUIET_S) == 1
+    assert poster.attempts == 0
+    assert _deliveries(store)[key] == (0, _T0 + 2 * _QUIET_S, 0)
+
+    store.set_session_live_status(child, "idle")
+    store.set_session_live_status(target, "idle")
+    assert await _sweep(2 * _QUIET_S - 1) == 0
+    assert await _sweep(2 * _QUIET_S) == 1
+    # The first real post failed: its backoff is a first attempt's, not the hold's claims'.
+    assert poster.attempts == 1
+    assert _deliveries(store)[key] == (0, _T0 + 2 * _QUIET_S + 1, 1)
+    assert await _sweep(2 * _QUIET_S + 1) == 1
+
+    assert poster.posted == [(watcher, _completed(target))]
+
+
+async def test_a_hold_is_extended_while_the_target_itself_runs(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, _watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    store.set_session_live_status(target, "running")
+
+    assert await _sweep(_QUIET_S) == 1
+    assert poster.posted == []
+    key = session_subscriptions._event_key("turn", "resp_1")
+    assert _deliveries(store)[key] == (0, _T0 + 2 * _QUIET_S, 0)
+
+
+async def test_a_failed_busy_check_extends_the_hold_instead_of_posting(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    key = session_subscriptions._event_key("turn", "resp_1")
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+
+    async def unavailable(*_args: object) -> bool:
+        raise RuntimeError("store unavailable")
+
+    with patch.object(session_subscriptions, "_busy", unavailable):
+        assert await _sweep(_QUIET_S) == 1
+    assert poster.posted == []
+    assert _deliveries(store)[key] == (0, _T0 + 2 * _QUIET_S, 0)
+
+    assert await _sweep(2 * _QUIET_S) == 1
+    assert poster.posted == [(watcher, _completed(target))]
+
+
+async def test_a_debounced_subscriber_of_a_quiet_target_hears_once_after_the_hold(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    assert await _sweep(_QUIET_S - 1) == 0
+    assert poster.posted == []
+    assert await _sweep(_QUIET_S) == 1
+    assert await _sweep(10**6) == 0
+
+    assert poster.posted == [(watcher, _completed(target))]
+
+
+@pytest.mark.parametrize(
+    ("edge", "last_reply"),
+    [
+        ("failed", None),
+        ("cancelled", None),
+        ("prompt", None),
+        ("completed", "Merged the fix.\nDONE: PR is green"),
+        ("completed", "USER NEEDED: which region?"),
+        ("completed", "Waiting on CI.\n  PARKED until tomorrow"),
+    ],
+)
+async def test_failures_cancels_prompts_and_named_ends_skip_the_hold(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str], edge: str, last_reply: str | None
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    if last_reply is not None:
+        _reply(store, target, last_reply)
+
+    if edge == "prompt":
+        await _prompt_edge(target, "elicit_1")
+    else:
+        await _turn_end(target, edge, "resp_1")
+
+    assert [session_id for session_id, _ in poster.posted] == [watcher]
+
+
+async def test_a_completed_end_without_a_named_line_is_held(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, _watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    _reply(store, target, "Not DONE yet, still going.")
+
+    await _turn_end(target, "completed", "resp_1")
+
+    assert poster.posted == []
+
+
+async def test_a_plain_subscription_never_reads_the_transcript_for_markers(
+    outbox: tuple[SqlAlchemyConversationStore, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+
+    async def unreadable(*_args: object) -> bool:
+        raise AssertionError("read the transcript for a plain subscription")
+
+    monkeypatch.setattr(session_subscriptions, "_names_a_settled_end", unreadable)
+    await _turn_end(target, "completed", "resp_1")
+
+    assert poster.posted == [(watcher, _completed(target))]
+
+
+async def test_a_held_notice_is_delivered_by_the_sweep_after_a_restart(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    session_subscriptions.configure(store, None, _Poster())
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+
+    restarted = _Poster()
+    session_subscriptions.configure(store, None, restarted)
+    assert await _sweep(_QUIET_S) == 1
+    assert await _sweep(10**6) == 0
+
+    assert restarted.posted == [(watcher, _completed(target))]
+
+
+async def test_the_subscribe_tool_passes_quiet_seconds(client: httpx.AsyncClient) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client))["id"]
+
+    output = await execute_tool(
+        tool_name="sys_session_subscribe",
+        arguments=json.dumps({"session_id": worker, "quiet_seconds": 120}),
+        server_client=client,
+        conversation_id=watcher,
+        agent_spec=AgentSpec(spec_version=1),
+    )
+
+    expected = {"subscriber_id": watcher, "session_id": worker, "quiet_seconds": 120}
+    assert json.loads(output) == expected
