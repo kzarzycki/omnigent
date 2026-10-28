@@ -870,9 +870,17 @@ def _get_head_sha(repo_root: Path) -> str | None:
 
 
 def source_install_commit() -> str | None:
-    """Return the short HEAD commit of a source install, ``None`` for a wheel."""
+    """Return the short commit this install was built from, ``None`` when unknown.
+
+    A git checkout reports its HEAD. An installed package reports the commit
+    recorded in ``_build_info`` when it was built, so a host installed from a
+    fork checkout (not editable) still says which build it runs.
+    """
     repo_root = _find_repo_root()
     sha = _get_head_sha(repo_root) if repo_root is not None else None
+    if not sha:
+        build_info = _read_build_info()
+        sha = build_info[1] if build_info is not None else None
     return sha[:9] if sha else None
 
 

@@ -6,7 +6,7 @@ import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { ArcaExtendActions, useCanExtendArca } from "./ArcaExtendActions";
 
-function CommandCopyButton({ command }: { command: string }) {
+export function CommandCopyButton({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
   const resetTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
