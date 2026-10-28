@@ -6102,6 +6102,7 @@ function ConversationRowImpl({
               projectName={projectFlyoutName}
               projectIcon={projectFlyoutIcon}
               gitBranch={gitBranch}
+              conversation={conversation}
               hasError={sessionState?.kind === "error"}
               shared={showSharedIndicator}
             />
@@ -6138,6 +6139,7 @@ function ConversationRowImpl({
             projectName={projectFlyoutName}
             projectIcon={projectFlyoutIcon}
             gitBranch={gitBranch}
+            conversation={conversation}
             hasError={sessionState?.kind === "error"}
             shared={showSharedIndicator}
           />
@@ -6731,6 +6733,7 @@ function PinnedProjectFlyoutContent({
   projectName,
   projectIcon,
   gitBranch,
+  conversation,
   hasError,
   shared,
 }: {
@@ -6738,6 +6741,7 @@ function PinnedProjectFlyoutContent({
   projectName: string;
   projectIcon: string | null;
   gitBranch: string | null;
+  conversation: Pick<Conversation, "labels">;
   hasError: boolean;
   shared: boolean;
 }) {
@@ -6766,6 +6770,11 @@ function PinnedProjectFlyoutContent({
           <span className="truncate">{gitBranch}</span>
         </p>
       )}
+      <SessionStatusLine
+        conversation={conversation}
+        testId="session-tooltip-status"
+        className="mt-1 block text-sm text-muted-foreground"
+      />
       {shared && <SessionSharedHint />}
       {hasError && <SessionErrorHint />}
     </HoverCardContent>
