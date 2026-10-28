@@ -76,6 +76,9 @@ CAP_REFRESH_HARNESSES = "refresh_harnesses"
 CAP_MCP_REGISTRY = "mcp_registry"
 # The host applies ``HostLaunchRunnerFrame.harness_telemetry`` to the runner:
 CAP_HARNESS_TELEMETRY = "harness_telemetry"
+# The host's owner configured an updater, so the host answers ``host.update``.
+# Advertised per host at connect time, not by every build (not in HOST_CAPABILITIES):
+CAP_SELF_UPDATE = "self_update"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
@@ -170,6 +173,8 @@ class HostFrameKind(str, Enum):
     STORE_SECRET_RESULT = "host.store_secret_result"
     DETECT_CREDENTIALS = "host.detect_credentials"
     DETECT_CREDENTIALS_RESULT = "host.detect_credentials_result"
+    UPDATE = "host.update"
+    UPDATE_RESULT = "host.update_result"
     FS_REQUEST = "host.fs_request"
     FS_RESULT = "host.fs_result"
     FS_WRITE_REQUEST = "host.fs_write_request"
@@ -974,6 +979,35 @@ class HostDetectCredentialsResultFrame:
 
 
 @dataclass
+class HostUpdateFrame:
+    """Server → host: run this host's own updater, aiming at ``target``.
+
+    The server names only the build it wants; the host runs the updater its
+    owner configured, which decides what it installs and whether to trust it.
+
+    :param request_id: Correlates the result, e.g. ``"req_update_1"``.
+    :param target: Build the server wants, a commit or a version, e.g. ``"c25ddceb8"``.
+    """
+
+    request_id: str
+    target: str
+
+
+@dataclass
+class HostUpdateResultFrame:
+    """Host → server: how the updater ended.
+
+    :param request_id: Correlates to the :class:`HostUpdateFrame`.
+    :param exit_code: The updater's exit status; ``None`` when it never ran.
+    :param output: The updater's last output lines, or why it did not run.
+    """
+
+    request_id: str
+    exit_code: int | None
+    output: str = ""
+
+
+@dataclass
 class HostFsRequestFrame:
     """Server → host: read-only workspace filesystem request.
 
@@ -1367,6 +1401,8 @@ HostFrame = (
     | HostStoreSecretResultFrame
     | HostDetectCredentialsFrame
     | HostDetectCredentialsResultFrame
+    | HostUpdateFrame
+    | HostUpdateResultFrame
     | HostFsRequestFrame
     | HostFsResultFrame
     | HostFsWriteFrame
@@ -1741,6 +1777,23 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.DETECT_CREDENTIALS_RESULT.value,
                 "request_id": frame.request_id,
                 "credentials": frame.credentials,
+            }
+        )
+    if isinstance(frame, HostUpdateFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.UPDATE.value,
+                "request_id": frame.request_id,
+                "target": frame.target,
+            }
+        )
+    if isinstance(frame, HostUpdateResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.UPDATE_RESULT.value,
+                "request_id": frame.request_id,
+                "exit_code": frame.exit_code,
+                "output": frame.output,
             }
         )
     if isinstance(frame, HostFsRequestFrame):
@@ -2255,6 +2308,22 @@ def _decode_known_host_frame(
             return HostDetectCredentialsFrame(request_id=_required_str(msg, "request_id"))
         case HostFrameKind.DETECT_CREDENTIALS_RESULT:
             return _decode_detect_credentials_result(msg)
+        case HostFrameKind.UPDATE:
+            return HostUpdateFrame(
+                request_id=_required_str(msg, "request_id"),
+                target=_required_str(msg, "target"),
+            )
+        case HostFrameKind.UPDATE_RESULT:
+            exit_code = msg.get("exit_code")
+            output = msg.get("output")
+            return HostUpdateResultFrame(
+                request_id=_required_str(msg, "request_id"),
+                # bool is an int subclass; a garbled payload must not pass as exit 0/1.
+                exit_code=exit_code
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+                else None,
+                output=output if isinstance(output, str) else "",
+            )
         case HostFrameKind.FS_REQUEST:
             return _decode_fs_request(msg)
         case HostFrameKind.FS_RESULT:

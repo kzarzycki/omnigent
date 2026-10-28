@@ -82,6 +82,8 @@ from omnigent.host.frames import (
     HostStopRunnerResultFrame,
     HostStoreSecretFrame,
     HostStoreSecretResultFrame,
+    HostUpdateFrame,
+    HostUpdateResultFrame,
     decode_host_frame,
     encode_host_frame,
 )
@@ -9985,3 +9987,36 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
+
+async def test_update_pauses_the_orphan_reaper_while_the_updater_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reaper must not collect the updater's exit status before asyncio does."""
+    host = _make_host_process()
+    reaper_paused: list[int] = []
+
+    async def _updater(argv: list[str], target: str) -> tuple[int, str]:
+        reaper_paused.append(host._owned_subprocess_ops)
+        return 0, f"updated to {target}"
+
+    class _RecordingWs:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, data: str) -> None:
+            self.sent.append(data)
+
+    monkeypatch.setattr("omnigent.host.connect.configured_updater", lambda: ["update-host"])
+    monkeypatch.setattr("omnigent.host.connect.run_host_updater", _updater)
+    ws = _RecordingWs()
+
+    await host._start_update(ws, HostUpdateFrame(request_id="update-1", target="abc1234"))  # type: ignore[arg-type]
+    assert host._update_task is not None
+    await host._update_task
+
+    assert reaper_paused == [1]
+    assert host._owned_subprocess_ops == 0
+    assert decode_host_frame(ws.sent[-1]) == HostUpdateResultFrame(
+        request_id="update-1", exit_code=0, output="updated to abc1234"
+    )

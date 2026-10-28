@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -63,6 +64,7 @@ from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailab
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
+    CAP_SELF_UPDATE,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
@@ -121,6 +123,8 @@ from omnigent.host.frames import (
     HostStopRunnerResultFrame,
     HostStoreSecretFrame,
     HostStoreSecretResultFrame,
+    HostUpdateFrame,
+    HostUpdateResultFrame,
     ImportSessionChunkingUnsupportedError,
     decode_host_frame,
     encode_host_frame,
@@ -273,6 +277,54 @@ def _unavailable_harness_became_ready(
         and _harness_now_configured(harness)
         for harness, availability in previous.items()
     )
+
+
+# The program this host runs when its owner clicks "Update now", as a shell-style
+# command line; e.g. agentic-eng's ``update-host.sh``. Unset: no update button.
+HOST_UPDATER_ENV = "OMNIGENT_HOST_UPDATER"
+# Passed to the updater: the build the server wants (a commit or a version).
+UPDATE_TARGET_ENV = "OMNIGENT_UPDATE_TARGET"
+# A reinstall fetches and builds; past this the updater is taken to be stuck and stopped.
+_UPDATER_TIMEOUT_S = 15 * 60
+_UPDATER_OUTPUT_LINES = 20
+
+
+def configured_updater() -> list[str] | None:
+    """The owner-configured updater's argv, or ``None`` when none is set."""
+    argv = shlex.split(os.environ.get(HOST_UPDATER_ENV, ""))
+    return argv or None
+
+
+async def run_host_updater(
+    argv: list[str], target: str, *, timeout_s: float = _UPDATER_TIMEOUT_S
+) -> tuple[int | None, str]:
+    """Run the updater for ``target`` and return its exit status and last output lines.
+
+    It runs in its own session, so restarting the host's service, which kills the
+    host's process group, does not kill the updater doing the restart.
+
+    :returns: ``(exit_code, output)``; ``exit_code`` is ``None`` when it could not
+        start, or did not finish in time and was stopped.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+            env={**os.environ, UPDATE_TARGET_ENV: target},
+        )
+    except OSError as exc:
+        return None, f"could not start {argv[0]}: {exc}"
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None, f"{argv[0]} did not finish within {timeout_s:.0f}s and was stopped"
+    lines = stdout.decode(errors="replace").strip().splitlines()
+    return proc.returncode, "\n".join(lines[-_UPDATER_OUTPUT_LINES:])
 
 
 def _runner_log_dir() -> Path:
@@ -1338,6 +1390,7 @@ class HostProcess:
         # lifetime. A tunnel reconnect retains successful or in-flight work;
         # a completed failed attempt may be retried.
         self._model_options_prewarm_task: asyncio.Task[bool] | None = None
+        self._update_task: asyncio.Task[None] | None = None
         # Discovery belongs to the daemon so connection retries share one
         # in-flight probe and registration waits for bounded discovery.
         self._capability_init_task: asyncio.Task[None] | None = None
@@ -4842,6 +4895,38 @@ class HostProcess:
             return self._tunnel_diagnostics[1]
         return None
 
+    async def _start_update(
+        self, ws: websockets.asyncio.client.ClientConnection, frame: HostUpdateFrame
+    ) -> None:
+        """Run the owner's updater in the background and reply when it ends.
+
+        Updating takes minutes, so it must not hold up the frame loop. One update
+        runs at a time; a second request is answered at once.
+        """
+        argv = configured_updater()
+        if argv is None or (self._update_task is not None and not self._update_task.done()):
+            reason = "no updater is configured" if argv is None else "an update is already running"
+            result = HostUpdateResultFrame(
+                request_id=frame.request_id, exit_code=None, output=reason
+            )
+            await self._send_text(ws, encode_host_frame(result))
+            return
+
+        async def _update() -> None:
+            _logger.info("running updater %s for target %s", argv[0], frame.target)
+            # The orphan reaper would otherwise collect the updater's exit status first.
+            with self._host_subprocess_op():
+                exit_code, output = await run_host_updater(argv, frame.target)
+            _logger.info("updater exited with %s", exit_code)
+            result = HostUpdateResultFrame(
+                request_id=frame.request_id, exit_code=exit_code, output=output
+            )
+            # The updater may already have restarted this host; nobody is left to tell.
+            with contextlib.suppress(Exception):
+                await self._send_text(ws, encode_host_frame(result))
+
+        self._update_task = asyncio.create_task(_update())
+
     async def _send_text(self, ws: websockets.asyncio.client.ClientConnection, data: str) -> None:
         diagnostics = self._diagnostics_for(ws)
         if diagnostics is None:
@@ -4881,7 +4966,10 @@ class HostProcess:
             interactive_shells=self._interactive_shells,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
-            capabilities=list(HOST_CAPABILITIES),
+            capabilities=[
+                *HOST_CAPABILITIES,
+                *([CAP_SELF_UPDATE] if configured_updater() is not None else []),
+            ],
             connection_id=connection_id,
             commit=await asyncio.to_thread(source_install_commit),
         )
@@ -5236,6 +5324,8 @@ class HostProcess:
                     secret_result.gateway_inference,
                 )
             await self._send_text(ws, encode_host_frame(secret_result))
+        elif isinstance(frame, HostUpdateFrame):
+            await self._start_update(ws, frame)
         elif isinstance(frame, HostDetectCredentialsFrame):
             # Ambient detection may probe files / a localhost socket, so run it
             # off the event loop.

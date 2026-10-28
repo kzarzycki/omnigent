@@ -51,6 +51,17 @@ export interface HostUpdate {
   target: string;
   /** Command that updates the host, e.g. `omni upgrade`. */
   command: string;
+  /** The host's owner configured an updater, so "Update now" can run it. */
+  can_update?: boolean;
+  /** The last "Update now" on this host; null when none was asked for. */
+  run?: HostUpdateRun | null;
+}
+
+export interface HostUpdateRun {
+  /** `restarted`: the host reconnected while its updater was still running. */
+  state: "running" | "finished" | "failed" | "restarted";
+  /** The updater's last output lines, or why it did not run. */
+  output: string;
 }
 
 interface HostsResponse {
@@ -219,6 +230,20 @@ export async function refreshHarnessesOnHost(hostId: string): Promise<RefreshHar
   );
   if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as RefreshHarnessesResult;
+}
+
+/** Ask an outdated host to run its own updater; the outcome arrives in `update.run`. */
+export function useUpdateHost(hostId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await authenticatedFetch(`/v1/hosts/${encodeURIComponent(hostId)}/update`, {
+        method: "POST",
+      });
+      if (!res.ok) throw await apiErrorFromResponse(res);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["hosts"] }),
+  });
 }
 
 export async function installHarnessOnHost(
