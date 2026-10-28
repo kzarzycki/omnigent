@@ -99,12 +99,19 @@ Under **Repository permissions**, set only what sandboxes need:
 | **Contents** | **Read and write** | Clone repos, and push branches for PRs. Use **Read-only** if sandboxes should only clone. |
 | **Metadata** | **Read-only** (mandatory) | Auto-selected; required by GitHub. |
 | **Pull requests** | **Read and write** | Open PRs from the sandbox and surface "PRs opened this session". **Read-only** if you never create PRs. |
+| **Issues** | **Read-only** *(optional)* | Chat link previews only: issue titles and state. |
+| **Checks** | **Read-only** *(optional)* | Chat link previews only: check-run results on PR and commit links. |
+| **Commit statuses** | **Read-only** *(optional)* | Chat link previews only: commit status results on PR and commit links. |
+| **Actions** | **Read-only** *(optional)* | Chat link previews only: workflow run state. |
 
-Leave everything else **No access**. No **Account** or **Organization**
+The four optional rows are needed only for chat link previews. Without them GitHub
+answers 403, so issue and run links stay plain and PR and commit previews lose their
+checks. Leave everything else **No access**. No **Account** or **Organization**
 permissions are needed. The user-to-server token inherits exactly these scopes,
-so this list is the ceiling on what a connected sandbox can do as the user.
+so this list (the optional rows widen it, read-only) is the ceiling on what a connected
+sandbox can do as the user.
 
-![Repository permissions: Contents, Metadata, Pull requests](images/github-app/04-permissions.png)
+![Repository permissions: Contents, Metadata, Pull requests (the screenshot predates the optional preview rows)](images/github-app/04-permissions.png)
 
 ## Step 5 — Where can this App be installed, then Create
 
@@ -191,12 +198,15 @@ nor `OMNIGENT_DOMAIN`), the feature logs a warning and **stays disabled**.
 
 1. Sign in to Omnigent as a real user, open **Settings → Sandbox Integrations**.
    The **Connect GitHub** control appears (the nav link only shows when the App
-   is configured — driven by `github_app_enabled` in `/v1/info`).
+   is configured — driven by `"github"` in `enabled_connections` in `/v1/info`).
 2. Click **Connect GitHub** → GitHub's authorize screen → back to Omnigent with
    `?github=connected`. The panel now shows **Connected as `<login>`**.
 3. Start a sandbox session on a **private** repo owned by an account where the
    App is **installed**; confirm the sandbox can `git clone`, push a branch, and
    (if enabled) open a PR.
+4. With the optional permissions granted, post a GitHub PR link in a chat: its state
+   appears beside the link and hovering shows the details. Without `"github"` in
+   `enabled_connections` the chat sends no preview requests and the link stays plain.
 
 If Step 3 returns `404` on a private repo while Steps 1–2 succeeded, the App is
 connected but **not installed** on that repo's owner — revisit [Step 7](#step-7--install-the-app).
