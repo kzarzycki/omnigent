@@ -90,7 +90,9 @@ and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that chec
   `local-ci` and `land` check the checkout's HEAD against the PR head, so it runs both in
   a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
   `mise trust -q`, `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group lint` and
-  `pnpm install --frozen-lockfile --filter web` (the session-list lint is TypeScript).
+  `pnpm install --frozen-lockfile --filter web --filter ./editors/vscode` (the session-list
+  lint is TypeScript, and the VS Code extension's type check runs once a branch touches the
+  pnpm lockfile).
   Without them `local-ci` stops without checking anything. It also writes your final
   report to the host path your brief names.
 - **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
