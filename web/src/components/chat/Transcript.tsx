@@ -29,6 +29,7 @@ import { FloatingBannerStack, StreamBudgetBanner } from "@/components/StreamBudg
 import { DbcertBanner } from "@/components/DbcertBanner";
 import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
 import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
+import { HostUpdateBanner, useOutdatedHost } from "@/components/HostUpdateBanner";
 import { useSearchParams } from "@/lib/routing";
 import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
 import {
@@ -370,7 +371,9 @@ function TranscriptImpl({
   const showWorkingIndicator = shouldShowWorkingIndicator(display.showsWorking, display.bubbles);
   const arcaWarning = useArcaShutdownBanner();
   const showArcaBanner = arcaWarning.showForHost(hostId);
-  const hasPinnedBanner = display.hasTasks || showArcaBanner;
+  const hostUpdate = useOutdatedHost(hostId);
+  const outdatedHost = hostUpdate.outdated;
+  const hasPinnedBanner = display.hasTasks || showArcaBanner || outdatedHost !== null;
   return (
     <>
       {/* Task tracker pinned above the thread. Sibling of the viewport (not an
@@ -378,6 +381,13 @@ function TranscriptImpl({
       Self-hides with no tasks. */}
       <ChatPlanAccordion className="mt-14 md:mt-12" />
       {showArcaBanner && <ArcaShutdownBanner warning={arcaWarning} hasTasks={display.hasTasks} />}
+      {outdatedHost && (
+        <HostUpdateBanner
+          outdated={outdatedHost}
+          onDismiss={() => hostUpdate.dismissToday(outdatedHost)}
+          hasPinnedAbove={display.hasTasks || showArcaBanner}
+        />
+      )}
       {/* Wrapper div gives us a ref to scope the SelectionPopup to the
       conversation area without requiring Conversation to forward refs. */}
       <div
