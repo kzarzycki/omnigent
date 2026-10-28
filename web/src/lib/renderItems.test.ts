@@ -4274,3 +4274,90 @@ describe("buildBubbles — lastActivityAtS", () => {
     expect(asst.lastActivityAtS).toBeUndefined();
   });
 });
+
+describe("buildBubbles — prompts cancelled before a reply", () => {
+  function prompt(itemId: string, text: string, responseId = "resp_1"): AnyBlock {
+    return {
+      type: "user_message",
+      ctx: ctx({ itemId, responseId }),
+      content: [{ type: "input_text", text }],
+    };
+  }
+  function reply(itemId: string, text: string, responseId = "resp_1"): AnyBlock {
+    return {
+      type: "text_done",
+      ctx: ctx({ itemId, responseId }),
+      fullText: text,
+      hasCodeBlocks: false,
+    };
+  }
+  const interruptRecord = (itemId: string) => prompt(itemId, "[Request interrupted by user]");
+  const users = (bubbles: Bubble[]) =>
+    bubbles.filter((b): b is Extract<Bubble, { kind: "user" }> => b.kind === "user");
+
+  it("marks an unanswered prompt cancelled and folds the interrupt record into it", () => {
+    const [cancelledPrompt, record] = users(
+      buildBubbles([prompt("u1", "write an essay"), interruptRecord("i1")], null),
+    );
+    expect(cancelledPrompt).toMatchObject({ itemId: "u1", cancelled: true });
+    expect(record).toMatchObject({ itemId: "i1", foldedIntoCancelledPrompt: true });
+  });
+
+  it("treats the runner's [System: interrupted] marker the same way", () => {
+    const [cancelledPrompt] = users(
+      buildBubbles([prompt("u1", "hi"), prompt("i1", "[System: interrupted]\nAbandoned.")], null),
+    );
+    expect(cancelledPrompt?.cancelled).toBe(true);
+  });
+
+  it("leaves an answered prompt and its interrupt marker as they were", () => {
+    const [answered, record] = users(
+      buildBubbles(
+        [prompt("u1", "write an essay"), reply("a1", "Once upon a"), interruptRecord("i1")],
+        null,
+      ),
+    );
+    expect(answered?.cancelled).toBeUndefined();
+    expect(record?.foldedIntoCancelledPrompt).toBeUndefined();
+  });
+
+  it("marks every prompt in an unanswered run, stopping at earlier agent output", () => {
+    const flagged = users(
+      buildBubbles(
+        [
+          prompt("u1", "first"),
+          reply("a1", "done"),
+          prompt("u2", "second", "resp_2"),
+          prompt("u3", "third", "resp_2"),
+          interruptRecord("i1"),
+        ],
+        null,
+      ),
+    ).map((bubble) => [bubble.itemId, Boolean(bubble.cancelled)]);
+    expect(flagged).toEqual([
+      ["u1", false],
+      ["u2", true],
+      ["u3", true],
+      ["i1", false],
+    ]);
+  });
+
+  it("flags a prompt already reused from the cache when its interrupt record arrives", () => {
+    const cache = createBubbleCache();
+    const before = [
+      prompt("u0", "earlier"),
+      reply("a0", "ok"),
+      prompt("u1", "write an essay", "resp_2"),
+    ];
+    buildBubbles(before, null, cache);
+    const after = [...before, interruptRecord("i1")];
+    const incremental = buildBubbles(after, null, cache);
+    expect(users(incremental).find((b) => b.itemId === "u1")?.cancelled).toBe(true);
+    expect(incremental).toEqual(buildBubbles(after, null));
+  });
+
+  it("bubblesEqual sees the cancelled flag", () => {
+    const [plain] = users(buildBubbles([prompt("u1", "hi")], null));
+    expect(bubblesEqual(plain!, { ...plain!, cancelled: true })).toBe(false);
+  });
+});

@@ -14,6 +14,7 @@ import {
 } from "react";
 import {
   ArrowUpIcon,
+  BanIcon,
   CheckIcon,
   ClockIcon,
   CopyIcon,
@@ -755,6 +756,8 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
   // the content is a pure system marker, swap in a muted centered indicator.
   if (images.length === 0 && fileChips.length === 0 && mentionedChips.length === 0) {
+    // The prompt above already shows this interrupt as its cancelled state.
+    if (bubble.foldedIntoCancelledPrompt) return null;
     const parsed = parseSystemMessage(text);
     if (parsed) return <SystemMessageView message={parsed} revealed={revealed} />;
   }
@@ -769,6 +772,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
       data-role="user"
       data-user-message-id={bubble.itemId}
       data-message-id={bubble.itemId}
+      data-cancelled={bubble.cancelled ? "true" : undefined}
       className={cn("max-w-[640px]", bubble.pending && "animate-user-message-enter")}
     >
       <div className="ml-auto flex w-fit max-w-full flex-col items-end">
@@ -796,7 +800,10 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             </Tooltip>
           )}
           <MessageContent
-            className={flashing ? "animate-message-highlight" : undefined}
+            className={cn(
+              flashing && "animate-message-highlight",
+              bubble.cancelled && "opacity-60",
+            )}
             // Another contributor's bubble takes their avatar color at low
             // alpha instead of the default bg-muted.
             style={
@@ -929,6 +936,15 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
           >
             <ClockIcon size={12} aria-hidden />
             The agent will read this after its current step
+          </div>
+        )}
+        {bubble.cancelled && (
+          <div
+            className="flex items-center gap-1 pt-1 text-[11px] leading-4 text-muted-foreground"
+            data-testid="message-cancelled"
+          >
+            <BanIcon size={12} aria-hidden />
+            Cancelled before the agent replied
           </div>
         )}
         {/* 40%-visible on touch, hover/focus-reveal on desktop. */}

@@ -189,15 +189,30 @@ const ATTACHED_RE = /\[Attached(?: file)?:\s*([^\]]*)\]\s*/g;
  * :returns: ``true`` for a system marker, ``false`` for a real user message.
  */
 export function isSystemUserContent(content: MessageContentBlock[]): boolean {
+  return parseSystemUserContent(content) !== null;
+}
+
+/**
+ * True when a user-role message is an interrupt record (Claude's own, or the
+ * runner's `[System: interrupted]`) rather than a real user turn.
+ *
+ * :param content: A user message block's content array.
+ * :returns: ``true`` for an interrupt record.
+ */
+export function isInterruptUserContent(content: MessageContentBlock[]): boolean {
+  return parseSystemUserContent(content)?.kind === "interrupted";
+}
+
+function parseSystemUserContent(content: MessageContentBlock[]): ParsedSystemMessage | null {
   const hasAttachments = content.some((c) => c.type === "input_image" || c.type === "input_file");
-  if (hasAttachments) return false;
+  if (hasAttachments) return null;
   const text = content
     .filter(isTextBlock)
     .map((c) => c.text)
     .join("")
     .replace(ATTACHED_RE, "")
     .trim();
-  return parseSystemMessage(text) !== null;
+  return parseSystemMessage(text);
 }
 
 /**
