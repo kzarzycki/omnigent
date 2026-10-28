@@ -15,6 +15,7 @@ driving the same session never double-post.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -40,6 +41,10 @@ from omnigent.harnesses.opencode_native.permissions import (
     map_verdict_to_decision,
     normalize_for_policy,
     parse_permission_request,
+)
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    raise_for_subagent_delivery_not_confirmed,
 )
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -547,6 +552,8 @@ class OpenCodeNativeForwarder:
         self._pending_children: dict[str, _PendingChild] = {}
         # Newest history message known settled; the reconnect catch-up cursor.
         self._last_seen_message_id: str | None = None
+        # Retries a status edge the runner refuses as not delivered to a parent.
+        self._status_retry = SubagentStatusRetry()
 
     async def run(self, *, max_reconnects: int | None = None) -> None:
         """
@@ -581,6 +588,7 @@ class OpenCodeNativeForwarder:
                 backoff = min(backoff * 2, 5.0)
         finally:
             await self._cancel_background_tasks()
+            await self._status_retry.aclose()
 
     async def _cancel_background_tasks(self) -> None:
         """Cancel and await every parked permission and form task."""
@@ -718,7 +726,16 @@ class OpenCodeNativeForwarder:
         data: _JsonObject = {"status": status}
         if extra:
             data.update(extra)
-        await self._post_event(_EXTERNAL_STATUS, data, conversation_id=turn.conversation_id)
+        await self._status_retry.send(
+            turn.conversation_id or self._session_id,
+            functools.partial(self._post_status_once, data, turn.conversation_id),
+        )
+
+    async def _post_status_once(self, data: _JsonObject, conversation_id: str | None) -> None:
+        """POST one status edge, raising only for a not-confirmed sub-agent delivery."""
+        raise_for_subagent_delivery_not_confirmed(
+            await self._post_event(_EXTERNAL_STATUS, data, conversation_id=conversation_id)
+        )
 
     def _response_id(self, turn: _SessionTurn, message_id: str | None) -> str:
         """Per-turn ``response_id``: the running edge's id, else the message id."""

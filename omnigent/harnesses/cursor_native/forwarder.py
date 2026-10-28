@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import functools
 import hashlib
 import json
 import logging
@@ -52,7 +53,10 @@ import httpx
 from omnigent.harnesses.cursor_native import status as cursor_native_status
 from omnigent.harnesses.cursor_native.bridge import FORK_HISTORY_CLOSE_TAG, FORK_HISTORY_OPEN_TAG
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
-from omnigent.native._native_post_delivery import post_may_have_been_delivered
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    post_may_have_been_delivered,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -960,9 +964,12 @@ async def forward_cursor_store_to_session(
     pending_turn_end: int | None = None
     outcome_parse_failures = 0
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
-    async with httpx.AsyncClient(
-        base_url=base_url, headers=headers, auth=auth, timeout=timeout
-    ) as client:
+    async with (
+        httpx.AsyncClient(
+            base_url=base_url, headers=headers, auth=auth, timeout=timeout
+        ) as client,
+        SubagentStatusRetry() as status_retry,
+    ):
         while True:
             try:
                 # Snapshot completion before reading its transcript. A turn
@@ -1233,11 +1240,17 @@ async def forward_cursor_store_to_session(
                         outcome = "failed"
                     else:
                         outcome_parse_failures = 0
-                    await _post_external_session_status(
-                        client,
-                        session_id=session_id,
-                        status="failed" if outcome == "failed" else "idle",
-                        turn_outcome=outcome,
+                    # A refused parent delivery retries in the background, so the
+                    # marker counts as posted either way.
+                    await status_retry.send(
+                        session_id,
+                        functools.partial(
+                            _post_external_session_status,
+                            client,
+                            session_id=session_id,
+                            status="failed" if outcome == "failed" else "idle",
+                            turn_outcome=outcome,
+                        ),
                     )
                     await asyncio.to_thread(
                         cursor_native_status.write_posted_count, bridge_dir, pending_turn_end

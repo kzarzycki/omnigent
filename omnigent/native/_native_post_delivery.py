@@ -12,17 +12,23 @@ use to decide whether a failed POST is safe to retry.
 
 :func:`post_session_event_with_retry` is the shared retry loop extracted from
 the codex/antigravity forwarders so a single implementation is maintained.
+
+:class:`SubagentStatusRetry` gives every native forwarder the same bounded,
+off-loop retry for a status post the runner refuses with
+``subagent_delivery_not_confirmed``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 
 import httpx
 
@@ -166,6 +172,247 @@ def post_may_have_been_delivered(exc: httpx.HTTPError) -> bool:
     except RuntimeError:
         return False
     return True
+
+
+# A 503 ``subagent_delivery_not_confirmed`` means the runner could not deliver a
+# terminal sub-agent result to the parent inbox. It is retried (the work entry can
+# be created slightly after the child reports terminal — a short dispatch race), but
+# UNLIKE a generic 5xx it must NOT retry forever: when the parent host is gone the
+# condition is permanent. Bounded so a single orphaned sub-agent cannot flood the
+# shared server. The budget spans the backoff schedule (capped at 30 s) ⇒ a few
+# minutes, comfortably covering the dispatch race.
+SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS = 12
+_SUBAGENT_DELIVERY_RETRY_BASE_DELAY_S = 1.0
+_SUBAGENT_DELIVERY_RETRY_MAX_DELAY_S = 30.0
+_SUBAGENT_DELIVERY_NOT_CONFIRMED = "subagent_delivery_not_confirmed"
+
+
+def is_subagent_delivery_not_confirmed_response(response: httpx.Response) -> bool:
+    """
+    Return whether ``response`` is a ``subagent_delivery_not_confirmed`` 503.
+
+    The runner returns this application-level 503 when a terminal sub-agent
+    payload could not be delivered to the parent inbox (no work entry / inbox),
+    and the server relays it as its ``error.code`` envelope. It is a
+    bounded-retry class, distinct from a generic transient 5xx.
+
+    :param response: Omnigent response to a session-event POST.
+    :returns: ``True`` only for a 503 whose JSON body carries
+        ``error == "subagent_delivery_not_confirmed"`` (runner) or
+        ``error.code == "subagent_delivery_not_confirmed"`` (server).
+    """
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 — best-effort body parse
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if isinstance(error, dict):
+        error = error.get("code")
+    return error == _SUBAGENT_DELIVERY_NOT_CONFIRMED
+
+
+def is_subagent_delivery_not_confirmed(exc: BaseException) -> bool:
+    """
+    Return whether ``exc`` carries a ``subagent_delivery_not_confirmed`` 503.
+
+    :param exc: Exception raised while posting an Omnigent event.
+    :returns: ``True`` only for an :class:`httpx.HTTPStatusError` whose response
+        :func:`is_subagent_delivery_not_confirmed_response` accepts.
+    """
+    return isinstance(exc, httpx.HTTPStatusError) and is_subagent_delivery_not_confirmed_response(
+        exc.response
+    )
+
+
+def raise_for_subagent_delivery_not_confirmed(response: httpx.Response | None) -> None:
+    """
+    Raise for a ``subagent_delivery_not_confirmed`` 503 and nothing else.
+
+    Adapts post helpers that return a response instead of raising, so
+    :class:`SubagentStatusRetry` can see the refusal while every other outcome
+    keeps the helper's own handling.
+
+    :param response: Final response of a status post, or ``None`` after a
+        transport failure.
+    :raises httpx.HTTPStatusError: When ``response`` is that 503.
+    """
+    if response is not None and is_subagent_delivery_not_confirmed_response(response):
+        raise httpx.HTTPStatusError(
+            "sub-agent delivery not confirmed", request=response.request, response=response
+        )
+
+
+@dataclass(eq=False)
+class _PendingStatus:
+    """One status post waiting for its next bounded retry."""
+
+    post: Callable[[], Awaitable[object]]
+    attempts: int
+    task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+
+class SubagentStatusRetry:
+    """
+    Bounded background retry for status posts refused as not confirmed.
+
+    :meth:`send` posts at once. When the runner answers
+    ``subagent_delivery_not_confirmed``, the post is retried from a task of its
+    own with capped exponential backoff, so a forwarder's poll loop never waits
+    on it. After :data:`SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS` attempts
+    it is dropped with a warning; nothing posts ``failed`` in its place, since
+    the runner already recorded the child's real result. A newer status post for
+    the same session replaces a pending one, so a stale terminal edge never
+    lands after the next turn's edges.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int | None = None,
+        base_delay_s: float | None = None,
+        max_delay_s: float | None = None,
+    ) -> None:
+        """
+        Initialize a tracker with no pending posts.
+
+        :param max_attempts: Attempts, the first included, before a refused
+            post is dropped; defaults to
+            :data:`SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS`.
+        :param base_delay_s: Delay after the first refusal, doubled per
+            attempt; defaults to 1 s.
+        :param max_delay_s: Cap on one delay; defaults to 30 s.
+        :returns: None.
+        """
+        self._max_attempts = max(
+            1,
+            SUBAGENT_DELIVERY_NOT_CONFIRMED_MAX_ATTEMPTS if max_attempts is None else max_attempts,
+        )
+        self._base_delay_s = max(
+            0.0, _SUBAGENT_DELIVERY_RETRY_BASE_DELAY_S if base_delay_s is None else base_delay_s
+        )
+        self._max_delay_s = max(
+            0.0, _SUBAGENT_DELIVERY_RETRY_MAX_DELAY_S if max_delay_s is None else max_delay_s
+        )
+        self._pending: dict[str, _PendingStatus] = {}
+
+    def is_pending(self, key: str) -> bool:
+        """Return whether a refused post for ``key`` still awaits a retry."""
+        return key in self._pending
+
+    async def send(self, key: str, post: Callable[[], Awaitable[object]]) -> bool:
+        """
+        Post one status edge now, retrying a not-confirmed refusal in the background.
+
+        :param key: Session the status edge targets, e.g. ``"conv_abc123"``.
+        :param post: Performs one POST and raises :class:`httpx.HTTPError` on
+            failure (a status helper, or one adapted with
+            :func:`raise_for_subagent_delivery_not_confirmed`).
+        :returns: ``True`` when delivered now; ``False`` when refused as not
+            confirmed and scheduled for retry.
+        :raises httpx.HTTPError: Any other failure, for the caller's own handling.
+        """
+        self._discard(key)
+        try:
+            await post()
+        except httpx.HTTPError as exc:
+            if not is_subagent_delivery_not_confirmed(exc):
+                raise
+            if self._max_attempts <= 1:
+                self._log_exhausted(key, attempts=1)
+                return False
+            pending = _PendingStatus(post=post, attempts=1)
+            self._pending[key] = pending
+            pending.task = asyncio.create_task(
+                self._retry(key, pending), name=f"subagent-status-retry:{key}"
+            )
+            return False
+        return True
+
+    async def aclose(self) -> None:
+        """Cancel every pending retry; for a forwarder shutting down."""
+        tasks = [pending.task for pending in self._pending.values() if pending.task is not None]
+        self._pending.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def __aenter__(self) -> SubagentStatusRetry:
+        """Return this tracker; :meth:`aclose` runs on exit."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Cancel pending retries before the forwarder's HTTP client closes."""
+        await self.aclose()
+
+    def _discard(self, key: str) -> None:
+        """Drop a pending retry that a newer status post supersedes."""
+        pending = self._pending.pop(key, None)
+        if pending is not None and pending.task is not None:
+            pending.task.cancel()
+
+    def _delay_s(self, attempts: int) -> float:
+        """Return the backoff after ``attempts`` refused attempts."""
+        return min(self._base_delay_s * (2 ** min(attempts - 1, 32)), self._max_delay_s)
+
+    async def _retry(self, key: str, pending: _PendingStatus) -> None:
+        """Re-post ``pending`` until delivered, superseded or out of attempts."""
+        while self._pending.get(key) is pending:
+            await asyncio.sleep(self._delay_s(pending.attempts))
+            if self._pending.get(key) is not pending:
+                return
+            pending.attempts += 1
+            try:
+                await pending.post()
+            except httpx.HTTPError as exc:
+                # Another refusal is final; only this 503 or a transport error retries.
+                if isinstance(exc, httpx.HTTPStatusError) and not (
+                    is_subagent_delivery_not_confirmed(exc)
+                ):
+                    self._pending.pop(key, None)
+                    _logger.warning(
+                        "sub-agent status retry stopped after %d attempts; session=%s error=%r",
+                        pending.attempts,
+                        key,
+                        exc,
+                    )
+                    return
+                if pending.attempts >= self._max_attempts:
+                    self._pending.pop(key, None)
+                    self._log_exhausted(key, attempts=pending.attempts, exc=exc)
+                    return
+                continue
+            except Exception:  # e.g. a client closed under the retry.
+                self._pending.pop(key, None)
+                _logger.warning("sub-agent status retry stopped; session=%s", key, exc_info=True)
+                return
+            self._pending.pop(key, None)
+            _logger.info(
+                "sub-agent status delivered after %d attempts; session=%s",
+                pending.attempts,
+                key,
+            )
+            return
+
+    def _log_exhausted(
+        self, key: str, *, attempts: int, exc: httpx.HTTPError | None = None
+    ) -> None:
+        """Log a status post dropped after its retry budget."""
+        _logger.warning(
+            "dropping sub-agent status after %d attempts; parent delivery not "
+            "confirmed; session=%s last_error=%r",
+            attempts,
+            key,
+            exc,
+        )
 
 
 async def post_external_session_status(
@@ -325,6 +572,9 @@ async def post_session_event_with_retry(
         if response.status_code < 400:
             return response
         if response.status_code not in retry_status_codes:
+            return response
+        if is_subagent_delivery_not_confirmed_response(response):
+            # Retried by SubagentStatusRetry on its own bounded schedule.
             return response
         if attempt >= max_attempts:
             return response

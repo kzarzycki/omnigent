@@ -51,19 +51,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
 import re
 import time
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 
 from omnigent.harnesses.qwen_native.bridge import events_file_path
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
+from omnigent.native._native_post_delivery import SubagentStatusRetry
 
 _logger = logging.getLogger(__name__)
 
@@ -117,6 +119,11 @@ class _ForwardState:
     # ``None`` means no assistant message is awaiting its ``message_stop``;
     # ``""`` represents qwen's JSON null/missing terminal stop reason.
     last_assistant_stop_reason: str | None = None
+    #: Retries terminal edges the runner refuses as not delivered to a parent.
+    #: In-memory only; never persisted.
+    status_retry: SubagentStatusRetry = field(
+        default_factory=SubagentStatusRetry, repr=False, compare=False
+    )
 
 
 def _read_state(bridge_dir: Path) -> _ForwardState:
@@ -440,7 +447,14 @@ async def _deliver_forward_actions(
         if isinstance(action, _MirrorItem):
             await _post_conversation_item(client, session_id=session_id, item=action)
         else:
-            await _post_external_session_status(client, session_id=session_id, terminal=action)
+            # A refused parent delivery retries in the background, so the edge
+            # counts as delivered here either way.
+            await state.status_retry.send(
+                session_id,
+                functools.partial(
+                    _post_external_session_status, client, session_id=session_id, terminal=action
+                ),
+            )
         seen[action.uuid] = None
         state.seen_uuids = list(seen)
         state.last_assistant_text = _assistant_text_after_action(state.last_assistant_text, action)
@@ -483,7 +497,10 @@ async def forward_qwen_events_to_session(
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
     from omnigent.cli_auth import open_server_client
 
-    async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
+    async with (
+        open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client,
+        state.status_retry,
+    ):
         while True:
             try:
                 (

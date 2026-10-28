@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -73,6 +74,7 @@ from omnigent.native._native_forwarder_health import (
 from omnigent.native._native_forwarder_health import (
     record_post_failure as record_native_post_failure,
 )
+from omnigent.native._native_post_delivery import SubagentStatusRetry
 
 _logger = logging.getLogger(__name__)
 
@@ -1570,7 +1572,10 @@ async def forward_kimi_wire_to_session(
     # time it was alerted on (both monotonic).
     edge_failing_since: float | None = None
     last_edge_alert = 0.0
-    async with httpx.AsyncClient(timeout=15.0, auth=auth) as client:
+    async with (
+        httpx.AsyncClient(timeout=15.0, auth=auth) as client,
+        SubagentStatusRetry() as status_retry,
+    ):
 
         def _persist() -> None:
             _write_state(
@@ -1627,13 +1632,17 @@ async def forward_kimi_wire_to_session(
                 _persist()
                 return
             try:
-                await _post_external_session_status(
-                    client,
-                    base_url=base_url,
-                    headers=headers,
-                    session_id=session_id,
-                    status=status,
-                    output=last_assistant_text or dropped_edge_output,
+                await status_retry.send(
+                    session_id,
+                    functools.partial(
+                        _post_external_session_status,
+                        client,
+                        base_url=base_url,
+                        headers=headers,
+                        session_id=session_id,
+                        status=status,
+                        output=last_assistant_text or dropped_edge_output,
+                    ),
                 )
             except httpx.HTTPError as exc:
                 # An undelivered edge is a delivery outage whatever the cause;
@@ -1900,15 +1909,21 @@ async def forward_kimi_wire_to_session(
                         elif item.kind == "model":
                             usage_sync.note_model(item.model)
                         elif item.kind in ("turn_end", "turn_failed"):
-                            await _post_external_session_status(
-                                client,
-                                base_url=base_url,
-                                headers=headers,
-                                session_id=session_id,
-                                status="idle" if item.kind == "turn_end" else "failed",
-                                # A failed turn.ended carries the provider error
-                                # message; surface it when no assistant text ran.
-                                output=last_assistant_text or item.text,
+                            # A refused parent delivery retries in the background,
+                            # so the cursor moves past this edge either way.
+                            await status_retry.send(
+                                session_id,
+                                functools.partial(
+                                    _post_external_session_status,
+                                    client,
+                                    base_url=base_url,
+                                    headers=headers,
+                                    session_id=session_id,
+                                    status="idle" if item.kind == "turn_end" else "failed",
+                                    # A failed turn.ended carries the provider error
+                                    # message; surface it when no assistant text ran.
+                                    output=last_assistant_text or item.text,
+                                ),
                             )
                             last_assistant_text = ""
                             turn_open = False

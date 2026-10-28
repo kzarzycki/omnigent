@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -70,6 +71,7 @@ import httpx
 
 from omnigent.harnesses.hermes_native import status as hermes_native_status
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
+from omnigent.native._native_post_delivery import SubagentStatusRetry
 
 _logger = logging.getLogger(__name__)
 
@@ -1122,7 +1124,10 @@ async def forward_hermes_store_to_session(
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
     from omnigent.cli_auth import open_server_client
 
-    async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
+    async with (
+        open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client,
+        SubagentStatusRetry() as status_retry,
+    ):
         usage_tracker = _HermesUsageTracker(client, session_id, bridge_dir)
         compaction_persisted = False
         while True:
@@ -1228,11 +1233,15 @@ async def forward_hermes_store_to_session(
                                     # (and the idle/PTY-watcher resolution) must still
                                     # proceed — never abort the turn for a live-card post.
                                     try:
-                                        await _post_external_session_status(
-                                            client,
-                                            session_id=session_id,
-                                            status="running",
-                                            response_id=action.response_id,
+                                        await status_retry.send(
+                                            session_id,
+                                            functools.partial(
+                                                _post_external_session_status,
+                                                client,
+                                                session_id=session_id,
+                                                status="running",
+                                                response_id=action.response_id,
+                                            ),
                                         )
                                     except Exception:  # live-card edge is best-effort
                                         _logger.debug(
@@ -1377,11 +1386,15 @@ async def forward_hermes_store_to_session(
                         # never blocks mirroring.
                         if active_turn_id is not None and not running_posted_this_batch:
                             try:
-                                await _post_external_session_status(
-                                    client,
-                                    session_id=session_id,
-                                    status="running",
-                                    response_id=active_turn_id,
+                                await status_retry.send(
+                                    session_id,
+                                    functools.partial(
+                                        _post_external_session_status,
+                                        client,
+                                        session_id=session_id,
+                                        status="running",
+                                        response_id=active_turn_id,
+                                    ),
                                 )
                             except Exception:  # live-card edge is best-effort
                                 _logger.debug(
@@ -1430,11 +1443,17 @@ async def forward_hermes_store_to_session(
                             # has no id here and posts id-less — the PTY watcher's
                             # idle (which pops the active id server-side) plus the
                             # snapshot refetch still resolve it, as on abort.
-                            await _post_external_session_status(
-                                client,
-                                session_id=session_id,
-                                status="idle",
-                                response_id=closed_turn_id,
+                            # A refused parent delivery retries in the background,
+                            # so the count advances either way.
+                            await status_retry.send(
+                                session_id,
+                                functools.partial(
+                                    _post_external_session_status,
+                                    client,
+                                    session_id=session_id,
+                                    status="idle",
+                                    response_id=closed_turn_id,
+                                ),
                             )
                             await asyncio.to_thread(
                                 hermes_native_status.write_posted_count,
