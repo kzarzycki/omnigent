@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -62,7 +63,10 @@ from omnigent.harnesses.devin_native.subagents import (
     reconstruct_transcript_chains,
     transcript_items,
 )
-from omnigent.native._native_post_delivery import post_external_session_status
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    post_external_session_status,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
@@ -118,6 +122,11 @@ class _ForwardState:
     #: ``{"task", "title", "tool_use_id", "mirrored"}``. Persisted so a
     #: supervisor restart does not re-mirror an already-posted sub-agent.
     subagents: dict[str, _JsonObject] = field(default_factory=dict)
+    #: Retries status edges the runner refuses as not delivered to a parent.
+    #: In-memory only; never persisted.
+    status_retry: SubagentStatusRetry = field(
+        default_factory=SubagentStatusRetry, repr=False, compare=False
+    )
 
     def as_dict(self) -> _JsonObject:
         """Return a JSON-serializable view for persistence."""
@@ -374,6 +383,7 @@ async def _open_turn(
     *,
     session_id: str,
     turn: _TurnState,
+    status_retry: SubagentStatusRetry,
 ) -> None:
     """Post the running status edge that opens a turn.
 
@@ -385,11 +395,15 @@ async def _open_turn(
     """
     turn.live = True
     with contextlib.suppress(httpx.HTTPError):
-        await post_external_session_status(
-            client,
-            session_id=session_id,
-            status="running",
-            response_id=turn.response_id,
+        await status_retry.send(
+            session_id,
+            functools.partial(
+                post_external_session_status,
+                client,
+                session_id=session_id,
+                status="running",
+                response_id=turn.response_id,
+            ),
         )
 
 
@@ -398,17 +412,22 @@ async def _close_turn(
     *,
     session_id: str,
     turn: _TurnState,
+    status_retry: SubagentStatusRetry,
 ) -> None:
     """Post the idle status edge that ends an open turn."""
     if not turn.live:
         turn.reset()
         return
     with contextlib.suppress(httpx.HTTPError):
-        await post_external_session_status(
-            client,
-            session_id=session_id,
-            status="idle",
-            response_id=turn.response_id,
+        await status_retry.send(
+            session_id,
+            functools.partial(
+                post_external_session_status,
+                client,
+                session_id=session_id,
+                status="idle",
+                response_id=turn.response_id,
+            ),
         )
     turn.reset()
 
@@ -551,8 +570,17 @@ async def _mirror_completed_subagents(
                 )
                 posted += 1
                 info["items_posted"] = posted
-            await post_external_session_status(
-                client, session_id=child_id, status="idle", response_id=response_id
+            # A refused parent delivery retries on its own bounded schedule, so
+            # the child counts as mirrored either way.
+            await state.status_retry.send(
+                child_id,
+                functools.partial(
+                    post_external_session_status,
+                    client,
+                    session_id=child_id,
+                    status="idle",
+                    response_id=response_id,
+                ),
             )
         except httpx.HTTPError as exc:
             _logger.warning("devin-native: could not mirror sub-agent %s: %s", agent_id, exc)
@@ -596,7 +624,9 @@ async def _handle_event(
     if event == _USER_PROMPT_SUBMIT:
         # A new prompt authoritatively closes any turn still open.
         if turn.prompt_id is not None and turn.prompt_id != prompt_id:
-            await _close_turn(client, session_id=session_id, turn=turn)
+            await _close_turn(
+                client, session_id=session_id, turn=turn, status_retry=state.status_retry
+            )
         if payload.get(DEVIN_POLICY_BLOCKED_KEY):
             # Policy blocked this prompt, so Devin never ran it and no Stop will
             # arrive. Mirroring it would show a turn that never happened and leave
@@ -604,7 +634,7 @@ async def _handle_event(
             return
         prompt = payload.get("prompt")
         turn.prompt_id = prompt_id
-        await _open_turn(client, session_id=session_id, turn=turn)
+        await _open_turn(client, session_id=session_id, turn=turn, status_retry=state.status_retry)
         if isinstance(prompt, str):
             prompt = _INJECTED_BLOCK_RE.sub("", prompt).strip()
         if isinstance(prompt, str) and prompt.strip():
@@ -737,7 +767,9 @@ async def _handle_event(
                 response_id=turn.response_id,
             )
         await _post_usage(client, session_id=session_id, bridge_dir=bridge_dir, state=state)
-        await _close_turn(client, session_id=session_id, turn=turn)
+        await _close_turn(
+            client, session_id=session_id, turn=turn, status_retry=state.status_retry
+        )
         await _mirror_completed_subagents(
             client, session_id=session_id, agent_name=agent_name, state=state
         )
@@ -745,7 +777,9 @@ async def _handle_event(
 
     if event == _SESSION_END:
         await _post_usage(client, session_id=session_id, bridge_dir=bridge_dir, state=state)
-        await _close_turn(client, session_id=session_id, turn=turn)
+        await _close_turn(
+            client, session_id=session_id, turn=turn, status_retry=state.status_retry
+        )
         await _mirror_completed_subagents(
             client, session_id=session_id, agent_name=agent_name, state=state
         )
@@ -794,7 +828,10 @@ async def forward_devin_hooks_to_session(
     turn = _TurnState()
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
 
-    async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
+    async with (
+        open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client,
+        state.status_retry,
+    ):
         # Tell the bridge injection path it is safe to send: the cursor is
         # established, so nothing already in the log will be re-published.
         write_forwarder_ready(bridge_dir)
