@@ -1070,6 +1070,16 @@ describe("WorkspacePanel maximize", () => {
     expect(onToggleMaximized).toHaveBeenCalledTimes(1);
   });
 
+  it("toggles full screen when a file tab is double-clicked, but not its close button", () => {
+    const { onToggleMaximized } = renderWorkspace({ openFiles: ["src/App.tsx"] });
+
+    fireEvent.doubleClick(screen.getByTitle("src/App.tsx"));
+    expect(onToggleMaximized).toHaveBeenCalledTimes(1);
+
+    fireEvent.doubleClick(screen.getByRole("button", { name: "Close App.tsx" }));
+    expect(onToggleMaximized).toHaveBeenCalledTimes(1);
+  });
+
   it("swaps to the exit-full-screen affordance and covers the content region when maximized", () => {
     renderWorkspace({ maximized: true });
 
