@@ -4914,7 +4914,9 @@ class HostProcess:
 
         async def _update() -> None:
             _logger.info("running updater %s for target %s", argv[0], frame.target)
-            exit_code, output = await run_host_updater(argv, frame.target)
+            # The orphan reaper would otherwise collect the updater's exit status first.
+            with self._host_subprocess_op():
+                exit_code, output = await run_host_updater(argv, frame.target)
             _logger.info("updater exited with %s", exit_code)
             result = HostUpdateResultFrame(
                 request_id=frame.request_id, exit_code=exit_code, output=output
