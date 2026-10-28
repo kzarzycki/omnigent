@@ -2407,9 +2407,12 @@ function ConversationList({
   // which would re-open a folder the user just collapsed.
   const activeProjectName = useMemo(() => {
     if (!activeId) return null;
-    const active = allConversations.find((c) => c.id === activeId);
-    return active?.labels?.[PROJECT_LABEL_KEY] ?? null;
-  }, [activeId, allConversations]);
+    // The folder that renders the row, whether filed by `project_id` or the legacy label.
+    return (
+      sections.projectGroups.find((g) => g.conversations.some((c) => c.id === activeId))?.name ??
+      null
+    );
+  }, [activeId, sections.projectGroups]);
   // Auto-expand the project folder holding the selected session, so navigating
   // to a filed session reveals it instead of leaving it hidden in a collapsed
   // folder. Skipped for pinned sessions: they're already reachable from the
