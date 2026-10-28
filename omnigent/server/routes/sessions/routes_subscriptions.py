@@ -58,8 +58,12 @@ def register_subscriptions_routes(
         From now on this session gets a ``[System: …]`` message whenever the
         watched session ends a turn (completed, cancelled or failed) or blocks
         on a prompt; a prompt it is already blocked on is delivered at once.
-        Subscribing twice is a no-op. The watched session is unchanged: no
-        parent link, runner or lifecycle coupling.
+        With ``quiet_seconds``, a completed turn end is held that long and a
+        newer one replaces it, so a busy session wakes this one once it settles;
+        failures, cancels, prompts and an end whose last reply has a line
+        starting ``DONE``, ``USER NEEDED`` or ``PARKED`` still post at once. Subscribing again only sets
+        ``quiet_seconds``. The watched session is unchanged: no parent link,
+        runner or lifecycle coupling.
 
         Requires edit access to this session and read access to the watched one.
 
@@ -82,9 +86,13 @@ def register_subscriptions_routes(
             )
         await _live_session(session_id)
         await _live_session(target_id)
+        quiet_seconds = body.quiet_seconds or None
         try:
             created = await asyncio.to_thread(
-                conversation_store.add_session_subscription, session_id, target_id
+                conversation_store.add_session_subscription,
+                session_id,
+                target_id,
+                quiet_seconds=quiet_seconds,
             )
         except SubscriptionLimitError:
             raise OmnigentError(
@@ -111,7 +119,9 @@ def register_subscriptions_routes(
                     conversation_store.delete_session_subscription, session_id, target_id
                 )
                 raise
-        return SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
+        return SessionSubscriptionObject(
+            subscriber_id=session_id, session_id=target_id, quiet_seconds=quiet_seconds
+        )
 
     @router.delete("/sessions/{session_id}/subscriptions/{target_id}", status_code=204)
     async def unsubscribe_session(request: Request, session_id: str, target_id: str) -> Response:
@@ -151,9 +161,18 @@ def register_subscriptions_routes(
         if await asyncio.to_thread(conversation_store.get_conversation, session_id) is None:
             raise _session_not_found()
         page, has_more = await asyncio.to_thread(_readable_page, user_id, session_id, after, limit)
+        settings = await asyncio.to_thread(
+            conversation_store.get_session_subscriptions, session_id, page
+        )
         return SessionSubscriptionList(
             data=[
-                SessionSubscriptionObject(subscriber_id=session_id, session_id=target_id)
+                SessionSubscriptionObject(
+                    subscriber_id=session_id,
+                    session_id=target_id,
+                    quiet_seconds=(
+                        settings[target_id].quiet_seconds if target_id in settings else None
+                    ),
+                )
                 for target_id in page
             ],
             last_id=page[-1] if page else None,

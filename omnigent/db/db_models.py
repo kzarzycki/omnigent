@@ -1699,6 +1699,8 @@ class SqlSessionSubscription(OmnigentBase):
 
     :param subscriber_id: Session that receives the notices.
     :param target_id: Session being watched.
+    :param quiet_seconds: Seconds a completed turn end's notice is held, so a
+        target that keeps working wakes the subscriber once; ``None`` holds none.
     """
 
     __tablename__ = "session_subscriptions"
@@ -1711,6 +1713,7 @@ class SqlSessionSubscription(OmnigentBase):
     )
     subscriber_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
     target_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    quiet_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         # "Who watches this session" on every turn end.
