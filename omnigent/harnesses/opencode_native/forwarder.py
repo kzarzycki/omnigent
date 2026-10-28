@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 from collections import OrderedDict
@@ -44,6 +45,10 @@ from omnigent.harnesses.opencode_native.permissions import (
     normalize_for_policy,
     parse_permission_request,
     reply_body,
+)
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    raise_for_subagent_delivery_not_confirmed,
 )
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -219,6 +224,8 @@ class OpenCodeNativeForwarder:
         self._active_message_id: str | None = None
         self._running_response_id: str | None = None
         self._question_tasks: dict[str, asyncio.Task[None]] = {}
+        # Retries a status edge the runner refuses as not delivered to a parent.
+        self._status_retry = SubagentStatusRetry()
 
     async def seed_dedupe_from_history(self) -> None:
         """
@@ -366,6 +373,7 @@ class OpenCodeNativeForwarder:
             # Never leave a parked ``question`` task orphaned when the consume
             # loop exits (cap reached, return, or cancellation): cancel them all.
             await self._cancel_question_tasks()
+            await self._status_retry.aclose()
 
     async def _cancel_question_tasks(self) -> None:
         """Cancel and await every in-flight question park task."""
@@ -470,7 +478,13 @@ class OpenCodeNativeForwarder:
         data: _JsonObject = {"status": status}
         if extra:
             data.update(extra)
-        await self._post_event(_EXTERNAL_STATUS, data)
+        await self._status_retry.send(
+            self._session_id, functools.partial(self._post_status_once, data)
+        )
+
+    async def _post_status_once(self, data: _JsonObject) -> None:
+        """POST one status edge, raising only for a not-confirmed sub-agent delivery."""
+        raise_for_subagent_delivery_not_confirmed(await self._post_event(_EXTERNAL_STATUS, data))
 
     def _response_id(self, message_id: str | None) -> str:
         """Map an opencode assistant messageID to a per-turn ``response_id``.

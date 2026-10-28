@@ -8,12 +8,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 from collections.abc import Awaitable
 
 import httpx
 
+from omnigent.native._native_post_delivery import (
+    SubagentStatusRetry,
+    post_external_session_status,
+)
+
 _logger = logging.getLogger("omnigent.runner.app")
+
+# Retries completion edges the runner refuses as not delivered to a parent, off
+# the turn: the turn's end awaits each completion task.
+_STATUS_RETRY = SubagentStatusRetry()
 
 # Bounded wait for a sub-agent's start edge to mint its child session before the
 # completion edge records the outcome. The mint POST carries its own timeout, so
@@ -146,6 +156,7 @@ async def _complete_acp_subagent_child(
     summary: str,
     child_id_future: asyncio.Future[str],
     title: str = "",
+    status_retry: SubagentStatusRetry = _STATUS_RETRY,
 ) -> None:
     """Record a harness-reported sub-agent's outcome on its child session (end edge).
 
@@ -161,9 +172,8 @@ async def _complete_acp_subagent_child(
     :param child_id_future: Future the start edge resolves with the child id.
     :param title: The sub-agent's display name, used as the summary message's
         author; falls back to *child_key* when empty.
+    :param status_retry: Retries a completion edge refused as not delivered.
     """
-    from omnigent.native._native_post_delivery import post_external_session_status
-
     try:
         child_id = await asyncio.wait_for(
             asyncio.shield(child_id_future), timeout=_SUBAGENT_MINT_WAIT_S
@@ -185,14 +195,18 @@ async def _complete_acp_subagent_child(
             agent=title or child_key,
         )
     try:
-        await post_external_session_status(
-            client,
-            session_id=child_id,
-            status="idle" if ok else "failed",
-            output=summary or None,
-            # The harness reported this sub-agent's outcome itself, so a
-            # success edge is a confirmed turn completion, not a guess.
-            turn_completed=True if ok else None,
+        await status_retry.send(
+            child_id,
+            functools.partial(
+                post_external_session_status,
+                client,
+                session_id=child_id,
+                status="idle" if ok else "failed",
+                output=summary or None,
+                # The harness reported this sub-agent's outcome itself, so a
+                # success edge is a confirmed turn completion, not a guess.
+                turn_completed=True if ok else None,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — a status edge failure must not break the turn
         _logger.warning(
