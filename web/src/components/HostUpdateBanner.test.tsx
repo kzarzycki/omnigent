@@ -105,7 +105,7 @@ describe("HostUpdateBanner", () => {
       ["failed", "The update failed.", "not signed by a key in allowed_signers"],
       [
         "finished",
-        "The updater finished, but zarz-mbp still runs 1a2b3c4d5.",
+        "The updater finished. zarz-mbp runs 1a2b3c4d5 until it restarts.",
         "deferred: sessions mid-turn on this host",
       ],
     ] as const)(

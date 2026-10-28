@@ -62,7 +62,7 @@ function runSummary(host: Host, update: HostUpdate): string | null {
     case "failed":
       return "The update failed.";
     case "finished":
-      return `The updater finished, but ${host.name} still runs ${update.current}.`;
+      return `The updater finished. ${host.name} runs ${update.current} until it restarts.`;
     case "restarted":
       return `${host.name} restarted, but it still runs ${update.current}.`;
     default:
