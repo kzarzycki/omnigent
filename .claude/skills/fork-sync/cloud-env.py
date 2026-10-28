@@ -11,8 +11,10 @@ ALLOWED_SIGNERS plus the new key's line, into a new environment's variables;
 no copy of the private key is kept. It prints the environment id and the
 allowed_signers line every machine must add.
 
-ponytail: create only, the CLI has no update call; to rotate, create under a
-new name and archive the old environment in claude.ai.
+ponytail: create only. To rotate a key in place, update the existing environment
+with `POST /v1/environment_providers/<id>`, the same headers and its `name`,
+`description` and `config`, rather than creating a new one, which changes the
+environment id every pin names.
 """
 
 import base64
