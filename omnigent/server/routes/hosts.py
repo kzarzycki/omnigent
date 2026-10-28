@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import weakref
 from typing import Any
@@ -43,6 +44,7 @@ from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
+    HostHelloFrame,
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
@@ -161,6 +163,46 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
         return None
     padded = (*release, 0, 0, 0)[:3]
     return (padded[0], padded[1], padded[2])
+
+
+# Deploy settings for the host update banner: the commit hosts should run (the
+# server image has no git, so only the deploy knows it) and the command that
+# updates a host. A fork's builds all share one version, so only the commit says
+# a host is behind, and only the deploy knows its team's updater.
+_DEPLOY_COMMIT_ENV = "OMNIGENT_DEPLOY_COMMIT"
+_DEPLOY_UPDATE_COMMAND_ENV = "OMNIGENT_DEPLOY_UPDATE_COMMAND"
+# Shortest commit prefix trusted to name one commit (git's own default abbreviation).
+_MIN_COMMIT_PREFIX = 7
+
+
+def _same_commit(left: str, right: str) -> bool:
+    """Whether two commit ids, either possibly abbreviated, name the same commit."""
+    left, right = left.lower(), right.lower()
+    if min(len(left), len(right)) < _MIN_COMMIT_PREFIX:
+        return False
+    return left.startswith(right) or right.startswith(left)
+
+
+def _host_update(hello: HostHelloFrame | None) -> dict[str, str | None] | None:
+    """Describe the update a connected host needs, or ``None`` when it needs none.
+
+    A host on another commit than ``OMNIGENT_DEPLOY_COMMIT`` is outdated, and so
+    is one that reports no commit: it predates the build that reports one.
+    ``None`` for a host not connected here, or when the deploy sets no commit.
+
+    :param hello: The host's connect hello, ``None`` when not connected here.
+    :returns: ``{"current": ..., "target": ..., "command": ...}`` — the short
+        commit the host runs and should run, and the deploy's update command
+        (``None`` when it sets none) — or ``None``.
+    """
+    target_commit = (os.environ.get(_DEPLOY_COMMIT_ENV) or "").strip()
+    if hello is None or not target_commit:
+        return None
+    if hello.commit and _same_commit(hello.commit, target_commit):
+        return None
+    current = hello.commit[:9] if hello.commit else f"{hello.version} (unknown commit)"
+    command = (os.environ.get(_DEPLOY_UPDATE_COMMAND_ENV) or "").strip() or None
+    return {"current": current, "target": target_commit[:9], "command": command}
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -712,13 +754,14 @@ def create_hosts_router(
     flags = feature_flags or resolve_feature_flags()
     router = APIRouter()
 
-    def _reported_build(host_id: str) -> dict[str, str | None]:
-        """Version and commit from the live hello; ``None`` when not connected here."""
+    def _reported_build(host_id: str) -> dict[str, Any]:
+        """Version, commit and update target from the live hello; ``None`` if not here."""
         conn = host_registry.get(host_id)
         hello = conn.hello if conn is not None else None
         return {
             "version": hello.version if hello else None,
             "commit": hello.commit if hello else None,
+            "update": _host_update(hello),
         }
 
     @router.get("/hosts")
@@ -731,8 +774,9 @@ def create_hosts_router(
         :param request: The incoming request (for auth).
         :returns: ``{"hosts": [...]}`` with host details — ``host_id``,
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
-            ``configured_harnesses``, and ``gateway_inference`` (``None`` when
-            no connected host has reported it to this replica).
+            ``configured_harnesses``, ``gateway_inference`` (``None`` when
+            no connected host has reported it to this replica), and
+            ``version`` / ``commit`` / ``update`` (see :func:`_host_update`).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user
