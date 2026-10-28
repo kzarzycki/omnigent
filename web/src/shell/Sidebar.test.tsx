@@ -2396,6 +2396,33 @@ describe("Sidebar project sections", () => {
     expect(within(projectSection).getByText("conv_filed")).toBeInTheDocument();
   });
 
+  it.each([
+    ["a blank legacy label", { omni_project: "" }],
+    ["no legacy label", {}],
+  ])("auto-expands the folder of a session filed by project_id with %s", (_shape, labels) => {
+    projectsMock.push("Customer X");
+    mockConversations([conv("conv_filed", "Claude Code", { project_id: "p_Customer X", labels })]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/conv_filed"]}>
+              <Routes>
+                <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>,
+    );
+
+    const header = screen.getByRole("button", { name: /^Customer X/ });
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    const projectSection = screen.getByText("Customer X").closest("section")!;
+    expect(within(projectSection).getByText("conv_filed")).toBeInTheDocument();
+  });
+
   it("moves a pinned project session out into the global Pinned section", () => {
     projectsMock.push("Customer X");
     mockConversations([
