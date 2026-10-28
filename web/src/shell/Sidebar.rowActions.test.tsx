@@ -911,6 +911,28 @@ describe("pinned row project flyout", () => {
     );
   });
 
+  it("shows the session's status line in the flyout for a pinned, project-owned row", async () => {
+    mocks.pinnedStore.set(["conv_1"]);
+    mockConversations([
+      { ...CONV, labels: { omni_project: "Moonshot", "status.line": "waits on CI" } },
+    ]);
+    renderSidebar();
+
+    fireEvent.focus(screen.getByRole("link", { name: /My Session/ }));
+    const flyout = await screen.findByTestId("pinned-project-flyout");
+    expect(within(flyout).getByTestId("session-tooltip-status")).toHaveTextContent("waits on CI");
+  });
+
+  it("omits the status line from the flyout when the session has none", async () => {
+    mocks.pinnedStore.set(["conv_1"]);
+    mockConversations([{ ...CONV, labels: { omni_project: "Moonshot" } }]);
+    renderSidebar();
+
+    fireEvent.focus(screen.getByRole("link", { name: /My Session/ }));
+    const flyout = await screen.findByTestId("pinned-project-flyout");
+    expect(within(flyout).queryByTestId("session-tooltip-status")).toBeNull();
+  });
+
   it("shows the project's real emoji icon in the flyout when the project has one", async () => {
     // The flyout mirrors the folder/picker: a first-class project that carries a
     // chosen emoji surfaces that glyph next to its name, not the generic folder.
