@@ -3186,14 +3186,23 @@ class PermissionObject(BaseModel):
     level: int
 
 
+# Longest quiet period a subscription may ask for: one day.
+MAX_SUBSCRIPTION_QUIET_SECONDS = 86400
+
+
 class SessionSubscriptionRequest(BaseModel):
     """
     Request body for ``POST /v1/sessions/{id}/subscriptions``.
 
     :param session_id: The session to watch, e.g. ``"conv_abc123"``.
+    :param quiet_seconds: Hold each completed turn end's notice this long,
+        posting only once the watched session and its direct children have
+        settled, e.g. ``300``. ``0`` or absent posts every notice at once.
+        Subscribing again sets it.
     """
 
     session_id: str = Field(min_length=1, max_length=64)
+    quiet_seconds: int | None = Field(default=None, ge=0, le=MAX_SUBSCRIPTION_QUIET_SECONDS)
 
     @field_validator("session_id")
     @classmethod
@@ -3209,10 +3218,13 @@ class SessionSubscriptionObject(BaseModel):
 
     :param subscriber_id: The session that receives the notices.
     :param session_id: The watched session.
+    :param quiet_seconds: How long a completed turn end's notice is held;
+        omitted when notices post at once.
     """
 
     subscriber_id: str
     session_id: str
+    quiet_seconds: int | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SessionSubscriptionList(BaseModel):

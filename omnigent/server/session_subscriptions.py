@@ -21,6 +21,12 @@ duplicate costs the reader one history read while a lost one stalls it.
 Settled rows are pruned after a retention window, except a prompt's, which is
 kept while its target may still have it pending.
 
+A subscription with a quiet period holds a completed turn end's row until that
+period has passed, and a newer held end replaces it; the sweep posts it then,
+or holds it again while the target or a direct child is running. Failures,
+cancels, prompts and an end whose last reply has a line starting with one of
+``_SETTLED_MARKERS`` post at once.
+
 The server configures this module once in ``create_app``; until then every
 entry point is a no-op.
 """
@@ -35,14 +41,14 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, Literal, cast
 
 from omnigent.db.db_models import current_workspace_id, workspace_scope
-from omnigent.entities import Conversation
+from omnigent.entities import Conversation, MessageData
 from omnigent.harness_aliases import is_native_harness
 from omnigent.runtime import pending_elicitations
 from omnigent.server.auth import LEVEL_READ
 from omnigent.server.permissions import check_session_access
 from omnigent.server.subagent_activity import latest_turn_id
 from omnigent.stores import ConversationStore
-from omnigent.stores.conversation_store import SubscriptionDelivery
+from omnigent.stores.conversation_store import SessionSubscription, SubscriptionDelivery
 from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
@@ -89,6 +95,11 @@ _SKIP = object()
 _PROMPT = 0
 _TURN_OUTCOMES: dict[int, TurnOutcome] = {1: "completed", 2: "cancelled", 3: "failed"}
 _TURN_CODES: dict[str, int] = {outcome: code for code, outcome in _TURN_OUTCOMES.items()}
+# A completed turn end held for the subscription's quiet period.
+_HELD_COMPLETED = 4
+# A line of the last reply starting with one of these ends the turn for good,
+# so its notice skips the quiet period.
+_SETTLED_MARKERS = ("DONE", "USER NEEDED", "PARKED")
 
 
 def configure(
@@ -177,7 +188,35 @@ async def record_turn_end(
             return
         # A runner can die or be stopped before the turn wrote anything.
         key = target_id
-    await _record(target_id, _event_key("turn", key), _TURN_CODES[outcome])
+
+    async def hold() -> bool:
+        return not await _names_a_settled_end(target_id, store)
+
+    await _record(
+        target_id,
+        _event_key("turn", key),
+        _TURN_CODES[outcome],
+        hold=hold if outcome == "completed" else None,
+    )
+
+
+async def _names_a_settled_end(target_id: str, store: ConversationStore) -> bool:
+    """Whether the target's last reply has a line starting with a settled marker."""
+    from omnigent.server.routes._sessions.helpers import _message_text
+
+    latest = await asyncio.to_thread(store.list_items, target_id, limit=20, order="desc")
+    reply = next(
+        (
+            row.data
+            for row in latest.data
+            if isinstance(row.data, MessageData)
+            and row.data.role == "assistant"
+            and not row.data.is_meta
+        ),
+        None,
+    )
+    text = _message_text(reply.content) if reply is not None else None
+    return any(line.lstrip().startswith(_SETTLED_MARKERS) for line in (text or "").splitlines())
 
 
 def notify_turn_end(
@@ -352,9 +391,19 @@ def _owner(store: ConversationStore, session: Conversation) -> str | None:
 
 
 async def _record(
-    target_id: str, event_key: str, outcome: int, *, only: str | None = None
+    target_id: str,
+    event_key: str,
+    outcome: int,
+    *,
+    only: str | None = None,
+    hold: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Record the event for each subscriber (or *only* one), then post the new rows.
+
+    When *hold* says so, a subscriber with a quiet period gets a held row
+    instead, which the sweep posts once that period has passed; *hold* is
+    asked only once such a subscriber is found. A turn end posted at once
+    settles the subscriber's older held row.
 
     :raises Exception: A page could not be recorded; earlier pages stay recorded
         and a retried call skips them.
@@ -364,21 +413,38 @@ async def _record(
         return
     workspace_id = current_workspace_id()
     after: str | None = None
-    leased_until = int(time.time()) + _LEASE_S
+    now = int(time.time())
+    leased_until = now + _LEASE_S
+    holding: bool | None = None
     while True:
         if only is not None:
-            page = [only]
+            page = [SessionSubscription(only, target_id)]
         else:
             page = await asyncio.to_thread(
-                store.list_session_subscribers, target_id, after=after, limit=_SUBSCRIBER_PAGE
+                store.list_session_subscriber_settings,
+                target_id,
+                after=after,
+                limit=_SUBSCRIBER_PAGE,
             )
+        held: dict[int, list[str]] = {}
+        if hold is not None and holding is None and any(s.quiet_seconds for s in page):
+            holding = await hold()
+        for subscription in page:
+            if holding and subscription.quiet_seconds:
+                held.setdefault(subscription.quiet_seconds, []).append(subscription.subscriber_id)
+        for quiet_seconds, subscriber_ids in held.items():
+            await _hold(store, subscriber_ids, target_id, event_key, now + quiet_seconds)
+        held_ids = {subscriber_id for group in held.values() for subscriber_id in group}
         created = await asyncio.to_thread(
             store.enqueue_subscription_deliveries,
-            page,
+            [s.subscriber_id for s in page if s.subscriber_id not in held_ids],
             target_id,
             event_key,
             outcome,
             due_at=leased_until,
+            # A turn end posted at once makes an earlier held end stale.
+            supersede_at=now if outcome in _TURN_OUTCOMES else None,
+            superseded_outcome=_HELD_COMPLETED,
         )
         for subscriber_id in created:
             _spawn(
@@ -391,7 +457,50 @@ async def _record(
             )
         if only is not None or len(page) < _SUBSCRIBER_PAGE:
             return
-        after = page[-1]
+        after = page[-1].subscriber_id
+
+
+async def _hold(
+    store: ConversationStore,
+    subscriber_ids: list[str],
+    target_id: str,
+    event_key: str,
+    due: int,
+) -> None:
+    """Record held completed rows due at *due*, replacing older held ones."""
+    created = await asyncio.to_thread(
+        store.enqueue_subscription_deliveries,
+        subscriber_ids,
+        target_id,
+        event_key,
+        _HELD_COMPLETED,
+        due_at=due,
+        # Holding is not an attempt, so the hold's claims leave the backoff alone.
+        attempts=0,
+        supersede_at=int(time.time()),
+    )
+    if created:
+        _wake_at(due)
+
+
+async def _busy(store: ConversationStore, target_id: str) -> bool:
+    """Whether the target or one of its live direct children is running."""
+    children = await asyncio.to_thread(store.list_child_conversation_ids_by_parent, [target_id])
+    sessions = await asyncio.to_thread(
+        store.get_conversations, [target_id, *children.get(target_id, [])]
+    )
+    return any(
+        session.live_status == "running" and not session.archived for session in sessions.values()
+    )
+
+
+async def _busy_or_unknown(store: ConversationStore, target_id: str) -> bool:
+    """:func:`_busy`, counting a failed check as busy so the hold is extended, not cut short."""
+    try:
+        return await _busy(store, target_id)
+    except Exception:
+        _logger.warning("Could not check whether %s is running", target_id, exc_info=True)
+        return True
 
 
 async def _post_recorded(delivery: SubscriptionDelivery, leased_until: int) -> None:
@@ -456,6 +565,8 @@ async def _render(store: ConversationStore, target_id: str, outcome: int) -> str
         return None
     if outcome == _PROMPT:
         return prompt_notice(target.title, target_id)
+    if outcome == _HELD_COMPLETED:
+        return turn_notice(target.title, target_id, "completed")
     return turn_notice(target.title, target_id, _TURN_OUTCOMES[outcome])
 
 
@@ -568,17 +679,34 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
     with workspace_scope(delivery.workspace_id):
         key = (delivery.subscriber_id, delivery.target_id, delivery.event_key)
         try:
+            subscription = (
+                await asyncio.to_thread(
+                    store.get_session_subscriptions, delivery.subscriber_id, [delivery.target_id]
+                )
+            ).get(delivery.target_id)
             owner = (
                 await _deliverable(store, delivery.subscriber_id, delivery.target_id)
-                if await asyncio.to_thread(
-                    store.has_session_subscription, delivery.subscriber_id, delivery.target_id
-                )
+                if subscription is not None
                 else _SKIP
             )
             if owner is _SKIP:
                 await asyncio.to_thread(
                     store.settle_subscription_delivery, *key, settled_at=int(time.time())
                 )
+                return
+            quiet_seconds = cast(SessionSubscription, subscription).quiet_seconds
+            # A held row's first claim is its hold ending; a later one retries a failed post.
+            if (
+                delivery.outcome == _HELD_COMPLETED
+                and delivery.attempts == 1
+                and quiet_seconds
+                and await _busy_or_unknown(store, delivery.target_id)
+            ):
+                due = int(time.time()) + quiet_seconds
+                await asyncio.to_thread(
+                    store.reschedule_subscription_delivery, *key, due_at=due, attempts=0
+                )
+                _wake_at(due)
                 return
         except Exception:
             _logger.warning(
