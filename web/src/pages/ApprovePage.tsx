@@ -41,6 +41,7 @@ interface ElicitationData {
   native_delivery?: NativePermissionDelivery;
   permission_directories?: string[];
   file_edit?: unknown;
+  ask_user_question?: Record<string, unknown>;
 }
 
 type PageState =
@@ -175,6 +176,7 @@ export function ApprovePage() {
     state.kind === "pending" &&
     (Boolean(state.data.native_delivery) ||
       Boolean(state.data.permission_directories?.length) ||
+      Boolean(state.data.ask_user_question) ||
       fileEdit !== null);
 
   return (
@@ -243,6 +245,7 @@ export function ApprovePage() {
           nativeDelivery={state.data.native_delivery}
           permissionDirectories={state.data.permission_directories}
           fileEdit={fileEdit}
+          askUserQuestion={state.data.ask_user_question}
           onSubmit={(_id, action, content, meta) => void submit(action, content, meta)}
           keyboardActive
         />

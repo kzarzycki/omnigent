@@ -129,7 +129,9 @@ class ElicitationCoordinator:
         """
         self._pending.pop((session_id, elicitation_id), None)
 
-    async def await_verdict(self, session_id: str, elicitation_id: str) -> Verdict | object | None:
+    async def await_verdict(
+        self, session_id: str, elicitation_id: str, *, expires: bool = True
+    ) -> Verdict | object | None:
         """Block on the pre-:meth:`register`ed future until answered or timeout.
 
         Returns the :class:`Verdict` (a Slack click), :data:`RESOLVED_EXTERNALLY`
@@ -138,6 +140,7 @@ class ElicitationCoordinator:
         when no one answered within the timeout (the caller then declines so the
         server doesn't hang). Registers on demand if the caller skipped
         :meth:`register` (keeps the method usable standalone, e.g. in tests).
+        ``expires=False`` waits with no timeout, for a question nothing is parked on.
         """
         key = (session_id, elicitation_id)
         future = self._pending.get(key)
@@ -145,7 +148,7 @@ class ElicitationCoordinator:
             self.register(session_id, elicitation_id)
             future = self._pending[key]
         try:
-            return await asyncio.wait_for(future, timeout=self._timeout)
+            return await asyncio.wait_for(future, timeout=self._timeout if expires else None)
         except TimeoutError:
             return None
         finally:

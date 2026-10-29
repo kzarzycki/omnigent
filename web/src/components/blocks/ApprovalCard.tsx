@@ -63,6 +63,7 @@ import {
   exitPlanModePlan,
 } from "@/lib/askUserQuestion";
 import { askUserQuestionSignature } from "@/lib/askUserQuestionDrafts";
+import { NON_BLOCKING_QUESTION_POLICY } from "@/lib/blocks";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
@@ -464,7 +465,11 @@ export function ApprovalCard({
   // ("pre_tool_use", "codex_command_approval", ...). It carries no
   // information the card doesn't already show, so hide it for them.
   const showPhase = phase !== "" && !isNativePolicy;
-  const askUserQuestionTitle = questionPromptTitle(policyName, phase);
+  // `sys_ask_user_question` is harness-neutral, so its card names no vendor.
+  const askUserQuestionTitle =
+    policyName === NON_BLOCKING_QUESTION_POLICY
+      ? "The agent has questions"
+      : questionPromptTitle(policyName, phase);
 
   const fileEditDiff = useMemo(
     () => (fileEdit ? getFileEditDiff(fileEdit.toolName, fileEdit.toolInput) : null),

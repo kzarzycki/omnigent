@@ -27,6 +27,8 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from omnigent.tools.builtins.ask_user_question import QUESTION_ID_PREFIX
+
 if TYPE_CHECKING:
     from omnigent.entities.conversation import Conversation
     from omnigent.stores import ConversationStore
@@ -178,7 +180,8 @@ class SubagentBlockNotifier:
                 with contextlib.suppress(RuntimeError):
                     self._loop.call_soon_threadsafe(signal.set)
             return
-        if event_type != _REQUEST_TYPE:
+        # A sys_ask_user_question card does not block the child; its answer is a message.
+        if event_type != _REQUEST_TYPE or elicitation_id.startswith(QUESTION_ID_PREFIX):
             return
         with self._lock:
             if key in self._notified:

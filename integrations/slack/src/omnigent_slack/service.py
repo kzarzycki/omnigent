@@ -979,7 +979,8 @@ class SlackOmnigentService:
         finally:
             # Settle any card still open (turn ended before its resolution push,
             # or was torn down) so no resolver task leaks; an unanswered one is
-            # declined server-side to release the park.
+            # declined server-side to release the park. A non-blocking question
+            # parks nothing, so its card stays answerable past the turn.
             await self._elicitation.finish_pending(omnigent, turn, state.elicitations)
         if state.aborted:
             raise _TurnAborted("")  # already delivered; signal the caller to stop

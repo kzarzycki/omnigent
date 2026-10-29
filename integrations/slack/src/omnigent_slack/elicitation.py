@@ -64,6 +64,9 @@ class PendingElicitation:
     # Set when a Slack verdict was clicked but its POST to the server failed, so
     # the server never received it and stays parked on the request.
     delivery_failed: bool = False
+    # Set when the turn ended with a non-blocking question still unanswered; its
+    # resolver then finalizes the card itself, since no turn loop will.
+    detached: bool = False
 
 
 @dataclass
@@ -231,7 +234,7 @@ class ElicitationController:
             return
         pending = PendingElicitation(request=request, card_ts=card_ts)
         state.pending[request.elicitation_id] = pending
-        resolver = asyncio.create_task(self._resolve_verdict(omnigent, request, pending))
+        resolver = asyncio.create_task(self._resolve_verdict(omnigent, turn, request, pending))
         pending.resolver = resolver
         # Track for shutdown cancellation; drop from the set when it finishes.
         self._resolvers.add(resolver)
@@ -271,6 +274,7 @@ class ElicitationController:
     async def _resolve_verdict(
         self,
         omnigent: OmnigentClient,
+        turn: SlackTurn,
         request: ElicitationRequest,
         pending: PendingElicitation,
     ) -> None:
@@ -285,8 +289,14 @@ class ElicitationController:
         declines so the server-side park releases. A POST that raises is logged
         and flagged (``delivery_failed``) WITHOUT recording the verdict, so the
         card never shows "Approved/Denied" for an answer the server never got.
+        A non-blocking question never times out, and once its turn has ended
+        this task finalizes the card after delivering the answer.
         """
-        verdict = await self._coordinator.await_verdict(request.session_id, request.elicitation_id)
+        verdict = await self._coordinator.await_verdict(
+            request.session_id,
+            request.elicitation_id,
+            expires=not request.is_nonblocking_question,
+        )
         if verdict is RESOLVED_EXTERNALLY:
             # Already resolved server-side; post nothing (the loop finalizes).
             return
@@ -322,8 +332,11 @@ class ElicitationController:
                 request.elicitation_id,
                 verdict.accepted,
             )
-            return
-        pending.verdict = verdict
+        else:
+            pending.verdict = verdict
+        if pending.detached and not pending.finalized:
+            pending.finalized = True
+            await self._finalize_card(turn, pending, self._outcome(pending))
 
     async def on_resolved(
         self, turn: SlackTurn, elicitation_id: str, state: ElicitationTurnState
@@ -367,10 +380,16 @@ class ElicitationController:
         delivery) is finalized with that outcome. A card left genuinely
         unanswered — the server is still parked on it — is DECLINED here so the
         server-side park releases, and labelled "abandoned" rather than
-        mislabelled "answered elsewhere" (nothing answered it).
+        mislabelled "answered elsewhere" (nothing answered it). An unanswered
+        non-blocking question parks nothing, so its card and resolver stay live
+        until the user answers; it is never declined.
         """
         for _eid, pending in list(state.pending.items()):
             if pending.finalized:
+                continue
+            nonblocking = pending.request.is_nonblocking_question
+            if nonblocking and pending.verdict is None and not pending.delivery_failed:
+                pending.detached = True
                 continue
             pending.finalized = True
             resolver = pending.resolver
@@ -391,7 +410,7 @@ class ElicitationController:
             server_park_released = not pending.delivery_failed and (
                 pending.verdict is not None or pending.timed_out
             )
-            if server_park_released:
+            if server_park_released or nonblocking:
                 outcome = self._outcome(pending)
             else:
                 # Nothing reached the server (unanswered, or delivery failed) and

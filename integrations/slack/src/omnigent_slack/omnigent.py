@@ -16,6 +16,7 @@ import httpx
 # and pool here build on them. Re-exported below so existing
 # ``from omnigent_slack.omnigent import extract_delta`` sites keep working.
 from omnigent_slack.events import (
+    NONBLOCKING_QUESTION_POLICY,
     ElicitationOption,
     ElicitationQuestion,
     ElicitationRequest,
@@ -1111,7 +1112,11 @@ class OmnigentClient:
         status = snapshot.get("status")
         return SessionActivity(
             status=status if isinstance(status, str) else None,
-            pending_elicitation=bool(self._parse_pending(snapshot)),
+            # A sys_ask_user_question card parks no turn, so it doesn't hold back new messages.
+            pending_elicitation=any(
+                (e.get("params") or {}).get("policy_name") != NONBLOCKING_QUESTION_POLICY
+                for e in self._parse_pending(snapshot)
+            ),
         )
 
     async def get_session_info(self, session_id: str) -> SessionInfo:

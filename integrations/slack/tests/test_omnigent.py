@@ -1196,6 +1196,18 @@ async def test_get_session_activity_maps_server_state() -> None:
         route.mock(return_value=snap("idle", [{"elicitation_id": "e2"}]))
         a = await client.get_session_activity("conv_1")
         assert not a.is_busy and a.needs_user_action
+
+        # A non-blocking question waits without parking the turn: messages still go through.
+        question = {
+            "elicitation_id": "question_1",
+            "params": {"policy_name": "sys_ask_user_question"},
+        }
+        route.mock(return_value=snap("idle", [question]))
+        a = await client.get_session_activity("conv_1")
+        assert not a.needs_user_action
+        route.mock(return_value=snap("idle", [question, {"elicitation_id": "e3"}]))
+        a = await client.get_session_activity("conv_1")
+        assert a.needs_user_action
     finally:
         await client.aclose()
 

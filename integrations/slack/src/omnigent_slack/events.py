@@ -43,6 +43,10 @@ class ElicitationQuestion:
     multi_select: bool = False
 
 
+# Policy name of the tool that asks without holding the turn open.
+NONBLOCKING_QUESTION_POLICY = "sys_ask_user_question"
+
+
 @dataclass(frozen=True, slots=True)
 class ElicitationRequest:
     """A server-initiated request parsed off the event stream.
@@ -74,6 +78,15 @@ class ElicitationRequest:
     @property
     def is_form(self) -> bool:
         return bool(self.questions)
+
+    @property
+    def is_nonblocking_question(self) -> bool:
+        """Whether this is a ``sys_ask_user_question`` card, which parks no turn.
+
+        Its answer reaches the session as a later message, so the card must
+        outlive the turn that asked it and never be declined on the user's behalf.
+        """
+        return self.policy_name == NONBLOCKING_QUESTION_POLICY
 
     @property
     def is_supported(self) -> bool:
