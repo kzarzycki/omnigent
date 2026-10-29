@@ -188,3 +188,261 @@ def test_relay_process_failure_cleanup(tmp_path: Path, failure: str) -> None:
     finally:
         os.close(master)
         os.close(slave)
+
+
+# macOS before Python 3.13 has no os.waitid; a wrapper models that elsewhere.
+_WITHOUT_WAITID = "if hasattr(os, 'waitid'): del os.waitid\n"
+_WAITID_CASES = [
+    pytest.param(True, marks=pytest.mark.skipif(not hasattr(os, "waitid"), reason="no os.waitid")),
+    False,
+]
+
+
+def test_relay_exits_on_sigterm_when_child_exit_waits_for_master_close(tmp_path: Path) -> None:
+    """A stop must not deadlock on a child whose exit waits for the PTY master to close."""
+    ready = tmp_path / "ready"
+    # Model macOS: a child exiting with unread PTY output is not reapable until the master closes.
+    wrapper = (
+        "import os,pty,time\n"
+        "from omnigent.terminals.program_status import main\n"
+        "real_fork, real_close = pty.fork, os.close\n"
+        "real_waitpid, real_waitid = os.waitpid, getattr(os, 'waitid', None)\n"
+        "masters = []\n"
+        "def fork():\n"
+        " pid, fd = real_fork()\n"
+        " if pid: masters.append(fd)\n"
+        " return pid, fd\n"
+        "def close(fd):\n"
+        " if fd in masters: masters.remove(fd)\n"
+        " real_close(fd)\n"
+        "def waitpid(pid, flags):\n"
+        " while masters:\n"
+        "  if flags & os.WNOHANG: return 0, 0\n"
+        "  time.sleep(0.01)\n"
+        " return real_waitpid(pid, flags)\n"
+        "def waitid(idtype, pid, flags):\n"
+        " if masters: return None\n"
+        " return real_waitid(idtype, pid, flags)\n"
+        "pty.fork, os.close, os.waitpid = fork, close, waitpid\n"
+        "if real_waitid: os.waitid = waitid\n"
+        "main()\n"
+    )
+    child = (
+        "import os,signal,time; from pathlib import Path; "
+        "[signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGHUP)]; "
+        f"ready = Path({str(ready)!r}); pending = ready.with_suffix('.tmp'); "
+        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)"
+    )
+    master, slave = os.openpty()
+    try:
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                "--state-file",
+                str(tmp_path / "status.json"),
+                "--app",
+                "claude-code",
+                "--",
+                sys.executable,
+                "-c",
+                child,
+            ],
+            stdin=slave,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    assert process.poll() is None
+                    time.sleep(0.01)
+                assert ready.exists(), "child never became ready"
+                process.terminate()
+                process.wait(timeout=10)
+                with pytest.raises(ProcessLookupError):
+                    os.kill(int(ready.read_text()), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
+def test_relay_stop_kills_descendants_after_child_exits(tmp_path: Path, has_waitid: bool) -> None:
+    """A descendant ignoring SIGHUP and SIGTERM must not outlive the stopped relay.
+
+    With ``os.waitid`` the group kill comes before the child is reaped, while its PID
+    cannot be reused; without it (macOS before Python 3.13) the relay still works.
+    """
+    ready = tmp_path / "ready"
+    errors = tmp_path / "relay-errors"
+    wrapper = (
+        "import os\n"
+        "from omnigent.terminals.program_status import main\n"
+        "real_killpg = os.killpg\n"
+        + ("" if has_waitid else _WITHOUT_WAITID)
+        + "def killpg(pgid, sig):\n"
+        " flags = os.WEXITED | os.WNOHANG | os.WNOWAIT\n"
+        " try: hasattr(os, 'waitid') and os.waitid(os.P_PID, pgid, flags)\n"
+        " except ChildProcessError: os.write(2, b'killpg-after-reap\\n')\n"
+        " real_killpg(pgid, sig)\n"
+        "os.killpg = killpg\n"
+        "main()\n"
+    )
+    descendant = (
+        "import os,signal,time; from pathlib import Path; "
+        "[signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGHUP)]; "
+        f"ready = Path({str(ready)!r}); pending = ready.with_suffix('.tmp'); "
+        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)"
+    )
+    child = (
+        f"import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
+        "time.sleep(60)"
+    )
+    master, slave = os.openpty()
+    descendant_pid = None
+    try:
+        with (
+            errors.open("wb") as stderr,
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    wrapper,
+                    "--state-file",
+                    str(tmp_path / "status.json"),
+                    "--app",
+                    "claude-code",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    child,
+                ],
+                stdin=slave,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+            ) as process,
+        ):
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    assert process.poll() is None
+                    time.sleep(0.01)
+                assert ready.exists(), "descendant never became ready"
+                descendant_pid = int(ready.read_text())
+                process.terminate()
+                process.wait(timeout=10)
+                deadline = time.monotonic() + 5
+                while _alive(descendant_pid) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert not _alive(descendant_pid)
+                assert b"killpg-after-reap" not in errors.read_bytes()
+                assert b"Traceback" not in errors.read_bytes()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+    finally:
+        if descendant_pid is not None and _alive(descendant_pid):
+            os.kill(descendant_pid, 9)
+        os.close(master)
+        os.close(slave)
+
+
+def _alive(pid: int) -> bool:
+    """Whether *pid* runs and is not a zombie awaiting its reaper."""
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
+def test_relay_keeps_child_exit_status(tmp_path: Path, has_waitid: bool) -> None:
+    """The child's own exit status passes through, with or without ``os.waitid``."""
+    wrapper = (
+        "import os\n"
+        + ("" if has_waitid else _WITHOUT_WAITID)
+        + "from omnigent.terminals.program_status import main\n"
+        "main()\n"
+    )
+    master, slave = os.openpty()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                "--state-file",
+                str(tmp_path / "status.json"),
+                "--app",
+                "claude-code",
+                "--",
+                "sh",
+                "-c",
+                "exit 7",
+            ],
+            stdin=slave,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 7, result.stdout + result.stderr
+        assert b"Traceback" not in result.stderr
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
+def test_relay_forwards_input_to_a_running_child(tmp_path: Path, has_waitid: bool) -> None:
+    """Checking for the child's exit never blocks input forwarding while it runs."""
+    import select
+
+    wrapper = (
+        "import os\n"
+        + ("" if has_waitid else _WITHOUT_WAITID)
+        + "from omnigent.terminals.program_status import main\n"
+        "main()\n"
+    )
+    master, slave = os.openpty()
+    try:
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                "--state-file",
+                str(tmp_path / "status.json"),
+                "--app",
+                "claude-code",
+                "--",
+                "sh",
+                "-c",
+                'echo READY; read line; [ "$line" = ping ] && exit 5; exit 1',
+            ],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            try:
+                assert process.stdout is not None
+                output = b""
+                deadline = time.monotonic() + 5
+                while b"READY" not in output and time.monotonic() < deadline:
+                    if select.select([process.stdout], [], [], 0.1)[0]:
+                        output += os.read(process.stdout.fileno(), 4096)
+                assert b"READY" in output, output
+                os.write(master, b"ping\r")
+                assert process.wait(timeout=10) == 5
+            finally:
+                if process.poll() is None:
+                    process.kill()
+    finally:
+        os.close(master)
+        os.close(slave)
