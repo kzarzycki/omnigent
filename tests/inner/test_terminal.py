@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -3286,7 +3287,6 @@ def test_reap_orphaned_terminals_reaps_only_dead_owner_dirs(
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
     """
-    import os
 
     def _raise_if_called(*args: object, **kwargs: object) -> None:
         """Fail the test if kill-server runs with no socket present."""
@@ -3620,3 +3620,40 @@ async def test_read_join_wrapped_asks_tmux_to_join_wrapped_rows(tmp_path: Path) 
     assert calls[1] == ("capture-pane", "-t", instance.tmux_target, "-p", "-J")
     assert plain["screen"] == joined["screen"]
     assert "https://signin.example.com/device?user_code=ABCDEFGH" in joined["screen"]
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="requires a real tmux binary")
+@pytest.mark.asyncio
+async def test_close_stops_relay_and_child_that_ignore_hangup_real_tmux(
+    tmp_path: Path, short_tmp_parent: Path
+) -> None:
+    """Closing a terminal leaves no relay or child behind, even one ignoring SIGHUP and SIGTERM."""
+    instance = TerminalInstance(
+        name="claude",
+        session_key="s1",
+        socket_path=short_tmp_parent / "tmux.sock",
+        private_dir=tmp_path / "instance",
+        command="sh",
+        args=["-c", "trap '' HUP TERM; sleep 60"],
+        program_status_app="claude-code",
+    )
+    instance.private_dir.mkdir()
+    try:
+        await instance.launch(cwd=tmp_path)
+        assert instance.program_status is not None
+        for _ in range(250):
+            if instance.program_status.child_pid is not None:
+                break
+            await asyncio.sleep(0.02)
+        child_pid = instance.program_status.child_pid
+        assert child_pid is not None
+        relay_pid = json.loads(instance.program_status.path.read_text())["relay_pid"]
+    finally:
+        await instance.close()
+
+    for _ in range(500):
+        if not any(terminal_mod._process_alive(pid) for pid in (relay_pid, child_pid)):
+            break
+        await asyncio.sleep(0.02)
+    assert not terminal_mod._process_alive(relay_pid)
+    assert not terminal_mod._process_alive(child_pid)
