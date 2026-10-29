@@ -2877,7 +2877,10 @@ async def test_elicitation_choice_handler_declines_without_a_turn() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bridge", ["_elicitation_choice_handler", "_form_elicitation_handler"])
+@pytest.mark.parametrize(
+    "bridge",
+    ["_elicitation_choice_handler", "_form_elicitation_handler", "_ask_user_question_handler"],
+)
 @pytest.mark.parametrize("supported", [False, True])
 async def test_run_turn_installs_optional_bridges_only_where_supported(
     bridge: str,
@@ -2907,6 +2910,9 @@ async def test_run_turn_installs_optional_bridges_only_where_supported(
     ctx = TurnContext("resp_bridge", asyncio.Queue(), asyncio.Event())
     await adapter.run_turn(CreateResponseRequest(model="agent", input="hi"), ctx)
     assert (getattr(executor, bridge, None) is not None) is supported
+    if supported:
+        # Each optional bridge is wired to its own stable handler, not a sibling's.
+        assert getattr(executor, bridge) == getattr(adapter, f"_stable{bridge}")
     assert getattr(executor, "_elicitation_handler", None) is not None
 
 
@@ -2924,6 +2930,82 @@ async def test_form_elicitation_handler_decline_does_not_cancel_the_turn() -> No
     assert result.action == "decline"
     assert not ctx.cancelled.was_set
     assert ctx.seen[0][0] == "form-id"
+
+
+_ASK_INPUT = {
+    "questions": [
+        {
+            "question": "Which database?",
+            "header": "DB",
+            "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+            "multiSelect": False,
+        }
+    ]
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "content", "expected"),
+    [
+        ("accept", {"Which database?": "Postgres"}, "answered"),
+        ("accept", None, "allowed"),
+        ("decline", None, "denied"),
+    ],
+)
+async def test_claude_sdk_ask_user_question_is_one_question_card(
+    action: str,
+    content: dict[str, str] | None,
+    expected: str,
+) -> None:
+    """AskUserQuestion on the Claude SDK path parks one question card, not Allow/Reject.
+
+    The answer the card (or the elicitation-resolve API) sends back becomes
+    ``tool_input.answers``, so answering is the approval; a decline denies the
+    tool without cancelling the turn, as the claude-native hook does.
+    """
+    from types import SimpleNamespace
+
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.server.schemas import ElicitationResult
+
+    executor = ClaudeSDKExecutor(permission_mode="default")
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    executor._elicitation_handler = adapter._stable_elicitation_handler
+    executor._ask_user_question_handler = adapter._stable_ask_user_question_handler
+    ctx = _ElicitingTurnContext(ElicitationResult(action=action, content=content))
+    adapter._current_ctx = ctx  # type: ignore[assignment]
+
+    result = await executor._can_use_tool_gate(
+        "AskUserQuestion", _ASK_INPUT, SimpleNamespace(tool_use_id="tu_1")
+    )
+
+    (elicitation_id, params) = ctx.seen[0]
+    assert len(ctx.seen) == 1
+    # The runner recognises a question card by this prefix and doesn't stop the turn on decline.
+    assert elicitation_id.startswith("elicit_question_")
+    assert params.model_dump()["ask_user_question"] == {
+        "questions": [
+            {
+                "question": "Which database?",
+                "header": "DB",
+                "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+                "multiSelect": False,
+            }
+        ]
+    }
+    assert not ctx.cancelled.was_set
+    if expected == "answered":
+        assert isinstance(result, PermissionResultAllow)
+        assert result.updated_input == {**_ASK_INPUT, "answers": {"Which database?": "Postgres"}}
+    elif expected == "allowed":
+        assert isinstance(result, PermissionResultAllow)
+        assert result.updated_input is None
+    else:
+        assert isinstance(result, PermissionResultDeny)
 
 
 def test_translate_event_emits_subagent_started() -> None:
