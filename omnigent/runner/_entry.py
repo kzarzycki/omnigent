@@ -1623,7 +1623,7 @@ def create_app(
         _reaped_terminals = reap_orphaned_terminals()
         if _reaped_terminals:
             _logger.info(
-                "Reaped %d orphaned terminal tmux server(s) from prior runs",
+                "Reaped %d orphaned terminal(s) from prior runs",
                 _reaped_terminals,
                 extra={"session_id": runner_primary_session_id()},
             )

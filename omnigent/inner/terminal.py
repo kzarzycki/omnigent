@@ -911,9 +911,10 @@ def reap_orphaned_terminals() -> int:
     its owner's PID, namespace and boot at creation. A global maintenance
     sweep kills only servers with a proven dead owner in the same process
     domain. Legacy,
-    unreadable and foreign ownership records are preserved.
+    unreadable and foreign ownership records are preserved. It then kills
+    program-status relays left behind once their instance dir is gone.
 
-    :returns: The number of orphaned instance dirs reaped.
+    :returns: The number of orphaned instance dirs and relays reaped.
     """
     if not _tmux_available():
         return 0
@@ -961,6 +962,88 @@ def reap_orphaned_terminals() -> int:
             socket_path,
             "" if had_socket else " was already gone",
             claim.pid,
+        )
+        reaped += 1
+    return reaped + _reap_orphaned_status_relays()
+
+
+_PROC_SELF_ROOT = Path("/proc/self/root")
+
+
+def _process_root(pid: int) -> Path:
+    """The filesystem root *pid* sees: its own mount namespace on Linux, the host's elsewhere."""
+    return Path(f"/proc/{pid}/root") if _PROC_SELF_ROOT.exists() else Path("/")
+
+
+def _orphaned_relay_dir(pid: int, uid: int | None, cmdline: list[str], root: Path) -> Path | None:
+    """
+    Return the gone instance dir of a relay this user started from this module under *root*.
+
+    :returns: The instance dir, or ``None`` when the process is not such a relay
+        or its dir exists. A dir that cannot be checked reads as present.
+    """
+    from omnigent.terminals import program_status
+
+    script_suffix = os.path.join("omnigent", "terminals", "program_status.py")
+    if (
+        uid != os.getuid()
+        or len(cmdline) < 4
+        or not cmdline[1].endswith(script_suffix)
+        or cmdline[2] != "--state-file"
+    ):
+        return None
+    state_file = Path(cmdline[3])
+    instance_dir = state_file.parent
+    if (
+        state_file.name != program_status.STATE_FILE_NAME
+        or not instance_dir.name.startswith(_TERMINAL_DIR_PREFIX)
+        or Path(os.path.realpath(instance_dir.parent)) != root
+    ):
+        return None
+    try:
+        (_process_root(pid) / instance_dir.relative_to("/")).stat()
+    except FileNotFoundError:
+        return instance_dir
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _reap_orphaned_status_relays() -> int:
+    """
+    Kill this user's program-status relays whose terminal instance dir is gone.
+
+    A relay whose child cannot finish exiting outlives its tmux server and
+    holds two PTYs, so the instance-dir sweep alone never frees them. A live
+    terminal always keeps its dir, so its relay is never a candidate.
+
+    :returns: The number of relays killed.
+    """
+    import psutil
+
+    root = _terminals_tmp_root().resolve()
+    reaped = 0
+    for process in psutil.process_iter(["uids", "cmdline"]):
+        uids = process.info["uids"]
+        instance_dir = _orphaned_relay_dir(
+            process.pid, uids.real if uids else None, process.info["cmdline"] or [], root
+        )
+        if instance_dir is None:
+            continue
+        try:
+            children = process.children()
+            # Kill the relay first: closing its PTY master lets a child stuck exiting finish.
+            process.kill()
+        except psutil.Error:
+            continue
+        for child in children:
+            with contextlib.suppress(OSError, psutil.Error):
+                if child.is_running():
+                    os.killpg(child.pid, signal.SIGKILL)
+        logger.warning(
+            "orphan sweep killed program-status relay %s (terminal instance dir %s is gone)",
+            process.pid,
+            instance_dir.name,
         )
         reaped += 1
     return reaped
@@ -1696,7 +1779,7 @@ class TerminalInstance:
         else:
             inner_cmd = [self.command, *self.args]
         if self.program_status_app is not None:
-            status_path = self.private_dir / "program-status.json"
+            status_path = self.private_dir / program_status.STATE_FILE_NAME
             status_path.unlink(missing_ok=True)
             self.program_status = program_status.ProgramStatusReader(status_path)
             inner_cmd = [
