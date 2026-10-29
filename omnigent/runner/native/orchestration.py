@@ -7622,6 +7622,37 @@ def _claude_native_disallowed_tools_from_spec(
     return ()
 
 
+async def _launch_claude_native_terminal(
+    resource_registry: SessionResourceRegistry,
+    *,
+    agent_spec: AgentSpec | ResolvedSpec | None,
+    spec: TerminalEnvSpec,
+    **launch_kwargs: Any,
+) -> SessionResourceView:
+    """
+    Launch a session's Claude Code terminal with its agent's tool switches.
+
+    Every claude-native launch (runner auto-create, and the CLI's explicit
+    terminal spec on fresh start or cold resume) goes through here, so an
+    agent's ``native_ask_user_question: false`` holds however Claude starts.
+
+    :param resource_registry: Registry that launches the terminal.
+    :param agent_spec: The session's agent spec, or ``None`` when unknown.
+    :param spec: Terminal spec whose ``args`` end with Claude's own args.
+    :param launch_kwargs: Remaining
+        :meth:`SessionResourceRegistry.launch_required_terminal` arguments.
+    :returns: The launched terminal's resource view.
+    """
+    from omnigent.harnesses.claude_native.bridge import _merge_disallowed_tools
+
+    disallowed = _claude_native_disallowed_tools_from_spec(agent_spec)
+    if disallowed:
+        spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
+    return await resource_registry.launch_required_terminal(
+        spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
+    )
+
+
 def _native_startup_raw_instructions_from_spec(
     agent_spec: AgentSpec | ResolvedSpec | None,
 ) -> str | None:
@@ -9526,7 +9557,6 @@ async def _auto_create_claude_terminal(
         )
         or None,
         allowed_tools=routed_spawn_tools,
-        disallowed_tools=_claude_native_disallowed_tools_from_spec(agent_spec),
         # The route-turn hook is registered only when this session can
         # actually route; otherwise every submit would pay its round trip.
         turn_routing=_claude_turn_router is not None,
@@ -9641,15 +9671,14 @@ async def _auto_create_claude_terminal(
         extra={"session_id": session_id},
     )
     try:
-        terminal_view = await resource_registry.launch_required_terminal(
+        terminal_view = await _launch_claude_native_terminal(
+            resource_registry,
+            agent_spec=agent_spec,
             session_id=session_id,
             terminal_name="claude",
             session_key="main",
             spec=env_spec,
             parent_os_env=agent_os_env,
-            # Mark this as the claude-native agent terminal so its pane
-            # activity drives the session's PTY-derived working status.
-            resource_role=CLAUDE_NATIVE_TERMINAL_ROLE,
         )
     except (Exception, asyncio.CancelledError) as launch_error:
         # Preserve the original failure even if diagnostic cleanup is cancelled.
