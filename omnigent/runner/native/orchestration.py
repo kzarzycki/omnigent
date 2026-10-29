@@ -7600,6 +7600,28 @@ def _claude_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) 
     return model
 
 
+def _claude_native_disallowed_tools_from_spec(
+    agent_spec: AgentSpec | ResolvedSpec | None,
+) -> tuple[str, ...]:
+    """
+    Read the Claude tools an agent turns off, from its spec.
+
+    ``executor.config.native_ask_user_question: false`` turns off Claude's
+    blocking AskUserQuestion, so the model asks with ``sys_ask_user_question``
+    and keeps hearing other input. The parser stringifies config values, so
+    ``"false"`` counts as well as ``False``.
+
+    :param agent_spec: Agent spec object, or a resolved wrapper carrying a
+        ``spec`` attribute. ``None`` means no spec was available.
+    :returns: ``("AskUserQuestion",)`` when turned off, else ``()``.
+    """
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    value = spec.executor.config.get("native_ask_user_question") if spec is not None else None
+    if value is False or (isinstance(value, str) and value.strip().lower() == "false"):
+        return ("AskUserQuestion",)
+    return ()
+
+
 def _native_startup_raw_instructions_from_spec(
     agent_spec: AgentSpec | ResolvedSpec | None,
 ) -> str | None:
@@ -9504,6 +9526,7 @@ async def _auto_create_claude_terminal(
         )
         or None,
         allowed_tools=routed_spawn_tools,
+        disallowed_tools=_claude_native_disallowed_tools_from_spec(agent_spec),
         # The route-turn hook is registered only when this session can
         # actually route; otherwise every submit would pay its round trip.
         turn_routing=_claude_turn_router is not None,

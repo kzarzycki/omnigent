@@ -996,6 +996,47 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     });
   });
 
+  it("renders a sys_ask_user_question card as a question form and submits the answers", () => {
+    // The harness-neutral tool asks without blocking: no vendor title, no
+    // "wants to call" gating line, no Approve/Reject pair, and the answers
+    // map (keyed by question text) goes back as `accept` content.
+    const submitSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({ submitApproval: submitSpy } as Partial<
+      ReturnType<typeof useChatStore.getState>
+    >);
+
+    render(
+      <ApprovalCard
+        elicitationId="question_abc"
+        message="Ship it?"
+        phase=""
+        policyName="sys_ask_user_question"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "Ship it?",
+              options: [{ label: "Yes" }, { label: "No" }],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("The agent has questions")).toBeDefined();
+    expect(screen.queryByText("Claude has questions")).toBeNull();
+    expect(screen.queryByText(/wants to call/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /approve/i })).toBeNull();
+    fireEvent.click(screen.getByLabelText("Yes"));
+    fireEvent.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(submitSpy).toHaveBeenCalledWith("question_abc", "accept", { "Ship it?": "Yes" });
+  });
+
   it("labels Codex structured input prompts as Codex prompts", () => {
     // Codex and Claude share the structured AskUserQuestion renderer,
     // but the title must reflect the producer. Otherwise a Codex plan

@@ -246,12 +246,14 @@ def _format_codex_version(version: tuple[int, int, int] | None) -> str:
 #: so codex never raises an interactive prompt for them. The rename keeps a
 #: session's title current, which the framework does unprompted on any session.
 #: The keep marks a scheduled run worth reading, and nobody watches a scheduled run.
+#: The question only posts a card, and a prompt before it would block the turn.
 #: The rest only read session and agent state, and under auto_review each ask
 #: is a reviewer model call. The list settles a dead runner's stale status, as
 #: every reader's list does. ``sys_read_inbox`` marks messages read, so it asks.
 _FRAMEWORK_APPROVED_TOOLS: tuple[str, ...] = (
     "sys_session_rename",
     "sys_session_keep",
+    "sys_ask_user_question",
     "sys_session_get_info",
     "sys_session_get_history",
     "sys_session_list",

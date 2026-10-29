@@ -383,16 +383,19 @@ export function ApprovalCard({
   // ("pre_tool_use", "codex_command_approval", ...). It carries no
   // information the card doesn't already show, so hide it for them.
   const showPhase = phase !== "" && !isNativePolicy;
+  // `sys_ask_user_question` is harness-neutral, so its card names no vendor.
   const askUserQuestionTitle =
-    policyName.startsWith("agy_") || phase.startsWith("agy_")
-      ? "Antigravity needs your input"
-      : policyName.startsWith("codex_") || phase.startsWith("codex_")
-        ? "Codex needs input"
-        : policyName.startsWith("cursor_") || phase.startsWith("cursor_")
-          ? "Cursor has questions"
-          : policyName.startsWith("pi_") || phase.startsWith("pi_")
-            ? "Pi needs your input"
-            : "Claude has questions";
+    policyName === "sys_ask_user_question"
+      ? "The agent has questions"
+      : policyName.startsWith("agy_") || phase.startsWith("agy_")
+        ? "Antigravity needs your input"
+        : policyName.startsWith("codex_") || phase.startsWith("codex_")
+          ? "Codex needs input"
+          : policyName.startsWith("cursor_") || phase.startsWith("cursor_")
+            ? "Cursor has questions"
+            : policyName.startsWith("pi_") || phase.startsWith("pi_")
+              ? "Pi needs your input"
+              : "Claude has questions";
 
   // Hide the raw JSON preview for AskUserQuestion (the form already
   // renders the questions + options structurally) and for option-

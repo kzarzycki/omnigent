@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from typing import Any
 
 from fastapi import (
@@ -10,6 +11,7 @@ from fastapi import (
     Request,
 )
 
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime import (
     pending_elicitations,
@@ -37,19 +39,25 @@ from omnigent.server.routes._errors import session_not_found as _session_not_fou
 from omnigent.server.routes._sessions.common import (
     _logger,
     get_server_runner_router,
+    session_stream,
     set_server_runner_router,
 )
 from omnigent.server.routes._sessions.helpers import (
     _apply_pending_policy_ask_writes,
+    _publish_elicitation_request_to_ancestors,
+    _structured_ask_user_question,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _resolve_elicitation,
 )
 from omnigent.server.schemas import (
+    ElicitationRequestEvent,
+    ElicitationRequestParams,
     ElicitationResult,
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.tools.builtins.ask_user_question import QUESTION_ID_PREFIX, SysAskUserQuestionTool
 
 # Level needed to view or answer an elicitation. Elicitations carry
 # collaborative prompts (``AskUserQuestion``, plan review, MCP forms) as
@@ -132,13 +140,90 @@ def register_elicitations_routes(
             if conv is None:
                 raise _session_not_found()
         _resolve_data = {"elicitation_id": elicitation_id, **body.model_dump(exclude_none=True)}
-        await _resolve_elicitation(session_id, _resolve_data, runner_router, conversation_store)
+        # Wired by the app; absent, a question answer refuses and keeps its card.
+        post_message = getattr(request.app.state, "post_server_message", None)
+        await _resolve_elicitation(
+            session_id,
+            _resolve_data,
+            runner_router,
+            conversation_store,
+            post_answer=(
+                (lambda text: post_message(session_id, user_id, text))
+                if post_message is not None
+                else None
+            ),
+        )
         # Apply any policy writes deferred by the relay tool-call ASK gate
         # (e.g. a cost-budget checkpoint) now that the verdict is in.
         await _apply_pending_policy_ask_writes(
             session_id, conv, conversation_store, agent_store, _resolve_data
         )
         return {"queued": False}
+
+    @router.post(
+        "/sessions/{session_id}/questions",
+        # Runner-side tool endpoint — hidden from the public API reference.
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def ask_question(
+        request: Request,
+        session_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, str]:
+        """
+        Publish a ``sys_ask_user_question`` card and return its id without waiting.
+
+        The card is an ordinary form elicitation carrying the
+        ``ask_user_question`` payload, so the pending index, session-list
+        badge, web card and notifications show it like any other prompt.
+        Nothing is parked: the verdict reaches the session later as a user
+        message (see :func:`_resolve_elicitation`).
+
+        :param request: The inbound request, used for identity extraction.
+        :param session_id: Session that asks, e.g. ``"conv_abc123"``.
+        :param body: ``{"questions": [{"question", "options", ...}]}``, the
+            ``AskUserQuestion`` input shape.
+        :returns: ``{"question_id": "question_<hex>", "status": "waiting"}``.
+        :raises OmnigentError: 404 if no session exists; 400 if no question
+            has a text and at least one labelled option.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        ask_payload = _structured_ask_user_question(body)
+        if ask_payload is None:
+            raise OmnigentError(
+                "questions must hold at least one question with a text and labelled options",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        # ponytail: the card lives in the in-memory pending index, so a server
+        # restart drops it; persist questions with the session if that matters.
+        question_id = f"{QUESTION_ID_PREFIX}{secrets.token_hex(16)}"
+        params = ElicitationRequestParams(
+            mode="form",
+            message="\n".join(question["question"] for question in ask_payload["questions"]),
+            policy_name=SysAskUserQuestionTool.name(),
+            ask_user_question=ask_payload,
+        )
+        event_payload = ElicitationRequestEvent(
+            type="response.elicitation_request",
+            elicitation_id=question_id,
+            params=params,
+        ).model_dump()
+        session_stream.publish(session_id, event_payload)
+        await asyncio.to_thread(
+            _publish_elicitation_request_to_ancestors,
+            conversation_store,
+            session_id,
+            event_payload,
+        )
+        return {"question_id": question_id, "status": "waiting"}
 
     @router.get(
         "/sessions/{session_id}/elicitations/{elicitation_id}",
@@ -201,7 +286,7 @@ def register_elicitations_routes(
             "content_preview": params.get("content_preview", ""),
             **{
                 key: params[key]
-                for key in ("native_delivery", "permission_directories")
+                for key in ("native_delivery", "permission_directories", "ask_user_question")
                 if key in params
             },
         }

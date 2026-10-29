@@ -334,3 +334,46 @@ def test_answered_question_survives_a_reload(
     # and the card itself is never inside a fold.
     expect(page.locator(_WORKED_FOLD)).to_have_count(2)
     expect(page.locator(f"{_WORKED_FOLD} {_APPROVAL_CARD}")).to_have_count(0)
+
+
+@pytest.mark.timeout(120)
+def test_sys_ask_user_question_card_answers_into_the_session(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """The non-blocking tool's card renders the same form; the answer becomes a user message.
+
+    ``POST .../questions`` is what the runner calls for ``sys_ask_user_question``.
+    Nothing is parked: the card is answered in the browser and the choice comes
+    back as an ordinary ``[answer to <id>]`` message in the transcript.
+    """
+    base_url, session_id = seeded_session
+    question = "Which option do you prefer?"
+    asked = httpx.post(
+        f"{base_url}/v1/sessions/{session_id}/questions",
+        json={
+            "questions": [
+                {"question": question, "options": [{"label": _OPTION_ONE}, {"label": _OPTION_TWO}]}
+            ]
+        },
+        timeout=10.0,
+    )
+    asked.raise_for_status()
+    question_id = asked.json()["question_id"]
+
+    page.goto(f"{base_url}/c/{session_id}")
+    card = page.locator(f'{_APPROVAL_CARD}[data-state="pending"]').filter(has=page.locator(_FORM))
+    expect(card).to_be_visible(timeout=_MOCK_ELICITATION_TIMEOUT_MS)
+    expect(card).to_contain_text("The agent has questions")
+    expect(card).not_to_contain_text("wants to call")
+    card.get_by_role("radio", name=_OPTION_ONE).check()
+    card.locator(_SUBMIT).click()
+
+    expect(page.locator(f'{_APPROVAL_CARD}[data-state="responded"]').first).to_be_visible(
+        timeout=_MOCK_ELICITATION_TIMEOUT_MS
+    )
+    expect(page.get_by_text(f"[answer to {question_id}] {question}: {_OPTION_ONE}")).to_be_visible(
+        timeout=_MOCK_ELICITATION_TIMEOUT_MS
+    )
+    snapshot = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json()
+    assert snapshot["pending_questions"] == []
