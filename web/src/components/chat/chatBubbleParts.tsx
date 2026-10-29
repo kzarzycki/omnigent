@@ -1036,7 +1036,7 @@ function AssistantBubble({
           current.sessionStatus === "running" ||
           current.sessionStatus === "waiting" ||
           current.pendingUserMessages.length > 0 ||
-          current.blocks.some((block) => block.type === "elicitation" && block.status === "pending")
+          current.blocks.some(isParkingElicitation)
         ) {
           throw new Error("Wait for the current turn to finish before retrying");
         }
