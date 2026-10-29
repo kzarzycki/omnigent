@@ -52,6 +52,7 @@ import {
 } from "@/components/composer/ComposerControls";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useAppName } from "@/lib/branding";
+import { isParkingElicitation } from "@/lib/blocks";
 import { cn } from "@/lib/utils";
 import { QueuedMessagesStrip } from "@/pages/QueuedMessagesStrip";
 import {
@@ -652,9 +653,7 @@ export function ChatPage() {
   // a boolean selector (not the whole `blocks` array): Zustand bails out when
   // the flag is unchanged, so `blocks` reference churn on every streaming
   // frame no longer re-renders this root — only an elicitation edge does.
-  const hasPendingElicitation = useChatStore((s) =>
-    s.blocks.some((b) => b.type === "elicitation" && b.status === "pending"),
-  );
+  const hasPendingElicitation = useChatStore((s) => s.blocks.some(isParkingElicitation));
 
   // Single-session snapshot (shared cache with chatStore.bindStream).
   // Must be declared BEFORE the early-return guards below — otherwise
@@ -2438,8 +2437,7 @@ function ComposerImpl(
   const hasPendingElicitation = useChatStore((s) =>
     s.blocks.some(
       (b) =>
-        b.type === "elicitation" &&
-        b.status === "pending" &&
+        isParkingElicitation(b) &&
         (b.targetSessionId == null || b.targetSessionId === s.conversationId),
     ),
   );

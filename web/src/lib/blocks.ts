@@ -721,6 +721,18 @@ export interface ElicitationBlock {
   agyPermission?: AgyPermission | null;
 }
 
+/** Policy of `sys_ask_user_question`: its card waits for an answer without parking the turn. */
+export const NON_BLOCKING_QUESTION_POLICY = "sys_ask_user_question";
+
+/** Whether a block is a pending prompt that parks the session's turn until it is answered. */
+export function isParkingElicitation(block: AnyBlock): block is ElicitationBlock {
+  return (
+    block.type === "elicitation" &&
+    block.status === "pending" &&
+    block.policyName !== NON_BLOCKING_QUESTION_POLICY
+  );
+}
+
 /** Union of all block types. */
 export type AnyBlock =
   | ResponseStartBlock

@@ -4629,6 +4629,22 @@ describe("Composer pending elicitation", () => {
     expect(screen.getByRole("button", { name: "Interrupt" })).toBeEnabled();
   });
 
+  it("lets the user send while a sys_ask_user_question card waits", () => {
+    // That question parks no turn, so the session must keep hearing other input.
+    useChatStore.setState({
+      conversationId: "conv_question",
+      blocks: [elicitationBlock({ policyName: "sys_ask_user_question" })],
+    });
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend })} />);
+    const ta = textarea();
+
+    expect(ta.placeholder).not.toBe("Respond to the pending request above to continue");
+    fireEvent.change(ta, { target: { value: "a relay while the question waits" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
   it("unlocks once the elicitation is responded", () => {
     useChatStore.setState({
       blocks: [elicitationBlock({ status: "responded", response: { action: "accept" } })],

@@ -54,6 +54,7 @@ import {
   exitPlanModePlan,
   parseAskUserQuestionPreview,
 } from "@/lib/askUserQuestion";
+import { NON_BLOCKING_QUESTION_POLICY } from "@/lib/blocks";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
@@ -385,7 +386,7 @@ export function ApprovalCard({
   const showPhase = phase !== "" && !isNativePolicy;
   // `sys_ask_user_question` is harness-neutral, so its card names no vendor.
   const askUserQuestionTitle =
-    policyName === "sys_ask_user_question"
+    policyName === NON_BLOCKING_QUESTION_POLICY
       ? "The agent has questions"
       : policyName.startsWith("agy_") || phase.startsWith("agy_")
         ? "Antigravity needs your input"

@@ -61,6 +61,7 @@ import {
   attachmentLabel,
   ELICITATION_RESPONSE_PREFIX,
   imagePreview,
+  isParkingElicitation,
   isTextBlock,
   keyedAttachments,
 } from "@/lib/blocks";
@@ -994,14 +995,12 @@ function AssistantBubble({
   const activeConversationId = useChatStore((s) => s.conversationId);
   const conversationId = scopedConversationId ?? activeConversationId;
   const rootSessionStatus = useChatStore((s) => s.sessionStatus);
-  const rootHasPendingElicitation = useChatStore((s) =>
-    s.blocks.some((b) => b.type === "elicitation" && b.status === "pending"),
-  );
+  const rootHasPendingElicitation = useChatStore((s) => s.blocks.some(isParkingElicitation));
   const sessionStatus = scopedConversationId ? scopedState.sessionStatus : rootSessionStatus;
   // A pending elicitation means the turn is parked awaiting the user — still in
   // flight even when its lifecycle or the session status reads settled.
   const hasPendingElicitation = scopedConversationId
-    ? scopedState.blocks.some((b) => b.type === "elicitation" && b.status === "pending")
+    ? scopedState.blocks.some(isParkingElicitation)
     : rootHasPendingElicitation;
   // Getter computes the markdown lazily at click time.
   const { isCopied, handleCopy } = useCopyMessage(
