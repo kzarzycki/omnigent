@@ -234,6 +234,32 @@ directory footer, and extension hooks remain active; extensions can modify the
 final prompt. This setting supports `pi` and `pi-native` only. Native settings
 apply on the next terminal launch; explicit native CLI arguments remain available.
 
+### Claude Code native questions
+
+Claude Code's own `AskUserQuestion` holds the turn open until someone answers,
+so relays, subscription notices and scheduled messages queue behind it. Every
+agent also has `sys_ask_user_question`, which shows the same card and returns
+at once; the answer arrives later as a user message,
+`[answer to <question_id>] <question>: <choice>`. To make a `claude-native`
+agent use only the non-blocking tool, set `native_ask_user_question: false`:
+
+```yaml
+spec_version: 1
+name: coordinator
+executor:
+  type: omnigent
+  config:
+    harness: claude-native
+    native_ask_user_question: false
+```
+
+The runner then launches Claude Code with `--disallowedTools AskUserQuestion`,
+merged into any `--disallowedTools` the session already passes. It applies on
+the next terminal launch. Codex has no equivalent switch: its
+`request_user_input` is off outside Plan mode (unless the
+`default_mode_request_user_input` feature is on), and no Codex feature flag
+removes it from Plan mode.
+
 ### GitHub Copilot
 
 `harness: copilot` runs the agent through the

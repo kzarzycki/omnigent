@@ -26,6 +26,7 @@ from omnigent.tools.builtins import (
     SysAgentDownloadTool,
     SysAgentGetTool,
     SysAgentListTool,
+    SysAskUserQuestionTool,
     SysCallAsyncTool,
     SysCancelAsyncTool,
     SysListModelsTool,
@@ -514,6 +515,7 @@ class ToolManager:
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
         self._tools[UiOpenFileTool.name()] = UiOpenFileTool()
         for tool in (
+            SysAskUserQuestionTool(),
             SysSessionKeepTool(),
             SysSessionSubscribeTool(),
             SysSessionUnsubscribeTool(),

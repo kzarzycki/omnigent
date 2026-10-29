@@ -294,6 +294,29 @@ async def test_observe_wakes_immediate_parent_for_blocked_child(
 
 
 @pytest.mark.asyncio
+async def test_a_childs_open_question_does_not_report_it_blocked(
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    """A ``sys_ask_user_question`` card leaves the child running, so no block notice."""
+    parent = conv_store.create_conversation(kind="default", title="parent")
+    child = conv_store.create_conversation(
+        kind="sub_agent", title="codex:auth-fix", parent_conversation_id=parent.id
+    )
+    dispatch = _RecordingDispatch()
+    notifier = SubagentBlockNotifier(
+        conversation_store=conv_store,
+        wake_dispatch=dispatch,
+        loop=asyncio.get_event_loop(),
+    )
+
+    notifier.observe(child.id, _request_event("question_0f3a", message="Ship it?"))
+    await asyncio.sleep(0)
+
+    assert not elicitation_armed(notifier, "question_0f3a")
+    assert dispatch.calls == []
+
+
+@pytest.mark.asyncio
 async def test_observe_no_op_for_top_level_session(
     conv_store: SqlAlchemyConversationStore,
 ) -> None:

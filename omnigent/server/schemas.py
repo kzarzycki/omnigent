@@ -2329,6 +2329,9 @@ class SessionResponse(BaseModel):
         Empty list when no prompts are outstanding. Sourced from
         the Omnigent server's in-memory
         :mod:`omnigent.runtime.pending_elicitations` index.
+    :param pending_questions: Unanswered ``sys_ask_user_question`` calls,
+        each ``{"question_id", "questions"}``, so a supervisor sees them
+        without parsing history. A subset of ``pending_elicitations``.
     :param pending_inputs: Accepted messages awaiting consumption, each
         ``{"pending_id", "content"}``. Includes durable managed-startup
         inputs and native messages awaiting a transcript receipt. Clients
@@ -2431,6 +2434,7 @@ class SessionResponse(BaseModel):
     external_session_id: str | None = None
     terminal_launch_args: list[str] | None = None
     pending_elicitations: list[dict[str, Any]] = Field(default_factory=list)
+    pending_questions: list[dict[str, Any]] = Field(default_factory=list)
     # Durable startup inputs plus ordinary native inputs awaiting a receipt.
     # Each {"pending_id", "content"} restores a pending bubble on reconnect.
     pending_inputs: list[dict[str, Any]] = Field(default_factory=list)

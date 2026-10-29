@@ -1310,6 +1310,7 @@ async def _auto_create_claude_terminal_for_test(
     session_id: str,
     workspace: Path,
     registry: object,
+    agent_spec: object | None = None,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1318,6 +1319,7 @@ async def _auto_create_claude_terminal_for_test(
     :param session_id: Session id, e.g. ``"conv_seed_launch_env"``.
     :param workspace: Session workspace, e.g. the ``bridge_dir`` fixture.
     :param registry: Session resource registry double.
+    :param agent_spec: The session's agent spec, or ``None`` for none.
     :returns: None. Raises whatever the auto-create path raises.
     """
     from unittest.mock import AsyncMock, Mock
@@ -1339,7 +1341,57 @@ async def _auto_create_claude_terminal_for_test(
         session_init=_claude_auto_create_session_init(session_id, workspace),
         auth_token_factory=lambda: None,
         resolve_launch_config=AsyncMock(return_value=None),
+        agent_spec=agent_spec,
     )
+
+
+@pytest.mark.parametrize(
+    ("config", "disallowed"),
+    [
+        ({"native_ask_user_question": False}, ["AskUserQuestion"]),
+        ({"native_ask_user_question": "False"}, ["AskUserQuestion"]),
+        ({"native_ask_user_question": "true"}, None),
+        ({}, None),
+    ],
+)
+async def test_an_agent_that_turns_off_native_questions_launches_claude_without_them(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, object],
+    disallowed: list[str] | None,
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after launch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_native_questions",
+            workspace=bridge_dir,
+            registry=registry,
+            agent_spec=AgentSpec(spec_version=1, executor=ExecutorSpec(config=config)),
+        )
+
+    args = launched[0]
+    if disallowed is None:
+        assert "--disallowedTools" not in args
+    else:
+        assert args[args.index("--disallowedTools") + 1].split(",") == disallowed
 
 
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(

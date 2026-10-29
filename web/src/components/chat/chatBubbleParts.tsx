@@ -62,6 +62,7 @@ import {
   ELICITATION_RESPONSE_PREFIX,
   hasPendingOwnElicitation,
   imagePreview,
+  isParkingElicitation,
   isTextBlock,
   keyedAttachments,
 } from "@/lib/blocks";
@@ -419,11 +420,6 @@ function useAgentTurnActive(): boolean {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const localSending = useChatStore((s) => s.status === "streaming");
   return computeIsTurnActive(sessionStatus, localSending);
-}
-
-/** Whether any elicitation card is still awaiting the user's answer. */
-function hasPendingElicitationBlock(blocks: readonly AnyBlock[]): boolean {
-  return blocks.some((b) => b.type === "elicitation" && b.status === "pending");
 }
 
 /**
@@ -1023,12 +1019,12 @@ function AssistantBubble({
   const activeConversationId = useChatStore((s) => s.conversationId);
   const conversationId = scopedConversationId ?? activeConversationId;
   const rootSessionStatus = useChatStore((s) => s.sessionStatus);
-  const rootHasPendingElicitation = useChatStore((s) => hasPendingElicitationBlock(s.blocks));
+  const rootHasPendingElicitation = useChatStore((s) => s.blocks.some(isParkingElicitation));
   const sessionStatus = scopedConversationId ? scopedState.sessionStatus : rootSessionStatus;
   // A pending elicitation means the turn is parked awaiting the user — still in
   // flight even when its lifecycle or the session status reads settled.
   const hasPendingElicitation = scopedConversationId
-    ? hasPendingElicitationBlock(scopedState.blocks)
+    ? scopedState.blocks.some(isParkingElicitation)
     : rootHasPendingElicitation;
   // Getter computes the markdown lazily at click time.
   const { isCopied, handleCopy } = useCopyMessage(
@@ -1065,7 +1061,7 @@ function AssistantBubble({
           current.sessionStatus === "running" ||
           current.sessionStatus === "waiting" ||
           current.pendingUserMessages.length > 0 ||
-          current.blocks.some((block) => block.type === "elicitation" && block.status === "pending")
+          current.blocks.some(isParkingElicitation)
         ) {
           throw new Error("Wait for the current turn to finish before retrying");
         }

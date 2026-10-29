@@ -7616,6 +7616,59 @@ def _claude_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) 
     return model
 
 
+def _claude_native_disallowed_tools_from_spec(
+    agent_spec: AgentSpec | ResolvedSpec | None,
+) -> tuple[str, ...]:
+    """
+    Read the Claude tools an agent turns off, from its spec.
+
+    ``executor.config.native_ask_user_question: false`` turns off Claude's
+    blocking AskUserQuestion, so the model asks with ``sys_ask_user_question``
+    and keeps hearing other input. The parser stringifies config values, so
+    ``"false"`` counts as well as ``False``.
+
+    :param agent_spec: Agent spec object, or a resolved wrapper carrying a
+        ``spec`` attribute. ``None`` means no spec was available.
+    :returns: ``("AskUserQuestion",)`` when turned off, else ``()``.
+    """
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    value = spec.executor.config.get("native_ask_user_question") if spec is not None else None
+    if value is False or (isinstance(value, str) and value.strip().lower() == "false"):
+        return ("AskUserQuestion",)
+    return ()
+
+
+async def _launch_claude_native_terminal(
+    resource_registry: SessionResourceRegistry,
+    *,
+    agent_spec: AgentSpec | ResolvedSpec | None,
+    spec: TerminalEnvSpec,
+    **launch_kwargs: Any,
+) -> SessionResourceView:
+    """
+    Launch a session's Claude Code terminal with its agent's tool switches.
+
+    Every claude-native launch (runner auto-create, and the CLI's explicit
+    terminal spec on fresh start or cold resume) goes through here, so an
+    agent's ``native_ask_user_question: false`` holds however Claude starts.
+
+    :param resource_registry: Registry that launches the terminal.
+    :param agent_spec: The session's agent spec, or ``None`` when unknown.
+    :param spec: Terminal spec whose ``args`` end with Claude's own args.
+    :param launch_kwargs: Remaining
+        :meth:`SessionResourceRegistry.launch_required_terminal` arguments.
+    :returns: The launched terminal's resource view.
+    """
+    from omnigent.harnesses.claude_native.bridge import _merge_disallowed_tools
+
+    disallowed = _claude_native_disallowed_tools_from_spec(agent_spec)
+    if disallowed:
+        spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
+    return await resource_registry.launch_required_terminal(
+        spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
+    )
+
+
 def _native_startup_raw_instructions_from_spec(
     agent_spec: AgentSpec | ResolvedSpec | None,
 ) -> str | None:
@@ -9790,15 +9843,14 @@ async def _auto_create_claude_terminal(
         extra={"session_id": session_id},
     )
     try:
-        terminal_view = await resource_registry.launch_required_terminal(
+        terminal_view = await _launch_claude_native_terminal(
+            resource_registry,
+            agent_spec=agent_spec,
             session_id=session_id,
             terminal_name="claude",
             session_key="main",
             spec=env_spec,
             parent_os_env=agent_os_env,
-            # Mark this as the claude-native agent terminal so its pane
-            # activity drives the session's PTY-derived working status.
-            resource_role=CLAUDE_NATIVE_TERMINAL_ROLE,
         )
     except (Exception, asyncio.CancelledError) as launch_error:
         # Preserve the original failure even if diagnostic cleanup is cancelled.

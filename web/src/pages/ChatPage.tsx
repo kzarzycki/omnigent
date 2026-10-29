@@ -52,7 +52,7 @@ import {
 } from "@/components/composer/ComposerControls";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useAppName } from "@/lib/branding";
-import { hasPendingOwnElicitation } from "@/lib/blocks";
+import { isParkingElicitation } from "@/lib/blocks";
 import { cn } from "@/lib/utils";
 import { QueuedMessagesStrip } from "@/pages/QueuedMessagesStrip";
 import {
@@ -658,9 +658,7 @@ export function ChatPage() {
   // a boolean selector (not the whole `blocks` array): Zustand bails out when
   // the flag is unchanged, so `blocks` reference churn on every streaming
   // frame no longer re-renders this root — only an elicitation edge does.
-  const hasPendingElicitation = useChatStore((s) =>
-    s.blocks.some((b) => b.type === "elicitation" && b.status === "pending"),
-  );
+  const hasPendingElicitation = useChatStore((s) => s.blocks.some(isParkingElicitation));
 
   // Single-session snapshot (shared cache with chatStore.bindStream).
   // Must be declared BEFORE the early-return guards below — otherwise
@@ -2497,7 +2495,11 @@ function ComposerImpl(
   // Mirrored sub-agent prompts (targetSessionId set to a child session)
   // don't gate this session's inbox, so they don't lock it.
   const hasPendingElicitation = useChatStore((s) =>
-    hasPendingOwnElicitation(s.blocks, s.conversationId),
+    s.blocks.some(
+      (b) =>
+        isParkingElicitation(b) &&
+        (b.targetSessionId == null || b.targetSessionId === s.conversationId),
+    ),
   );
   const readyPlaceholder = sendReconnectsArca
     ? "Send a message to reconnect Arca…"

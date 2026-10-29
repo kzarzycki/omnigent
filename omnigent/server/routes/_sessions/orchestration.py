@@ -450,6 +450,7 @@ from omnigent.telemetry.events import SessionCreatedEvent as _TelSessionCreatedE
 from omnigent.telemetry.events import TurnEndEvent as _TelTurnEndEvent
 from omnigent.telemetry.installation_id import get_installation_id as _get_installation_id
 from omnigent.telemetry.surface import classify_surface as _classify_surface
+from omnigent.tools.builtins.ask_user_question import QUESTION_ID_PREFIX, SysAskUserQuestionTool
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
@@ -1550,6 +1551,8 @@ def _build_session_response(
     # vanished thread. Computed per-response (not persisted) — self-heals.
     if side_chat_sealed:
         labels = {**labels, CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
+    if pending_elicitation_events is None:
+        pending_elicitation_events = pending_elicitations.snapshot_for(conv.id)
     return SessionResponse(
         id=conv.id,
         agent_id=conv.agent_id,
@@ -1600,11 +1603,18 @@ def _build_session_response(
         # render — the UI rebuilds blocks from the snapshot on
         # cold load, then live-tails. Empty list when nothing is
         # outstanding (the common case).
-        pending_elicitations=(
-            pending_elicitation_events
-            if pending_elicitation_events is not None
-            else pending_elicitations.snapshot_for(conv.id)
-        ),
+        pending_elicitations=pending_elicitation_events,
+        # This session's own unanswered questions; ancestor mirrors name a child target.
+        pending_questions=[
+            {
+                "question_id": event["elicitation_id"],
+                "questions": params["ask_user_question"]["questions"],
+            }
+            for event in pending_elicitation_events
+            if (params := event.get("params") or {}).get("policy_name")
+            == SysAskUserQuestionTool.name()
+            and params.get("target_session_id") in (None, conv.id)
+        ],
         # Replay un-consumed web messages on native-terminal sessions
         # so a client that posted then navigated away / rebound re-
         # hydrates the optimistic bubble. Empty for non-native sessions
@@ -2508,11 +2518,89 @@ async def _resolve_native_delivery(
     return True
 
 
+def _question_answer_text(question_id: str, questions: list[Any], data: dict[str, Any]) -> str:
+    """
+    Render a ``sys_ask_user_question`` verdict as the user message the session gets.
+
+    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+    :param questions: The published ``ask_user_question`` questions.
+    :param data: The verdict: ``action`` plus, on accept, ``content`` keyed by
+        question id or text, e.g. ``{"action": "accept", "content": {"Which?": "A"}}``.
+    :returns: One ``[answer to <id>] <question>: <choice>`` line per question.
+    """
+    content = data.get("content") if data.get("action") == "accept" else None
+    lines = []
+    for question in questions:
+        text = question.get("question", "") if isinstance(question, dict) else ""
+        if not isinstance(content, dict):
+            choice = "(dismissed without an answer)"
+        else:
+            value = content.get(question.get("id") or text)
+            if isinstance(value, list):
+                choice = ", ".join(str(item) for item in value) or "(no answer)"
+            else:
+                choice = str(value) if value not in (None, "") else "(no answer)"
+        lines.append(f"[answer to {question_id}] {text}: {choice}")
+    return "\n".join(lines)
+
+
+# Questions whose answer is being posted, so a concurrent second verdict posts nothing.
+# custom-lint: disable-next=workspace-scoped-cache -- ids are globally unique and short-lived
+_answering_questions: set[str] = set()
+
+
+async def _answer_question(
+    session_id: str,
+    question_id: str,
+    data: dict[str, Any],
+    conversation_store: ConversationStore | None,
+    post_answer: Callable[[str], Awaitable[object]] | None,
+) -> None:
+    """
+    Deliver a ``sys_ask_user_question`` verdict as one user message, then clear its card.
+
+    The answer is posted first, so a session that cannot take it keeps the card
+    open for another try. Nothing is parked and no runner holds the question,
+    so there is no Future to set and nothing to forward.
+
+    :param session_id: Session that asked, e.g. ``"conv_abc123"``.
+    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+    :param data: The verdict payload.
+    :param conversation_store: Store used to clear ancestor mirrors, or ``None``.
+    :param post_answer: Posts text into the session as the answering user's message.
+    :raises OmnigentError: When this server cannot post the answer.
+    """
+    entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
+    if entry is None or question_id in _answering_questions:
+        return
+    if post_answer is None:
+        raise OmnigentError(
+            "This server cannot deliver question answers.", code=ErrorCode.INTERNAL_ERROR
+        )
+    ask = entry[1].get("params", {}).get("ask_user_question") or {}
+    text = _question_answer_text(question_id, ask.get("questions") or [], data)
+    _answering_questions.add(question_id)
+    try:
+        await post_answer(text)
+        _publish_elicitation_resolved(session_id, question_id, action=data.get("action"))
+        if conversation_store is not None:
+            await asyncio.to_thread(
+                _publish_elicitation_resolved_to_ancestors,
+                conversation_store,
+                session_id,
+                question_id,
+                data.get("action"),
+            )
+    finally:
+        _answering_questions.discard(question_id)
+
+
 async def _resolve_elicitation(
     session_id: str,
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore | None = None,
+    post_answer: Callable[[str], Awaitable[object]] | None = None,
 ) -> None:
     """
     Resolve one outstanding elicitation from an approval payload.
@@ -2557,6 +2645,9 @@ async def _resolve_elicitation(
     :param conversation_store: Optional store used to mirror the
         resolved signal into ancestor streams when ``session_id`` is
         a child session. ``None`` keeps the signal scoped locally.
+    :param post_answer: Posts text into the session as the answering
+        user's message; a ``sys_ask_user_question`` verdict goes there
+        instead of through the three effects above.
     """
     # Empty-string default is intentional, NOT a fail-loud miss: the
     # resolve-URL caller always supplies the id (it comes from the URL
@@ -2565,6 +2656,9 @@ async def _resolve_elicitation(
     # matches, no resolved event published) rather than 500-ing the
     # client — the runner forward still fires so the runner can reject.
     elicitation_id = data.get("elicitation_id", "")
+    if isinstance(elicitation_id, str) and elicitation_id.startswith(QUESTION_ID_PREFIX):
+        await _answer_question(session_id, elicitation_id, data, conversation_store, post_answer)
+        return
     if isinstance(elicitation_id, str) and await _resolve_native_delivery(
         session_id, elicitation_id, data, conversation_store
     ):

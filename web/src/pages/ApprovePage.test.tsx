@@ -187,6 +187,34 @@ describe("ApprovePage submission", () => {
     expect(JSON.parse(String(resolveCall![1]!.body))).toEqual({ action: "decline" });
   });
 
+  it("answers a question card from a notification link with the chosen option", async () => {
+    // A sys_ask_user_question link opens here; Approve/Reject cannot answer it.
+    vi.mocked(identity.authenticatedFetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "pending",
+        message: "Ship it?",
+        policy_name: "sys_ask_user_question",
+        ask_user_question: {
+          questions: [{ question: "Ship it?", options: [{ label: "Yes" }, { label: "No" }] }],
+        },
+      }),
+    );
+    renderPage("sess_q", "question_q");
+    fireEvent.click(await screen.findByLabelText("Yes"));
+    expect(screen.queryByRole("button", { name: /Approve/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => {
+      const resolveCall = vi
+        .mocked(identity.authenticatedFetch)
+        .mock.calls.find(([url]) => String(url).includes("/resolve"));
+      expect(JSON.parse(String(resolveCall![1]!.body))).toEqual({
+        action: "accept",
+        content: { "Ship it?": "Yes" },
+      });
+    });
+  });
+
   it("shows a resolve error when the POST returns a non-ok status", async () => {
     // WHY: a failed resolve POST routes to the `error` branch with the status.
     vi.mocked(identity.authenticatedFetch)
