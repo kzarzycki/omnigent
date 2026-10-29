@@ -2771,8 +2771,12 @@ def url_component(value: str) -> str:
 _OMNIGENT_DISALLOWED_TOOLS: tuple[str, ...] = ()
 
 # Omnigent tools every session may call without a prompt. A scheduled run that
-# marks itself worth reading has nobody to answer one.
-_OMNIGENT_ALLOWED_TOOLS: tuple[str, ...] = ("mcp__omnigent__sys_session_keep",)
+# marks itself worth reading has nobody to answer one, and a prompt before a
+# question would block the turn the question exists not to block.
+_OMNIGENT_ALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__omnigent__sys_session_keep",
+    "mcp__omnigent__sys_ask_user_question",
+)
 
 
 def augment_claude_args(

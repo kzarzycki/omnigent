@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -9,7 +10,7 @@ from omnigent_slack.elicitation import (
     ElicitationTurnState,
     PendingElicitation,
 )
-from omnigent_slack.events import ElicitationRequest
+from omnigent_slack.events import ElicitationRequest, extract_elicitation_request
 from omnigent_slack.models import SlackTurn, ThreadKey
 
 _KEY = ThreadKey(team_id="T1", channel_id="C1", thread_ts="100.1")
@@ -39,17 +40,20 @@ class _FakeSlack:
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
 
+    async def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "ts": "200.1"}
+
     async def chat_update(self, **kwargs: Any) -> dict[str, Any]:
         self.updates.append(kwargs)
         return {"ok": True}
 
 
-def _controller() -> ElicitationController:
+def _controller(coordinator: ElicitationCoordinator | None = None) -> ElicitationController:
     async def _post_reply(client: Any, key: ThreadKey, text: str) -> None:
         return None
 
     return ElicitationController(
-        ElicitationCoordinator(),
+        coordinator or ElicitationCoordinator(),
         server_url="http://omnigent.test",
         post_reply=_post_reply,
         logger=logging.getLogger("test.elicitation"),
@@ -126,3 +130,47 @@ async def test_finish_pending_no_redecline_when_verdict_delivered() -> None:
     await controller.finish_pending(omnigent, _turn(), state)  # type: ignore[arg-type]
 
     assert omnigent.resolve_calls == []
+
+
+async def test_nonblocking_question_survives_turn_end_until_answered() -> None:
+    # sys_ask_user_question parks no turn: the turn ending (or the click timeout
+    # passing) must not decline it, since the server takes a decline as the answer.
+    omnigent = _RecordingOmnigent()
+    controller = _controller(ElicitationCoordinator(timeout_seconds=0.01))
+    turn = _turn()
+    state = ElicitationTurnState()
+    request = extract_elicitation_request(
+        {
+            "type": "response.elicitation_request",
+            "elicitation_id": "question_1",
+            "params": {
+                "mode": "form",
+                "policy_name": "sys_ask_user_question",
+                "message": "Ship?",
+                "ask_user_question": {
+                    "questions": [
+                        {"question": "Ship?", "options": [{"label": "Yes"}, {"label": "No"}]}
+                    ]
+                },
+            },
+        },
+        "conv_1",
+    )
+    assert request is not None
+    await controller.start(omnigent, turn, request, state)  # type: ignore[arg-type]
+
+    await controller.finish_pending(omnigent, turn, state)  # type: ignore[arg-type]
+    await asyncio.sleep(0.05)
+    assert omnigent.resolve_calls == []
+    assert turn.slack_client.updates == []  # type: ignore[attr-defined]
+
+    assert await controller.handle_action(
+        session_id="conv_1",
+        elicitation_id="question_1",
+        verdict=Verdict(accepted=True, content={"Ship?": "0"}),
+    )
+    resolver = state.pending["question_1"].resolver
+    assert resolver is not None
+    await resolver
+    assert omnigent.resolve_calls == [("conv_1", "question_1", True)]
+    assert turn.slack_client.updates[0]["text"] == "Request answered."  # type: ignore[attr-defined]
