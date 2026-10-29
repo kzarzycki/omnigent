@@ -495,6 +495,11 @@ Fields:
     snapshot build time. Replayed by the client as ApprovalCard blocks
     on cold load, since the live SSE stream has no replay buffer.
 
+  pending_questions (array, default `[]`)
+    This session's unanswered `sys_ask_user_question` calls, each
+    `{question_id, questions}`, so a supervisor can see them without
+    parsing history. A subset of `pending_elicitations`.
+
   pending_inputs (array, default `[]`)
     Un-consumed web-composer user messages on native-terminal
     (claude-native / codex-native) sessions at snapshot build time,
@@ -1210,6 +1215,38 @@ approval on a dedicated path rather than an in-band session event —
 which is what policy ASK gates rely on, so the verdict cannot be
 conflated with a generic session event. Any value other than
 `action: "accept"` denies.
+
+A verdict for a `question_…` id (a `sys_ask_user_question` card) instead
+posts one user message into the session, one line per question:
+`[answer to <id>] <question>: <choice>`, multi-select choices joined with
+`, `, and `(dismissed without an answer)` for a decline. The message takes
+the normal input path, so an idle session wakes and a busy one reads it at
+its next turn end. A second verdict for the same id posts nothing.
+
+### Ask a Question (sys_ask_user_question)
+
+```
+POST /v1/sessions/{session_id}/questions
+Content-Type: application/json
+
+{"questions": [{"question": "Ship it?", "header": "Release",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+                "multiSelect": false}]}
+
+200 OK
+{"question_id": "question_<32 hex>", "status": "waiting"}
+
+400 Bad Request — no question with a text and labelled options
+404 Not Found — no session with that id
+```
+
+Called by the runner for the `sys_ask_user_question` tool. Publishes the
+questions as a form `response.elicitation_request` (policy name
+`sys_ask_user_question`, the payload under `ask_user_question`) and returns
+without waiting, so the card, badge and notifications behave like any
+other prompt while the turn goes on. Requires LEVEL_EDIT on the session.
+Pending questions live in the server's in-memory elicitation index, so a
+server restart drops them.
 
 ### Fork Session
 

@@ -377,6 +377,7 @@ _AGY_ENABLED_TOOLS = [
     "sys_agent_download",
     "sys_agent_get",
     "sys_agent_list",
+    "sys_ask_user_question",
     "sys_call_async",
     "sys_cancel_async",
     "sys_cancel_task",

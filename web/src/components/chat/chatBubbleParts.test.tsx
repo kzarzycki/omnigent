@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ElicitationBlock } from "@/lib/blocks";
 import type { Bubble } from "@/lib/renderItems";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { ForkDialogContextProvider } from "@/shell/ForkDialogContext";
@@ -435,6 +436,30 @@ describe("AssistantBubble error retry", () => {
       ),
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed turn while a sys_ask_user_question card waits", async () => {
+    // That question parks no turn, so it must not hold back the continuation.
+    const question = {
+      type: "elicitation",
+      ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: "resp_q", itemId: null },
+      elicitationId: "question_1",
+      message: "Ship it?",
+      phase: "tool_call",
+      policyName: "sys_ask_user_question",
+      contentPreview: "",
+      requestedSchema: {},
+      url: null,
+      status: "pending",
+      response: null,
+    } satisfies ElicitationBlock;
+    useChatStore.setState({ blocks: [question] });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ queued: true, pending_id: "pending_retry" }));
+    render(<BubbleView bubble={errorBubble()} isLastAssistant />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
   });
 
   it("does not continue an old failed turn after a newer assistant response", async () => {

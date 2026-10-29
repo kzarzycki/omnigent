@@ -4094,6 +4094,7 @@ def test_augment_claude_args_merges_caller_allowed_tools(tmp_path: Path) -> None
         "Bash",
         "mcp__user__tool",
         "mcp__omnigent__sys_session_keep",
+        "mcp__omnigent__sys_ask_user_question",
         "mcp__omnigent__sys_session_rename",
     ]
 

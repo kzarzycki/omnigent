@@ -3554,6 +3554,15 @@ def create_app(
         # Still report the list, so admin chrome shows even if promotion failed.
         return {"user_id": user_id, "is_admin": flagged or listed}
 
+    def _register_server_message(handler: Callable[..., Awaitable[object]]) -> None:
+        """Share the server's user-message poster with subscriptions and question answers."""
+
+        def post(session_id: str, user_id: str | None, text: str) -> Awaitable[object]:
+            return handler(app=app, session_id=session_id, user_id=user_id, text=text)
+
+        app.state.post_server_message = post
+        session_subscriptions.configure(conversation_store, permission_store, post)
+
     app.include_router(
         create_sessions_router(
             conversation_store,
@@ -3598,13 +3607,7 @@ def create_app(
             register_runner_ingest=lambda handler: setattr(
                 app.state, "runner_event_ingest", handler
             ),
-            register_server_message=lambda handler: session_subscriptions.configure(
-                conversation_store,
-                permission_store,
-                lambda session_id, user_id, text: handler(
-                    app=app, session_id=session_id, user_id=user_id, text=text
-                ),
-            ),
+            register_server_message=_register_server_message,
         ),
         prefix="/v1",
         tags=["sessions"],
