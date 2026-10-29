@@ -397,6 +397,7 @@ async def test_terminal_launch_with_bridge_inject_advertises_comment_tools(
         "sys_session_rename",
         "ui_open_file",
         "sys_session_keep",
+        "sys_ask_user_question",
         "sys_session_subscribe",
         "sys_session_unsubscribe",
         "sys_session_subscriptions",
@@ -819,6 +820,73 @@ async def test_terminal_launch_writes_session_id_into_tool_relay_json(
     assert info.get("session_id") == relay_env.session_id, (
         f"session_id missing or wrong in tool_relay.json: {info}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "denylist"),
+    [({"native_ask_user_question": False}, "AskUserQuestion"), ({}, None)],
+)
+async def test_cli_cold_resume_launch_keeps_the_agents_native_question_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, object],
+    denylist: str | None,
+) -> None:
+    """The CLI's explicit resume launch gets the agent's AskUserQuestion denylist."""
+    from omnigent.harnesses.claude_native import main as claude_cli
+
+    session_id = f"conv_{uuid.uuid4().hex[:12]}"
+    bridge_dir = bridge_dir_for_bridge_id(session_id)
+    prepare_bridge_dir(session_id, workspace=tmp_path)
+    monkeypatch.chdir(tmp_path)
+    body = claude_cli._claude_terminal_request(
+        ("--resume", "claude-old"), command="claude", bridge_dir=bridge_dir
+    )
+    launched: list[list[str]] = []
+
+    class _Registry(_StubResourceRegistry):
+        async def launch_required_terminal(self, **kwargs: Any) -> SessionResourceView:
+            launched.append(list(kwargs["spec"].args))
+            return await super().launch_required_terminal(**kwargs)
+
+    class _Server(NullServerClient):
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            del kwargs
+            return httpx.Response(
+                200,
+                json={"agent_id": "ag_switch", "workspace": str(tmp_path)},
+                request=httpx.Request("GET", f"http://server{url}"),
+            )
+
+    async def resolve(_agent_id: str, _session_id: str | None) -> AgentSpec:
+        return AgentSpec(spec_version=1, executor=ExecutorSpec(config=config))
+
+    app = create_runner_app(
+        resource_registry=_Registry(tmp_path),
+        server_client=_Server(),  # type: ignore[arg-type]
+        spec_resolver=resolve,
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://runner"
+        ) as client:
+            try:
+                resp = await client.post(
+                    f"/v1/sessions/{session_id}/resources/terminals", json=body
+                )
+                assert resp.status_code == 200, resp.text
+            finally:
+                await client.delete(f"/v1/sessions/{session_id}")
+    finally:
+        shutil.rmtree(bridge_dir, ignore_errors=True)
+
+    args = launched[0]
+    assert args[args.index("--resume") + 1] == "claude-old"
+    if denylist is None:
+        assert "--disallowedTools" not in args
+    else:
+        assert args[args.index("--disallowedTools") + 1] == denylist
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ from omnigent.runner.native import (
     _ensure_native_terminal,
     _is_runner_owned_antigravity_terminal,
     _is_runner_owned_codex_terminal,
+    _launch_claude_native_terminal,
     _log_terminal_lookup_miss,
     _publish_tmux_target_for_bridge,
     _readvertise_missing_tmux_target,
@@ -62,7 +63,6 @@ from omnigent.runner.native import (
     _unwrap_resolved_spec,
 )
 from omnigent.runner.resource_registry import (
-    CLAUDE_NATIVE_TERMINAL_ROLE,
     CODEX_NATIVE_TERMINAL_ROLE,
     OMNIGENT_REPL_TERMINAL_ROLE,
     QWEN_NATIVE_TERMINAL_ROLE,
@@ -592,20 +592,21 @@ def register_resource_routes(
                 launched_relay = relay_after.relay
 
         try:
-            launch_method = (
-                resource_registry.launch_required_terminal
+            launch_kwargs: dict[str, Any] = {
+                "session_id": session_id,
+                "terminal_name": terminal_name,
+                "session_key": session_key,
+                "spec": env_spec,
+                "cwd_override": cwd_override,
+                "sandbox_override": sandbox_override,
+                "parent_os_env": agent_os_env,
+            }
+            resource_view = await (
+                _launch_claude_native_terminal(
+                    resource_registry, agent_spec=agent_spec, **launch_kwargs
+                )
                 if bridge_inject
-                else resource_registry.launch_auxiliary_terminal
-            )
-            resource_view = await launch_method(
-                session_id=session_id,
-                terminal_name=terminal_name,
-                session_key=session_key,
-                spec=env_spec,
-                cwd_override=cwd_override,
-                sandbox_override=sandbox_override,
-                parent_os_env=agent_os_env,
-                resource_role=(CLAUDE_NATIVE_TERMINAL_ROLE if bridge_inject else None),
+                else resource_registry.launch_auxiliary_terminal(**launch_kwargs)
             )
         except RuntimeError as exc:
             if launched_relay is not None:
