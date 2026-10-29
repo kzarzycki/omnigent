@@ -9810,6 +9810,52 @@ async def test_approval_event_flattened_for_harness_scaffold() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("elicitation_id", "interrupts"),
+    [
+        ("elicit_" + "a" * 32, True),
+        ("elicit_question_" + "b" * 32, False),
+        ("elicit_pi_" + "c" * 32, False),
+    ],
+)
+async def test_decline_interrupts_only_permission_cards(
+    elicitation_id: str, interrupts: bool
+) -> None:
+    """A declined permission card stops the turn; a declined question or Pi dialog is an answer.
+
+    The harness gets the deny either way; only a permission card also gets an
+    ``interrupt`` first.
+    """
+    posted: list[dict[str, Any]] = []
+
+    class _CapturingHarnessClient:
+        async def post(
+            self, url: str, *, json: dict[str, Any], timeout: float | None = None
+        ) -> httpx.Response:
+            posted.append(json)
+            return httpx.Response(204)
+
+    mgr = _FakeProcessManager(harness_client=cast(Any, _CapturingHarnessClient()))
+    app = create_runner_app(
+        process_manager=cast(HarnessProcessManager, mgr),
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _runner_test_client(app) as http:
+        resp = await http.post(
+            "/v1/sessions/conv_x/events",
+            json={
+                "type": "approval",
+                "data": {"elicitation_id": elicitation_id, "action": "decline"},
+            },
+        )
+
+    assert resp.status_code == 204
+    expected = ["interrupt", "approval"] if interrupts else ["approval"]
+    assert [body["type"] for body in posted] == expected
+    assert posted[-1]["elicitation_id"] == elicitation_id
+
+
+@pytest.mark.asyncio
 async def test_approval_event_without_content_flattened() -> None:
     """A decline verdict with no form content flattens without a ``content`` key."""
     from omnigent.runtime.harnesses._scaffold import ApprovalEvent

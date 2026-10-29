@@ -193,6 +193,10 @@ ElicitationHandler: TypeAlias = Callable[
     Awaitable[bool],
 ]
 
+# AskUserQuestion bridge wired in by :class:`ExecutorAdapter`: returns the
+# answers (``{}`` for an answerless approval), or ``None`` when declined.
+AskUserQuestionHandler: TypeAlias = Callable[[ToolArgs], Awaitable[ToolArgs | None]]
+
 # Opaque SDK artifacts whose concrete shape we don't touch directly:
 # - ``SdkMcpTool``: returned by ``sdk.tool(...)`` decorator and passed back
 #   to ``sdk.create_sdk_mcp_server(tools=...)`` without field access.
@@ -1837,6 +1841,8 @@ class ClaudeSDKExecutor(Executor):
         # the Omnigent elicitation system rather than silently allowed.
         # ``None`` until the adapter installs it on first use.
         self._elicitation_handler: ElicitationHandler | None = None
+        # Question-card bridge for AskUserQuestion, wired by ExecutorAdapter.
+        self._ask_user_question_handler: AskUserQuestionHandler | None = None
         # Live Claude SDK clients keyed by Omnigent session id.
         self._clients: dict[str, _ClaudeClientState] = {}
         self._pending_framework_context: dict[str, str] = {}
@@ -2472,6 +2478,15 @@ class ClaudeSDKExecutor(Executor):
             # is included for safety if the SDK ever calls the callback
             # after the handler was cleared.
             return PermissionResultAllow()
+        if tool_name == "AskUserQuestion" and self._ask_user_question_handler is not None:
+            # Answering the question card is the approval; Claude returns
+            # ``tool_input.answers`` as the tool result instead of asking again.
+            answers = await self._ask_user_question_handler(tool_input)
+            if answers is None:
+                return PermissionResultDeny(message="The user declined to answer")
+            if not answers:
+                return PermissionResultAllow()
+            return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
         allowed = await self._elicitation_handler(tool_name, tool_input)
         if allowed:
             return PermissionResultAllow()
