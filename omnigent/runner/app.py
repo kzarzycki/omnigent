@@ -212,6 +212,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.spec.skill_sources import resolve_session_skills
 from omnigent.spec.types import AgentSpec, LocalToolInfo, SkillSpec
+from omnigent.tools.builtins.ask_user_question import ASK_USER_QUESTION_ELICITATION_PREFIX
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
@@ -7266,9 +7267,12 @@ def create_runner_app(
                 _elicit_action == "accept",
                 _elicit_content if isinstance(_elicit_content, dict) else None,
             )
-            # Ordinary Pi dialog rejection is an answer, not a tool denial.
-            pi_dialog = str(_data.get("elicitation_id", "")).startswith("elicit_pi_")
-            if _elicit_action == "decline" and (runner_owned_approval or not pi_dialog):
+            # Rejecting a Pi dialog or an AskUserQuestion card answers it; it
+            # doesn't stop the turn.
+            answer_dialog = str(_data.get("elicitation_id", "")).startswith(
+                ("elicit_pi_", ASK_USER_QUESTION_ELICITATION_PREFIX)
+            )
+            if _elicit_action == "decline" and (runner_owned_approval or not answer_dialog):
                 try:
                     _int_client = await process_manager.get_client(conversation_id, "any")
                     await _int_client.post(

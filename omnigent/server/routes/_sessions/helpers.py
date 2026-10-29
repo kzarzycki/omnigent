@@ -325,6 +325,9 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import Host, HostStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.tools.builtins.ask_user_question import (
+    structured_ask_user_question as _structured_ask_user_question,
+)
 from omnigent.util.cost_plan import (
     COST_CONTROL_LABEL_NAMESPACE,
     reserved_cost_control_keys,
@@ -952,81 +955,6 @@ def _publish_and_persist_resource_event(
             exc_info=True,
             extra={"session_id": session_id},
         )
-
-
-def _structured_ask_user_question(
-    tool_input: Any,
-) -> dict[str, Any] | None:
-    """
-    Build a structured AskUserQuestion payload for the elicitation
-    params extras.
-
-    Claude's PermissionRequest payload includes the full tool_input
-    when the gated tool is AskUserQuestion. Rather than relying on
-    the (truncated) ``content_preview`` JSON-string, we extract the
-    questions + options here and ship them as a typed structure the
-    UI consumes directly.
-
-    The returned shape is the same one the UI's
-    :file:`@/lib/askUserQuestion.ts` produces from its preview
-    parser — so the front-end can treat both sources uniformly.
-
-    :param tool_input: The ``tool_input`` field from the
-        PermissionRequest payload.
-    :returns: ``{"questions": [...]}`` on success, or ``None`` when
-        the input doesn't carry a usable AskUserQuestion shape (no
-        questions, malformed options, etc.) — caller falls back to
-        the binary preview-only render.
-    """
-    if not isinstance(tool_input, dict):
-        return None
-    questions_raw = tool_input.get("questions")
-    if not isinstance(questions_raw, list) or not questions_raw:
-        return None
-    questions: list[dict[str, Any]] = []
-    for entry in questions_raw:
-        if not isinstance(entry, dict):
-            continue
-        question_text = entry.get("question")
-        if not isinstance(question_text, str) or not question_text:
-            continue
-        options_raw = entry.get("options")
-        if not isinstance(options_raw, list):
-            continue
-        options: list[dict[str, Any]] = []
-        for opt in options_raw:
-            if isinstance(opt, dict):
-                label = opt.get("label")
-                if not isinstance(label, str) or not label:
-                    continue
-                option: dict[str, Any] = {"label": label}
-                description = opt.get("description")
-                if isinstance(description, str) and description:
-                    option["description"] = description
-                # ``preview`` is an optional richer snippet some
-                # Claude builds attach to an option (rendered as a
-                # <pre> below the option list when selected). Ride
-                # it through verbatim so the UI can surface it.
-                preview = opt.get("preview")
-                if isinstance(preview, str) and preview:
-                    option["preview"] = preview
-                options.append(option)
-            elif isinstance(opt, str) and opt:
-                options.append({"label": opt})
-        if not options:
-            continue
-        question: dict[str, Any] = {
-            "question": question_text,
-            "options": options,
-            "multiSelect": entry.get("multiSelect") is True,
-        }
-        header = entry.get("header")
-        if isinstance(header, str) and header:
-            question["header"] = header
-        questions.append(question)
-    if not questions:
-        return None
-    return {"questions": questions}
 
 
 def _canonical_tool_input(tool_input: dict[str, Any] | None) -> dict[str, Any]:

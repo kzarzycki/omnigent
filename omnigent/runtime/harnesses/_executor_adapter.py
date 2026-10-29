@@ -65,6 +65,10 @@ from omnigent.server.schemas import (
     ReasoningSummaryTextDeltaEvent,
     ReasoningTextDeltaEvent,
 )
+from omnigent.tools.builtins.ask_user_question import (
+    ASK_USER_QUESTION_ELICITATION_PREFIX,
+    structured_ask_user_question,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -271,6 +275,14 @@ class ExecutorAdapter(HarnessApp):
         ):
             executor._elicitation_choice_handler = (  # type: ignore[attr-defined]
                 self._stable_elicitation_choice_handler
+            )
+        # The Claude SDK executor asks AskUserQuestion as a question card.
+        if (
+            hasattr(executor, "_ask_user_question_handler")
+            and executor._ask_user_question_handler is None  # type: ignore[attr-defined]
+        ):
+            executor._ask_user_question_handler = (  # type: ignore[attr-defined]
+                self._stable_ask_user_question_handler
             )
         # PiExecutor parks ``ctx.ui`` dialogs as form elicitations. Decline must
         # not abort the turn (unlike the binary permission card).
@@ -858,17 +870,48 @@ class ExecutorAdapter(HarnessApp):
             ctx.cancelled.set()
         return result.action == "accept"
 
+    async def _stable_ask_user_question_handler(
+        self,
+        tool_input: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Ask Claude's ``AskUserQuestion`` as one question card.
+
+        Mirrors the claude-native permission hook: the card carries the
+        structured ``ask_user_question`` extra, and answering it approves the
+        call. A decline denies the tool without cancelling the turn.
+
+        :returns: The answers keyed by question text, the shape
+            ``tool_input.answers`` takes; ``{}`` when accepted without answers;
+            ``None`` when declined, cancelled, or no turn is active.
+        """
+        ctx = self._current_ctx
+        if ctx is None:
+            _logger.error("AskUserQuestion callback fired with no active turn context; declining")
+            return None
+        params = self._permission_card(
+            "AskUserQuestion",
+            tool_input,
+            ask_user_question=structured_ask_user_question(tool_input),
+        )
+        elicitation_id = f"{ASK_USER_QUESTION_ELICITATION_PREFIX}{secrets.token_hex(16)}"
+        result = await ctx.elicit(elicitation_id, params)
+        if result.action != "accept":
+            return None
+        return dict(result.content or {})
+
     def _permission_card(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
         *,
         requested_schema: dict[str, Any] | None = None,
+        ask_user_question: dict[str, Any] | None = None,
     ) -> ElicitationRequestParams:
         """Build the approval-card params for a tool-permission elicitation.
 
         With *requested_schema* the card renders one button per choice instead of
-        Approve/Reject; without it, the usual binary card.
+        Approve/Reject; with *ask_user_question* it renders that question form;
+        without either, the usual binary card.
         """
         # Build a concise preview: truncate long args so the UI widget
         # stays readable. 300 chars matches AP's policy-engine preview.
@@ -879,6 +922,9 @@ class ExecutorAdapter(HarnessApp):
         preview = preview[:300]
 
         label = self._harness_label
+        extras: dict[str, Any] = (
+            {"ask_user_question": ask_user_question} if ask_user_question else {}
+        )
         return ElicitationRequestParams(
             mode="form",
             message=f"{label} wants to use **{tool_name}**",
@@ -887,6 +933,7 @@ class ExecutorAdapter(HarnessApp):
             phase="tool_call",
             policy_name=f"{label.lower()}_sdk_permission",
             content_preview=f"{tool_name}({preview})",
+            **extras,
         )
 
     async def _stable_elicitation_choice_handler(
