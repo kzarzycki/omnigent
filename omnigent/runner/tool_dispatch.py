@@ -87,8 +87,8 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
-from omnigent.tools.builtins.session_message import SysSessionMessageTool
 from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY, SysSessionKeepTool
+from omnigent.tools.builtins.session_message import SysSessionMessageTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.session_subscriptions import (
     SysSessionSubscribeTool,

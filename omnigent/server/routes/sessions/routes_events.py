@@ -1447,9 +1447,10 @@ def register_events_routes(
             and await startup.accepts(conv, request.app)
         ):
             if peer_message:
+                # A peer message without an HTTP request was refused above.
                 await asyncio.to_thread(
                     require_orchestration_source,
-                    request,
+                    cast("Request", request),
                     user_id,
                     conversation_store,
                     permission_store,
