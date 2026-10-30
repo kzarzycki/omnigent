@@ -698,6 +698,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -726,6 +727,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -753,6 +755,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -775,6 +778,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -805,6 +809,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -830,6 +835,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),
@@ -858,6 +864,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />, {
       wrapper: withQueryClient(),

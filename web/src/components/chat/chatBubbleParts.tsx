@@ -66,7 +66,7 @@ import { readableSentText, replaceSentMentions } from "@/lib/composerMentions";
 import { mentionPillMarkdown } from "@/lib/mentionPills";
 import { splitSessionMessageOrigin } from "@/lib/sessionMessageOrigin";
 import { useSessionLabel } from "@/hooks/useSessionLabel";
-import type { AnyBlock, ImageContentBlock, MessageContentBlock } from "@/lib/blocks";
+import type { ImageContentBlock, MessageContentBlock } from "@/lib/blocks";
 import {
   attachmentLabel,
   ELICITATION_RESPONSE_PREFIX,
