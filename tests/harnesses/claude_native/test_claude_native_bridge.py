@@ -1401,13 +1401,6 @@ def _read_native_user(
             "Another Claude session sent a message while you were working:\n" + _TEAMMATE_MESSAGE,
             True,
         ),
-        (
-            "Another Claude session sent a message:\n"
-            + _TEAMMATE_MESSAGE
-            + "\nThis came from another Claude session — not typed by your user, "
-            "but working on their behalf.",
-            True,
-        ),
         ("Explain this: " + _TEAMMATE_MESSAGE, False),
         (_TEAMMATE_MESSAGE + "\nWhat does this mean?", False),
         ("```xml\n" + _TEAMMATE_MESSAGE + "\n```", False),
@@ -1425,6 +1418,30 @@ def test_team_markup_needs_provenance(
     _, response_id, peers = _read_native_user(tmp_path, content, origin={"kind": "peer"})
     assert all(peer.data.get("is_meta") for peer in peers)
     assert response_id == "active"
+
+
+_PEER_DELIVERY = (
+    "Another Claude session sent a message:\n"
+    + _TEAMMATE_MESSAGE
+    + "\n\nThis came from another Claude session — not typed by your user, "
+    "but very likely working on their behalf."
+)
+
+
+@pytest.mark.parametrize("as_blocks", [False, True])
+def test_framed_peer_delivery_without_origin_is_hidden(tmp_path: Path, as_blocks: bool) -> None:
+    content = [{"type": "text", "text": _PEER_DELIVERY}] if as_blocks else _PEER_DELIVERY
+    _, response_id, items = _read_native_user(tmp_path, content)
+    assert [item.data.get("is_meta") for item in items] == [True]
+    assert response_id == "active"
+
+    # The same frame pasted by a person keeps Claude's paste wrapper and stays visible.
+    pasted = f'<pasted_content id="p1">{_PEER_DELIVERY}</pasted_content id="p1">'
+    _, _, [item] = _read_native_user(tmp_path, pasted)
+    assert item.data == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": _PEER_DELIVERY}],
+    }
 
 
 @pytest.mark.parametrize(
