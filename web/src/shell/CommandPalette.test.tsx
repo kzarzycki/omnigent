@@ -405,10 +405,10 @@ describe("CommandPalette — match preview", () => {
   });
 
   it("opens a content match with the chat's find bar on the query", () => {
-    setSessions([
-      conv("c1", "Hello", "cursor", "…the deploy step failed…"),
-      conv("c2", "deploy runbook", "agent", null),
-    ]);
+    setSearchGroups({
+      title: searchPages([conv("c2", "deploy runbook", "agent", null)]),
+      content: searchPages([conv("c1", "Hello", "cursor", "…the deploy step failed…")]),
+    });
     renderPalette();
     search("deploy step");
 
@@ -496,7 +496,9 @@ describe("CommandPalette — mobile full-screen sheet", () => {
     { viewport: "desktop", isMobile: false, closes: 0 },
   ])("closes the sidebar on $viewport only when a pick navigates", ({ isMobile, closes }) => {
     setMobile(isMobile);
-    setSessions([conv("c1", "Hello", "cursor", "…the deploy step failed…")]);
+    setSearchGroups({
+      content: searchPages([conv("c1", "Hello", "cursor", "…the deploy step failed…")]),
+    });
     const onCloseSidebar = vi.fn();
     const onToggleLeftSidebar = vi.fn();
     vi.useFakeTimers();
@@ -594,6 +596,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("kestrel");
@@ -620,6 +623,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("kestrel");
@@ -635,7 +639,7 @@ describe("CommandPalette — title and content groups", () => {
     rerender(<CommandPalette {...props} />);
 
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(navigate).toHaveBeenCalledWith("/c/second");
+    expect(navigate).toHaveBeenCalledWith("/c/second?find=kestrel");
   });
 
   it("selects the top row again when the palette reopens", () => {
@@ -645,6 +649,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     fireEvent.keyDown(screen.getByTestId("command-palette-input"), { key: "ArrowDown" });
@@ -665,6 +670,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("kestrel");
@@ -693,6 +699,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("deploy");
@@ -706,7 +713,7 @@ describe("CommandPalette — title and content groups", () => {
     const input = screen.getByTestId("command-palette-input");
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(navigate).toHaveBeenCalledWith("/c/c3");
+    expect(navigate).toHaveBeenCalledWith("/c/c3?find=deploy");
   });
 
   it("holds the search until server info loads, then sends only the grouped requests", () => {
@@ -716,6 +723,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("deploy");
@@ -742,6 +750,7 @@ describe("CommandPalette — title and content groups", () => {
       onOpenChange: vi.fn(),
       onToggleLeftSidebar: vi.fn(),
       onToggleRightSidebar: vi.fn(),
+      onCloseSidebar: vi.fn(),
     };
     const { rerender } = render(<CommandPalette {...props} />);
     search("deploy");
