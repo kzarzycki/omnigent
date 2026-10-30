@@ -9645,15 +9645,23 @@ def _is_trusted_agent_notification_text(text: str, *, origin: object = None) -> 
     if isinstance(origin, dict) and origin.get("kind") == "peer":
         return True
     stripped = text.lstrip()
-    return stripped.startswith("<task-notification>") and all(
+    if stripped.startswith("<task-notification>") and all(
         marker in stripped for marker in _TASK_NOTIFICATION_REQUIRED_MARKERS
+    ):
+        return True
+    # Claude writes cross-session deliveries as plain user records without
+    # ``origin``; its own frame plus guidance tail marks them. Pastes stay
+    # wrapped in ``<pasted_content>`` here, so a quoted delivery is still shown.
+    peer_delivery = _split_peer_delivery(text)
+    return (
+        peer_delivery is not None
+        and peer_delivery[0]
+        and peer_delivery[1].startswith(_TEAMMATE_DELIVERY_GUIDANCE)
     )
 
 
-def _is_agent_notification_text(text: str) -> bool:
-    """Recognize possible agent context; text alone does not prove its origin."""
-    if _is_trusted_agent_notification_text(text):
-        return True
+def _split_peer_delivery(text: str) -> tuple[bool, str] | None:
+    """Return whether team envelopes carry Claude's frame, and the text after them."""
     stripped = text.lstrip()
     wrapped = False
     for prefix in _TEAMMATE_MESSAGE_PREFIXES:
@@ -9662,13 +9670,18 @@ def _is_agent_notification_text(text: str) -> bool:
             wrapped = True
             break
     if _TEAMMATE_MESSAGE_RE.match(stripped) is None:
-        return False
+        return None
     while match := _TEAMMATE_MESSAGE_RE.match(stripped):
         stripped = stripped[match.end() :].lstrip()
-        if not stripped:
-            return True
-    # Wrapped peer messages can append Claude's own explanatory guidance.
-    return wrapped and stripped.startswith(_TEAMMATE_DELIVERY_GUIDANCE)
+    return wrapped, stripped
+
+
+def _is_agent_notification_text(text: str) -> bool:
+    """Recognize possible agent context; text alone does not prove its origin."""
+    if _is_trusted_agent_notification_text(text):
+        return True
+    peer_delivery = _split_peer_delivery(text)
+    return peer_delivery is not None and not peer_delivery[1]
 
 
 def _subagent_handback_id(origin: object) -> str | None:
