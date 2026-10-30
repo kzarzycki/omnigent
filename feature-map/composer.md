@@ -107,6 +107,9 @@ and steers messages while the agent is busy.
   can be steered into the running turn.
 - `browser-pointer-queue`: desktop Design-mode instructions follow the same queue
   and always-steer preference, keeping their element screenshots.
+- `cancelled-prompt`: a prompt stopped before the agent produced any output
+  renders muted with "Cancelled before the agent replied" in place of a separate
+  Interrupted marker. A prompt that got output keeps the marker.
 - `pi-compact`: `/compact` follows the normal queue/Always steer preference.
   Send now interrupts the turn and compacts. During compaction, queued messages
   wait in the web queue; immediate sends are retained by the Pi integration.
@@ -496,6 +499,10 @@ Other connection providers alone do not enable the managed MCP picker.
 - **`queue-and-steer`:**
   `tests/e2e_ui/chat/test_queue_steer.py::test_steer_sends_queued_message_while_busy`,
   `tests/e2e_ui/chat/test_composer_bulk_steer.py::test_bulk_steer_retries_the_whole_queue`
+- **`cancelled-prompt`:** component tests in `web/src/lib/renderItems.test.ts`
+  and `web/src/pages/ChatPage.userBubble.test.tsx`. Manually: in a Claude native
+  session send a long task and press Stop before any reply; expect the prompt
+  muted with the cancelled note, live and after reload.
 - **`browser-pointer-queue`, desktop:** manually hold an agent turn open, then
   send a normal composer follow-up and two pointer instructions (Send and Enter).
   With Always steer off, all three stay queued and the popup says "Queued for

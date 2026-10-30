@@ -35,7 +35,7 @@ import {
   isSessionScopedDecision,
   routingExtras,
 } from "./routingDecision";
-import { isSystemUserContent } from "./systemMessage";
+import { isInterruptUserContent, isSystemUserContent } from "./systemMessage";
 import type { AgyPermission, CodexPersistMode, RememberScope } from "./types";
 import type { ActiveResponse } from "@/store/types";
 
@@ -191,6 +191,10 @@ export type Bubble =
        * optimistic→committed swap (no remount/flink).
        */
       stableKey?: string;
+      /** Stopped before the agent produced any output for it. */
+      cancelled?: boolean;
+      /** Interrupt record already shown as a preceding prompt's cancelled state. */
+      foldedIntoCancelledPrompt?: boolean;
     }
   | {
       kind: "assistant";
@@ -395,7 +399,7 @@ export function buildBubbles(
   // cached prefix may be reused at all.
   const superseded = supersededRoutingChips(blocks);
   if (cache === undefined) {
-    return markContinuedTurns(
+    return finalizeBubbles(
       walkBubbles(
         blocks,
         activeResponse,
@@ -451,7 +455,7 @@ export function buildBubbles(
     cache.activeResponse = activeResponse;
     cache.interruptedResponseIds = interruptedResponseIds;
     cache.liveTurnId = liveTurnId;
-    cache.bubbles = markContinuedTurns(rest.bubbles, activeResponse);
+    cache.bubbles = finalizeBubbles(rest.bubbles, activeResponse);
     cache.lastBubbleStart = rest.lastBubbleStart;
     cache.lastBubbleCount = rest.lastBubbleCount;
     cache.supersededChips = superseded;
@@ -473,11 +477,56 @@ export function buildBubbles(
   cache.activeResponse = activeResponse;
   cache.interruptedResponseIds = interruptedResponseIds;
   cache.liveTurnId = liveTurnId;
-  cache.bubbles = markContinuedTurns(full.bubbles, activeResponse);
+  cache.bubbles = finalizeBubbles(full.bubbles, activeResponse);
   cache.lastBubbleStart = full.lastBubbleStart;
   cache.lastBubbleCount = full.lastBubbleCount;
   cache.supersededChips = superseded;
   return cache.bubbles;
+}
+
+/** Whole-transcript passes that run after every walk, incremental or full. */
+function finalizeBubbles(bubbles: Bubble[], activeResponse: ActiveResponse | null): Bubble[] {
+  return markCancelledPrompts(markContinuedTurns(bubbles, activeResponse));
+}
+
+/**
+ * Flag prompts the person stopped before the agent produced any output.
+ *
+ * An interrupt record (Claude's own, or the runner's `[System: interrupted]`)
+ * right after one or more prompts, with no agent output between them, means
+ * those prompts got no reply. They render as cancelled and the record itself
+ * folds into them, so the state shows once, on the prompt it describes.
+ * Routing chips and output-less assistant bubbles are skipped. Returns the same
+ * array when nothing changed; flagged bubbles are replaced, never mutated.
+ */
+function markCancelledPrompts(bubbles: Bubble[]): Bubble[] {
+  let out: Bubble[] | null = null;
+  for (let i = 0; i < bubbles.length; i += 1) {
+    const marker = bubbles[i]!;
+    if (marker.kind !== "user" || !isInterruptUserContent(marker.content)) continue;
+    let cancelledAny = false;
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const previous = (out ?? bubbles)[j]!;
+      if (previous.kind === "routing_decision") continue;
+      if (previous.kind === "assistant" && !hasAgentOutput(previous)) continue;
+      if (previous.kind !== "user" || previous.pending || isSystemUserContent(previous.content)) {
+        break;
+      }
+      cancelledAny = true;
+      if (previous.cancelled) continue;
+      if (out === null) out = bubbles.slice();
+      out[j] = { ...previous, cancelled: true };
+    }
+    if (!cancelledAny || marker.foldedIntoCancelledPrompt) continue;
+    if (out === null) out = bubbles.slice();
+    out[i] = { ...marker, foldedIntoCancelledPrompt: true };
+  }
+  return out ?? bubbles;
+}
+
+/** Whether an assistant bubble shows anything the agent did or said. */
+function hasAgentOutput(bubble: Extract<Bubble, { kind: "assistant" }>): boolean {
+  return bubble.items.some((item) => item.kind !== "text" || item.text.trim() !== "");
 }
 
 /**
@@ -1879,6 +1928,8 @@ export function bubblesEqual(a: Bubble, b: Bubble): boolean {
       a.createdAtS !== b.createdAtS ||
       a.stableKey !== b.stableKey ||
       a.shellCommand !== b.shellCommand ||
+      Boolean(a.cancelled) !== Boolean(b.cancelled) ||
+      Boolean(a.foldedIntoCancelledPrompt) !== Boolean(b.foldedIntoCancelledPrompt) ||
       a.content.length !== b.content.length
     )
       return false;
