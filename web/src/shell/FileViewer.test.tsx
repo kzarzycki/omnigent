@@ -259,8 +259,6 @@ interface RenderProps {
   sort?: ChangedSort;
   /** Enables the prev/next nav header when provided. */
   onNavigateTo?: (path: string) => void;
-  /** Which shell copy this is; defaults to the single-viewport viewer. */
-  viewport?: "desktop" | "mobile";
 }
 
 /**
@@ -284,7 +282,6 @@ function viewerTree({
   onClose = vi.fn(),
   sort,
   onNavigateTo,
-  viewport,
 }: RenderProps = {}) {
   const url = initialSearch ? `/?${initialSearch}` : "/";
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -305,7 +302,6 @@ function viewerTree({
           onClose={onClose}
           sort={sort}
           onNavigateTo={onNavigateTo}
-          viewport={viewport}
         />
       </MemoryRouter>
     </QueryClientProvider>
