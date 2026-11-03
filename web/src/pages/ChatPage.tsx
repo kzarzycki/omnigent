@@ -1763,7 +1763,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   // chunk defers until after first paint. Returning to an already-warm
   // background session is still same-commit (it's already in warmTerminals).
   const renderedTerminals = warmTerminals;
-  const handleTerminalResume = useCallback(async () => {
+  const handleSessionResume = useCallback(async () => {
     if (!conversationId) throw new Error("Session is not available");
     if (liveness.kind === "host_offline" || liveness.kind === "local_stranded") {
       onShowReconnectHelp();
@@ -1791,7 +1791,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           visible={isShown}
           runnerOnline={isActive ? runnerOnline : undefined}
           lastTaskError={isActive ? lastTaskError : undefined}
-          onResume={isActive ? handleTerminalResume : undefined}
+          onResume={isActive ? handleSessionResume : undefined}
           sandboxOffline={isActive && liveness.kind === "host_asleep"}
           onSurfaceElement={isActive ? setTerminalSurfaceEl : undefined}
           readOnly={entry.readOnly}
@@ -1896,10 +1896,14 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             onViewportShrinkPinScroll={pinScrollOnComposerGrowth}
           />
 
-          {/* Reconnect-or-fork banner when unreachable, nothing otherwise.
+          {/* Reconnect banner when unreachable, asleep row with Resume when asleep.
           Sits below the composer so its position is consistent with the
           terminal view. */}
-          <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
+          <ConnectionIndicator
+            liveness={liveness}
+            onShowReconnectHelp={onShowReconnectHelp}
+            onResume={terminalReadOnly ? undefined : handleSessionResume}
+          />
         </>
       )}
     </>
