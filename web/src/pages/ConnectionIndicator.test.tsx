@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConnectionIndicator } from "./ChatIndicators";
@@ -126,7 +126,9 @@ describe("ConnectionIndicator", () => {
     expect(screen.getByTestId("asleep-indicator")).toHaveTextContent(/session is asleep/i);
     fireEvent.click(screen.getByRole("button", { name: "Resume" }));
     expect(onResume).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole("button", { name: "Resume" })).toBeEnabled();
+    // Stays pending after success until liveness flips and unmounts the row.
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: /resuming/i })).toBeDisabled();
   });
 
   it("names the sandbox for host_asleep and shows a failed resume", async () => {

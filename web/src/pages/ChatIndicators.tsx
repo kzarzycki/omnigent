@@ -1,5 +1,5 @@
 import { AlertTriangleIcon, Loader2Icon, MoonIcon, WifiOffIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ErrorBanner } from "@/components/blocks/StatusBlocks";
@@ -184,6 +184,9 @@ export function ConnectionIndicator({
  * wakes the sandbox) without sending a message. Read-only viewers get the row
  * without the button.
  */
+/** Upper bound on "Resuming…" after a successful wake, if liveness never flips. */
+const RESUME_SETTLE_MS = 30_000;
+
 function AsleepIndicator({
   sandbox,
   onResume,
@@ -193,15 +196,19 @@ function AsleepIndicator({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const settleTimer = useRef<number>(0);
+  useEffect(() => () => window.clearTimeout(settleTimer.current), []);
   const resume = async () => {
     if (!onResume) return;
     setError(null);
     setPending(true);
     try {
       await onResume();
+      // Liveness flips on the next poll or stream push, which unmounts this row;
+      // stay "Resuming…" until then so the button doesn't invite a second click.
+      settleTimer.current = window.setTimeout(() => setPending(false), RESUME_SETTLE_MS);
     } catch (cause) {
       setError(cause instanceof Error && cause.message ? cause.message : "Something went wrong");
-    } finally {
       setPending(false);
     }
   };
