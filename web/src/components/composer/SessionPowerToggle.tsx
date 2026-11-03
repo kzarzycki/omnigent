@@ -33,15 +33,13 @@ export function SessionPowerToggle({
 }) {
   const { session } = useSession(sessionId);
   const stopSession = useStopSession();
-  const [pending, setPending] = useState(false);
+  // The state a click started from; the switch is pending only while liveness
+  // still reports it, so the new state never renders with the old spinner.
+  const [pendingFrom, setPendingFrom] = useState<SessionPowerState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const settleTimer = useRef<number>(0);
-
-  // The switch is done once liveness reports the new state.
-  useEffect(() => {
-    window.clearTimeout(settleTimer.current);
-    setPending(false);
-  }, [state]);
+  if (pendingFrom !== null && pendingFrom !== state) setPendingFrom(null);
+  const pending = pendingFrom === state;
   useEffect(() => () => window.clearTimeout(settleTimer.current), []);
 
   const stoppable = isSessionStoppable({
@@ -61,15 +59,16 @@ export function SessionPowerToggle({
   const toggle = async () => {
     if (pending || disabledReason) return;
     setError(null);
-    setPending(true);
+    setPendingFrom(state);
     try {
       if (live) await stopSession.mutateAsync(sessionId);
       else await onResume();
-      // Liveness flips on the next poll or stream push and clears `pending`.
-      settleTimer.current = window.setTimeout(() => setPending(false), SETTLE_MS);
+      // Liveness flips on the next poll or stream push, which ends `pending`.
+      window.clearTimeout(settleTimer.current);
+      settleTimer.current = window.setTimeout(() => setPendingFrom(null), SETTLE_MS);
     } catch (cause) {
       setError(cause instanceof Error && cause.message ? cause.message : "Something went wrong");
-      setPending(false);
+      setPendingFrom(null);
     }
   };
 
