@@ -123,10 +123,11 @@ describe("ConnectionIndicator", () => {
     expect(screen.getByTestId("connecting-indicator")).toHaveTextContent("Connecting…");
   });
 
-  it.each<SessionLiveness>([{ kind: "online" }, { kind: "unknown" }])(
-    "renders nothing for the reachable state %o",
+  it.each<SessionLiveness>([{ kind: "online" }, { kind: "runner_asleep" }, { kind: "unknown" }])(
+    "renders nothing for the reachable/sidebar-owned state %o",
     (liveness) => {
-      // WHY: an online or not-yet-polled session has nothing to report.
+      // WHY: online/asleep/unknown surface their status in the sidebar or keep
+      // the composer open — this band stays empty for them.
       const { container } = render(
         <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />,
       );

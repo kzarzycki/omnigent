@@ -1,9 +1,7 @@
-import { AlertTriangleIcon, Loader2Icon, MoonIcon, WifiOffIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertTriangleIcon, Loader2Icon, WifiOffIcon, XIcon } from "lucide-react";
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ErrorBanner } from "@/components/blocks/StatusBlocks";
-import { Button } from "@/components/ui/button";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import { SANDBOX_STAGE_LABELS } from "@/lib/sandboxStatus";
 import type { SandboxStatus } from "@/lib/types";
@@ -78,12 +76,9 @@ export function SandboxFailedIndicator({ status }: { status: SandboxStatus }) {
 export function ConnectionIndicator({
   liveness,
   onShowReconnectHelp,
-  onResume,
 }: {
   liveness: SessionLiveness;
   onShowReconnectHelp: () => void;
-  /** Wakes an asleep session without sending a message; omit for read-only viewers. */
-  onResume?: () => Promise<void>;
 }) {
   const terminalFirst = useTerminalFirst();
   const sandboxStatus = useChatStore((s) => s.sandboxStatus);
@@ -143,13 +138,6 @@ export function ConnectionIndicator({
     );
   }
 
-  // The next message wakes an asleep session, but nothing on screen said it was
-  // asleep. The terminal view shows its own Resume (MainTerminalView).
-  const terminalView = terminalFirst?.isTerminalFirst && terminalFirst.view === "terminal";
-  if ((liveness.kind === "runner_asleep" || liveness.kind === "host_asleep") && !terminalView) {
-    return <AsleepIndicator sandbox={liveness.kind === "host_asleep"} onResume={onResume} />;
-  }
-
   // Terminal-first sessions: the Chat/Terminal switcher lives in the header
   // (ViewModeToggle) on every shell, iOS included — this band renders
   // nothing for them outside the unreachable states above.
@@ -175,76 +163,10 @@ export function ConnectionIndicator({
     );
   }
 
-  // `online`/`unknown`: nothing to say, the composer is ready.
+  // `online`/`unknown` for a non-terminal-first session and
+  // `runner_asleep`/`host_asleep` for any session: the composer's live/asleep
+  // toggle shows the state and the composer stays open, so render nothing here.
   return null;
-}
-
-/**
- * Passive "asleep" row with a Resume button that relaunches the runner (or
- * wakes the sandbox) without sending a message. Read-only viewers get the row
- * without the button.
- */
-/** Upper bound on "Resuming…" after a successful wake, if liveness never flips. */
-const RESUME_SETTLE_MS = 30_000;
-
-function AsleepIndicator({
-  sandbox,
-  onResume,
-}: {
-  sandbox: boolean;
-  onResume?: () => Promise<void>;
-}) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const settleTimer = useRef<number>(0);
-  useEffect(() => () => window.clearTimeout(settleTimer.current), []);
-  const resume = async () => {
-    if (!onResume) return;
-    setError(null);
-    setPending(true);
-    try {
-      await onResume();
-      // Liveness flips on the next poll or stream push, which unmounts this row;
-      // stay "Resuming…" until then so the button doesn't invite a second click.
-      settleTimer.current = window.setTimeout(() => setPending(false), RESUME_SETTLE_MS);
-    } catch (cause) {
-      setError(cause instanceof Error && cause.message ? cause.message : "Something went wrong");
-      setPending(false);
-    }
-  };
-  return (
-    <div
-      data-testid="asleep-indicator"
-      role="status"
-      className={cn(
-        "mx-auto mb-4 flex w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 px-6 py-1.5 text-muted-foreground text-sm",
-        CHAT_COLUMN_WIDTH,
-      )}
-    >
-      <span className="flex items-center gap-1.5">
-        <MoonIcon className="size-3.5 shrink-0" aria-hidden />
-        {sandbox
-          ? "Sandbox is asleep — your next message starts it"
-          : "Session is asleep — your next message wakes it"}
-      </span>
-      {onResume && (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={pending}
-          onClick={() => void resume()}
-          componentId="diagnostics.chat.asleep-resume"
-        >
-          {pending && <Loader2Icon className="size-3.5 animate-spin" aria-hidden />}
-          {pending ? "Resuming…" : "Resume"}
-        </Button>
-      )}
-      {error && (
-        <span className="w-full text-center text-destructive">Couldn't resume: {error}</span>
-      )}
-    </div>
-  );
 }
 
 /**

@@ -211,6 +211,10 @@ import {
 } from "@/lib/sessionHost";
 import { HostBadge } from "@/components/HostBadge";
 import {
+  SessionPowerToggle,
+  type SessionPowerState,
+} from "@/components/composer/SessionPowerToggle";
+import {
   type McpServerRow,
   BUILTIN_SLASH_COMMANDS,
   isSlashCommandText,
@@ -1887,6 +1891,16 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
               !sandboxLaunching &&
               (liveness.kind === "host_offline" || liveness.kind === "local_stranded")
             }
+            sessionPower={
+              sandboxLaunching
+                ? null
+                : liveness.kind === "online"
+                  ? "live"
+                  : liveness.kind === "runner_asleep" || liveness.kind === "host_asleep"
+                    ? "asleep"
+                    : null
+            }
+            onResumeSession={handleSessionResume}
             sendReconnectsArca={sendReconnectsArca}
             onShowReconnectHelp={onShowReconnectHelp}
             costRoutingEligible={costRoutingEligible}
@@ -1896,14 +1910,10 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             onViewportShrinkPinScroll={pinScrollOnComposerGrowth}
           />
 
-          {/* Reconnect banner when unreachable, asleep row with Resume when asleep.
+          {/* Reconnect-or-fork banner when unreachable, nothing otherwise.
           Sits below the composer so its position is consistent with the
           terminal view. */}
-          <ConnectionIndicator
-            liveness={liveness}
-            onShowReconnectHelp={onShowReconnectHelp}
-            onResume={terminalReadOnly ? undefined : handleSessionResume}
-          />
+          <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
         </>
       )}
     </>
@@ -2039,6 +2049,10 @@ interface ComposerProps {
    * banner below is the only affordance.
    */
   unreachable?: boolean;
+  /** Live/asleep state for the composer's toggle; `null` hides it (starting, offline, unknown). */
+  sessionPower?: SessionPowerState | null;
+  /** Relaunch an asleep session without sending a message. */
+  onResumeSession?: () => Promise<void>;
   /**
    * Sending reconnects the session's offline Arca host: the textarea stays
    * enabled while `unreachable`, and the placeholder says so.
@@ -2383,6 +2397,8 @@ function ComposerImpl(
     showPollyCodexGoalControl = false,
     isNativeWrapper = false,
     unreachable = false,
+    sessionPower = null,
+    onResumeSession,
     sendReconnectsArca = false,
     onShowReconnectHelp,
     costRoutingEligible = false,
@@ -4246,6 +4262,15 @@ function ComposerImpl(
                   appearance="composer"
                   readOnly={isReadOnly}
                   onReconnect={onShowReconnectHelp}
+                />
+              )}
+              {composerSessionId && sessionPower && onResumeSession && (
+                <SessionPowerToggle
+                  sessionId={composerSessionId}
+                  state={sessionPower}
+                  onResume={onResumeSession}
+                  readOnly={isReadOnly}
+                  turnRunning={isStreaming}
                 />
               )}
               {(showClaudePermissionMode || showCodexApprovalMode) && (

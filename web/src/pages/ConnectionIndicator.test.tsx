@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConnectionIndicator } from "./ChatIndicators";
@@ -32,21 +32,15 @@ function renderWithContext(
   liveness: SessionLiveness,
   ctx: TerminalFirstContextValue | null,
   onShowReconnectHelp = vi.fn(),
-  onResume?: () => Promise<void>,
 ) {
-  const indicator = (
-    <ConnectionIndicator
-      liveness={liveness}
-      onShowReconnectHelp={onShowReconnectHelp}
-      onResume={onResume}
-    />
-  );
   return render(
     <TooltipProvider>
       {ctx ? (
-        <TerminalFirstContextProvider value={ctx}>{indicator}</TerminalFirstContextProvider>
+        <TerminalFirstContextProvider value={ctx}>
+          <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
+        </TerminalFirstContextProvider>
       ) : (
-        indicator
+        <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
       )}
     </TooltipProvider>,
   );
@@ -117,41 +111,21 @@ describe("ConnectionIndicator", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("shows the asleep row with Resume, not a disconnect banner, for runner_asleep", async () => {
-    // The composer stays open and the next message wakes the runner; Resume
-    // wakes it without sending anything.
-    const onResume = vi.fn().mockResolvedValue(undefined);
-    renderWithContext({ kind: "runner_asleep" }, null, vi.fn(), onResume);
+  it("renders NOTHING for a runner_asleep NON-terminal-first session — composer stays open", () => {
+    // Core UX goal: when the host is alive the chat box stays open and
+    // the runner relaunches on the next message, so the band shows no
+    // disconnect banner.
+    const { container } = renderWithContext({ kind: "runner_asleep" }, null);
     expect(screen.queryByTestId("disconnected-indicator")).toBeNull();
-    expect(screen.getByTestId("asleep-indicator")).toHaveTextContent(/session is asleep/i);
-    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-    expect(onResume).toHaveBeenCalledTimes(1);
-    // Stays pending after success until liveness flips and unmounts the row.
-    await act(async () => {});
-    expect(screen.getByRole("button", { name: /resuming/i })).toBeDisabled();
+    expect(container).toBeEmptyDOMElement();
   });
 
-  it("names the sandbox for host_asleep and shows a failed resume", async () => {
-    const onResume = vi.fn().mockRejectedValue(new Error("No runner is available"));
-    renderWithContext({ kind: "host_asleep" }, makeCtx({ view: "chat" }), vi.fn(), onResume);
-    expect(screen.getByTestId("asleep-indicator")).toHaveTextContent(/sandbox is asleep/i);
-    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-    expect(await screen.findByText(/couldn't resume: no runner is available/i)).toBeInTheDocument();
-  });
-
-  it("omits Resume for a read-only viewer", () => {
-    renderWithContext({ kind: "runner_asleep" }, null);
-    expect(screen.getByTestId("asleep-indicator")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
-  });
-
-  it("leaves the asleep state to the terminal's own Resume in the terminal view", () => {
-    const { container } = renderWithContext(
-      { kind: "runner_asleep" },
-      makeCtx({ view: "terminal" }),
-      vi.fn(),
-      vi.fn(),
-    );
+  it("renders nothing (no banner) for a runner_asleep terminal-first session", () => {
+    // Stopping a runner keeps the chat open (host alive); the header toggle
+    // stays available and the next send relaunches the runner. This band
+    // shows no disconnect banner.
+    const { container } = renderWithContext({ kind: "runner_asleep" }, makeCtx());
+    expect(screen.queryByTestId("disconnected-indicator")).toBeNull();
     expect(container).toBeEmptyDOMElement();
   });
 
