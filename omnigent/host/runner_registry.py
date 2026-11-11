@@ -334,21 +334,38 @@ def _live_runners(snapshot: RegistrySnapshot | None) -> list[RegisteredRunner]:
     ]
 
 
+def session_leaders(pids: Collection[int]) -> set[int]:
+    """*pids* and the session leaders among their descendants.
+
+    A harness started in a session of its own keeps its tool calls and
+    background jobs there, not in its runner's session.
+    """
+    leaders = set(pids)
+    for pid in pids:
+        with contextlib.suppress(psutil.Error):
+            for child in psutil.Process(pid).children(recursive=True):
+                with contextlib.suppress(OSError):
+                    if os.getsid(child.pid) == child.pid:
+                        leaders.add(child.pid)
+    return leaders
+
+
 def live_runner_pids(path: Path) -> set[int]:
-    """Pids of the runners the registry lists that still run."""
-    return {entry.pid for entry in _live_runners(read_registry(path))}
+    """Session leaders of the runners the registry lists that still run."""
+    return session_leaders({entry.pid for entry in _live_runners(read_registry(path))})
 
 
 def end_runner_sessions(
     leader_pids: Collection[int], *, started_before: float, grace_s: float = 2.0
 ) -> list[int]:
-    """End what is left in the sessions that runners with *leader_pids* lead.
+    """End what is left in the sessions that *leader_pids* lead.
 
     A runner leads its own session, so its tool calls and background jobs
-    carry its pid as their session id; a service manager no longer sweeps
-    them. *started_before* is when the leaders were seen alive: a session id
-    stays taken while a member lives, so an older process with that id is a
-    member of the runner's session and not of one that reused the pid.
+    carry its pid, or its harness's (see :func:`session_leaders`), as their
+    session id; a service manager no longer sweeps them. *started_before* is
+    when the leaders were seen alive: a session id stays taken while a member
+    lives, so an older process with that id is a member of that session and
+    not of one that reused the pid.
 
     :returns: The pids that were signalled.
     """

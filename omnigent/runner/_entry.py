@@ -1373,10 +1373,10 @@ def _run_parent_death_killer(
 
 
 def _end_own_session() -> None:
-    """End every other process in the session this runner leads."""
-    from omnigent.host.runner_registry import end_runner_sessions
+    """End every other process in the sessions this runner and its harness lead."""
+    from omnigent.host.runner_registry import end_runner_sessions, session_leaders
 
-    end_runner_sessions({os.getpid()}, started_before=time.time())
+    end_runner_sessions(session_leaders({os.getpid()}), started_before=time.time())
 
 
 def _host_registry_path_from_env() -> Path | None:

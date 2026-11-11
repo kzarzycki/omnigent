@@ -28,6 +28,7 @@ from omnigent.host.runner_registry import (
     process_matches,
     process_start_stamp,
     read_registry,
+    session_leaders,
     stop_registered_runners,
 )
 from omnigent.native.owner_claim import current_boot_id
@@ -536,3 +537,34 @@ def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_proces
         assert time.monotonic() < deadline, "the member that ignores SIGTERM survived"
         time.sleep(0.05)
     assert bystander.poll() is None
+
+
+def test_session_leaders_include_a_runners_children_that_lead_a_session() -> None:
+    # The runner stand-in starts a harness in a session of its own and a plain child.
+    idle = "[sys.executable, '-c', 'import time; time.sleep(120)']"
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            f"harness = subprocess.Popen({idle}, start_new_session=True)\n"
+            f"plain = subprocess.Popen({idle})\n"
+            "print(harness.pid, plain.pid, flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert runner.stdout is not None
+        harness_pid, plain_pid = map(int, runner.stdout.readline().split())
+
+        leaders = session_leaders({runner.pid})
+
+        assert leaders == {runner.pid, harness_pid}
+        ended = end_runner_sessions(leaders, started_before=time.time())
+        assert set(ended) == {runner.pid, harness_pid, plain_pid}
+        assert process_start_stamp(harness_pid) is None
+    finally:
+        runner.kill()
+        runner.wait()
