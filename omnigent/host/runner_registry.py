@@ -20,8 +20,9 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -91,13 +92,21 @@ def process_matches(pid: int, started_at: float) -> bool:
     return stamp is not None and abs(stamp - started_at) <= _START_STAMP_TOLERANCE_S
 
 
+def _known_fields(record_type: type, raw: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys another build wrote that this one does not know."""
+    names = {field.name for field in fields(record_type)}
+    return {key: value for key, value in raw.items() if key in names}
+
+
 def read_registry(path: Path) -> RegistrySnapshot | None:
     """Read a registry file; ``None`` when it is missing or not valid."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        owner = RegistryOwner(**raw["daemon"])
+        owner = RegistryOwner(**_known_fields(RegistryOwner, raw["daemon"]))
         runners = {
-            runner_id: RegisteredRunner(runner_id=runner_id, **entry)
+            runner_id: RegisteredRunner(
+                **{**_known_fields(RegisteredRunner, entry), "runner_id": runner_id}
+            )
             for runner_id, entry in raw["runners"].items()
         }
     except (OSError, ValueError, TypeError, KeyError, AttributeError):

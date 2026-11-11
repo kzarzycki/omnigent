@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -160,6 +161,21 @@ def test_release_keeps_runners_added_before_and_after(tmp_path: Path, spawn_proc
     snapshot = read_registry(path)
     assert snapshot is not None
     assert snapshot.runners == {}
+
+
+def test_registry_written_by_another_build_is_still_read(tmp_path: Path, spawn_process) -> None:
+    path = tmp_path / "target.runners"
+    daemon, runner = spawn_process(), spawn_process()
+    _write(path, _owner(daemon, released=True), _runner("runner-1", runner, tmp_path / "log"))
+    raw = json.loads(path.read_text())
+    raw["daemon"]["added_by_a_newer_build"] = 1
+    raw["runners"]["runner-1"]["added_by_a_newer_build"] = 1
+    path.write_text(json.dumps(raw))
+
+    snapshot = read_registry(path)
+
+    assert snapshot is not None
+    assert snapshot.runners["runner-1"].pid == runner.pid
 
 
 def test_next_owner_decisions(tmp_path: Path, spawn_process) -> None:
