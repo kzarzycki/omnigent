@@ -1073,7 +1073,8 @@ def create_hosts_router(
 
         :raises HTTPException: 404 when the host is unknown, 403 when not the
             owner, 409 when offline or the host daemon is too old to list model
-            options, 502 on host-side failure, 504 on timeout.
+            options, 501 when the harness has no host catalog, 502 on host-side
+            failure, 504 on timeout.
         """
         user_id = require_user(request, auth_provider)
         host = await asyncio.to_thread(host_store.get_host, host_id)
@@ -1093,7 +1094,9 @@ def create_hosts_router(
         )
         if result.get("status") != "ok":
             raise HTTPException(
-                status_code=502,
+                # A harness with no host catalog is a permanent answer, not a gateway fault:
+                # 501 keeps clients from retrying it as they do a 502.
+                status_code=501 if result.get("status") == "unsupported" else 502,
                 detail=str(result.get("error") or "host model-options lookup failed"),
             )
         models = result.get("models")
