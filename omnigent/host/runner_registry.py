@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -193,6 +194,15 @@ class RunnerRegistry:
             if self._runners.pop(runner_id, None) is not None:
                 self._write_locked()
 
+    def remove_pid(self, pid: int) -> None:
+        """Forget the runner with *pid*, for one that never got a tracked handle."""
+        with self._lock:
+            stale = [rid for rid, entry in self._runners.items() if entry.pid == pid]
+            for runner_id in stale:
+                del self._runners[runner_id]
+            if stale:
+                self._write_locked()
+
     def clear(self) -> None:
         """Forget every runner, after the daemon stopped them all itself."""
         with self._lock:
@@ -213,22 +223,68 @@ class RunnerRegistry:
             _logger.warning("Could not write runner registry %s", self.path, exc_info=True)
 
 
-def next_owner(path: Path, runner_id: str, owner_pid: int) -> tuple[int, float] | bool | None:
-    """Decide what a runner does once the daemon *owner_pid* is gone.
+class AdoptedRunnerProc:
+    """Popen-like handle on a runner this daemon adopted and is not the parent of."""
 
-    :returns: ``(pid, started_at)`` of a new daemon that adopted this runner;
-        ``True`` to keep serving and ask again (the old daemon released its
-        runners and no new daemon has claimed them yet); ``None`` to shut down.
+    def __init__(self, entry: RegisteredRunner) -> None:
+        self.pid = entry.pid
+        self.returncode: int | None = None
+        self._started_at = entry.started_at
+        self._log_path = Path(entry.log_path)
+
+    def poll(self) -> int | None:
+        """Return the exit code once the runner is gone, else ``None``."""
+        if self.returncode is None and not process_matches(self.pid, self._started_at):
+            self.returncode = self._exit_code_from_log()
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Block until the runner is gone; raise ``TimeoutExpired`` after *timeout*."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while (code := self.poll()) is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("adopted runner", timeout or 0.0)
+            time.sleep(0.1)
+        return code
+
+    def terminate(self) -> None:
+        """Ask the runner to shut down."""
+        self._signal(signal.SIGTERM)
+
+    def kill(self) -> None:
+        """End the runner at once."""
+        self._signal(getattr(signal, "SIGKILL", signal.SIGTERM))
+
+    def _signal(self, signum: int) -> None:
+        if self.poll() is None:
+            with contextlib.suppress(OSError):
+                os.kill(self.pid, signum)
+
+    def _exit_code_from_log(self) -> int:
+        # ponytail: only a parent can read an exit status. An orderly runner
+        # exit logs "runner exiting:"; anything else counts as a crash.
+        try:
+            tail = self._log_path.read_bytes()[-8192:]
+        except OSError:
+            return 1
+        return 0 if b"runner exiting:" in tail else 1
+
+
+def next_owner(path: Path, runner_id: str) -> tuple[int, float] | bool:
+    """Decide what a runner does once the daemon it watched is gone.
+
+    :returns: ``(pid, started_at)`` of the live daemon that lists this runner
+        (a new daemon adopted it); ``True`` to keep serving and ask again (the
+        dead daemon released its runners and no daemon has claimed them yet);
+        ``False`` to shut down.
     """
     snapshot = read_registry(path)
-    if snapshot is None:
-        return None
+    if snapshot is None or runner_id not in snapshot.runners:
+        return False
     owner = snapshot.owner
-    if owner.pid == owner_pid:
-        return True if owner.released and runner_id in snapshot.runners else None
-    if runner_id not in snapshot.runners:
-        return None
-    return owner.pid, owner.started_at
+    if process_matches(owner.pid, owner.started_at):
+        return owner.pid, owner.started_at
+    return owner.released
 
 
 def stop_registered_runners(path: Path, *, grace_s: float = 5.0) -> list[int]:

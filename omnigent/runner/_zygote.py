@@ -719,6 +719,10 @@ class _ZygoteServer:
             _send(conn, {"error": f"fork failed: {exc}"})
             return
         if pid == 0:
+            # Own session: a service manager that stops the daemon's process
+            # group must not take the runner with it.
+            with contextlib.suppress(OSError):
+                os.setsid()
             # Runner child: keep r_end (its harness channel), close every
             # inherited zygote-side socket including the just-made z_end.
             with contextlib.suppress(OSError):

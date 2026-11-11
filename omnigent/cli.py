@@ -10960,6 +10960,7 @@ def host_disable() -> None:
     for record in _list_daemon_records():
         if not _pid_alive(record.pid):
             _delete_daemon_record(record)
+            _stop_daemon_runners(record)
     click.echo("Disabled the Omnigent host user service.")
     click.echo(f"Removed service definition: {_display_path(service.path)}")
 
@@ -11197,7 +11198,26 @@ def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> str:
     return _SIGNAL_DELIVERED
 
 
+def _stop_daemon_runners(record: _HostDaemonRecord) -> None:
+    """End the runners a stopped daemon left behind for a successor to adopt.
+
+    A daemon stopped with ``SIGTERM`` releases its runners so a restart keeps
+    them. A deliberate stop has no successor, so it ends them here.
+    """
+    from omnigent.host.runner_registry import runner_registry_path, stop_registered_runners
+
+    stop_registered_runners(runner_registry_path(record.target))
+
+
 def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> str:
+    """Stop a daemon and its runners; see :func:`_terminate_daemon_process`."""
+    outcome = _terminate_daemon_process(record, force=force)
+    if outcome != _STOP_DROPPED_FOREIGN:
+        _stop_daemon_runners(record)
+    return outcome
+
+
+def _terminate_daemon_process(record: _HostDaemonRecord, *, force: bool) -> str:
     """
     Terminate one local daemon process.
 

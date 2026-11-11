@@ -1232,11 +1232,54 @@ def _parent_is_orphaned(parent_pid: int, *, started_at: float | None = None) -> 
     return current is not None and current != started_at
 
 
+def _await_next_host_daemon(
+    registry_path: Path | None, runner_id: str | None, poll_interval_s: float
+) -> tuple[int, float] | None:
+    """Wait for a host daemon to adopt this runner after its daemon died.
+
+    :returns: The adopting daemon's pid and start stamp, or ``None`` when the
+        runner must shut down: no registry, the dead daemon did not release
+        its runners, or the daemon that took over does not list this runner.
+    """
+    if registry_path is None or runner_id is None:
+        return None
+    from omnigent.host.runner_registry import next_owner
+
+    announced = False
+    while (decision := next_owner(registry_path, runner_id)) is True:
+        if not announced:
+            _logger.info(
+                "host daemon stopped and released its runners; serving until one adopts",
+                extra={"session_id": runner_primary_session_id()},
+            )
+            announced = True
+        time.sleep(poll_interval_s)
+    return decision or None
+
+
+def _watch_adopting_daemon(daemon_pid: int, started_at: float) -> Callable[[], bool]:
+    """Return the liveness check for a daemon that adopted this runner.
+
+    The adopting daemon is never this process's OS parent, so only its pid and
+    start stamp can say whether it is still there.
+    """
+    from omnigent.host.runner_registry import process_matches
+
+    _logger.info(
+        "adopted by host daemon pid %d",
+        daemon_pid,
+        extra={"session_id": runner_primary_session_id()},
+    )
+    return lambda: not process_matches(daemon_pid, started_at)
+
+
 def _run_parent_death_killer(
     parent_pid: int,
     request_shutdown: Callable[[], None],
     *,
     adopted: threading.Event | None = None,
+    registry_path: Path | None = None,
+    runner_id: str | None = None,
     poll_interval_s: float = 0.5,
     grace_s: float = 2.0,
     exit_fn: Callable[[int], None] = os._exit,
@@ -1259,10 +1302,18 @@ def _run_parent_death_killer(
     The CLI sets it (via the adopt signal) while it is still alive, so the
     flag is observed before the subsequent parent-death is detected.
 
+    With *registry_path*, a host daemon that was asked to stop can hand the
+    runner on: the runner keeps serving while the daemon's registry says its
+    runners were released, and watches the next daemon once that one lists it.
+    A daemon that died without releasing (a crash) still ends the runner.
+
     :param parent_pid: The launcher's process id to monitor, e.g.
         ``12345``.
     :param request_shutdown: Callback that triggers a graceful shutdown
         (e.g. setting the runner's stop event on the loop thread).
+    :param registry_path: The host daemon's runner registry, or ``None`` for a
+        runner no daemon can hand on (launched by the CLI).
+    :param runner_id: This runner's id in that registry.
     :param adopted: Event set when the runner has been adopted; once set,
         the watcher returns without requesting shutdown. ``None`` disables
         adoption (watch until parent death).
@@ -1275,14 +1326,23 @@ def _run_parent_death_killer(
     :returns: None.
     """
     started_at = _parent_start_time(parent_pid)
-    while not _parent_is_orphaned(parent_pid, started_at=started_at):
+    owner_is_gone: Callable[[], bool] = functools.partial(
+        _parent_is_orphaned, parent_pid, started_at=started_at
+    )
+
+    while True:
+        while not owner_is_gone():
+            if adopted is not None and adopted.is_set():
+                return
+            time.sleep(poll_interval_s)
+        # Parent is gone (or never set). Honor a late adopt that raced the
+        # parent's exit so an intentional detach is never torn down.
         if adopted is not None and adopted.is_set():
             return
-        time.sleep(poll_interval_s)
-    # Parent is gone (or never set). Honor a late adopt that raced the
-    # parent's exit so an intentional detach is never torn down.
-    if adopted is not None and adopted.is_set():
-        return
+        new_owner = _await_next_host_daemon(registry_path, runner_id, poll_interval_s)
+        if new_owner is None:
+            break
+        owner_is_gone = _watch_adopting_daemon(*new_owner)
     request_shutdown()
     time.sleep(grace_s)
     # The hard exit is a backstop reached only when graceful shutdown did not
@@ -1299,6 +1359,14 @@ def _run_parent_death_killer(
     with contextlib.suppress(Exception):
         sys.stderr.flush()
     exit_fn(0)
+
+
+def _host_registry_path_from_env() -> Path | None:
+    """Return the host daemon's runner registry path, when a daemon launched us."""
+    from omnigent.host.runner_registry import RUNNER_HOST_REGISTRY_ENV_VAR
+
+    raw_path = os.environ.get(RUNNER_HOST_REGISTRY_ENV_VAR)
+    return Path(raw_path) if raw_path else None
 
 
 def _runner_workspace_from_env() -> Path | None:
@@ -2061,7 +2129,11 @@ async def _run_tunnel_from_env() -> None:
         threading.Thread(
             target=_run_parent_death_killer,
             args=(parent_pid, _request_parent_death_shutdown),
-            kwargs={"adopted": adopted_event},
+            kwargs={
+                "adopted": adopted_event,
+                "registry_path": _host_registry_path_from_env(),
+                "runner_id": runner_id,
+            },
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,
         ).start()
