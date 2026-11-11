@@ -240,7 +240,8 @@ def test_stop_registered_runners_ends_only_recorded_processes(
 
     assert stop_registered_runners(path, grace_s=5.0) == [runner.pid]
 
-    assert runner.wait(timeout=5) is not None
+    # SIGTERM first: the runner gets the chance to shut down cleanly.
+    assert runner.wait(timeout=5) == -signal.SIGTERM
     assert other.poll() is None
     assert not path.exists()
     assert stop_registered_runners(path) == []
