@@ -11,6 +11,9 @@ it as a plain ``acp:<slug>`` agent:
 * later prompts are posted to ``POST /v1/code/sessions/{id}/events`` and
   ``session/cancel`` posts an ``interrupt`` control request there, the protocol
   the CLI's own interactive client speaks, so any process can re-attach;
+* nothing else stops the cloud session: a bridge that is terminated, or loses
+  the network, leaves the turn running, and the next bridge mirrors what it
+  missed before it sends anything;
 * the transcript is read back from ``GET /v1/code/sessions/{id}/events``,
   and mirrored as ACP ``session/update`` notifications until the turn's
   ``result`` event. All calls use the Claude CLI's own claude.ai login;
@@ -27,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import http.client
 import io
 import itertools
 import json
@@ -54,8 +58,21 @@ API_BASE = os.environ.get("CLAUDE_CLOUD_API_BASE", "https://api.anthropic.com")
 CLAUDE_CLI = os.environ.get("CLAUDE_CLOUD_CLI", "claude")
 # The stream sends a keepalive every ~12 s; reconnect when it goes quiet for longer.
 STREAM_IDLE_S = 60
-# A turn waits as long as its cloud session shows life; this long without any fails it.
+# A dropped stream reconnects after 1 s, doubling up to this while the failures last.
+RECONNECT_MAX_S = 30
+# A turn waits as long as its cloud session shows life; this long without any, while
+# the session can be reached, fails it.
 STALL_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_STALL_TIMEOUT_S", "1800"))
+# One poll of a waiting turn counts this much at most: a longer step is this host
+# asleep, not the cloud session quiet.
+STALL_STEP_S = 2.0
+# Quiet seconds after the cloud started a new CLI mid-turn before the turn counts as cut off.
+CUT_OFF_GRACE_S = 30
+# What the bridge posts to a session whose turn its sandbox cut off.
+CONTINUE_PROMPT = (
+    "The sandbox restarted and cut your last turn off before it finished. Tool calls that "
+    "were running may not have completed. Check what is done, then continue the task."
+)
 # Omnigent ends a turn after HARNESS_ACP_PROMPT_TIMEOUT_S (300 s) with no message,
 # and one cloud tool call can run longer, so a waiting turn sends an empty update.
 KEEPALIVE_S = 60
@@ -73,8 +90,9 @@ SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
 MARKER = "cloud session: https://claude.ai/code/"
 MARKER_RE = re.compile(re.escape(MARKER) + r"((?:session|cse)_[A-Za-z0-9]{10,})")
 # ACP session -> cloud session, for an Omnigent that re-prompts a respawned
-# bridge with the old ACP session id instead of opening a new one; and first
-# prompt -> cloud session, for one that opens a new ACP session after a failed turn.
+# bridge with the old ACP session id instead of opening a new one; first
+# prompt -> cloud session, for one that opens a new ACP session after a failed turn;
+# and cloud session -> the last ``result`` mirrored to Omnigent (``seen:<id>``).
 STATE_FILE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / (
     "claude-cloud-acp/sessions.json"
 )
@@ -260,20 +278,34 @@ def fetch_events(session_id: str, cursor: str | None) -> tuple[list[dict], str |
         return events, page.get("resume_cursor") or cursor
 
 
-def stream_events(session_id: str, after: int) -> Iterator[dict | None]:
+def unreachable(error: Exception) -> bool:
+    """Whether *error* means the network never reached the API, rather than the API refusing."""
+    lost = isinstance(error, (OSError, http.client.HTTPException))
+    return lost and not isinstance(error, urllib.error.HTTPError)
+
+
+def stream_events(session_id: str, after: int) -> Iterator[dict | Exception | None]:
     """Yield the session's events after sequence number *after*, live, without end.
 
-    Yields None for keepalives and dropped connections, so the caller can check
-    its deadline. Reconnects from the last event seen.
+    Between events it yields None for a keepalive, and the error for a connection
+    that failed or dropped, so the caller can check its deadline and tell a network
+    that is away (:func:`unreachable`) from a quiet session. Reconnects from the
+    last event seen, more slowly while the failures last.
     """
+    wait, down = 1, False
     while True:
-        req = urllib.request.Request(
-            f"{API_BASE}/v1/code/sessions/{session_id}/events/stream?from_sequence_num={after}",
-            headers={**_headers(), "Accept": "text/event-stream"},
-        )
+        error: Exception | None = None
         try:
+            # Built here: reading the login can fail too, and is retried like the rest.
+            req = urllib.request.Request(
+                f"{API_BASE}/v1/code/sessions/{session_id}/events/stream?from_sequence_num={after}",
+                headers={**_headers(), "Accept": "text/event-stream"},
+            )
             with urllib.request.urlopen(req, timeout=STREAM_IDLE_S) as resp:
                 for raw in resp:
+                    if down:
+                        log(f"stream back after {after}")
+                    wait, down = 1, False
                     line = raw.decode()
                     # ponytail: one-line ``data:`` fields only, which is all the server sends.
                     event = json.loads(line[5:]) if line.startswith("data:") else {}
@@ -282,10 +314,14 @@ def stream_events(session_id: str, after: int) -> Iterator[dict | None]:
                         yield event
                     else:
                         yield None
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            log(f"stream dropped after {after}, reconnecting: {exc}")
-        yield None
-        time.sleep(1)
+        except (OSError, http.client.HTTPException, ValueError, RuntimeError) as exc:
+            error = exc
+            if not down:  # once per outage, not once per attempt
+                log(f"stream dropped after {after}, reconnecting: {exc}")
+            down = True
+        yield error
+        time.sleep(wait)
+        wait = min(wait * 2, RECONNECT_MAX_S)
 
 
 # Aliases the CLI resolves to the latest model; any full model id passes through too.
@@ -440,6 +476,75 @@ class McpProxy:
         }
 
 
+def _answer_file(request_id: str) -> Path:
+    name = hashlib.sha256(request_id.encode()).hexdigest()
+    return STATE_FILE.parent / "answers" / f"{name}.json"
+
+
+def once(request_id: str, message: dict, handle) -> dict:
+    """Answer an MCP message, running a tool call at most once across bridges.
+
+    A call's result is kept until the cloud session has it, and a day longer
+    (:func:`forget_sent_answers`). A bridge that reads the same request again
+    sends the kept result: the answer never got through, or that bridge listed
+    the open requests before another bridge answered this one.
+    When the earlier bridge stopped while the call ran, nobody knows
+    whether it took effect, and the call fails saying so. Running it again could
+    send a message or start a session twice.
+    ponytail: the record is this machine's; a bridge on another host runs the call again.
+    """
+    if message.get("method") != "tools/call":
+        return handle(message)  # handshakes and listings repeat safely
+    record = _answer_file(request_id)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        record.open("x").close()  # atomic: two bridges cannot both claim the call
+    except FileExistsError:
+        with contextlib.suppress(ValueError):  # empty or cut short: the call's fate is unknown
+            return json.loads(record.read_text())
+        error = {
+            "code": -32000,
+            "message": "the bridge restarted while this call ran: it may have taken effect, "
+            "and its result is lost. Check before calling again.",
+        }
+        return {"jsonrpc": "2.0", "id": message.get("id"), "error": error}
+    reply = handle(message)
+    with contextlib.suppress(OSError):  # unsaved, the claim stays and reads as unknown
+        whole = record.with_suffix(".tmp")
+        whole.write_text(json.dumps(reply))
+        whole.replace(record)
+    return reply
+
+
+SENT_KEPT_S = 86400
+
+
+def forget_sent_answers() -> None:
+    """Drop the tool results the cloud session has had for a day.
+
+    Only a bridge that listed the open requests before the answer arrived reads
+    such a request again, and it does so within seconds.
+    """
+    for sent in (STATE_FILE.parent / "answers").glob("*.sent"):
+        with contextlib.suppress(OSError):  # another bridge dropped it first
+            if time.time() - sent.stat().st_mtime > SENT_KEPT_S:
+                sent.with_suffix(".json").unlink(missing_ok=True)
+                sent.unlink()
+
+
+def deliver(session_id: str, request_id: str, response: dict) -> None:
+    """Post a control response, through a network outage: the CLI waits for it."""
+    delay = 1
+    while True:
+        try:
+            return respond(session_id, request_id, response)
+        except (OSError, http.client.HTTPException) as exc:
+            if not unreachable(exc):
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, RECONNECT_MAX_S)
+
+
 def respond(session_id: str, request_id: str, response: dict) -> None:
     post_event(
         session_id,
@@ -502,8 +607,10 @@ def answer_control(s: Session, payload: dict) -> None:
     request, request_id = payload.get("request") or {}, payload.get("request_id")
     subtype = request.get("subtype")
     if subtype == "mcp_message" and (proxy := s.mcp.get(request.get("server_name", ""))):
-        reply = proxy.handle(request.get("message") or {})
-        respond(s.cloud_id, request_id, {"mcp_response": reply})
+        reply = once(request_id, request.get("message") or {}, proxy.handle)
+        deliver(s.cloud_id, request_id, {"mcp_response": reply})
+        if (record := _answer_file(request_id)).exists():
+            record.with_suffix(".sent").touch()  # delivered: kept one more day
     elif subtype == "can_use_tool":
         tool, tool_input = request.get("tool_name", ""), request.get("input") or {}
         # Omnigent applies its own policy when its relay runs an MCP tool. The
@@ -515,7 +622,7 @@ def answer_control(s: Session, payload: dict) -> None:
             decision = {"behavior": "allow", "updatedInput": tool_input}
         else:
             decision = {"behavior": "deny", "message": f"{tool} is not approved by Omnigent"}
-        respond(s.cloud_id, request_id, decision)
+        deliver(s.cloud_id, request_id, decision)
 
 
 # ── event mapping ──────────────────────────────────────────
@@ -627,20 +734,31 @@ class Session:
         self.mcp: dict[str, McpProxy] = {}
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
+        # Events the turns since the last completed one took off the queue. Omnigent
+        # drops what a failed turn showed, so its retry in this bridge shows them again.
+        self.taken: list[dict] = []
         # Control requests being answered: the cloud sends nothing while it waits on one.
         self.answering: set[str] = set()
+        # Why the stream's last connection failed; None while it delivers.
+        self.stream_error: Exception | None = None
         self.cancelled = threading.Event()
         self.running = False
         self.interrupted = False
         # A turn of this bridge that carried the marker has completed.
         self.marked = False
+        # The last ``result`` mirrored; recorded as seen once Omnigent has the turn.
+        self.mirrored = 0
+        # This bridge's last turn was mirrored to its end, so the cloud session is idle.
+        self.caught_up = False
         self.lock = threading.RLock()  # re-entered by the SIGTERM handler
 
-    def follow(self, after: int) -> None:
+    def follow(self, after: int, settled: frozenset[str] = frozenset()) -> None:
         """Read the cloud session's stream from *after* for the rest of the bridge's life.
 
         Control requests are answered as they arrive, between turns too: the CLI
         handshakes with MCP servers whenever it (re)connects, and gives up quickly.
+        Those in *settled* were dealt with before this bridge came, so a stream read
+        from the past does not run their tool calls again.
         Every event also goes to :attr:`events` for the running turn.
         """
         if self.reader is not None:
@@ -648,8 +766,15 @@ class Session:
 
         def read() -> None:
             for event in stream_events(self.cloud_id, after):
+                if isinstance(event, Exception):
+                    self.stream_error = event
+                    continue
+                self.stream_error = None
                 payload = (event or {}).get("payload") or {}
-                if payload.get("type") == "control_request":
+                if (
+                    payload.get("type") == "control_request"
+                    and payload.get("request_id") not in settled
+                ):
                     # Off the reader: a tool call can outlast the CLI's wait for other events.
                     threading.Thread(target=self.answer, args=(payload,), daemon=True).start()
                 if event is not None:
@@ -666,41 +791,58 @@ class Session:
         finally:
             self.answering.discard(request_id)
 
+    @property
+    def offline(self) -> bool:
+        """The network is away: the cloud session cannot be reached, and keeps running."""
+        return self.stream_error is not None and unreachable(self.stream_error)
+
     def events_while_alive(self) -> Iterator[dict | None]:
         """Yield the session's events, and None each quiet second, while it shows life.
 
         Life is an event, or a control request still being answered. After
-        STALL_TIMEOUT_S without either, raise: the session has stopped progressing.
+        STALL_TIMEOUT_S that the session could be reached and showed neither, raise:
+        it has stopped progressing. Time this host slept or had no network is not
+        counted, because the session works on without it and the stream catches up.
         """
-        alive = time.monotonic()
+        quiet, last = 0.0, time.monotonic()
         while True:
             try:
                 event = self.events.get(timeout=1)
             except queue.Empty:
-                if self.answering:
-                    alive = time.monotonic()
-                elif time.monotonic() - alive > STALL_TIMEOUT_S:
+                now = time.monotonic()
+                quiet, last = quiet + min(now - last, STALL_STEP_S), now
+                if self.answering or self.offline:
+                    quiet = 0.0
+                elif quiet > STALL_TIMEOUT_S:
+                    why = f" (the stream fails: {self.stream_error})" if self.stream_error else ""
                     raise RuntimeError(
                         f"cloud session https://claude.ai/code/{self.cloud_id} made no progress "
-                        f"for {STALL_TIMEOUT_S:.0f}s; it is left as it is, and the next message "
-                        "continues it"
+                        f"for {STALL_TIMEOUT_S:.0f}s{why}; it is left as it is, and the next "
+                        "message continues it"
                     ) from None
                 yield None
                 continue
-            alive = time.monotonic()
+            quiet, last = 0.0, time.monotonic()
             yield event
 
     def cancel(self) -> None:
-        """Interrupt the running cloud turn, once.
+        """Interrupt the running cloud turn, once. Only ``session/cancel`` leads here.
 
         Sent right away, not on the next poll: Omnigent terminates the bridge
         straight after ``session/cancel``.
         """
+        first = not self.cancelled.is_set()
         self.cancelled.set()
         with self.lock:
             if self.running and self.cloud_id and not self.interrupted:
-                log(f"interrupting {self.cloud_id}")
-                interrupt(self.cloud_id)
+                try:
+                    interrupt(self.cloud_id)
+                except (OSError, http.client.HTTPException, RuntimeError) as exc:
+                    # The turn's loop calls again each second until it gets through.
+                    if first:
+                        log(f"interrupt of {self.cloud_id} not delivered, retrying: {exc}")
+                    return
+                log(f"interrupted {self.cloud_id}")
                 # Only once delivered: a SIGTERM during the POST aborts it, and
                 # the handler re-entering here sends it again.
                 self.interrupted = True
@@ -792,6 +934,72 @@ def split_replay(text: str, cwd: str) -> tuple[str | None, str]:
     return cloud_id, latest
 
 
+def same_message(posted: str, text: str, prompt: str) -> bool:
+    """Whether the cloud session got *text* as *posted*: sent again, it would run twice.
+
+    *prompt* is what Omnigent sent this bridge. The first message of an Omnigent
+    session was posted with what Omnigent put before it, and
+    :func:`replayed_first_prompt` restores that from a replayed *prompt*.
+    ponytail: a first message that was itself a replayed transcript (a session
+    moved here from another harness) is not recognized, and is sent again.
+    """
+    posted, text = posted.strip(), text.strip()
+    if not text or posted == text:
+        return bool(text)
+    history = prompt.partition(REPLAY_HEAD)[2].rsplit(REPLAY_TAIL, 1)[0]
+    is_first = history.split("\nuser: ", 1)[0].strip() == text
+    return is_first and posted == replayed_first_prompt(prompt)
+
+
+def backlog(s: Session, text: str, prompt: str) -> tuple[int, bool, frozenset[str], int] | None:
+    """What a bridge new to its cloud session mirrors before it sends *text*.
+
+    The session's last message is behind when Omnigent never got its turn: the
+    turn still runs, or it ended after the bridge that sent it was gone. Returns
+    that message's sequence number; whether it is *text* itself (a retry, which
+    sent again would run twice); the control requests already dealt with; and
+    where to read the stream from, which is earlier than the message when a
+    request from before it still waits for an answer. None when nothing is behind.
+    ponytail: without a ``seen:`` record (another machine's bridge), a finished
+    turn counts as behind only when its message is *text*.
+    """
+    events, _ = fetch_events(s.cloud_id, None)
+    message = result = 0
+    posted = ""
+    asked: dict[str, int] = {}
+    settled: set[str] = set()
+    for event in sorted(events, key=lambda e: int(e["sequence_num"])):
+        seq, payload = int(event["sequence_num"]), event.get("payload") or {}
+        kind = payload.get("type")
+        if kind == "control_request":
+            asked[payload.get("request_id")] = seq
+        elif kind == "control_response":
+            settled.add((payload.get("response") or {}).get("request_id"))
+        elif kind == "control_cancel_request":  # a new CLI drops what the old one asked
+            settled.add(payload.get("request_id"))
+        elif payload.get("parent_tool_use_id"):
+            continue  # a sub-agent's step
+        elif kind == "result":
+            result = seq
+            settled |= asked.keys()  # a turn's requests end with it
+        elif kind == "user" and event.get("source", "client") == "client":
+            content = (payload.get("message") or {}).get("content")
+            # A tool result is a user event too, from the VM.
+            if isinstance(content, str) or not any(
+                b.get("type") == "tool_result" for b in content or []
+            ):
+                message = seq
+                if _text_of(content) != CONTINUE_PROMPT:  # it continues the message before
+                    posted = _text_of(content)
+    same = same_message(posted, text, prompt)
+    seen = recall().get(f"seen:{s.cloud_id}")
+    behind = message > int(seen) if seen else message > 0 and (result < message or same)
+    if not behind:
+        return None
+    waiting = [seq - 1 for request_id, seq in asked.items() if request_id not in settled]
+    return message, same, frozenset(settled), min([message, *waiting])
+
+
 def thought(acp_id: str, text: str) -> None:
     update(
         acp_id, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": text}}
@@ -823,6 +1031,7 @@ def run_turn(acp_id: str, text: str) -> str:
         s.marked = True
         return stop
     except Exception as exc:
+        s.caught_up = False  # the cloud turn may still run; the next turn looks first
         # Omnigent drops a failed turn's output, marker included, so the error names it.
         if s.cloud_id and s.cloud_id not in str(exc):
             raise RuntimeError(
@@ -861,6 +1070,9 @@ def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
 
 
 def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
+    prompt, again = text, True
+    if s.caught_up:
+        s.taken.clear()  # the last turn reached Omnigent
     if s.cloud_id is None:
         s.cloud_id, text = split_replay(text, s.cwd)
         if s.cloud_id is None:
@@ -869,37 +1081,115 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
             else:
                 _create(acp_id, s, text, text)
                 after = 0
-        else:
-            log(f"re-attaching to {s.cloud_id}")
-            announce(acp_id, s)
-            check_model(acp_id, s)
-            after, unarchived = _send(s, text)
-            if unarchived:
-                thought(
-                    acp_id,
-                    "[cloud] unarchived the session; files from before the archive are gone\n",
-                )
-    else:
-        if not s.marked:
-            announce(acp_id, s)  # the turn that announced it failed, and Omnigent dropped it
-        check_model(acp_id, s)
-        after, unarchived = _send(s, text)
-        if unarchived:
-            thought(
-                acp_id, "[cloud] unarchived the session; files from before the archive are gone\n"
-            )
+            s.follow(after)
+            return _continued(acp_id, s, _mirror(acp_id, s, after))
+        log(f"re-attaching to {s.cloud_id}")
+    if not s.marked:
+        # A new bridge, or one whose announcing turn failed and Omnigent dropped it.
+        announce(acp_id, s)
+    if not s.caught_up and (behind := backlog(s, text, prompt)):
+        # Attach before sending: the cloud session did not stop when its bridge did,
+        # nor when this bridge's last turn failed.
+        after, same, settled, start = behind
+        log(f"{s.cloud_id}: mirroring from {after} before sending (same message: {same})")
+        thought(
+            acp_id,
+            "[cloud] the session kept working without the bridge; showing what it did"
+            + ("\n" if same else ", then sending this message\n"),
+        )
+        s.follow(start, settled)
+        stop = _mirror(acp_id, s, after)
+        if stop == "cut off":
+            if same:  # this message's one continuation
+                text, again = CONTINUE_PROMPT, False
+        elif same or stop == "cancelled":
+            return stop
+    check_model(acp_id, s)
+    after, unarchived = _send(s, text)
+    if unarchived:
+        thought(acp_id, "[cloud] unarchived the session; files from before the archive are gone\n")
     s.follow(after)
-    for event in s.events_while_alive():
+    return _continued(acp_id, s, _mirror(acp_id, s, after), again)
+
+
+def _continued(acp_id: str, s: Session, stop: str, again: bool = True) -> str:
+    """Ask a session whose turn was cut off to continue, once, and mirror that turn.
+
+    *again* is false when the turn just mirrored was that one continuation.
+    """
+    if stop != "cut off":
+        return stop
+    if again:
+        after, _ = _send(s, CONTINUE_PROMPT)
+        stop = _mirror(acp_id, s, after)
+    if stop == "cut off":
+        # A sandbox that keeps restarting needs a person.
+        raise RuntimeError("the cloud session's sandbox restarted mid-turn twice")
+    return stop
+
+
+# What a new CLI and the bridge exchange while no turn runs.
+_NOT_TURN_LIFE = {
+    "env_manager_log",
+    "control_request",
+    "control_response",
+    "control_cancel_request",
+}
+
+
+def _mirror(acp_id: str, s: Session, after: int) -> str:
+    """Mirror the cloud session's events after *after* until its turn ends.
+
+    A turn ends with a ``result``. One the cloud cut off has none: its sandbox was
+    replaced mid-turn (it idled on a request to a host that was away), the new CLI
+    announces itself and then waits for a message. That returns "cut off", once
+    the session then stayed quiet for :data:`CUT_OFF_GRACE_S` seconds in a row
+    with no answer of this host under way. Anything the turn itself sends after
+    the new CLI's start (output, a tool's progress) shows it is alive.
+
+    Events an earlier, failed turn of this bridge took come first.
+    """
+    offline = False
+    began, quiet = False, None  # the turn produced output; quiet seconds since a new CLI
+    again = len(s.taken)
+    for n, event in enumerate(itertools.chain(list(s.taken), s.events_while_alive())):
         if s.cancelled.is_set():
-            # A cancel that came before the session existed. Keep mirroring after
-            # it: the interrupted turn still ends with a ``result`` event.
+            # A cancel that came before the session existed, or that the network
+            # dropped. Keep mirroring after it: the interrupted turn still ends
+            # with a ``result`` event.
             s.cancel()
-        if event is None or int(event["sequence_num"]) <= after:
-            continue  # quiet, or from before this turn's message
-        updates, done = to_updates(event.get("payload") or {})
+        if s.offline != offline:
+            offline = s.offline
+            thought(
+                acp_id,
+                "[cloud] no network: the cloud session keeps running, reconnecting\n"
+                if offline
+                else "[cloud] reconnected\n",
+            )
+        if event is None:
+            if quiet is not None:
+                quiet = 0 if offline or s.answering else quiet + 1
+                if quiet >= CUT_OFF_GRACE_S:
+                    log(f"{s.cloud_id}: the sandbox restarted mid-turn; the turn was cut off")
+                    thought(acp_id, "[cloud] the sandbox restarted and cut the turn off\n")
+                    return "cut off"
+            continue
+        if n >= again:
+            s.taken.append(event)
+        if int(event["sequence_num"]) <= after:
+            continue  # from before this turn's message
+        payload = event.get("payload") or {}
+        if payload.get("type") == "assistant":
+            began, quiet = True, None
+        elif began and payload.get("subtype") == "turn_handoff_available":
+            quiet = 0  # a CLI that starts before the turn does takes the message instead
+        elif quiet is not None:
+            quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
+        updates, done = to_updates(payload)
         for upd in updates:
             update(acp_id, upd)
         if done:
+            s.mirrored, s.caught_up = int(event["sequence_num"]), True
             return "cancelled" if s.interrupted else "end_turn"
     raise AssertionError("events_while_alive raises rather than ends")
 
@@ -977,18 +1267,33 @@ def handle_prompt(msg: dict) -> None:
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
+        return
+    # Only after the response: a bridge that dies before it leaves the turn
+    # unseen, so a retry of its message mirrors it again and is not sent twice.
+    session = SESSIONS[params["sessionId"]]
+    with contextlib.suppress(OSError):
+        if session.mirrored:
+            remember(f"seen:{session.cloud_id}", str(session.mirrored))
 
 
 def stop(*_: object) -> None:
-    """On SIGTERM or EOF, interrupt any running cloud turn; nobody is left to mirror it."""
-    log("stopping")
+    """On SIGTERM or EOF, leave: a running cloud turn goes on, and the next bridge mirrors it.
+
+    Only ``session/cancel`` stops the cloud session. Omnigent terminates the bridge
+    straight after sending one, so a cancel still on its way is delivered first.
+    """
     for session in SESSIONS.values():
-        session.cancel()
+        if session.cancelled.is_set():
+            session.cancel()
+        elif session.running:
+            log(f"leaving {session.cloud_id} running")
+    log("stopping")
     sys.exit(0)
 
 
 def serve() -> None:
     signal.signal(signal.SIGTERM, stop)
+    forget_sent_answers()
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -1065,6 +1370,7 @@ for line in sys.stdin:
 
 def self_check() -> None:
     globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
+    real_stream_events = stream_events
     os.environ.pop("CLAUDE_CLOUD_TOKEN", None)  # the token cases read the stubbed login
     # Outside a git repo the session fails plainly, before any `claude` runs.
     not_repo = Path(tempfile.mkdtemp())
@@ -1295,6 +1601,8 @@ def self_check() -> None:
     globals()["_send"] = slow_send
     globals()["create_cloud_session"] = lambda *_: "session_01NewNewNewNew"
     real_remember, globals()["remember"] = remember, lambda *_: None
+    # The sessions below fake a reader; an empty cloud log has nothing to catch up on.
+    globals()["fetch_events"] = lambda *_: ([], None)
     globals()["KEEPALIVE_S"] = 0.5
     quiet = SESSIONS["acp-quiet"] = Session("/", "acp-quiet")
     quiet.cloud_id, quiet.reader = "session_q", threading.current_thread()
@@ -1324,6 +1632,7 @@ def self_check() -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         assert run_turn("acp-working", "build it") == "end_turn"
     assert time.monotonic() - started > 3, "ended before the result"
+    real_answer_control = answer_control
     globals()["answer_control"] = lambda *_: time.sleep(2.5)  # a long MCP call
     threading.Thread(target=working.answer, args=({"request_id": "mcp-call"},)).start()
     threading.Timer(2.7, working.events.put, [result | {"sequence_num": "11"}]).start()
@@ -1401,6 +1710,7 @@ def self_check() -> None:
         writer.join()
     assert all(f"k{n}" in recall() for n in range(20)), recall()
     # Each turn's keepalive has ended by the time the turn returns, however fast turns follow.
+    real_mirror_turn = _mirror_turn
     globals()["_mirror_turn"] = lambda *_: time.sleep(0.1) or "end_turn"
     threads_before = threading.active_count()
     with contextlib.redirect_stdout(io.StringIO()):
@@ -1439,11 +1749,355 @@ def self_check() -> None:
     busy.cancel()
     busy.cancel()
     assert sent == ["session_y"], sent
+    # A bridge that is terminated leaves a running cloud turn alone. Only a cancel
+    # that was asked for, and not delivered yet, goes out on the way.
+    sent.clear()
+    left = SESSIONS["acp-left"] = Session("/", "acp-left")
+    left.cloud_id, left.running = "session_left", True
+    stopping = SESSIONS["acp-stopping"] = Session("/", "acp-stopping")
+    stopping.cloud_id, stopping.running = "session_stopping", True
+    stopping.cancelled.set()  # ``session/cancel`` came, and SIGTERM cut its POST short
+    with contextlib.suppress(SystemExit):
+        stop()
+    assert sent == ["session_stopping"], sent
+    left.running = stopping.running = False
+    # An interrupt the network drops is sent again: not lost, and not fatal to the bridge.
+    attempts: list[str] = []
+
+    def flaky_interrupt(cloud_id: str) -> None:
+        attempts.append(cloud_id)
+        if len(attempts) == 1:
+            raise urllib.error.URLError("no route to host")
+
+    globals()["interrupt"] = flaky_interrupt
+    busy.interrupted = False
+    busy.cancel()
+    assert not busy.interrupted
+    busy.cancel()
+    assert busy.interrupted and attempts == ["session_y"] * 2, attempts
+    # A new bridge reads its cloud session's log before it sends, to see what is behind.
+    assert same_message("the brief", " the brief\n", "the brief")
+    retried_first = f"rules\n\n{REPLAY_HEAD}the brief\n\n{REPLAY_TAIL}the brief"
+    assert same_message("rules\n\nthe brief", "the brief", retried_first)  # with its system prompt
+    later = f"rules\n\n{REPLAY_HEAD}the brief\nuser: go on\n\n{REPLAY_TAIL}go on"
+    assert not same_message("rules\n\nthe brief", "go on", later)
+    # Another message that an earlier one happens to end with is not a retry.
+    assert not same_message("Print this literal text:\ncontinue", "continue", "continue")
+    assert not same_message("x", "", "")
+
+    def cloud_log(*rows: tuple[str, dict]) -> list[dict]:
+        return [
+            {"sequence_num": str(seq), "source": source, "payload": payload}
+            for seq, (source, payload) in enumerate(rows, 1)
+        ]
+
+    def said(text: str) -> tuple[str, dict]:
+        return "client", {"type": "user", "message": {"content": text}}
+
+    def answered_with(text: str) -> tuple[str, dict]:
+        block = {"type": "text", "text": text}
+        return "worker", {"type": "assistant", "message": {"content": [block]}}
+
+    def asks(request_id: str) -> tuple[str, dict]:
+        request = {"subtype": "mcp_message", "server_name": "echo"}
+        return "worker", {"type": "control_request", "request_id": request_id, "request": request}
+
+    tool_output = {"type": "tool_result", "tool_use_id": "t1", "content": "x"}
+    ended = ("worker", {"type": "result"})
+    cloud = cloud_log(
+        said("ready"),
+        asks("old"),
+        ended,
+        said("the brief"),
+        asks("done"),
+        ("client", {"type": "control_response", "response": {"request_id": "done"}}),
+        ("worker", {"type": "user", "message": {"content": [tool_output]}}),
+        asks("open"),
+    )
+    globals()["fetch_events"] = lambda *_: (list(cloud), None)
+    late = SESSIONS["acp-late"] = Session("/repo", "acp-late")
+    late.cloud_id = "session_late"
+    # Its turn still runs: behind from the message on, whatever is sent now. The
+    # request an earlier turn asked and the one already answered are settled.
+    assert backlog(late, "the brief", "") == (4, True, frozenset({"old", "done"}), 4)
+    assert backlog(late, "continue", "") == (4, False, frozenset({"old", "done"}), 4)
+    finished = cloud + cloud_log(*[ended] * 9)[8:]
+    globals()["fetch_events"] = lambda *_: (finished, None)
+    # A turn that ended with nobody mirroring it is behind for a retry of its message...
+    assert backlog(late, "the brief", "") == (4, True, frozenset({"old", "done", "open"}), 4)
+    assert backlog(late, "continue", "") is None  # ...but not for another, without a record
+    real_remember("seen:session_late", "3")  # Omnigent has the turns up to the first result
+    assert backlog(late, "continue", "")[:2] == (4, False)
+    real_remember("seen:session_late", "9")
+    assert backlog(late, "the brief", "") is None  # seen: the same text is a new message
+    real_remember("seen:session_late", None)
+    # A request from before the message that still waits (the MCP handshake a
+    # stopped bridge never answered) is read again, from just before it.
+    handshake = cloud_log(said("ready"), ended, asks("handshake"), said("go"))
+    globals()["fetch_events"] = lambda *_: (handshake, None)
+    assert backlog(late, "go", "") == (4, True, frozenset(), 2)
+    # The whole turn: a bridge that comes while the cloud turn runs mirrors it to the
+    # end, answers only the request still open, and sends nothing for a retry.
+    nap = time.sleep
+
+    def cloud_stream(_cloud_id: str, after: int) -> Iterator[dict]:
+        while True:
+            for event in list(cloud):
+                if int(event["sequence_num"]) > after:
+                    after = int(event["sequence_num"])
+                    yield event
+            nap(0.05)
+
+    def cloud_send(_s: Session, text: str) -> tuple[int, bool]:
+        prompts.append(text)
+        rows = [*[ended] * len(cloud), said(text), answered_with(f"did: {text}"), ended]
+        cloud.extend(cloud_log(*rows)[-3:])
+        return len(cloud) - 2, False
+
+    reanswered: list[str] = []
+    globals()["answer_control"] = lambda _s, payload: reanswered.append(payload["request_id"])
+    globals()["fetch_events"] = lambda *_: (list(cloud), None)
+    globals()["stream_events"], globals()["_send"] = cloud_stream, cloud_send
+    globals()["_mirror_turn"] = real_mirror_turn
+    prompts.clear()
+    rest = cloud_log(*[ended] * len(cloud), answered_with("first task done"), ended)[-2:]
+    threading.Timer(0.5, cloud.extend, [rest]).start()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert run_turn("acp-late", "the brief") == "end_turn"
+    assert "first task done" in out.getvalue() and prompts == [], (out.getvalue(), prompts)
+    assert reanswered == ["open"], reanswered
+    # The turn is seen only once its response has left. A bridge that died just
+    # before leaves it unseen, and a retry mirrors it again without sending.
+    assert "seen:session_late" not in recall(), recall()
+
+    def prompted(acp_id: str, text: str) -> str:
+        params = {"sessionId": acp_id, "prompt": [{"type": "text", "text": text}]}
+        with contextlib.redirect_stdout(shown := io.StringIO()):
+            handle_prompt({"id": 1, "params": params})
+        return shown.getvalue()
+
+    again = SESSIONS["acp-again"] = Session("/repo", "acp-again")
+    again.cloud_id = "session_late"
+    shown = prompted("acp-again", "the brief")
+    assert "first task done" in shown and '"stopReason": "end_turn"' in shown, shown
+    assert prompts == [] and recall()["seen:session_late"] == "10", (prompts, recall())
+    # A turn that ran and ended with no bridge is shown before a new message is sent.
+    cloud.extend(
+        cloud_log(*[ended] * len(cloud), said("second task"), answered_with("second done"), ended)[
+            -3:
+        ]
+    )
+    after_outage = SESSIONS["acp-after"] = Session("/repo", "acp-after")
+    after_outage.cloud_id = "session_late"
+    shown = prompted("acp-after", "continue")
+    assert prompts == ["continue"] and recall()["seen:session_late"] == "16", (prompts, recall())
+    assert -1 < shown.find("second done") < shown.find("did: continue"), shown
+    # The same bridge, after a turn of its own failed with the message already
+    # posted: the retry mirrors that turn and does not post the message again.
+    after_outage.caught_up = False
+    cloud.extend(
+        cloud_log(*[ended] * len(cloud), said("third task"), answered_with("third done"), ended)[
+            -3:
+        ]
+    )
+    shown = prompted("acp-after", "third task")
+    assert "third done" in shown and prompts == ["continue"], (shown, prompts)
+    assert recall()["seen:session_late"] == "19", recall()
+    # A catch-up that worked, then a send that failed: the turn failed, so Omnigent
+    # dropped what it showed. The retry in the same bridge shows again what the
+    # failed turn took off the queue, and then sends.
+    after_outage.caught_up = False
+    cloud.extend(
+        cloud_log(*[ended] * len(cloud), said("fourth task"), answered_with("fourth done"), ended)[
+            -3:
+        ]
+    )
+
+    def no_route(*_: object) -> tuple[int, bool]:
+        globals()["_send"] = cloud_send
+        raise OSError("no route to host")
+
+    globals()["_send"] = no_route
+    shown = prompted("acp-after", "fifth task")
+    assert "fourth done" in shown and "no route to host" in shown, shown
+    assert recall()["seen:session_late"] == "19", recall()
+    shown = prompted("acp-after", "fifth task")
+    assert -1 < shown.find("fourth done") < shown.find("did: fifth task"), shown
+    assert prompts == ["continue", "fifth task"], prompts
+    # A turn the cloud cut off (a new CLI started mid-turn, then silence) has no
+    # result. It ends as cut off, and the bridge asks the session to continue:
+    # once in a turn of its own, and in place of a retried message.
+    globals()["CUT_OFF_GRACE_S"] = 1
+    short_stall, globals()["STALL_TIMEOUT_S"] = STALL_TIMEOUT_S, 60
+    new_cli = ("worker", {"type": "system", "subtype": "turn_handoff_available"})
+
+    def cut_off_once(_s: Session, text: str) -> tuple[int, bool]:
+        globals()["_send"] = cloud_send
+        prompts.append(text)
+        rows = [*[ended] * len(cloud), said(text), answered_with("half done"), new_cli]
+        cloud.extend(cloud_log(*rows)[-3:])
+        return len(cloud) - 2, False
+
+    globals()["_send"] = cut_off_once
+    prompts.clear()
+    shown = prompted("acp-after", "sixth task")
+    assert prompts == ["sixth task", CONTINUE_PROMPT], (prompts, shown)
+    assert -1 < shown.find("half done") < shown.find("cut the turn off") < shown.find("did: "), (
+        shown
+    )
+    rows = [*[ended] * len(cloud), said("seventh task"), answered_with("half again"), new_cli]
+    cloud.extend(cloud_log(*rows)[-3:])
+    retried = SESSIONS["acp-cut"] = Session("/repo", "acp-cut")
+    retried.cloud_id = "session_late"
+    prompts.clear()
+    shown = prompted("acp-cut", "seventh task")
+    assert prompts == [CONTINUE_PROMPT] and "half again" in shown, (prompts, shown)
+    assert backlog(retried, "seventh task", "") is None  # seen to the continued turn's end
+    # A retried message's continuation that is cut off too fails: one continuation each.
+    rows = [*[ended] * len(cloud), said("eighth task"), answered_with("half 8"), new_cli]
+    cloud.extend(cloud_log(*rows)[-3:])
+    globals()["_send"] = cut_off_once  # the continuation is cut off, a second would end
+    again_cut = SESSIONS["acp-cut2"] = Session("/repo", "acp-cut2")
+    again_cut.cloud_id = "session_late"
+    prompts.clear()
+    shown = prompted("acp-cut2", "eighth task")
+    assert prompts == [CONTINUE_PROMPT] and "restarted mid-turn twice" in shown, (prompts, shown)
+
+    # A new CLI mid-turn is no cut-off while the turn shows life after it (a tool's
+    # progress), or while this host still answers a request of it.
+    def turn_survives(sign_of_life: list[tuple[str, dict]], answering: bool) -> None:
+        def send(_s: Session, text: str) -> tuple[int, bool]:
+            prompts.append(text)
+            rows = [said(text), answered_with("part"), new_cli, *sign_of_life]
+            cloud.extend(cloud_log(*[ended] * len(cloud), *rows)[-len(rows) :])
+            sent = len(cloud) - len(rows) + 1
+            if answering:
+                retried.answering.add("held")
+            late = cloud_log(*[ended] * len(cloud), answered_with("whole"), ended)[-2:]
+            threading.Timer(
+                2.5, lambda: (retried.answering.discard("held"), cloud.extend(late))
+            ).start()
+            return sent, False
+
+        globals()["_send"] = send
+        prompts.clear()
+        shown = prompted("acp-cut", "a long task")
+        assert prompts == ["a long task"] and "whole" in shown, (prompts, shown)
+        assert "cut the turn off" not in shown, shown
+
+    turn_survives([("worker", {"type": "tool_progress"})], answering=False)
+    turn_survives([], answering=True)
+    # A first turn that is cut off is continued as any other.
+    cloud.clear()
+
+    def create_cut_off(_acp_id: str, fresh: Session, first: str, _text: str) -> None:
+        fresh.cloud_id = "session_late"
+        cloud.extend(cloud_log(said(first), answered_with("half first"), new_cli))
+
+    real_create, globals()["_create"] = _create, create_cut_off
+    globals()["_send"] = cloud_send
+    prompts.clear()
+    SESSIONS["acp-first"] = Session("/repo", "acp-first")
+    shown = prompted("acp-first", "a first task")
+    assert prompts == [CONTINUE_PROMPT] and '"stopReason": "end_turn"' in shown, (prompts, shown)
+    globals()["_create"] = real_create
+    globals()["STALL_TIMEOUT_S"] = short_stall
+    # A tool call runs once across bridges: its result is kept until delivered,
+    # and a call cut short by a restart fails instead of running again.
+    ran: list[dict] = []
+
+    def tool(message: dict) -> dict:
+        ran.append(message)
+        return {"jsonrpc": "2.0", "id": message["id"], "result": len(ran)}
+
+    call = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "send"}}
+    assert once("req-1", call, tool)["result"] == 1
+    assert once("req-1", call, tool)["result"] == 1 and len(ran) == 1  # answer lost, read again
+    _answer_file("req-1").write_text("")  # the bridge stopped while it ran
+    assert "may have taken effect" in once("req-1", call, tool)["error"]["message"]
+    _answer_file("req-1").write_text('{"jsonrpc": "2.0", "resu')  # a reply cut short
+    assert "may have taken effect" in once("req-1", call, tool)["error"]["message"]
+    assert len(ran) == 1
+    # A delivered result stays a day: a bridge that listed the open requests before
+    # the answer arrived reads the request again, and must not run the call again.
+    sent_to: list[dict] = []
+    real_deliver, globals()["deliver"] = deliver, lambda *args: sent_to.append(args[2])
+    late_reader = Session("/repo", "acp-two")
+    late_reader.cloud_id, late_reader.mcp = (
+        "session_two",
+        {"omnigent": type("P", (), {"handle": staticmethod(tool)})},
+    )
+    asked = {
+        "request_id": "req-3",
+        "request": {"subtype": "mcp_message", "server_name": "omnigent", "message": call},
+    }
+    real_answer_control(late_reader, asked)
+    real_answer_control(late_reader, asked)  # the other bridge, from its older view of the log
+    assert len(ran) == 2 and sent_to[0] == sent_to[1], (ran, sent_to)
+    globals()["deliver"] = real_deliver
+    forget_sent_answers()
+    assert _answer_file("req-3").exists()  # sent just now
+    old = time.time() - SENT_KEPT_S - 60
+    os.utime(_answer_file("req-3").with_suffix(".sent"), (old, old))
+    forget_sent_answers()
+    assert not _answer_file("req-3").exists() and _answer_file("req-1").exists()  # unsent stays
+    tries: list[str] = []
+
+    def flaky_respond(_session: str, request_id: str, _response: dict) -> None:
+        tries.append(request_id)
+        if len(tries) < 3:
+            raise urllib.error.URLError("no route")
+
+    real_respond, globals()["respond"] = respond, flaky_respond
+    real_nap, time.sleep = time.sleep, lambda _s: None
+    deliver("session_x", "req-9", {})
+    time.sleep, globals()["respond"] = real_nap, real_respond
+    assert tries == ["req-9"] * 3, tries
+    listing = {"jsonrpc": "2.0", "id": 10, "method": "tools/list"}
+    assert [once("req-2", listing, tool)["result"] for _ in range(2)] == [3, 4]
+    # No network is not a stall: the turn waits, and fails only when the session
+    # can be reached and stays silent. The reason the stream gives is in the error.
+    assert unreachable(urllib.error.URLError("no route")) and unreachable(TimeoutError())
+    assert unreachable(http.client.IncompleteRead(b""))
+    refused = urllib.error.HTTPError("https://x", 401, "Unauthorized", {}, None)
+    assert not unreachable(refused) and not unreachable(RuntimeError("login expired"))
+    globals()["STALL_TIMEOUT_S"] = 0.5
+    away = Session("/", "acp-away")
+    away.cloud_id, away.stream_error = "session_away", urllib.error.URLError("no route")
+    waiting = away.events_while_alive()
+    assert [next(waiting) for _ in range(3)] == [None] * 3 and away.offline
+    away.stream_error = refused
+    try:
+        next(waiting)
+        raise AssertionError("a session that refuses its stream never stalled")
+    except RuntimeError as exc:
+        assert "the stream fails: HTTP Error 401" in str(exc), exc
+    # Time the host slept is not the cloud's silence: a clock that jumps hours
+    # between two polls counts as one poll.
+    real_time, jumps = time, itertools.count(0, 10_000)
+    globals()["STALL_TIMEOUT_S"] = STALL_STEP_S * 2.5
+    globals()["time"] = type("T", (), {"monotonic": staticmethod(lambda: next(jumps))})
+    slept = Session("/", "acp-slept")
+    slept.cloud_id = "session_slept"
+    waiting = slept.events_while_alive()
+    try:
+        assert [next(waiting), next(waiting)] == [None, None]
+        try:
+            next(waiting)
+            raise AssertionError("a silent session never stalled")
+        except RuntimeError as exc:
+            assert "made no progress" in str(exc), exc
+    finally:
+        globals()["time"] = real_time
+    globals()["stream_events"] = real_stream_events
     streams = [
         [b":keepalive\n", b'data: {"sequence_num": "7", "payload": {"type": "user"}}\n'],
+        urllib.error.URLError("network is unreachable"),
         [b'data: {"sequence_num": "8", "payload": {"type": "result"}}\n'],
     ]
     urls: list[str] = []
+    naps: list[float] = []
 
     class FakeResponse(list):
         def __enter__(self):
@@ -1454,19 +2108,31 @@ def self_check() -> None:
 
     def fake_urlopen(req, **_):
         urls.append(req.full_url)
-        return FakeResponse(streams.pop(0))
+        if isinstance(stream := streams.pop(0), Exception):
+            raise stream
+        return FakeResponse(stream)
 
     globals()["access_token"] = lambda: "token"
     urllib.request.urlopen, real_urlopen = fake_urlopen, urllib.request.urlopen
-    globals()["time"] = type("T", (), {"sleep": staticmethod(lambda _: None)})
+    stub_time = {"sleep": staticmethod(naps.append), "strftime": staticmethod(time.strftime)}
+    globals()["time"] = type("T", (), stub_time)
     try:
-        seen = [e and e["sequence_num"] for e in itertools.islice(stream_events("s", 6), 5)]
+        seen = list(itertools.islice(stream_events("s", 6), 6))
     finally:
         urllib.request.urlopen = real_urlopen
-    assert seen == [None, "7", None, "8", None], seen
-    assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7"], (
-        urls
-    )  # reconnects after the last seen
+    # A keepalive, an event, the stream's end, a drop (the error itself), then on.
+    assert [e["sequence_num"] if isinstance(e, dict) else e for e in seen] == [
+        None,
+        "7",
+        None,
+        seen[3],
+        "8",
+        None,
+    ], seen
+    assert unreachable(seen[3]), seen
+    # Reconnects after the last seen, waiting longer each time until a line arrives.
+    assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7", "7"], urls
+    assert naps == [1, 2], naps
     print("self-check ok")
 
 

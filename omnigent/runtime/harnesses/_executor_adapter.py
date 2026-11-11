@@ -638,9 +638,10 @@ class ExecutorAdapter(HarnessApp):
         if executor is None:
             return True
         try:
-            await asyncio.wait_for(
-                executor.interrupt_session(session_key), timeout=_INTERRUPT_SLICE_S
-            )
+            if executor.interrupt_on_abandon():
+                await asyncio.wait_for(
+                    executor.interrupt_session(session_key), timeout=_INTERRUPT_SLICE_S
+                )
         except _HARNESS_ALREADY_GONE_ERRORS as exc:
             _logger.warning(
                 "abnormal-exit interrupt of inner session %s found the harness already gone (%s)",

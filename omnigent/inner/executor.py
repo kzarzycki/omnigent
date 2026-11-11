@@ -717,6 +717,16 @@ class Executor:
         """Ask the executor to interrupt a currently running turn, if supported."""
         return False
 
+    def interrupt_on_abandon(self) -> bool:
+        """Whether a turn the runtime gives up on (an error or a timeout) is interrupted
+        before the executor is closed.
+
+        ``True`` for work that lives in the executor's own process. An executor
+        whose work runs elsewhere and can be joined again returns ``False``, so
+        only a person's Stop ends it.
+        """
+        return True
+
     async def enqueue_session_message(self, session_key: str, content: EnqueuedContent) -> bool:  # noqa: ARG002 — default no-op; subclasses override to support live queueing
         """Send a new user message to a live session without interrupting it, if supported.
 

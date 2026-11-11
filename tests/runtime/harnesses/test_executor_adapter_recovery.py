@@ -864,6 +864,29 @@ async def test_safe_interrupt_reaps_even_when_interrupt_hangs(
     assert executor.close_calls == 1
 
 
+class _DetachedWorkExecutor(_FakeExecutor):
+    """Executor whose work runs elsewhere and outlives it, such as a cloud session."""
+
+    def interrupt_on_abandon(self) -> bool:
+        return False
+
+
+async def test_safe_interrupt_leaves_work_that_outlives_the_executor() -> None:
+    """An abandoned turn of such an executor is reaped without an interrupt.
+
+    The interrupt would cancel work that the next turn can join again; only a
+    person's Stop, which takes the inline interrupt path, ends it.
+    """
+    executor = _DetachedWorkExecutor()
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+
+    assert await adapter._safe_interrupt(executor, "sess_cloud")
+
+    assert executor.interrupt_calls == []
+    assert executor.close_session_calls == 1
+    assert executor.close_calls == 1
+
+
 class _RefusedInterruptExecutor(_FakeExecutor):
     """Executor whose ``interrupt_session`` finds the harness socket gone.
 

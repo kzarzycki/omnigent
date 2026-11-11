@@ -81,6 +81,7 @@ _ENV_SESSION_ID_MODE = "HARNESS_ACP_SESSION_ID_MODE"
 _ENV_SEND_MODEL = "HARNESS_ACP_SEND_MODEL"
 _ENV_OMNIGENT_MCP = "HARNESS_ACP_OMNIGENT_MCP"
 _ENV_INJECT_SYSTEM_PROMPT = "HARNESS_ACP_INJECT_SYSTEM_PROMPT"
+_ENV_CANCEL_ON_ABANDON = "HARNESS_ACP_CANCEL_ON_ABANDON"
 _ENV_CWD = "HARNESS_ACP_CWD"
 _ENV_OS_ENV = "HARNESS_ACP_OS_ENV"
 _ENV_ENV_PASSTHROUGH = "HARNESS_ACP_ENV_PASSTHROUGH"
@@ -184,6 +185,7 @@ def _build_acp_executor(extension: AcpExtension = NO_ACP_EXTENSION) -> Executor:
         env_unset=_csv_names(_ENV_ENV_UNSET),
         permission_mode=permission_mode,
         inject_system_prompt=inject_system_prompt,
+        cancel_on_abandon=_env_enabled(_ENV_CANCEL_ON_ABANDON, default=True),
     )
     return AcpExecutor(config=config, cwd=cwd, os_env=_resolve_os_env(), extension=extension)
 

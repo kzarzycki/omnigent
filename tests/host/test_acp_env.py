@@ -72,3 +72,23 @@ def test_acp_env_exclusion_reaches_vendor_through_daemon_and_runner(
     assert vendor_env[retained_name] == host_env[retained_name]
     assert "OMNIGENT_ACP_ENV_UNSET" not in vendor_env
     assert "UNRELATED_SECRET" not in vendor_env
+
+
+@pytest.mark.parametrize("configured", [None, True, False])
+def test_cancel_on_abandon_reaches_the_executor(tmp_path: Path, configured: bool | None) -> None:
+    """An agent's ``cancel_on_abandon`` decides whether an abandoned turn is interrupted."""
+    agent: dict[str, object] = {"name": "Cloud", "command": "cloud-bridge"}
+    if configured is not None:
+        agent["cancel_on_abandon"] = configured
+    spec = AgentSpec(
+        spec_version=1,
+        name="test-acp",
+        instructions="Test agent",
+        executor=ExecutorSpec(
+            type="omnigent", config={"harness": "acp:cloud", "acp_agent": agent}
+        ),
+    )
+    with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": str(tmp_path)}, clear=True):
+        with patch.dict(os.environ, _build_acp_spawn_env(spec)):
+            executor = _build_acp_executor()
+    assert executor.interrupt_on_abandon() is (configured is not False)
