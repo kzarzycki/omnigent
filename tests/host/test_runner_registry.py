@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -12,6 +13,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import psutil
 import pytest
 
 from omnigent.host import runner_registry
@@ -458,23 +460,63 @@ def test_claim_that_cannot_be_written_ends_the_runners_instead_of_adopting(
     assert snapshot.runners == {}
 
 
+def _runner_with_a_nested_harness() -> tuple[subprocess.Popen[bytes], int]:
+    """Start a runner stand-in whose child starts a harness in a session of its own."""
+    idle = [sys.executable, "-c", "import time; time.sleep(120)"]
+    middle = (
+        "import subprocess, time\n"
+        f"harness = subprocess.Popen({idle!r}, start_new_session=True)\n"
+        "print(harness.pid, flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, time\n"
+            f"subprocess.Popen({[sys.executable, '-c', middle]!r})\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert runner.stdout is not None
+    return runner, int(runner.stdout.readline())
+
+
+def _end_runner_tree(runner: subprocess.Popen[bytes], harness_pid: int) -> None:
+    with contextlib.suppress(psutil.Error):
+        for child in psutil.Process(runner.pid).children(recursive=True):
+            with contextlib.suppress(psutil.Error):
+                child.kill()
+    with contextlib.suppress(OSError):
+        os.kill(harness_pid, signal.SIGKILL)
+    runner.kill()
+    runner.wait()
+
+
 def test_live_runner_pids_lists_the_running_runners_of_this_boot(
     tmp_path: Path, spawn_process
 ) -> None:
     path = tmp_path / "target.runners"
-    daemon, live, gone = spawn_process(), spawn_process(), spawn_process()
-    owner = _owner(daemon, released=True)
-    entries = (
-        _runner("runner-live", live, tmp_path / "a"),
-        _runner("runner-gone", gone, tmp_path / "b"),
-    )
-    _end(gone)
-    _write(path, owner, *entries)
+    daemon, gone = spawn_process(), spawn_process()
+    live, harness_pid = _runner_with_a_nested_harness()
+    try:
+        owner = _owner(daemon, released=True)
+        entries = (
+            _runner("runner-live", live, tmp_path / "a"),
+            _runner("runner-gone", gone, tmp_path / "b"),
+        )
+        _end(gone)
+        _write(path, owner, *entries)
 
-    assert live_runner_pids(path) == {live.pid}
+        # A harness that leads its own session, however deep, is swept with its runner.
+        assert live_runner_pids(path) == {live.pid, harness_pid}
 
-    _write(path, RegistryOwner(**{**owner.__dict__, "boot_id": "another-boot"}), *entries)
-    assert live_runner_pids(path) == set()
+        _write(path, RegistryOwner(**{**owner.__dict__, "boot_id": "another-boot"}), *entries)
+        assert live_runner_pids(path) == set()
+    finally:
+        _end_runner_tree(live, harness_pid)
 
 
 def test_runner_ends_its_own_session_but_not_itself() -> None:
@@ -484,11 +526,14 @@ def test_runner_ends_its_own_session_but_not_itself() -> None:
             sys.executable,
             "-c",
             "import subprocess, sys\n"
-            "job = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "idle = [sys.executable, '-c', 'import time; time.sleep(120)']\n"
+            "job = subprocess.Popen(idle)\n"
+            "harness = subprocess.Popen(idle, start_new_session=True)\n"
             "from omnigent.runner import _entry\n"
             "_entry._end_own_session()\n"
             "import psutil\n"
-            "print('job gone' if not psutil.pid_exists(job.pid) else 'job alive', flush=True)\n",
+            "for proc in (job, harness):\n"
+            "    print('alive' if psutil.pid_exists(proc.pid) else 'gone', end=' ')\n",
         ],
         capture_output=True,
         text=True,
@@ -496,9 +541,10 @@ def test_runner_ends_its_own_session_but_not_itself() -> None:
         start_new_session=True,
     )
 
-    # The sweep reaps its own child, so the job's pid is gone, not a zombie.
+    # The sweep reaps its own children, so their pids are gone, not zombies.
+    # The harness in a session of its own is swept with the runner's.
     assert runner.returncode == 0, runner.stderr
-    assert runner.stdout.strip() == "job gone"
+    assert runner.stdout.strip() == "gone gone"
 
 
 def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_process) -> None:
