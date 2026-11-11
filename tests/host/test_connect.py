@@ -26,7 +26,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from omnigent import debug_logging
-from omnigent.host import HOST_FATAL_EXIT_CODE, runner_registry
+from omnigent.host import HOST_FATAL_EXIT_CODE, crash_reporting, runner_registry
 from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
@@ -4091,6 +4091,20 @@ def _write_released_by_dead_daemon(path: Path, *runners: RegisteredRunner) -> No
     )
 
 
+def _adopt_released(host: HostProcess, path: Path, entry: RegisteredRunner) -> None:
+    """Adopt *entry* the way a starting daemon does, from a released registry."""
+    _write_released_by_dead_daemon(path, entry)
+    host._runner_registry = RunnerRegistry(path)
+    for claimed in host._runner_registry.claim():
+        host._adopt_runner(claimed)
+
+
+def _registered_ids(path: Path) -> list[str]:
+    snapshot = read_registry(path)
+    assert snapshot is not None
+    return list(snapshot.runners)
+
+
 class _StubLifecycleLock:
     """A daemon lifecycle lock that is always held."""
 
@@ -4146,6 +4160,8 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
         await host.run()
 
         assert [hello.runners for hello in hellos] == [["runner_adopted"] if same_process else []]
+        # A service manager's SIGTERM would release this daemon's registry.
+        assert crash_reporting._runner_release_hook == host._runner_registry.release
         # The daemon stopped on its own, so it ended what it adopted.
         assert (runner.poll() is not None) is same_process
         snapshot = read_registry(path)
@@ -4160,10 +4176,13 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
 async def test_adopted_runner_answers_status_and_stops(tmp_path: Path) -> None:
     """An adopted runner reads ``alive`` and ``host.stop_runner`` ends it."""
     host = _make_host_process()
-    host._runner_registry = RunnerRegistry(tmp_path / "target.runners")
+    registry_path = tmp_path / "target.runners"
     runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
-        host._adopt_runner(_registered("runner_adopted", runner, tmp_path / "runner.log"))
+        _adopt_released(
+            host, registry_path, _registered("runner_adopted", runner, tmp_path / "runner.log")
+        )
+        assert _registered_ids(registry_path) == ["runner_adopted"]
 
         status = await host._handle_runner_status(
             HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_adopted")
@@ -4176,6 +4195,7 @@ async def test_adopted_runner_answers_status_and_stops(tmp_path: Path) -> None:
         assert result.status == "stopped"
         assert runner.poll() is not None
         assert "runner_adopted" not in host._runners
+        assert _registered_ids(registry_path) == []
     finally:
         if runner.poll() is None:
             runner.kill()
@@ -4195,7 +4215,7 @@ async def test_adopted_runner_exit_is_reported_only_when_its_log_shows_a_crash(
     monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
     host = _make_host_process()
     host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
-    host._runner_registry = RunnerRegistry(tmp_path / "target.runners")
+    registry_path = tmp_path / "target.runners"
     tunnel = _FakeTunnel()
     host._ws = tunnel  # type: ignore[assignment] — duck-typed send
     log_path = tmp_path / "runner.log"
@@ -4204,7 +4224,11 @@ async def test_adopted_runner_exit_is_reported_only_when_its_log_shows_a_crash(
     marker.touch()
     runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
-        host._adopt_runner(_registered("runner_adopted", runner, log_path, connect_marker=marker))
+        _adopt_released(
+            host,
+            registry_path,
+            _registered("runner_adopted", runner, log_path, connect_marker=marker),
+        )
         runner.kill()
         runner.wait()
 
@@ -4213,6 +4237,7 @@ async def test_adopted_runner_exit_is_reported_only_when_its_log_shows_a_crash(
         reports = [decode_host_frame(frame) for frame in tunnel.sent]
         assert [type(frame) for frame in reports] == ([HostRunnerExitedFrame] if reported else [])
         assert "runner_adopted" not in host._runners
+        assert _registered_ids(registry_path) == []
     finally:
         _cleanup_host(host)
 
@@ -8143,6 +8168,7 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     host._maintenance_janitor = SimpleNamespace(trigger=maintenance_reasons.append)  # type: ignore[assignment]
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
+    host._runner_registry = RunnerRegistry(tmp_path / "target.runners")
     workspace = tmp_path / "project"
     workspace.mkdir()
 
@@ -8197,6 +8223,10 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     while time.monotonic() < deadline and spawned[0].poll() is None:
         await asyncio.sleep(0.05)
     assert spawned[0].poll() is not None, "abandoned runner was leaked, still alive"
+    # Nor left for the next daemon to adopt.
+    snapshot = read_registry(host._runner_registry.path)
+    assert snapshot is not None
+    assert snapshot.runners == {}
     while time.monotonic() < deadline and not maintenance_reasons:
         await asyncio.sleep(0.01)
     assert maintenance_reasons == ["runner_spawn_abandoned"]

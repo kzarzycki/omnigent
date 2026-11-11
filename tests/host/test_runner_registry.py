@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 import threading
@@ -201,6 +202,36 @@ def test_stop_registered_runners_ends_only_recorded_processes(
     assert stop_registered_runners(path) == []
 
 
+def test_stop_registered_runners_kills_a_runner_that_ignores_sigterm(tmp_path: Path) -> None:
+    path = tmp_path / "target.runners"
+    stubborn = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert stubborn.stdout is not None
+        assert stubborn.stdout.readline().strip() == b"ready"
+        daemon = subprocess.Popen([sys.executable, "-c", "pass"])
+        owner = _owner(daemon, released=True)
+        daemon.wait()
+        _write(path, owner, _runner("runner-stubborn", stubborn, tmp_path / "log"))
+
+        assert stop_registered_runners(path, grace_s=0.3) == [stubborn.pid]
+
+        assert stubborn.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if stubborn.poll() is None:
+            stubborn.kill()
+        stubborn.wait()
+
+
 def test_adopted_runner_handle(tmp_path: Path, spawn_process) -> None:
     runner = spawn_process()
     log_path = tmp_path / "runner.log"
@@ -230,6 +261,14 @@ def test_watchdog_survives_a_released_daemon_and_follows_its_successor(
     first_daemon, second_daemon, runner = spawn_process(), spawn_process(), spawn_process()
     entry = _runner("runner-1", runner, tmp_path / "log")
     _write(path, _owner(first_daemon, released=True), entry)
+    reads: list[Path] = []
+    real_next_owner = runner_registry.next_owner
+
+    def _counting_next_owner(registry_path: Path, runner_id: str) -> tuple[int, float] | bool:
+        reads.append(registry_path)
+        return real_next_owner(registry_path, runner_id)
+
+    monkeypatch.setattr(runner_registry, "next_owner", _counting_next_owner)
     shutdown_requested = threading.Event()
     exited = threading.Event()
     watchdog = threading.Thread(
@@ -253,6 +292,10 @@ def test_watchdog_survives_a_released_daemon_and_follows_its_successor(
     _write(path, _owner(second_daemon, released=False), entry)
     time.sleep(0.3)
     assert not shutdown_requested.is_set()  # adopted: watches the new daemon
+    # It watches the adopter's process, not the registry.
+    registry_reads = len(reads)
+    time.sleep(0.3)
+    assert len(reads) == registry_reads
 
     _end(second_daemon)  # the adopter dies without releasing
     assert shutdown_requested.wait(timeout=5)
