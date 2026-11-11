@@ -11655,6 +11655,61 @@ async def test_probe_claude_model_options_uses_harness_startup_config(
     assert probe.default_model is None
 
 
+async def test_probe_claude_model_options_versions_rows_that_share_a_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two Fable rows (5.2 alias, pinned 5.1) read as two versions, not one name twice."""
+
+    def row(value: str, resolved: str, name: str, description: str) -> dict[str, object]:
+        return {
+            "value": value,
+            "resolvedModel": resolved,
+            "displayName": name,
+            "description": description,
+        }
+
+    picker = {
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": "model-catalog",
+            "response": {
+                "models": [
+                    row("opus", "claude-opus-5-5", "Opus", "Opus 5.5 · Best for everyday tasks"),
+                    row(
+                        "claude-fable-5-1[1m]",
+                        "claude-fable-5-1",
+                        "Fable",
+                        "Fable 5.1 · Most capable",
+                    ),
+                    row("fable", "claude-fable-5-2", "Fable", "Fable 5.2 · Most capable"),
+                ]
+            },
+        },
+    }
+
+    class _FakeProcess:
+        pid = None
+        returncode = 0
+
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            return json.dumps(picker).encode(), b""
+
+    async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+
+    probe = await claude_native.probe_claude_model_options(None)
+
+    assert probe is not None
+    assert [(r["id"], r["displayName"]) for r in probe.alias_rows] == [
+        ("opus", "Opus"),
+        ("claude-fable-5-1[1m]", "Fable 5.1 (1M context)"),
+        ("fable", "Fable 5.2"),
+    ]
+
+
 async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

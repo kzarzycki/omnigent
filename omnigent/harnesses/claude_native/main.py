@@ -1208,6 +1208,27 @@ def _claude_alias_row(alias: str, resolution: dict[str, str]) -> dict[str, objec
     return {"id": alias, "model": model, "displayName": label or alias}
 
 
+def _label_same_name_rows(rows: list[dict[str, object]], descriptions: dict[str, object]) -> None:
+    """
+    Tell apart picker rows the harness gives one display name.
+
+    Claude Code can offer two versions of a family under one name (``Fable``:
+    the ``fable`` alias on 5.2 and a pinned 5.1 row), which a picker shows as
+    two identical rows. The harness's description starts with the versioned
+    name (``Fable 5.2 · Most capable…``), so those rows are renamed to it.
+
+    :param rows: Picker rows, renamed in place.
+    :param descriptions: The harness's description per row ``id``.
+    """
+    names = [row["displayName"] for row in rows]
+    for row in rows:
+        description = descriptions.get(str(row["id"]))
+        name = description.partition(" · ")[0] if isinstance(description, str) else ""
+        if names.count(row["displayName"]) > 1 and name:
+            marker = " (1M context)" if str(row["id"]).endswith("[1m]") else ""
+            row["displayName"] = name + marker
+
+
 @dataclass(frozen=True)
 class ClaudeModelProbe:
     """One harness enumeration: picker rows plus the bare-launch default.
@@ -1389,6 +1410,7 @@ async def probe_claude_model_options(
     unresolved = [model["value"] for model in enabled if not model.get("resolvedModel")]
     resolutions = await _resolve_claude_model_aliases(claude_config, unresolved)
     alias_rows: list[dict[str, object]] = []
+    descriptions: dict[str, object] = {}
     seen_models: set[object] = set()
     for model in enabled:
         alias = model["value"]
@@ -1404,6 +1426,8 @@ async def probe_claude_model_options(
             continue
         seen_models.add(row["model"])
         alias_rows.append(row)
+        descriptions[alias] = model.get("description")
+    _label_same_name_rows(alias_rows, descriptions)
     return ClaudeModelProbe(
         alias_rows=alias_rows,
         default_model=default_resolution.get("model"),
