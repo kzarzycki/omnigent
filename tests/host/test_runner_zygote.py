@@ -558,6 +558,20 @@ def test_poll_after_stop_reports_live_runner_as_none(manager: ZygoteManager, tmp
         proc.kill()
 
 
+def test_forked_runner_leads_its_own_session(manager: ZygoteManager, tmp_path) -> None:
+    """A service manager stopping the daemon's process group spares the runner."""
+    proc = manager.fork_runner(_sleep_env(30), str(tmp_path / "runner.log"), str(tmp_path))
+    try:
+        # The zygote answers with the pid before the child reaches setsid().
+        deadline = time.monotonic() + 5
+        while os.getsid(proc.pid) != proc.pid:
+            assert time.monotonic() < deadline, "forked runner never left the zygote's session"
+            time.sleep(0.01)
+        assert os.getpgid(proc.pid) != os.getpgid(manager.pid)
+    finally:
+        proc.kill()
+
+
 @pytest.mark.parametrize("exit_before_restart", [False, True])
 def test_old_runner_exit_is_detected_after_zygote_restart(
     manager: ZygoteManager, tmp_path: Path, exit_before_restart: bool

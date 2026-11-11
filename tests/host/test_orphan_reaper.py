@@ -412,7 +412,11 @@ async def test_launch_protects_child_until_spawn_worker_returns(
     with _exited_process(42) as proc:
 
         def paused_spawn(
-            env: dict[str, str], session_slug: str, workspace: Path
+            env: dict[str, str],
+            session_slug: str,
+            workspace: Path,
+            *,
+            session_id: str | None = None,
         ) -> tuple[subprocess.Popen[bytes], Path]:
             started.set()
             assert resume.wait(timeout=5.0), "spawn worker was not released"

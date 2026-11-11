@@ -259,6 +259,7 @@ def test_stop_signal_reaches_sink_then_dies_by_signal(tmp_path: Path, signum: in
     rows_path = tmp_path / "rows.jsonl"
     proc = _run_child(
         """
+        cr.set_runner_release_hook(lambda: open(out + ".released", "w").close())
         cr.install_host_signal_handlers()
         print("ready", flush=True)
         while True:
@@ -277,6 +278,9 @@ def test_stop_signal_reaches_sink_then_dies_by_signal(tmp_path: Path, signum: in
 
     # Supervisors still see a signal death, exactly as before the handler.
     assert proc.returncode == -signum
+    # Only a service manager's SIGTERM releases runners to a successor.
+    released = Path(f"{rows_path}.released").exists()
+    assert released is (signum == signal.SIGTERM)
     (row,) = _exit_rows(rows_path)
     attrs = row["attributes"]
     assert isinstance(attrs, dict)
