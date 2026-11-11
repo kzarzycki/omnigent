@@ -288,8 +288,14 @@ def stream_events(session_id: str, after: int) -> Iterator[dict | None]:
         time.sleep(1)
 
 
-def create_cloud_session(text: str, cwd: str) -> str:
-    """Start ``claude --cloud "<text>"`` and return the new session id.
+# Aliases the CLI resolves to the latest model; any full model id passes through too.
+MODEL_ALIASES = ("haiku", "sonnet", "opus")
+# Effort for new cloud sessions; unset leaves the account default.
+EFFORT = os.environ.get("CLAUDE_CLOUD_EFFORT", "").strip()
+
+
+def create_cloud_session(text: str, cwd: str, model: str | None = None) -> str:
+    """Start ``claude --cloud "<text>" [--model m] [--effort e]``; return the new session id.
 
     Creating a cloud session is interactive-only in the CLI (``--cloud`` refuses
     ``--print``), so run it on a pseudo-terminal, read the id it prints, and
@@ -306,7 +312,9 @@ def create_cloud_session(text: str, cwd: str) -> str:
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     proc = subprocess.Popen(
-        [CLAUDE_CLI, "--cloud", text],
+        [CLAUDE_CLI, "--cloud", text]
+        + (["--model", model] if model else [])
+        + (["--effort", EFFORT] if EFFORT else []),
         cwd=cwd,
         stdin=slave,
         stdout=slave,
@@ -531,6 +539,16 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
     sub = "[sub-agent] " if payload.get("parent_tool_use_id") else ""
     if kind == "result" and not sub:
         return [], True
+    if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
+        return (
+            [
+                {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {"type": "text", "text": f"[cloud] model: {payload['model']}\n"},
+                }
+            ],
+            False,
+        )
     if kind == "env_manager_log":
         text = (payload.get("data") or {}).get("content")
         return (
@@ -600,6 +618,12 @@ class Session:
         self.cwd = cwd
         self.acp_id = acp_id
         self.cloud_id: str | None = None
+        # Picked through ``session/set_model``; it applies when the cloud session is created.
+        self.model: str | None = None
+        # The model the cloud session was created with ("" = account default); None if adopted.
+        self.started_model: str | None = None
+        # A pick already answered with the adopted-session note.
+        self.noted_model: str | None = None
         self.mcp: dict[str, McpProxy] = {}
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
@@ -828,7 +852,8 @@ def announce(acp_id: str, s: Session) -> None:
 
 def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
     """Start the cloud session, recorded under the Omnigent session's *first* prompt."""
-    s.cloud_id = create_cloud_session(cli_prompt, s.cwd)
+    s.cloud_id = create_cloud_session(cli_prompt, s.cwd, s.model)
+    s.started_model = s.model or ""
     # Recorded first: nothing after it may lose the link to a session that exists.
     remember(first_prompt_key(s.cwd, first), s.cloud_id)
     log(f"created {s.cloud_id}")
@@ -847,6 +872,7 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         else:
             log(f"re-attaching to {s.cloud_id}")
             announce(acp_id, s)
+            check_model(acp_id, s)
             after, unarchived = _send(s, text)
             if unarchived:
                 thought(
@@ -856,6 +882,7 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
     else:
         if not s.marked:
             announce(acp_id, s)  # the turn that announced it failed, and Omnigent dropped it
+        check_model(acp_id, s)
         after, unarchived = _send(s, text)
         if unarchived:
             thought(
@@ -888,7 +915,7 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
     s.follow(0)
     for event in s.events_while_alive():
         payload = (event or {}).get("payload") or {}
-        if payload.get("type") == "env_manager_log":
+        if payload.get("type") in ("env_manager_log", "system"):
             for upd in to_updates(payload)[0]:
                 update(acp_id, upd)
         elif to_updates(payload)[1]:
@@ -915,6 +942,31 @@ def _send(s: Session, text: str) -> tuple[int, bool]:
     sent = register_mcp(s.cloud_id, s.mcp)
     send_message(s.cloud_id, text)
     return sent
+
+
+def new_session_result(acp_id: str) -> dict:
+    """The ``session/new`` answer; the catalog makes Omnigent send ``session/set_model``."""
+    models = [{"modelId": m, "name": m} for m in MODEL_ALIASES]
+    return {"sessionId": acp_id, "models": {"availableModels": models}}
+
+
+def set_model(params: dict) -> None:
+    """Record Omnigent's pick. Omnigent's executor ignores a refusal here, so the turn refuses."""
+    session_for(params["sessionId"]).model = params.get("modelId")
+
+
+def check_model(acp_id: str, s: Session) -> None:
+    """Refuse a pick the existing cloud session can't take: the CLI fixes the model at creation."""
+    if not s.model or s.model in (s.started_model, s.noted_model):
+        return
+    if s.started_model is not None:
+        raise RuntimeError(
+            f"this cloud session runs on {s.started_model or 'the account default'}; "
+            f"it cannot switch to {s.model}. Start a new session for that model."
+        )
+    # Adopted after a restart: its original model isn't recorded.
+    thought(acp_id, "[cloud] resumed session keeps the model it started on\n")
+    s.noted_model = s.model
 
 
 def handle_prompt(msg: dict) -> None:
@@ -969,7 +1021,10 @@ def serve() -> None:
                 if spec.get("command")
             }
             log(f"session {acp_id} cwd={SESSIONS[acp_id].cwd}")
-            send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": acp_id}})
+            send({"jsonrpc": "2.0", "id": mid, "result": new_session_result(acp_id)})
+        elif method == "session/set_model":
+            set_model(params)
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/prompt":
             threading.Thread(target=handle_prompt, args=(msg,), daemon=True).start()
         elif method == "session/cancel":
@@ -1017,13 +1072,99 @@ def self_check() -> None:
     stub.write_text(f"#!/bin/sh\ntouch {not_repo}/ran\n")
     stub.chmod(0o755)
     real_cli, globals()["CLAUDE_CLI"] = CLAUDE_CLI, str(stub)
+    real_fns = {n: globals()[n] for n in ("create_cloud_session", "remember", "announce", "_send")}
     try:
         create_cloud_session("hi", str(not_repo))
         raise AssertionError("a session started outside a git repo")
     except RuntimeError as exc:
         assert "is not a git repository" in str(exc), exc
     assert not (not_repo / "ran").exists()
+    # The picked model and effort reach the CLI as flags; none picked adds none.
+    subprocess.run(["git", "init", "-q", str(not_repo)], check=True)
+    stub.write_text(
+        f'#!/bin/sh\necho "$@" > {not_repo}/args\necho session_01ArgsArgsArgs; sleep 2\n'
+    )
+    for model, effort, flags in ((None, "", ""), ("haiku", "low", " --model haiku --effort low")):
+        globals()["EFFORT"] = effort
+        assert create_cloud_session("hi", str(not_repo), model) == "session_01ArgsArgsArgs"
+        assert (not_repo / "args").read_text().strip() == "--cloud hi" + flags
+    globals()["EFFORT"] = ""
+    init_upd, _ = to_updates({"type": "system", "subtype": "init", "model": "test-model-1"})
+    assert "model: test-model-1" in init_upd[0]["content"]["text"], init_upd
     globals()["CLAUDE_CLI"] = real_cli
+    # Negotiation: the catalog, then a pick, reach creation; a later different pick refuses.
+    picked: list[str | None] = []
+    globals()["create_cloud_session"] = lambda _p, _c, model=None: (
+        picked.append(model) or "session_01PickedPicked"
+    )
+    globals()["remember"] = lambda *_: None
+    globals()["announce"] = lambda *_: None
+    globals()["_send"] = lambda *_: (1, False)
+    first = SESSIONS["acp-pick"] = Session("/", "acp-pick")
+    assert {
+        m["modelId"] for m in new_session_result("acp-pick")["models"]["availableModels"]
+    } == set(MODEL_ALIASES)
+    set_model({"sessionId": "acp-pick", "modelId": "haiku"})
+    first.reader = threading.current_thread()
+    first.events.put({"sequence_num": "1", "payload": {"type": "result"}})
+    with contextlib.redirect_stdout(io.StringIO()):
+        _mirror_turn("acp-pick", first, "go")
+    assert picked == ["haiku"], picked
+    set_model({"sessionId": "acp-pick", "modelId": "opus"})
+    try:
+        _mirror_turn("acp-pick", first, "again")
+        raise AssertionError("a running session switched model")
+    except RuntimeError as exc:
+        assert "cannot switch to opus" in str(exc), exc
+    # A session adopted from a transcript can't be checked: it says so and goes on.
+    adopted = Session("/", "acp-adopt")
+    adopted.cloud_id, adopted.model = "session_01Adopted", "opus"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        check_model("acp-adopt", adopted)
+    assert "keeps the model it started on" in out.getvalue() and adopted.started_model is None
+    # The init event's model shows up even when MCP servers force the bootstrap turn.
+    boot = SESSIONS["acp-boot"] = Session("/", "acp-boot")
+    boot.reader = threading.current_thread()
+    boot.events.put(
+        {
+            "sequence_num": "1",
+            "payload": {"type": "system", "subtype": "init", "model": "test-model-1"},
+        }
+    )
+    boot.events.put({"sequence_num": "2", "payload": {"type": "result"}})
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        _bootstrap("acp-boot", boot, "go")
+    assert "model: test-model-1" in out.getvalue(), out.getvalue()
+    # Over the real wire: catalog in session/new, set_model acknowledged, prompt dispatched.
+    server = subprocess.Popen(
+        [sys.executable, __file__], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+
+    def call(mid: int, method: str, params: dict) -> dict:
+        server.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params}) + "\n"
+        )
+        server.stdin.flush()
+        while (reply := json.loads(server.stdout.readline())).get("id") != mid:
+            pass  # skip keepalive updates
+        return reply
+
+    try:
+        call(1, "initialize", {})
+        new = call(2, "session/new", {"cwd": str(not_repo / "nowhere")})["result"]
+        assert new["models"]["availableModels"], new
+        sid = new["sessionId"]
+        assert call(3, "session/set_model", {"sessionId": sid, "modelId": "haiku"})["result"] == {}
+        reply = call(
+            4, "session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}]}
+        )
+        assert "is not a git repository" in reply["error"]["message"], reply
+    finally:
+        server.kill()
+    for name in ("create_cloud_session", "remember", "announce", "_send"):
+        globals()[name] = real_fns[name]
     upd, done = to_updates(
         {
             "type": "assistant",
@@ -1193,7 +1334,7 @@ def self_check() -> None:
     # and the new bridge continues that cloud session instead of creating one.
     globals()["remember"] = real_remember
     created: list[str] = []
-    globals()["create_cloud_session"] = lambda prompt, _cwd: (
+    globals()["create_cloud_session"] = lambda prompt, _cwd, _model=None: (
         created.append(prompt) or "session_01StalledStalled"
     )
     stalled = SESSIONS["acp-stalled"] = Session("/repo", "acp-stalled")
