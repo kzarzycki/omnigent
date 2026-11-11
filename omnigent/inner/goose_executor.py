@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
@@ -1197,12 +1198,15 @@ class GooseExecutor(Executor):
             }
         )
 
-        deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
         accumulated_text: list[str] = []
 
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
+            # ``time.monotonic`` stops while the host sleeps; the loop's clock
+            # (uvloop) does not, and would fail the turn on wake.
+            remaining = deadline - time.monotonic()
+            answered = fut.done() and self._queue.empty()  # an answer beats the clock
+            if remaining <= 0 and not answered:
                 yield ExecutorError(message="Timeout waiting for goose response", retryable=True)
                 return
 
@@ -1269,7 +1273,7 @@ class GooseExecutor(Executor):
 
             # Inbound message = progress; reset the idle deadline (after the
             # approval block so a slow approval doesn't time out).
-            deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+            deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
 
     async def close_session(self, session_key: str) -> None:
         """Close a named session (no-op; the ACP session is per-process)."""
