@@ -497,6 +497,29 @@ async def test_host_model_options_reports_probe_error_without_500(
     }
 
 
+async def test_model_options_unsupported_harness_is_501(
+    fs_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """A harness with no host catalog is a permanent 501, not a retryable 502."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    replies["model:acp"] = {
+        "status": "unsupported",
+        "error": "model options are unsupported for harness 'acp'",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/acp%3Aclaude-cloud/model-options")
+
+    assert resp.status_code == 501
+    assert "unsupported for harness" in resp.text
+
+
 async def test_list_filesystem_returns_paginated_entries(
     fs_setup: tuple[
         FastAPI,

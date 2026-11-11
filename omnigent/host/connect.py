@@ -4356,7 +4356,7 @@ class HostProcess:
         if harness != "claude-native":
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
-                status="failed",
+                status="unsupported",
                 error=f"model options are unsupported for harness {frame.harness!r}",
             )
         probed = await self._probed_claude_model_options()

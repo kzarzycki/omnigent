@@ -866,7 +866,7 @@ async def test_handle_model_options_rejects_unsupported_harness() -> None:
 
     assert result == HostModelOptionsResultFrame(
         request_id="req_models",
-        status="failed",
+        status="unsupported",
         error="model options are unsupported for harness 'cursor-native'",
     )
 
