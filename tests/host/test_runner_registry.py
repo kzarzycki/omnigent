@@ -21,6 +21,7 @@ from omnigent.host.runner_registry import (
     RegistrySnapshot,
     RunnerRegistry,
     adoptable_runners,
+    end_runner_sessions,
     next_owner,
     process_matches,
     process_start_stamp,
@@ -179,6 +180,33 @@ def test_registry_written_by_another_build_is_still_read(tmp_path: Path, spawn_p
     assert snapshot.runners["runner-1"].pid == runner.pid
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("daemon", "pid", "12"),
+        ("daemon", "started_at", None),
+        ("daemon", "released", "yes"),
+        ("runner", "pid", True),
+        ("runner", "started_at", "now"),
+    ],
+)
+def test_registry_with_a_wrongly_typed_field_is_not_read(
+    tmp_path: Path, spawn_process, section: str, field: str, value: object
+) -> None:
+    path = tmp_path / "target.runners"
+    daemon, runner = spawn_process(), spawn_process()
+    _write(path, _owner(daemon, released=True), _runner("runner-1", runner, tmp_path / "log"))
+    raw = json.loads(path.read_text())
+    record = raw["daemon"] if section == "daemon" else raw["runners"]["runner-1"]
+    record[field] = value
+    path.write_text(json.dumps(raw))
+
+    assert read_registry(path) is None
+    assert next_owner(path, "runner-1") is False
+    assert stop_registered_runners(path) == []
+    assert runner.poll() is None
+
+
 def test_next_owner_decisions(tmp_path: Path, spawn_process) -> None:
     path = tmp_path / "target.runners"
     daemon, runner = spawn_process(), spawn_process()
@@ -216,6 +244,20 @@ def test_stop_registered_runners_ends_only_recorded_processes(
     assert other.poll() is None
     assert not path.exists()
     assert stop_registered_runners(path) == []
+
+
+def test_stop_registered_runners_leaves_another_boots_registry_alone(
+    tmp_path: Path, spawn_process
+) -> None:
+    path = tmp_path / "target.runners"
+    daemon, runner = spawn_process(), spawn_process()
+    owner = RegistryOwner(**{**_owner(daemon, released=True).__dict__, "boot_id": "another-boot"})
+    _write(path, owner, _runner("runner-1", runner, tmp_path / "log"))
+
+    assert stop_registered_runners(path) == []
+
+    assert runner.poll() is None
+    assert not path.exists()
 
 
 def test_stop_registered_runners_kills_a_runner_that_ignores_sigterm(tmp_path: Path) -> None:
@@ -325,13 +367,14 @@ def test_watchdog_ends_the_runner_when_the_daemon_dies_unreleased(
     path = tmp_path / "target.runners"
     daemon, runner = spawn_process(), spawn_process()
     _write(path, _owner(daemon, released=False), _runner("runner-1", runner, tmp_path / "log"))
-    shutdown_requested = threading.Event()
+    shutdown_requested, session_ended = threading.Event(), threading.Event()
     watchdog = threading.Thread(
         target=_entry._run_parent_death_killer,
         args=(daemon.pid, shutdown_requested.set),
         kwargs={
             "registry_path": path,
             "runner_id": "runner-1",
+            "end_session": session_ended.set,
             "poll_interval_s": 0.02,
             "grace_s": 0.0,
             "exit_fn": lambda _code: None,
@@ -343,4 +386,74 @@ def test_watchdog_ends_the_runner_when_the_daemon_dies_unreleased(
     _end(daemon)
 
     assert shutdown_requested.wait(timeout=5)
+    assert session_ended.wait(timeout=5)
     assert process_matches(runner.pid, process_start_stamp(runner.pid) or 0.0)
+
+
+def test_watchdog_shuts_the_runner_down_when_the_registry_cannot_be_read(
+    spawn_process, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ZYGOTE_RUNNER_FORKED_ENV_VAR, "1")
+
+    def broken(*_args: object) -> None:
+        raise RuntimeError("registry lookup failed")
+
+    monkeypatch.setattr(_entry, "_await_next_host_daemon", broken)
+    daemon = spawn_process()
+    shutdown_requested = threading.Event()
+    watchdog = threading.Thread(
+        target=_entry._run_parent_death_killer,
+        args=(daemon.pid, shutdown_requested.set),
+        kwargs={"poll_interval_s": 0.02, "grace_s": 0.0, "exit_fn": lambda _code: None},
+        daemon=True,
+    )
+    watchdog.start()
+
+    _end(daemon)
+
+    assert shutdown_requested.wait(timeout=5)
+
+
+def test_claim_that_cannot_be_written_ends_the_runners_instead_of_adopting(
+    tmp_path: Path, spawn_process, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "target.runners"
+    old_daemon, runner = spawn_process(), spawn_process()
+    owner = _owner(old_daemon, released=True)
+    _end(old_daemon)
+    _write(path, owner, _runner("runner-1", runner, tmp_path / "log"))
+
+    def full_disk(*_args: object) -> None:
+        raise OSError("no space left")
+
+    monkeypatch.setattr(runner_registry, "_write_registry", full_disk)
+
+    assert RunnerRegistry(path).claim() == []
+    assert runner.wait(timeout=5) == -signal.SIGTERM
+
+
+def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_process) -> None:
+    # The leader stands in for a runner: it starts a job in its session and exits.
+    leader = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys\n"
+            "job = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "print(job.pid, flush=True)\n",
+        ],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert leader.stdout is not None
+    job_pid = int(leader.stdout.readline())
+    leader.wait()
+    bystander = spawn_process()
+    seen_at = time.time()
+
+    assert end_runner_sessions({leader.pid}, started_before=seen_at - 3600) == []
+    assert process_start_stamp(job_pid) is not None
+
+    assert end_runner_sessions({leader.pid}, started_before=seen_at) == [job_pid]
+    assert process_start_stamp(job_pid) is None
+    assert bystander.poll() is None

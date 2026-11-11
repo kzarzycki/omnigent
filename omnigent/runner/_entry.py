@@ -1280,6 +1280,7 @@ def _run_parent_death_killer(
     adopted: threading.Event | None = None,
     registry_path: Path | None = None,
     runner_id: str | None = None,
+    end_session: Callable[[], None] | None = None,
     poll_interval_s: float = 0.5,
     grace_s: float = 2.0,
     exit_fn: Callable[[int], None] = os._exit,
@@ -1314,6 +1315,9 @@ def _run_parent_death_killer(
     :param registry_path: The host daemon's runner registry, or ``None`` for a
         runner no daemon can hand on (launched by the CLI).
     :param runner_id: This runner's id in that registry.
+    :param end_session: Ends the tool calls and background jobs in this
+        runner's session when the daemon died without releasing it, as the
+        service manager's sweep of the service did.
     :param adopted: Event set when the runner has been adopted; once set,
         the watcher returns without requesting shutdown. ``None`` disables
         adoption (watch until parent death).
@@ -1339,11 +1343,18 @@ def _run_parent_death_killer(
         # parent's exit so an intentional detach is never torn down.
         if adopted is not None and adopted.is_set():
             return
-        new_owner = _await_next_host_daemon(registry_path, runner_id, poll_interval_s)
+        try:
+            new_owner = _await_next_host_daemon(registry_path, runner_id, poll_interval_s)
+        except Exception:  # a dead watchdog would leave an orphan serving
+            _logger.exception("could not read the host daemon's runner registry; shutting down")
+            new_owner = None
         if new_owner is None:
             break
         owner_is_gone = _watch_adopting_daemon(*new_owner)
     request_shutdown()
+    if end_session is not None:
+        with contextlib.suppress(Exception):
+            end_session()
     time.sleep(grace_s)
     # The hard exit is a backstop reached only when graceful shutdown did not
     # finish within the grace window; record it since os._exit skips the
@@ -1359,6 +1370,13 @@ def _run_parent_death_killer(
     with contextlib.suppress(Exception):
         sys.stderr.flush()
     exit_fn(0)
+
+
+def _end_own_session() -> None:
+    """End every other process in the session this runner leads."""
+    from omnigent.host.runner_registry import end_runner_sessions
+
+    end_runner_sessions({os.getpid()}, started_before=time.time())
 
 
 def _host_registry_path_from_env() -> Path | None:
@@ -2126,13 +2144,17 @@ async def _run_tunnel_from_env() -> None:
         # the host dies), an event-loop watchdog could never fire. The
         # thread requests graceful shutdown via the loop, then hard-exits
         # as a backstop. See _run_parent_death_killer.
+        registry_path = _host_registry_path_from_env()
+        # Only a daemon-launched runner leads a session of its own to sweep.
+        leads_session = registry_path is not None and os.getsid(0) == os.getpid()
         threading.Thread(
             target=_run_parent_death_killer,
             args=(parent_pid, _request_parent_death_shutdown),
             kwargs={
                 "adopted": adopted_event,
-                "registry_path": _host_registry_path_from_env(),
+                "registry_path": registry_path,
                 "runner_id": runner_id,
+                "end_session": _end_own_session if leads_session else None,
             },
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,

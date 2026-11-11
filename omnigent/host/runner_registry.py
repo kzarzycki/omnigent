@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,11 @@ def _known_fields(record_type: type, raw: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in raw.items() if key in names}
 
 
+def _is_process_identity(pid: object, started_at: object) -> bool:
+    """Whether the values can name a process: an int pid and a numeric start stamp."""
+    return type(pid) is int and type(started_at) in (int, float)
+
+
 def read_registry(path: Path) -> RegistrySnapshot | None:
     """Read a registry file; ``None`` when it is missing or not valid."""
     try:
@@ -110,6 +116,12 @@ def read_registry(path: Path) -> RegistrySnapshot | None:
             for runner_id, entry in raw["runners"].items()
         }
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    # A wrongly typed field would crash the liveness checks that act on it.
+    records = [owner, *runners.values()]
+    if type(owner.released) is not bool or not all(
+        _is_process_identity(record.pid, record.started_at) for record in records
+    ):
         return None
     return RegistrySnapshot(owner=owner, runners=runners)
 
@@ -172,8 +184,14 @@ class RunnerRegistry:
         with self._lock:
             adopted = adoptable_runners(read_registry(self.path))
             self._runners = {entry.runner_id: entry for entry in adopted}
-            self._write_locked()
-        return adopted
+            if self._write_locked():
+                return adopted
+            # The runners cannot see an owner that is not on disk, so they would
+            # serve on with no daemon to stop them. End them as a crash would.
+            self._runners = {}
+        for entry in adopted:
+            _signal_recorded(entry, signal.SIGTERM)
+        return []
 
     def add(
         self,
@@ -224,12 +242,14 @@ class RunnerRegistry:
             self._owner = RegistryOwner(**{**asdict(self._owner), "released": True})
             self._write_locked()
 
-    def _write_locked(self) -> None:
+    def _write_locked(self) -> bool:
         try:
             _write_registry(self.path, RegistrySnapshot(self._owner, dict(self._runners)))
         except OSError:
             # Without the file runners fall back to exiting with the daemon.
             _logger.warning("Could not write runner registry %s", self.path, exc_info=True)
+            return False
+        return True
 
 
 class AdoptedRunnerProc:
@@ -296,32 +316,80 @@ def next_owner(path: Path, runner_id: str) -> tuple[int, float] | bool:
     return owner.released
 
 
+def _signal_recorded(entry: RegisteredRunner, signum: int) -> None:
+    """Signal *entry*'s process, unless its pid now names another process."""
+    if process_matches(entry.pid, entry.started_at):
+        with contextlib.suppress(OSError):
+            os.kill(entry.pid, signum)
+
+
+def _live_runners(snapshot: RegistrySnapshot | None) -> list[RegisteredRunner]:
+    """The listed runners that still run; none for a registry from another boot."""
+    if snapshot is None or snapshot.owner.boot_id != current_boot_id():
+        return []
+    return [
+        entry
+        for entry in snapshot.runners.values()
+        if process_matches(entry.pid, entry.started_at)
+    ]
+
+
+def live_runner_pids(path: Path) -> set[int]:
+    """Pids of the runners the registry lists that still run."""
+    return {entry.pid for entry in _live_runners(read_registry(path))}
+
+
+def end_runner_sessions(
+    leader_pids: Collection[int], *, started_before: float, grace_s: float = 2.0
+) -> list[int]:
+    """End what is left in the sessions that runners with *leader_pids* lead.
+
+    A runner leads its own session, so its tool calls and background jobs
+    carry its pid as their session id; a service manager no longer sweeps
+    them. *started_before* is when the leaders were seen alive: a session id
+    stays taken while a member lives, so an older process with that id is a
+    member of the runner's session and not of one that reused the pid.
+
+    :returns: The pids that were signalled.
+    """
+    members = []
+    for proc in psutil.process_iter():
+        with contextlib.suppress(psutil.Error, OSError):
+            if (
+                proc.pid != os.getpid()
+                and os.getsid(proc.pid) in leader_pids
+                and proc.create_time() <= started_before
+            ):
+                members.append(proc)
+    for proc in members:
+        with contextlib.suppress(psutil.Error):
+            proc.terminate()
+    _, stubborn = psutil.wait_procs(members, timeout=grace_s)
+    for proc in stubborn:
+        with contextlib.suppress(psutil.Error):
+            proc.kill()
+    return [proc.pid for proc in members]
+
+
 def stop_registered_runners(path: Path, *, grace_s: float = 5.0) -> list[int]:
     """End every runner the registry lists and remove the file.
 
     For a deliberate stop, after the daemon is gone. A pid that no longer names
-    the recorded process is left alone.
+    the recorded process is left alone, and so is everything a registry from
+    before the last boot lists.
 
     :returns: The pids that were signalled.
     """
-    snapshot = read_registry(path)
-    live = [
-        entry
-        for entry in (snapshot.runners.values() if snapshot is not None else ())
-        if process_matches(entry.pid, entry.started_at)
-    ]
+    live = _live_runners(read_registry(path))
     for entry in live:
-        with contextlib.suppress(OSError):
-            os.kill(entry.pid, signal.SIGTERM)
+        _signal_recorded(entry, signal.SIGTERM)
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline and any(
         process_matches(entry.pid, entry.started_at) for entry in live
     ):
         time.sleep(0.1)
     for entry in live:
-        if process_matches(entry.pid, entry.started_at):
-            with contextlib.suppress(OSError):
-                os.kill(entry.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        _signal_recorded(entry, getattr(signal, "SIGKILL", signal.SIGTERM))
     with contextlib.suppress(OSError):
         path.unlink()
     return [entry.pid for entry in live]
