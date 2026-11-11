@@ -69,6 +69,8 @@ def _spawn_host_daemon(
     live_server: str,
     mock_llm_server_url: str,
     interactive_shells: list[str] | None = None,
+    host_id: str | None = None,
+    log_name: str = "host-daemon.log",
 ) -> _SpawnedHostDaemon:
     """
     Spawn an isolated host daemon for a single host e2e test.
@@ -92,27 +94,34 @@ def _spawn_host_daemon(
     :param mock_llm_server_url: Base URL of the mock LLM server, e.g.
         ``"http://127.0.0.1:12345"``.
     :param interactive_shells: Optional deterministic host inventory for tests.
+    :param host_id: Restart the daemon this test already spawned under this id,
+        keeping its config and data directory.
+    :param log_name: File name of the daemon log under *tmp_path*.
     :returns: The spawned daemon handle and its host_id.
     """
     omni_dir = tmp_path / ".omnigent"
     omni_dir.mkdir(parents=True, exist_ok=True)
-    # Bare 32-char hex — host_id is a Uuid16 column, and the API returns the
-    # bare form, so _wait_for_host_online's comparison must see the same.
-    host_id = uuid.uuid4().hex
-    host_name = f"e2e-host-{uuid.uuid4().hex[:12]}"
-    (omni_dir / "config.yaml").write_text(
-        yaml.safe_dump(
-            {"host": {"host_id": host_id, "name": host_name}},
-            default_flow_style=False,
-            sort_keys=True,
+    if host_id is None:
+        # Bare 32-char hex — host_id is a Uuid16 column, and the API returns the
+        # bare form, so _wait_for_host_online's comparison must see the same.
+        host_id = uuid.uuid4().hex
+        host_name = f"e2e-host-{uuid.uuid4().hex[:12]}"
+        (omni_dir / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"host": {"host_id": host_id, "name": host_name}},
+                default_flow_style=False,
+                sort_keys=True,
+            )
         )
-    )
     # Route process logs to a deterministic file so tests can read the
     # "Launched runner ... (pid=NNNN)" line and inspect it on failure.
-    daemon_log = tmp_path / "host-daemon.log"
+    daemon_log = tmp_path / log_name
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        # The suite's own config and data homes would hide the config above.
+        "OMNIGENT_CONFIG_HOME": str(omni_dir),
+        "OMNIGENT_DATA_DIR": str(omni_dir),
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "OPENAI_API_KEY": "mock-key",
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
@@ -881,6 +890,81 @@ def test_host_death_kills_runners(
             host_proc.kill()
             host_proc.wait()
         raise
+
+
+def test_runner_outlives_a_daemon_restart_and_is_adopted(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+) -> None:
+    """A SIGTERM'd daemon leaves its runner serving for the next daemon.
+
+    A service manager restarts the daemon with SIGTERM. The runner keeps its
+    tunnel, the next daemon on the same data directory adopts it, and the
+    session's next message completes on that same runner process.
+    """
+    marker1 = "HOST_RESTART_PRE"
+    marker2 = "HOST_RESTART_POST"
+    configure_mock_llm(mock_llm_server_url, [{"text": marker1}, {"text": marker2}])
+    first = _spawn_host_daemon(
+        tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
+    )
+    second: _SpawnedHostDaemon | None = None
+    runner_pid: int | None = None
+    try:
+        _wait_for_host_online(http_client, first.host_id, timeout=30.0)
+        agent_id = lookup_agent_id(
+            http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
+        )
+        session_resp = http_client.post("/v1/sessions", json={"agent_id": agent_id})
+        session_resp.raise_for_status()
+        session_id = session_resp.json()["id"]
+        launch_resp = http_client.post(
+            f"/v1/hosts/{first.host_id}/runners",
+            json={"session_id": session_id, "workspace": str(tmp_path)},
+            timeout=60.0,
+        )
+        assert launch_resp.status_code == 200, launch_resp.text
+        runner_id = launch_resp.json()["runner_id"]
+        _wait_for_runner_status(http_client, runner_id, online=True)
+        http_client.patch(
+            f"/v1/sessions/{session_id}", json={"runner_id": runner_id}
+        ).raise_for_status()
+        _assert_round_trip(http_client, session_id, marker1)
+        runner_pid = _runner_pid_from_daemon_log(first.daemon_log)
+        assert runner_pid is not None, first.daemon_log.read_text()
+
+        first.proc.send_signal(signal.SIGTERM)
+        first.proc.wait(timeout=15)
+        # Longer than the runner watchdog's poll, which ends a runner of a dead daemon.
+        time.sleep(3.0)
+        assert _pid_alive(runner_pid), "the runner exited with its SIGTERM'd daemon"
+
+        second = _spawn_host_daemon(
+            tmp_path=tmp_path,
+            live_server=live_server,
+            mock_llm_server_url=mock_llm_server_url,
+            host_id=first.host_id,
+            log_name="host-daemon-restarted.log",
+        )
+        adopting = f"Adopting runner {runner_id} (pid {runner_pid})"
+        deadline = time.monotonic() + 30.0
+        while adopting not in second.daemon_log.read_text():
+            assert time.monotonic() < deadline, second.daemon_log.read_text()
+            time.sleep(POLL_INTERVAL_S)
+        _wait_for_host_online(http_client, second.host_id, timeout=30.0)
+
+        _assert_round_trip(http_client, session_id, marker2)
+        assert _pid_alive(runner_pid)
+        assert http_client.get(f"/v1/sessions/{session_id}").json()["runner_id"] == runner_id
+    finally:
+        for daemon in (first, second):
+            if daemon is not None and daemon.proc.poll() is None:
+                daemon.proc.kill()
+                daemon.proc.wait()
+        if runner_pid is not None and _pid_alive(runner_pid):
+            os.kill(runner_pid, signal.SIGKILL)
 
 
 # ── Host-restart native round-trip ─────────────────────────────
