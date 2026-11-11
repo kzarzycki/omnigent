@@ -423,6 +423,9 @@ def test_host_name_only_config_generates_host_id(
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        # The suite's own config and data homes would hide the config above.
+        "OMNIGENT_CONFIG_HOME": str(omni_dir),
+        "OMNIGENT_DATA_DIR": str(omni_dir),
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "OPENAI_API_KEY": "mock-key",
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
