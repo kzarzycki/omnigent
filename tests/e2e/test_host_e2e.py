@@ -32,6 +32,7 @@ import httpx
 import pytest
 import yaml
 
+from omnigent.host.runner_registry import stop_registered_runners
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
@@ -158,6 +159,19 @@ def _spawn_host_daemon(
             stderr=log_fh,
         )
     return _SpawnedHostDaemon(proc=proc, host_id=host_id, daemon_log=daemon_log)
+
+
+def _end_host_daemon(daemon: _SpawnedHostDaemon) -> None:
+    """Kill *daemon*, then every runner its registry still lists.
+
+    A daemon stopped with SIGTERM leaves its runners serving for a successor,
+    so a test that stops one this way must end them itself.
+    """
+    if daemon.proc.poll() is None:
+        daemon.proc.kill()
+    daemon.proc.wait()
+    for registry in (daemon.daemon_log.parent / ".omnigent" / "daemons").glob("*.runners"):
+        stop_registered_runners(registry)
 
 
 def _runner_pid_from_daemon_log(log_path: Path) -> int | None:
@@ -790,12 +804,8 @@ def test_host_runner_survives_host_disconnect(
             )
             assert marker2 in final_assistant_text(body2)
 
-    except Exception:
-        # Cleanup: make sure host proc is dead.
-        if host_proc.poll() is None:
-            host_proc.kill()
-            host_proc.wait()
-        raise
+    finally:
+        _end_host_daemon(daemon)
 
 
 def test_host_death_kills_runners(
@@ -962,12 +972,9 @@ def test_runner_outlives_a_daemon_restart_and_is_adopted(
         assert _pid_alive(runner_pid)
         assert http_client.get(f"/v1/sessions/{session_id}").json()["runner_id"] == runner_id
     finally:
-        for daemon in (first, second):
-            if daemon is not None and daemon.proc.poll() is None:
-                daemon.proc.kill()
-                daemon.proc.wait()
-        if runner_pid is not None and _pid_alive(runner_pid):
-            os.kill(runner_pid, signal.SIGKILL)
+        for daemon in (second, first):
+            if daemon is not None:
+                _end_host_daemon(daemon)
 
 
 # ── Host-restart native round-trip ─────────────────────────────
