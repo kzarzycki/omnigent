@@ -53,6 +53,7 @@ import math
 import os
 import secrets
 import shlex
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -1954,12 +1955,15 @@ class AcpExecutor(Executor):
             }
         )
 
-        deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
         accumulated_text: list[str] = []
 
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
+            # ``time.monotonic`` stops while the host sleeps; the loop's clock
+            # (uvloop) does not, and would fail the turn on wake.
+            remaining = deadline - time.monotonic()
+            answered = fut.done() and self._queue.empty()  # an answer beats the clock
+            if remaining <= 0 and not answered:
                 yield ExecutorError(message="Timeout waiting for ACP response", retryable=True)
                 return
 
@@ -2006,7 +2010,7 @@ class AcpExecutor(Executor):
                 await self._respond_to_agent_request(notification)
 
             # Inbound message = progress; reset the idle deadline.
-            deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+            deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
 
     async def interrupt_session(self, session_key: str) -> bool:  # noqa: ARG002 — one ACP session per process
         """Abort the running turn via the ACP ``session/cancel`` notification.

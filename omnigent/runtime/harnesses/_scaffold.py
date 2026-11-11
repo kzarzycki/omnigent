@@ -52,6 +52,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from omnigent.errors import ErrorCode, HarnessTransportClosedError, OmnigentError
+from omnigent.host_sleep import HostSleepWatch
 from omnigent.native import _native_forwarder_health as native_forwarder_health
 from omnigent.policies.types import FAIL_CLOSED_PHASES
 from omnigent.runtime.tool_output import cap_tool_output
@@ -1640,6 +1641,12 @@ class HarnessApp:
         idle_wd: asyncio.Timeout | None = None
         attempt = 0
         loop = asyncio.get_running_loop()
+
+        # Neither watchdog counts time the host slept: the turn could make no
+        # progress then, and on wake both deadlines are past. ``check()``
+        # credits a sleep before a deadline is read or set, so a reset that
+        # runs before the watch's own tick does not credit it twice.
+        sleep_watch = HostSleepWatch(lambda: (absolute_wd, idle_wd))
         try:
             # Absolute outer (spans every recovery attempt), idle inner
             # (fresh per attempt): ``.expired()`` on each tells which
@@ -1657,6 +1664,7 @@ class HarnessApp:
                             # just-fired timeout: rescheduling an
                             # expiring/expired ``asyncio.Timeout`` raises
                             # RuntimeError out of ``emit``.
+                            sleep_watch.check()
                             now = loop.time()
                             if not idle_wd.expired():
                                 idle_wd.reschedule(now + idle_timeout)
@@ -1679,6 +1687,7 @@ class HarnessApp:
                             # ONLY the idle deadline, never the absolute
                             # ceiling — an approval that is never answered
                             # must still terminate at the hard cap.
+                            sleep_watch.check()
                             if not idle_wd.expired():
                                 idle_wd.reschedule(loop.time() + idle_timeout)
 
@@ -1701,6 +1710,7 @@ class HarnessApp:
                         # wedge again before the hard cap kills it, so a
                         # post-ceiling stall keeps dying promptly via the
                         # idle error instead of bouncing into the cap.
+                        sleep_watch.check()
                         absolute_deadline = absolute_wd.when()
                         out_of_absolute_budget = absolute_wd.expired() or (
                             absolute_deadline is not None
@@ -1720,6 +1730,7 @@ class HarnessApp:
                         ctx._reset_idle_watchdog = None
                         ctx._hold_idle_watchdog = None
                         cleanup_complete = await self._prepare_turn_retry()
+                        sleep_watch.check()
                         absolute_deadline = absolute_wd.when()
                         if (
                             not cleanup_complete
@@ -1797,6 +1808,7 @@ class HarnessApp:
             # ``response.cancelled`` event.
             raise
         finally:
+            sleep_watch.stop()
             # Sentinel that tells ``_stream_turn`` to stop reading
             # the queue and emit the terminal event.
             ctx._event_queue.put_nowait(None)

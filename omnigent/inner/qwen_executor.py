@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
@@ -1428,15 +1429,18 @@ class QwenExecutor(Executor):
         # Idle-based deadline: reset on every inbound message (bottom of loop),
         # so it bounds time-without-progress, not total turn length — a long
         # human approval or slow stream won't trip a spurious timeout.
-        deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
         accumulated_text: list[str] = []
         # Per-turn token usage, summed across qwen's per-call usage emissions
         # (see _accumulate_usage). Stays empty when qwen reports none.
         turn_usage: dict[str, int] = {}
 
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
+            # ``time.monotonic`` stops while the host sleeps; the loop's clock
+            # (uvloop) does not, and would fail the turn on wake.
+            remaining = deadline - time.monotonic()
+            answered = fut.done() and self._queue.empty()  # an answer beats the clock
+            if remaining <= 0 and not answered:
                 yield ExecutorError(message="Timeout waiting for qwen response", retryable=True)
                 return
 
@@ -1552,7 +1556,7 @@ class QwenExecutor(Executor):
 
             # Inbound message = progress; reset the idle deadline. Runs after the
             # human-approval block above so a slow approval doesn't time out.
-            deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
+            deadline = time.monotonic() + _PROMPT_TIMEOUT_SECONDS
 
     async def close_session(self, session_key: str) -> None:
         """Close a named session (no-op; sessions are per-process)."""
