@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from omnigent.host.runner_registry import (
     RunnerRegistry,
     adoptable_runners,
     end_runner_sessions,
+    live_runner_pids,
     next_owner,
     process_matches,
     process_start_stamp,
@@ -228,7 +230,7 @@ def test_next_owner_decisions(tmp_path: Path, spawn_process) -> None:
 
 
 def test_stop_registered_runners_ends_only_recorded_processes(
-    tmp_path: Path, spawn_process
+    tmp_path: Path, spawn_process, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "target.runners"
     daemon, runner, other = spawn_process(), spawn_process(), spawn_process()
@@ -238,10 +240,21 @@ def test_stop_registered_runners_ends_only_recorded_processes(
         path, _owner(daemon, released=True), _runner("runner-1", runner, tmp_path / "a"), recycled
     )
 
+    sent: list[tuple[int, int]] = []
+    real_kill = os.kill
+
+    def recording_kill(pid: int, signum: int) -> None:
+        sent.append((pid, signum))
+        real_kill(pid, signum)
+
+    monkeypatch.setattr(runner_registry.os, "kill", recording_kill)
+
     assert stop_registered_runners(path, grace_s=5.0) == [runner.pid]
 
     # SIGTERM first: the runner gets the chance to shut down cleanly.
     assert runner.wait(timeout=5) == -signal.SIGTERM
+    # It exited inside the grace period, so its pid gets nothing more.
+    assert sent == [(runner.pid, signal.SIGTERM)]
     assert other.poll() is None
     assert not path.exists()
     assert stop_registered_runners(path) == []
@@ -369,13 +382,14 @@ def test_watchdog_ends_the_runner_when_the_daemon_dies_unreleased(
     daemon, runner = spawn_process(), spawn_process()
     _write(path, _owner(daemon, released=False), _runner("runner-1", runner, tmp_path / "log"))
     shutdown_requested, session_ended = threading.Event(), threading.Event()
+    order: list[str] = []
     watchdog = threading.Thread(
         target=_entry._run_parent_death_killer,
-        args=(daemon.pid, shutdown_requested.set),
+        args=(daemon.pid, lambda: order.append("shutdown") or shutdown_requested.set()),
         kwargs={
             "registry_path": path,
             "runner_id": "runner-1",
-            "end_session": session_ended.set,
+            "end_session": lambda: order.append("end_session") or session_ended.set(),
             "poll_interval_s": 0.02,
             "grace_s": 0.0,
             "exit_fn": lambda _code: None,
@@ -388,6 +402,8 @@ def test_watchdog_ends_the_runner_when_the_daemon_dies_unreleased(
 
     assert shutdown_requested.wait(timeout=5)
     assert session_ended.wait(timeout=5)
+    # The runner stops taking work before its tool processes are ended.
+    assert order == ["shutdown", "end_session"]
     assert process_matches(runner.pid, process_start_stamp(runner.pid) or 0.0)
 
 
@@ -427,10 +443,61 @@ def test_claim_that_cannot_be_written_ends_the_runners_instead_of_adopting(
     def full_disk(*_args: object) -> None:
         raise OSError("no space left")
 
+    real_write = runner_registry._write_registry
     monkeypatch.setattr(runner_registry, "_write_registry", full_disk)
+    registry = RunnerRegistry(path)
 
-    assert RunnerRegistry(path).claim() == []
+    assert registry.claim() == []
     assert runner.wait(timeout=5) == -signal.SIGTERM
+    # Once the disk has room again, the ended runner is not listed as this daemon's.
+    monkeypatch.setattr(runner_registry, "_write_registry", real_write)
+    registry.release()
+    snapshot = read_registry(path)
+    assert snapshot is not None
+    assert snapshot.runners == {}
+
+
+def test_live_runner_pids_lists_the_running_runners_of_this_boot(
+    tmp_path: Path, spawn_process
+) -> None:
+    path = tmp_path / "target.runners"
+    daemon, live, gone = spawn_process(), spawn_process(), spawn_process()
+    owner = _owner(daemon, released=True)
+    entries = (
+        _runner("runner-live", live, tmp_path / "a"),
+        _runner("runner-gone", gone, tmp_path / "b"),
+    )
+    _end(gone)
+    _write(path, owner, *entries)
+
+    assert live_runner_pids(path) == {live.pid}
+
+    _write(path, RegistryOwner(**{**owner.__dict__, "boot_id": "another-boot"}), *entries)
+    assert live_runner_pids(path) == set()
+
+
+def test_runner_ends_its_own_session_but_not_itself() -> None:
+    # A session leader stands in for a runner whose daemon died unreleased.
+    runner = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys\n"
+            "job = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "from omnigent.runner import _entry\n"
+            "_entry._end_own_session()\n"
+            "import psutil\n"
+            "print('job gone' if not psutil.pid_exists(job.pid) else 'job alive', flush=True)\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        start_new_session=True,
+    )
+
+    # The sweep reaps its own child, so the job's pid is gone, not a zombie.
+    assert runner.returncode == 0, runner.stderr
+    assert runner.stdout.strip() == "job gone"
 
 
 def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_process) -> None:
@@ -441,13 +508,17 @@ def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_proces
             "-c",
             "import subprocess, sys\n"
             "job = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
-            "print(job.pid, flush=True)\n",
+            "stubborn = subprocess.Popen([sys.executable, '-c', "
+            "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print(1, flush=True); time.sleep(120)'], stdout=subprocess.PIPE)\n"
+            "stubborn.stdout.readline()\n"
+            "print(job.pid, stubborn.pid, flush=True)\n",
         ],
         stdout=subprocess.PIPE,
         start_new_session=True,
     )
     assert leader.stdout is not None
-    job_pid = int(leader.stdout.readline())
+    job_pid, stubborn_pid = map(int, leader.stdout.readline().split())
     leader.wait()
     bystander = spawn_process()
     seen_at = time.time()
@@ -455,6 +526,13 @@ def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_proces
     assert end_runner_sessions({leader.pid}, started_before=seen_at - 3600) == []
     assert process_start_stamp(job_pid) is not None
 
-    assert end_runner_sessions({leader.pid}, started_before=seen_at) == [job_pid]
+    assert sorted(
+        end_runner_sessions({leader.pid}, started_before=seen_at, grace_s=0.5)
+    ) == sorted([job_pid, stubborn_pid])
     assert process_start_stamp(job_pid) is None
+    # A member that ignores SIGTERM is killed after the grace period.
+    deadline = time.monotonic() + 5
+    while process_start_stamp(stubborn_pid) is not None:
+        assert time.monotonic() < deadline, "the member that ignores SIGTERM survived"
+        time.sleep(0.05)
     assert bystander.poll() is None
