@@ -9,6 +9,7 @@ Each scenario starts real cloud sessions on the signed-in claude.ai account.
     python3 e2e.py archived <git checkout>   # a turn on an archived session unarchives it
     python3 e2e.py cancel   <git checkout>   # cancel interrupts the running cloud turn
     python3 e2e.py teardown <git checkout>   # cancel then kill, as Omnigent's Esc does
+    python3 e2e.py detach   <git checkout>   # a killed bridge leaves the turn; the next joins it
     python3 e2e.py subagent <git checkout>   # sub-agent steps are mirrored with a label
     python3 e2e.py mcp      <git checkout>   # the cloud agent calls an MCP server on this host
     python3 e2e.py policy   <git checkout>   # permissions.ask rules send built-ins to Omnigent
@@ -234,6 +235,57 @@ def scenario_teardown(cwd: str) -> None:
     )
 
 
+def scenario_detach(cwd: str) -> None:
+    echo = [
+        {"name": "echo", "command": sys.executable, "args": ["-c", bridge.ECHO_MCP], "env": []}
+    ]
+    ask = LOOP + (
+        "\nThen call the echo tool of the echo MCP server with text 'after-loop' "
+        "and quote its result exactly."
+    )
+    first = Client(cwd, mcp=echo)
+
+    def kill_on_tool(update: dict) -> None:
+        if update.get("sessionUpdate") == "tool_call" and update.get("title") == "Bash":
+            print("\033[33m  -> close stdin, SIGTERM, and no session/cancel\033[0m")
+            first.proc.stdin.close()
+            first.proc.terminate()
+
+    started = time.monotonic()
+    with contextlib.suppress(RuntimeError, ValueError):  # the bridge is gone mid-turn
+        first.prompt(ask, kill_on_tool)
+    cloud_id = first.cloud_url.rsplit("/", 1)[1]
+    print("\n-- bridge gone mid-turn; a new one is sent the same message again --")
+    second = Client(cwd, mcp=echo)
+    second.prompt(REPLAY.format(history=f"user: {ask}", latest=ask))
+    took = time.monotonic() - started
+    second.close()
+    events, _ = bridge.fetch_events(cloud_id, None)
+    sends = [
+        e
+        for e in events
+        if e.get("source") == "client"
+        and (e.get("payload") or {}).get("type") == "user"
+        and "loop-finished" in str(e["payload"]["message"]["content"])
+    ]
+    check(second.cloud_url == first.cloud_url, f"same cloud session ({first.cloud_url})")
+    check(len(sends) == 1, f"the message reached the cloud session once ({len(sends)} found)")
+    check("loop-finished" in second.answer, "the new bridge mirrored the turn to its end")
+    check(took < 150, f"the loop was not started again ({took:.0f}s for a 60s loop)")
+    check(
+        f"served by {socket.gethostname()}" in second.answer,
+        "the new bridge served the tool call of the turn it joined",
+    )
+    print("\n-- a third bridge, after the turn: a new message is sent as usual --")
+    third = Client(cwd, mcp=echo)
+    history = f"user: {ask}\nassistant: {second.answer.strip()}"
+    third.prompt(
+        REPLAY.format(history=history, latest="Which word did the loop end on? One word.")
+    )
+    third.close()
+    check("loop-finished" in third.answer.lower(), "the session takes the next message")
+
+
 def scenario_subagent(cwd: str) -> None:
     client = Client(cwd)
     client.prompt(
@@ -304,6 +356,7 @@ if __name__ == "__main__":
         "archived": scenario_archived,
         "cancel": scenario_cancel,
         "teardown": scenario_teardown,
+        "detach": scenario_detach,
         "subagent": scenario_subagent,
         "mcp": scenario_mcp,
         "policy": scenario_policy,

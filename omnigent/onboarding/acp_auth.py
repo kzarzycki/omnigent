@@ -59,6 +59,9 @@ class AcpAgentEntry:
         Pi forks like ``omp``) to prevent XML tool-call fragments from leaking
         into their responses when no MCP relay is active. See
         :attr:`omnigent.inner.acp_executor.AcpAgentConfig.inject_system_prompt`.
+    :param cancel_on_abandon: Send ``session/cancel`` when Omnigent gives up on a
+        turn. Disable for an agent whose work outlives its process. See
+        :attr:`omnigent.inner.acp_executor.AcpAgentConfig.cancel_on_abandon`.
     :param env_passthrough: Environment variable *names* the agent may read at
         spawn, e.g. ``("XAI_API_KEY",)``. The spawn env is deny-by-default and
         the executor cannot know which variable an arbitrary agent
@@ -75,6 +78,7 @@ class AcpAgentEntry:
     send_model: bool = False
     omnigent_mcp: bool = True
     inject_system_prompt: bool = True
+    cancel_on_abandon: bool = True
     env_passthrough: tuple[str, ...] = ()
 
 
@@ -168,6 +172,9 @@ def acp_agents(config: dict[str, object] | None = None) -> list[AcpAgentEntry]:
         inject_system_prompt = raw.get("inject_system_prompt", True)
         if not isinstance(inject_system_prompt, bool):
             raise ValueError("acp agent inject_system_prompt must be a boolean")
+        cancel_on_abandon = raw.get("cancel_on_abandon", True)
+        if not isinstance(cancel_on_abandon, bool):
+            raise ValueError("acp agent cancel_on_abandon must be a boolean")
         entries.append(
             AcpAgentEntry(
                 slug=slug,
@@ -178,6 +185,7 @@ def acp_agents(config: dict[str, object] | None = None) -> list[AcpAgentEntry]:
                 send_model=bool(raw.get("send_model", False)),
                 omnigent_mcp=omnigent_mcp,
                 inject_system_prompt=inject_system_prompt,
+                cancel_on_abandon=cancel_on_abandon,
                 env_passthrough=parse_env_passthrough(raw.get("env_passthrough")),
             )
         )
@@ -241,6 +249,8 @@ def acp_agents_settings(entries: list[AcpAgentEntry]) -> dict[str, object]:
             item["omnigent_mcp"] = False
         if not e.inject_system_prompt:
             item["inject_system_prompt"] = False
+        if not e.cancel_on_abandon:
+            item["cancel_on_abandon"] = False
         if e.env_passthrough:
             item["env_passthrough"] = list(e.env_passthrough)
         agents.append(item)

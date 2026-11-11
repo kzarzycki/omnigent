@@ -228,6 +228,11 @@ class AcpAgentConfig:
         plain user content and lets the agent's own system prompt take effect
         unmodified. When ``omnigent_mcp`` is ``False`` and the agent manages its
         own context, setting this to ``False`` is strongly recommended.
+    :param cancel_on_abandon: Send ``session/cancel`` when Omnigent gives up on a
+        turn (an error or a timeout), before it stops the agent process. On by
+        default. Set to ``False`` for an agent whose work runs elsewhere and
+        outlives the process, such as a bridge to a cloud session: the work
+        goes on, the next turn joins it again, and only Stop cancels it.
     :param available_models: Curated model ids from the agent's explicitly bound
         provider (``HARNESS_ACP_MODEL_LIST``). Empty (the default) means nothing was
         curated: every model the agent accepts is allowed. When set, warm
@@ -256,6 +261,7 @@ class AcpAgentConfig:
     env_passthrough: tuple[str, ...] = ()
     permission_mode: str = "auto"
     inject_system_prompt: bool = True
+    cancel_on_abandon: bool = True
     available_models: tuple[str, ...] = ()
     env_unset: tuple[str, ...] = ()
     default_model: str | None = None
@@ -2023,6 +2029,10 @@ class AcpExecutor(Executor):
         except Exception as exc:  # noqa: BLE001 — interrupt is best-effort
             logger.debug("acp[%s] session/cancel failed: %s", self._config.name, exc)
             return False
+
+    def interrupt_on_abandon(self) -> bool:
+        """Per the agent's ``cancel_on_abandon`` setting."""
+        return self._config.cancel_on_abandon
 
     async def close_session(self, session_key: str) -> None:
         """Close a named session (no-op; the ACP session is per-process)."""

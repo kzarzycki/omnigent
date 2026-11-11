@@ -160,3 +160,16 @@ def test_shadowed_builtin_acp_rows_matches_row_ids_only() -> None:
 def test_shadowed_builtin_acp_rows_empty_without_config() -> None:
     """No configured agents → no rows suppressed (the common case)."""
     assert shadowed_builtin_acp_rows([]) == frozenset()
+
+
+def test_cancel_on_abandon_round_trips_only_when_disabled() -> None:
+    agents = [
+        {"name": "Cloud", "command": "cloud-bridge", "cancel_on_abandon": False},
+        {"name": "Goose", "command": "goose acp"},
+    ]
+    entries = acp_agents({"acp": {"agents": agents}})
+
+    assert [entry.cancel_on_abandon for entry in entries] == [False, True]
+    assert acp_agents_settings(entries) == {"acp": {"agents": agents}}
+    with pytest.raises(ValueError, match="cancel_on_abandon must be a boolean"):
+        acp_agents({"acp": {"agents": [{**agents[0], "cancel_on_abandon": "false"}]}})

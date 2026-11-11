@@ -1907,6 +1907,9 @@ def _build_acp_spawn_env(
         inject_system_prompt = embedded.get("inject_system_prompt", True)
         if not isinstance(inject_system_prompt, bool):
             raise ValueError("executor acp_agent inject_system_prompt must be a boolean")
+        cancel_on_abandon = embedded.get("cancel_on_abandon", True)
+        if not isinstance(cancel_on_abandon, bool):
+            raise ValueError("executor acp_agent cancel_on_abandon must be a boolean")
         session_id_mode = embedded.get("session_id_mode", "server")
         if session_id_mode not in ("server", "client"):
             raise ValueError(
@@ -1928,6 +1931,7 @@ def _build_acp_spawn_env(
             send_model=send_model,
             omnigent_mcp=omnigent_mcp,
             inject_system_prompt=inject_system_prompt,
+            cancel_on_abandon=cancel_on_abandon,
             env_passthrough=parse_env_passthrough(embedded.get("env_passthrough")),
         )
     else:
@@ -1951,6 +1955,8 @@ def _build_acp_spawn_env(
         env["HARNESS_ACP_OMNIGENT_MCP"] = "1" if agent.omnigent_mcp else "0"
         if not agent.inject_system_prompt:
             env["HARNESS_ACP_INJECT_SYSTEM_PROMPT"] = "0"
+        if not agent.cancel_on_abandon:
+            env["HARNESS_ACP_CANCEL_ON_ABANDON"] = "0"
         if agent.env_passthrough:
             # Names only; the harness reads each value from its own environment.
             env["HARNESS_ACP_ENV_PASSTHROUGH"] = ",".join(agent.env_passthrough)
