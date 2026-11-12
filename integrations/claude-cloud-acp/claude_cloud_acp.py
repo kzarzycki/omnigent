@@ -39,6 +39,7 @@ import pty
 import pwd
 import queue
 import re
+import runpy
 import select
 import signal
 import struct
@@ -84,7 +85,7 @@ REFRESH_WINDOW_S = 300
 REFRESH_EVERY_S = 60
 # ponytail: unverified that this subcommand refreshes; without it the next call fails clearly.
 REFRESH_CMD = [CLAUDE_CLI, "agents", "--json"]
-_last_refresh = 0.0
+_last_refresh = -float(REFRESH_EVERY_S)
 PROTOCOL_VERSION = 1
 SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
 MARKER = "cloud session: https://claude.ai/code/"
@@ -1654,6 +1655,23 @@ def self_check() -> None:
     try:
         assert access_token() == "new" and runs == [REFRESH_CMD], runs
         assert access_token() == "new" and len(runs) == 1  # fresh token: no second refresh
+        # Right after boot monotonic() is near zero; a fresh module must still refresh at once.
+        fresh = runpy.run_path(__file__, run_name="fresh_bridge")
+        boot_runs: list[list[str]] = []
+        fresh_globals = fresh["access_token"].__globals__
+        fresh_globals["_read_login"] = lambda: (
+            logins[1]
+            if boot_runs
+            else {"accessToken": "old", "expiresAt": (time.time() + 60) * 1000}
+        )
+        subprocess.run = lambda cmd, **_: boot_runs.append(cmd)
+        real_monotonic, time.monotonic = time.monotonic, lambda: 5.0
+        try:
+            assert fresh["access_token"]() == "new" and boot_runs == [fresh["REFRESH_CMD"]], (
+                boot_runs
+            )
+        finally:
+            time.monotonic = real_monotonic
     finally:
         subprocess.run = real_run
     # Each prompt re-registers the MCP servers before it, for a CLI a new sandbox started.
