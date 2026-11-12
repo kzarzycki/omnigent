@@ -256,7 +256,11 @@ async def test_session_snapshot_reads_latest_items_then_returns_chronological() 
 async def test_session_snapshot_uses_child_spec_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Child snapshots expose their selected spec while parents keep the root spec."""
+    """Child snapshots expose their selected spec while parents keep the root spec.
+
+    Each snapshot reads the agent row once; harness resolution reuses that row
+    rather than reading the store again on the event loop.
+    """
     child_spec = AgentSpec(
         spec_version=1,
         name="executor",
@@ -297,11 +301,13 @@ async def test_session_snapshot_uses_child_spec_metadata(
     }
     conv_store = _ConversationStore([], conversations=conversations)
     cache_loads: list[bool] = []
+    agent_reads: list[str] = []
 
     class _AgentStore:
         @staticmethod
         def get(agent_id: str) -> Any:
             assert agent_id == "ag_advisor"
+            agent_reads.append(agent_id)
             return type(
                 "StoredAgent",
                 (),
@@ -346,6 +352,7 @@ async def test_session_snapshot_uses_child_spec_metadata(
     assert child.context_window == 100_000
     assert child.harness == "codex"
     assert cache_loads == [True, True, True, True]
+    assert agent_reads == ["ag_advisor", "ag_advisor"]
 
 
 @pytest.mark.asyncio
