@@ -2237,20 +2237,7 @@ def test_omnigent_tools_kept_when_mcp_enabled() -> None:
     assert ex._omnigent_tools == tools, "tools must be stored when omnigent_mcp=True"
 
 
-@pytest.mark.asyncio
-async def test_inject_system_prompt_false_skips_prepend(tmp_path: Path) -> None:
-    """inject_system_prompt=False prevents the spec's system prompt from being
-    folded into the first ACP user turn (#4917 — Pi-fork agents like omp).
-
-    Without this fix, Omnigent's system prompt is prepended to the user message
-    on the first turn.  For agents that fully own their own system prompt (Pi
-    forks), this confuses the internal Claude model into emitting XML tool-call
-    fragments (``</function></tool_call>``) when there is no MCP relay backing
-    the described tools.
-    """
-    agent_path = tmp_path / "prompt_echo_agent.py"
-    agent_path.write_text(
-        r"""
+_PROMPT_ECHO_AGENT = r"""
 import sys, json
 
 def send(obj):
@@ -2284,7 +2271,21 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": mid,
               "result": {"stopReason": "end_turn", "usage": {}}})
 """
-    )
+
+
+@pytest.mark.asyncio
+async def test_inject_system_prompt_false_skips_prepend(tmp_path: Path) -> None:
+    """inject_system_prompt=False prevents the spec's system prompt from being
+    folded into the first ACP user turn (#4917 — Pi-fork agents like omp).
+
+    Without this fix, Omnigent's system prompt is prepended to the user message
+    on the first turn.  For agents that fully own their own system prompt (Pi
+    forks), this confuses the internal Claude model into emitting XML tool-call
+    fragments (``</function></tool_call>``) when there is no MCP relay backing
+    the described tools.
+    """
+    agent_path = tmp_path / "prompt_echo_agent.py"
+    agent_path.write_text(_PROMPT_ECHO_AGENT)
     command = shlex.join([sys.executable, str(agent_path)])
 
     # With injection enabled (default), the system prompt is prepended.
@@ -2319,6 +2320,83 @@ for line in sys.stdin:
         "system prompt must not appear in the first turn when inject_system_prompt=False"
     )
     assert "hello" in combined_no_inject, "user message itself must still be sent"
+
+
+@pytest.mark.parametrize(
+    ("omnigent_mcp", "inject", "tool_served", "relay", "expect_guidance"),
+    [
+        (True, False, True, "starts", True),  # claude-cloud: owns its prompt, tool served
+        (True, False, False, "starts", False),  # relay on, tool not among the served schemas
+        (False, False, True, "starts", False),  # relay off for this agent
+        (True, True, True, "starts", True),  # default injection, tool served
+        (False, True, True, "starts", False),  # default injection, relay off (jcode, OpenClaw)
+        (True, True, False, "starts", False),  # default injection, tool not served
+        (True, True, True, "kill-switch", False),  # OMNIGENT_ACP_MCP=0 with the schema present
+        (True, False, True, "kill-switch", False),
+        (True, True, True, "setup-fails", False),  # relay setup raised; agent has no tools
+        (True, False, True, "setup-fails", False),
+    ],
+    ids=[
+        "cloud",
+        "cloud-no-tool",
+        "cloud-no-relay",
+        "inject",
+        "inject-no-relay",
+        "inject-no-tool",
+        "inject-kill-switch",
+        "cloud-kill-switch",
+        "inject-setup-fails",
+        "cloud-setup-fails",
+    ],
+)
+@pytest.mark.asyncio
+async def test_card_guidance_follows_whether_the_tool_is_served(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    omnigent_mcp: bool,
+    inject: bool,
+    tool_served: bool,
+    relay: str,
+    expect_guidance: bool,
+) -> None:
+    """The first turn carries the question-card guidance exactly when the executor
+    really serves ``sys_ask_user_question`` through a running relay, whether or not it
+    folds in the rest of the prompt."""
+    from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
+
+    if relay == "kill-switch":
+        monkeypatch.setenv("OMNIGENT_ACP_MCP", "0")
+    elif relay == "setup-fails":
+
+        def _fail_bridge_dir() -> Path:
+            raise OSError("bridge directory is not writable")
+
+        monkeypatch.setattr(
+            "omnigent.harnesses.claude_native.bridge.prepare_acp_mcp_bridge_dir",
+            _fail_bridge_dir,
+        )
+    agent_path = tmp_path / "prompt_echo_agent.py"
+    agent_path.write_text(_PROMPT_ECHO_AGENT)
+    command = shlex.join([sys.executable, str(agent_path)])
+    system_prompt = f"OTHER_SYSTEM_TEXT\n\n{ASK_USER_QUESTION_INSTRUCTION}"
+    tools = [{"name": "sys_ask_user_question" if tool_served else "other_tool"}]
+    executor = AcpExecutor(
+        AcpAgentConfig(command=command, inject_system_prompt=inject, omnigent_mcp=omnigent_mcp)
+    )
+    executor._tool_executor = lambda name, args: None  # type: ignore[assignment]
+    echoed: list[str] = []
+    try:
+        async for ev in executor.run_turn(
+            [{"role": "user", "content": "hello"}], tools, system_prompt
+        ):
+            if isinstance(ev, TextChunk):
+                echoed.append(ev.text)
+    finally:
+        await executor.close()
+    text = "".join(echoed)
+    assert (ASK_USER_QUESTION_INSTRUCTION in text) is expect_guidance
+    assert ("OTHER_SYSTEM_TEXT" in text) is inject
+    assert "hello" in text
 
 
 @pytest.mark.asyncio

@@ -129,6 +129,7 @@ from omnigent.runtime.policies.builder import (
     load_session_usage,
 )
 from omnigent.runtime.policies.engine import PolicyEngine
+from omnigent.runtime.question_card import ANSWER_LINE_PREFIX
 from omnigent.runtime.telemetry import telemetry_guarded
 from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.server import (
@@ -2542,7 +2543,7 @@ def _question_answer_text(question_id: str, questions: list[Any], data: dict[str
                 choice = ", ".join(str(item) for item in value) or "(no answer)"
             else:
                 choice = str(value) if value not in (None, "") else "(no answer)"
-        lines.append(f"[answer to {question_id}] {text}: {choice}")
+        lines.append(f"{ANSWER_LINE_PREFIX}{question_id}] {text}: {choice}")
     return "\n".join(lines)
 
 

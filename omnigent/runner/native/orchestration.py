@@ -7688,12 +7688,12 @@ def _native_startup_raw_instructions_from_spec(
     :returns: The original resolved instructions text, or ``None`` when
         absent/whitespace-only.
     """
-    from omnigent.runtime.prompt import raw_author_instructions
+    from omnigent.runtime.prompt import native_startup_instructions
 
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     if spec is None:
         return None
-    return raw_author_instructions(spec)
+    return native_startup_instructions(spec)
 
 
 def _cursor_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:

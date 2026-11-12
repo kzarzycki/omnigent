@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from omnigent.entities import (
@@ -16,6 +16,7 @@ from omnigent.entities import (
 )
 from omnigent.inner.native_attachments import expand_framework_notices
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
+from omnigent.runtime.question_card import ANSWER_LINE_PREFIX, ASK_USER_QUESTION_TOOL_NAME
 from omnigent.runtime.tool_result_replay import (
     image_omitted_placeholder,
     strip_unparseable_image_output,
@@ -58,6 +59,76 @@ EMBEDDED_BROWSER_PRIORITY_INSTRUCTION = (
     "attached) or for non-interactive bulk fetching."
 )
 
+# Tells every session when to post a question card. A tool description alone is
+# not enough: harnesses that load tools on demand show only the tool's name.
+ASK_USER_QUESTION_INSTRUCTION = (
+    f"Questions for the user: when a decision is the user's to make, call "
+    f"{ASK_USER_QUESTION_TOOL_NAME} instead of asking in prose and ending your "
+    "turn. Post one card per question, with options and the recommended one "
+    "first. Card text may use bullets and links; make everything you name in it a "
+    "link. The call returns at once: carry on with whatever does not depend on the "
+    "answer, and never wait or poll. The answer arrives later as a message that "
+    f"starts with `{ANSWER_LINE_PREFIX}<question id>]`. A card stays open across a "
+    "server restart, so there is nothing to re-post."
+)
+
+
+def offers_ask_user_question(
+    spec: AgentSpec | None = None,
+    *,
+    served_tools: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
+    """
+    Whether a session is offered ``sys_ask_user_question``; the only place that decides.
+
+    At composition time (``served_tools`` omitted) the answer follows
+    ``ToolManager._register_session_tools``, which registers the tool for every
+    spec. A harness that serves only some tools (ACP with its MCP relay) passes
+    the schemas it really serves, and the answer is whether this one is among them.
+
+    :param spec: The parsed AgentSpec, when known.
+    :param served_tools: Tool schemas the harness serves, flat or OpenAI-format.
+    :returns: ``True`` when the tool is offered.
+    """
+    del spec
+    if served_tools is None:
+        return True
+    for schema in served_tools:
+        function = schema.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else schema.get("name")
+        if name == ASK_USER_QUESTION_TOOL_NAME:
+            return True
+    return False
+
+
+def strip_ask_user_question_guidance(instructions: str) -> str:
+    """
+    Remove the card guidance from a composed prompt.
+
+    :param instructions: A composed system prompt.
+    :returns: The prompt without the guidance paragraph.
+    """
+    return instructions.replace(f"\n\n{ASK_USER_QUESTION_INSTRUCTION}", "").replace(
+        ASK_USER_QUESTION_INSTRUCTION, ""
+    )
+
+
+def native_startup_instructions(spec: AgentSpec) -> str | None:
+    """
+    Compose the text a native harness gets once, at terminal launch.
+
+    The author's verbatim instructions plus the card guidance. Per-turn
+    framework text is left out: a launch is not tied to one turn, but the card
+    guidance is static, so it can ride the startup channel.
+
+    :param spec: The parsed AgentSpec.
+    :returns: The composed startup text, or ``None`` when nothing applies.
+    """
+    return append_framework_instructions(
+        raw_author_instructions(spec),
+        [ASK_USER_QUESTION_INSTRUCTION] if offers_ask_user_question(spec) else [],
+    )
+
 
 def _framework_instructions_for(spec: AgentSpec) -> list[str]:
     """
@@ -84,6 +155,8 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
         instructions.append(SUBAGENT_WAKE_NOTICE_INSTRUCTION)
     if spec.tool_groups.browser:
         instructions.append(EMBEDDED_BROWSER_PRIORITY_INSTRUCTION)
+    if offers_ask_user_question(spec):
+        instructions.append(ASK_USER_QUESTION_INSTRUCTION)
     return instructions
 
 

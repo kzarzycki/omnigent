@@ -12,6 +12,7 @@ from omnigent.runner.subagent_work import (
 )
 from omnigent.runtime.mcp_tool_result import encode_mcp_image_result
 from omnigent.runtime.prompt import (
+    ASK_USER_QUESTION_INSTRUCTION,
     EMBEDDED_BROWSER_PRIORITY_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_INSTRUCTION,
     SUBAGENT_WAKE_NOTICE_SHAPE,
@@ -25,6 +26,8 @@ from omnigent.spec import AgentSpec
 from tests._image_fixtures import _TINY_PNG_BASE64
 
 _SAMPLE_FRAMEWORK_INSTRUCTION = "Framework instruction for testing build_instructions_nullable."
+# What every default agent gets after its authored text.
+_DEFAULT_GUIDANCE = f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\n{ASK_USER_QUESTION_INSTRUCTION}"
 
 
 def _spec(
@@ -259,17 +262,14 @@ def test_framework_instructions_append_after_custom_prompts() -> None:
         framework_instructions=("  Framework prompt  ",),
     )
 
-    assert result == (
-        "Agent prompt\n\nRequest prompt\n\n"
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\nFramework prompt"
-    )
+    assert result == (f"Agent prompt\n\nRequest prompt\n\n{_DEFAULT_GUIDANCE}\n\nFramework prompt")
 
 
 def test_empty_framework_instructions_do_not_change_default() -> None:
     spec = _spec(None)
 
     assert build_instructions(spec, None, [], framework_instructions=("", "   ")) == (
-        f"You are a helpful assistant.\n\n{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}"
+        f"You are a helpful assistant.\n\n{_DEFAULT_GUIDANCE}"
     )
 
 
@@ -283,7 +283,7 @@ def test_build_instructions_nullable_unauthored_never_fabricates_fallback() -> N
     guidance applies to every agent)."""
     spec = _spec(None)
     result = build_instructions_nullable(spec, None, [])
-    assert result == EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
+    assert result == _DEFAULT_GUIDANCE
     assert "You are a helpful assistant." not in result
 
 
@@ -292,13 +292,11 @@ def test_build_instructions_nullable_whitespace_only_treated_as_absent() -> None
     raw_author_instructions' non-empty/non-whitespace gate, so authored_present
     and composed agree on what counts as "authored"."""
     spec = _spec("   \n  ")
-    assert build_instructions_nullable(spec, None, []) == EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
+    assert build_instructions_nullable(spec, None, []) == _DEFAULT_GUIDANCE
     result = build_instructions_nullable(
         spec, None, [], framework_instructions=(_SAMPLE_FRAMEWORK_INSTRUCTION,)
     )
-    assert result == (
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}"
-    )
+    assert result == (f"{_DEFAULT_GUIDANCE}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}")
 
 
 def test_build_instructions_nullable_whitespace_only_per_request_treated_as_absent() -> None:
@@ -306,15 +304,11 @@ def test_build_instructions_nullable_whitespace_only_per_request_treated_as_abse
     the same non-empty/non-whitespace gate applies to both instruction
     sources, not just spec.instructions."""
     spec = _spec(None)
-    assert (
-        build_instructions_nullable(spec, "   \n  ", []) == EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
-    )
+    assert build_instructions_nullable(spec, "   \n  ", []) == _DEFAULT_GUIDANCE
     result = build_instructions_nullable(
         spec, "   \n  ", [], framework_instructions=(_SAMPLE_FRAMEWORK_INSTRUCTION,)
     )
-    assert result == (
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}"
-    )
+    assert result == (f"{_DEFAULT_GUIDANCE}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}")
 
 
 def test_build_instructions_nullable_authored_present() -> None:
@@ -323,10 +317,7 @@ def test_build_instructions_nullable_authored_present() -> None:
     result = build_instructions_nullable(
         spec, "Request prompt", [], framework_instructions=("Framework prompt",)
     )
-    assert result == (
-        "Agent prompt\n\nRequest prompt\n\n"
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\nFramework prompt"
-    )
+    assert result == (f"Agent prompt\n\nRequest prompt\n\n{_DEFAULT_GUIDANCE}\n\nFramework prompt")
 
 
 def test_build_instructions_nullable_framework_only_omits_fallback() -> None:
@@ -343,9 +334,7 @@ def test_build_instructions_nullable_framework_only_omits_fallback() -> None:
     result = build_instructions_nullable(
         spec, None, [], framework_instructions=(_SAMPLE_FRAMEWORK_INSTRUCTION,)
     )
-    assert result == (
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}"
-    )
+    assert result == (f"{_DEFAULT_GUIDANCE}\n\n{_SAMPLE_FRAMEWORK_INSTRUCTION}")
     assert "You are a helpful assistant." not in (result or "")
 
     # The comparison this helper replaces would have misclassified the
@@ -377,13 +366,12 @@ def test_subagent_wake_instruction_added_for_dispatching_agents(
     dispatching = _spec("Agent prompt", agents=agents, spawn=spawn, builtins=builtins)
     result = build_instructions(dispatching, None, [], framework_instructions=("Turn note",))
     assert result == (
-        f"Agent prompt\n\n{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n"
-        f"{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}\n\nTurn note"
+        f"Agent prompt\n\n{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n{_DEFAULT_GUIDANCE}\n\nTurn note"
     )
 
     unauthored = _spec(None, agents=agents, spawn=spawn, builtins=builtins)
     assert build_instructions_nullable(unauthored, None, []) == (
-        f"{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}"
+        f"{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n{_DEFAULT_GUIDANCE}"
     )
 
 
@@ -397,9 +385,7 @@ def test_embedded_browser_guidance_included_for_every_agent() -> None:
     carry the preference for any spec — authored or not.
     """
     authored = _spec("Agent prompt")
-    assert build_instructions(authored, None, []) == (
-        f"Agent prompt\n\n{EMBEDDED_BROWSER_PRIORITY_INSTRUCTION}"
-    )
+    assert build_instructions(authored, None, []) == (f"Agent prompt\n\n{_DEFAULT_GUIDANCE}")
 
 
 def test_embedded_browser_guidance_names_registered_tools() -> None:
@@ -449,8 +435,12 @@ def test_browser_guidance_omitted_when_browser_group_disabled() -> None:
     spec yields ``None`` rather than guidance for tools it lacks.
     """
     spec = _spec("You are a helpful assistant.", browser=False)
-    assert build_instructions_nullable(spec, None, []) == "You are a helpful assistant."
-    assert build_instructions_nullable(_spec(None, browser=False), None, []) is None
+    assert build_instructions_nullable(spec, None, []) == (
+        f"You are a helpful assistant.\n\n{ASK_USER_QUESTION_INSTRUCTION}"
+    )
+    assert EMBEDDED_BROWSER_PRIORITY_INSTRUCTION not in (
+        build_instructions_nullable(_spec(None, browser=False), None, []) or ""
+    )
 
 
 def test_browser_group_disabled_keeps_wake_notice_for_spawning_agent() -> None:
@@ -458,5 +448,97 @@ def test_browser_group_disabled_keeps_wake_notice_for_spawning_agent() -> None:
     wake notice still rides its own dispatch gate."""
     spec = _spec(None, spawn=True, browser=False)
     result = build_instructions_nullable(spec, None, [])
-    assert result == SUBAGENT_WAKE_NOTICE_INSTRUCTION
+    assert result == f"{SUBAGENT_WAKE_NOTICE_INSTRUCTION}\n\n{ASK_USER_QUESTION_INSTRUCTION}"
     assert EMBEDDED_BROWSER_PRIORITY_INSTRUCTION not in result
+
+
+def test_ask_user_question_guidance_names_tool_and_answer_prefix() -> None:
+    """
+    The guidance tells the agent the literal tool name and answer prefix, and the
+    code still uses those literals. Renaming either fails here until the wording
+    the agent is shown is updated on purpose.
+    """
+    from omnigent.server.routes._sessions.orchestration import _question_answer_text
+    from omnigent.tools.builtins.ask_user_question import SysAskUserQuestionTool
+
+    assert "call sys_ask_user_question " in ASK_USER_QUESTION_INSTRUCTION
+    assert "starts with `[answer to <question id>]`" in ASK_USER_QUESTION_INSTRUCTION
+    assert SysAskUserQuestionTool.name() == "sys_ask_user_question"
+    answer = _question_answer_text("question_1", [{"question": "Q?"}], {"action": "accept"})
+    assert answer.startswith("[answer to question_1]")
+
+
+def test_ask_user_question_guidance_reaches_every_agent() -> None:
+    """Every spec's composed prompt carries the card guidance."""
+    assert ASK_USER_QUESTION_INSTRUCTION in build_instructions(_spec("Agent prompt"), None, [])
+    assert ASK_USER_QUESTION_INSTRUCTION in (
+        build_instructions_nullable(_spec(None), None, []) or ""
+    )
+
+
+_SEVEN_UNDELIVERED_NATIVE = frozenset(
+    {
+        "cursor-native",
+        "kiro-native",
+        "antigravity-native",
+        "goose-native",
+        "qwen-native",
+        "kimi-native",
+        "hermes-native",
+    }
+)
+
+
+def _in_scope_harnesses() -> list[str]:
+    """Every registered harness except the seven that deliver no instructions (#274)."""
+    from omnigent.harness_plugins import harness_capabilities
+
+    return sorted(set(harness_capabilities()) - _SEVEN_UNDELIVERED_NATIVE - {"kimi"})
+
+
+# In-scope harnesses, each with a test of its real instruction channel:
+# tests/runtime/harnesses/test_card_guidance_adapter.py (the adapter every
+# non-native harness runs behind), tests/inner/test_card_guidance_delivery_{a,b,c}.py
+# (executors) and tests/runner/test_card_guidance_native_launch.py (native launches).
+_HARNESSES_WITH_CHANNEL_TESTS = frozenset(
+    {
+        "claude-native",
+        "codex-native",
+        "pi-native",
+        "devin-native",
+        "opencode-native",
+        "claude-sdk",
+        "codex",
+        "pi",
+        "openai-agents",
+        "cursor",
+        "antigravity",
+        "acp",
+        "jcode",  # built-in ACP harnesses run on the ACP executor
+        "grok",
+        "goose",
+        "qwen",
+        "hermes",
+        "copilot",
+        "open-responses",
+    }
+)
+
+
+def test_every_in_scope_harness_has_a_channel_test() -> None:
+    """A new harness must get its own delivery and absence tests, or be listed as out of scope."""
+    assert set(_in_scope_harnesses()) == _HARNESSES_WITH_CHANNEL_TESTS
+
+
+def test_offers_ask_user_question_follows_served_tools() -> None:
+    """One function decides: composition says yes; a harness's served list decides for it."""
+    from omnigent.runtime.prompt import offers_ask_user_question
+
+    assert offers_ask_user_question(_spec("x")) is True
+    assert offers_ask_user_question(served_tools=[]) is False
+    assert offers_ask_user_question(served_tools=[{"name": "sys_ask_user_question"}]) is True
+    assert (
+        offers_ask_user_question(served_tools=[{"function": {"name": "sys_ask_user_question"}}])
+        is True
+    )
+    assert offers_ask_user_question(served_tools=[{"name": "other"}]) is False

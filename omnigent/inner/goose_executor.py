@@ -61,6 +61,7 @@ from omnigent.inner.executor import (
     describe_exception,
 )
 from omnigent.inner.os_env import OSEnvironment, create_os_environment
+from omnigent.runtime.prompt import offers_ask_user_question, strip_ask_user_question_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -1148,6 +1149,10 @@ class GooseExecutor(Executor):
         # latch flips on any fresh session — even with an empty system prompt —
         # so a continuing session never re-replays history or re-folds.
         if fresh_session:
+            if not offers_ask_user_question(
+                served_tools=self._mcp.served_tools(self._omnigent_tools)
+            ):
+                system_prompt = strip_ask_user_question_guidance(system_prompt)
             if system_prompt:
                 user_text = f"{system_prompt}\n\n{user_text}" if user_text else system_prompt
             self._system_prompt_sent = True
