@@ -3928,7 +3928,7 @@ def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
         or absent/whitespace-only. Best-effort: a malformed spec must not
         block the terminal launch, so load failures degrade to ``None``.
     """
-    from omnigent.runtime.prompt import raw_author_instructions
+    from omnigent.runtime.prompt import native_startup_instructions
     from omnigent.spec import load as load_agent_spec
 
     try:
@@ -3940,7 +3940,7 @@ def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
             exc_info=True,
         )
         return None
-    return raw_author_instructions(spec)
+    return native_startup_instructions(spec)
 
 
 def _run_with_local_server(

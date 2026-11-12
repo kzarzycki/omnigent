@@ -444,6 +444,18 @@ class TestAgentRule:
         assert "omnigent_session: sess-a" in text
         assert "Always write TypeScript, never JavaScript." in text
 
+    def test_plain_agent_rule_carries_question_card_guidance(self, tmp_path: Path) -> None:
+        """A spec with no instructions still gets the card guidance in the rule."""
+        from omnigent.runner.app import _native_startup_raw_instructions_from_spec
+        from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
+        from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+        spec = AgentSpec(spec_version=1, name="devin", instructions=None, executor=ExecutorSpec())
+        startup_text = _native_startup_raw_instructions_from_spec(spec)
+        assert write_devin_agent_rule(tmp_path, startup_text, session_id="sess-a")
+        rule = tmp_path / ".windsurf" / "rules" / "omnigent-agent-instructions.md"
+        assert ASK_USER_QUESTION_INSTRUCTION in rule.read_text(encoding="utf-8")
+
     def test_none_removes_a_stale_rule(self, tmp_path: Path) -> None:
         write_devin_agent_rule(tmp_path, "old instructions", session_id="sess-a")
         rule = tmp_path / ".windsurf" / "rules" / "omnigent-agent-instructions.md"

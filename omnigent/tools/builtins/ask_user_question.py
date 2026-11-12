@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from omnigent.runtime.question_card import ANSWER_LINE_PREFIX, ASK_USER_QUESTION_TOOL_NAME
 from omnigent.tools.base import Tool
 
 # Prefix of a question's id; the elicitation it publishes carries the same id.
@@ -16,7 +17,7 @@ class SysAskUserQuestionTool(Tool):
     @classmethod
     def name(cls) -> str:
         """Return the tool name."""
-        return "sys_ask_user_question"
+        return ASK_USER_QUESTION_TOOL_NAME
 
     @classmethod
     def description(cls) -> str:
@@ -25,7 +26,7 @@ class SysAskUserQuestionTool(Tool):
             "Ask the user one to four multiple-choice questions without waiting. "
             "It returns at once with a question_id; the user sees a card with your "
             "options and may also type their own answer. The answer arrives later as "
-            "a user message starting with `[answer to <question_id>]`, one line per "
+            f"a user message starting with `{ANSWER_LINE_PREFIX}<question_id>]`, one line per "
             "question. Do not wait or poll for it: carry on with other work, or end "
             "your turn if you cannot continue without the answer. Messages from other "
             "sessions keep reaching you while the question is open. The question text and "

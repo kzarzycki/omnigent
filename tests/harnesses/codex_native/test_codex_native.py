@@ -34,6 +34,7 @@ from omnigent.harnesses.codex_native.bridge import (
 )
 from omnigent.harnesses.codex_native.elicitation import codex_elicitation_id
 from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
 from omnigent.spec import load
 
 # The default-stance auto-review override normalize_codex_permission_launch_args
@@ -9010,6 +9011,7 @@ def test_wrapper_spec_raw_instructions_resolves_prompt(tmp_path: Path) -> None:
     result = codex_native._wrapper_spec_raw_instructions(spec_path)
     assert result is not None
     assert "Codex is running in the session terminal" in result
+    assert ASK_USER_QUESTION_INSTRUCTION in result
 
 
 @pytest.mark.asyncio

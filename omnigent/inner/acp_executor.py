@@ -88,6 +88,11 @@ from omnigent.inner.executor import (
 )
 from omnigent.inner.os_env import OSEnvironment, create_os_environment
 from omnigent.process_logging import current_process_log_path, display_log_path
+from omnigent.runtime.prompt import (
+    ASK_USER_QUESTION_INSTRUCTION,
+    offers_ask_user_question,
+    strip_ask_user_question_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2008,8 +2013,21 @@ class AcpExecutor(Executor):
         # injection to avoid prepending text that confuses the agent's internal
         # Claude model into emitting XML tool-call fragments (#4917).
         if fresh_session:
+            offered = offers_ask_user_question(
+                served_tools=self._mcp.served_tools(self._omnigent_tools)
+            )
+            if not offered:
+                system_prompt = strip_ask_user_question_guidance(system_prompt)
             if system_prompt and self._config.inject_system_prompt:
                 user_text = f"{system_prompt}\n\n{user_text}" if user_text else system_prompt
+            elif offered and ASK_USER_QUESTION_INSTRUCTION in system_prompt:
+                # Agents that own their system prompt (claude-cloud) still need the
+                # question-card guidance for the Omnigent tools they are served.
+                user_text = (
+                    f"{ASK_USER_QUESTION_INSTRUCTION}\n\n{user_text}"
+                    if user_text
+                    else ASK_USER_QUESTION_INSTRUCTION
+                )
             self._system_prompt_sent = True
 
         prompt_blocks: list[_AcpJsonObject] = []

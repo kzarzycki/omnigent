@@ -78,6 +78,7 @@ from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
 )
 from omnigent.runner.session_init_protocol import RunnerSessionInitEnvelope
+from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
 from omnigent.terminals import TerminalRegistry
@@ -361,7 +362,12 @@ async def test_auto_create_pi_terminal_launches_required_terminal(
 
     args = captured["spec"].args
     assert args[-2:] == ["--append-system-prompt", "User addition"]
-    if instruction_spec in {"raw", "resolved", "resolved-replace"}:
+    if instruction_spec != "missing":
+        expected_instructions = (
+            ASK_USER_QUESTION_INSTRUCTION
+            if instruction_spec == "empty"
+            else f"{instructions}\n\n{ASK_USER_QUESTION_INSTRUCTION}"
+        )
         assert args.count("--append-system-prompt") == 2
         prompt_flag = (
             "--system-prompt"
@@ -376,8 +382,8 @@ async def test_auto_create_pi_terminal_launches_required_terminal(
             path.parent
             == Path(captured["spec"].env[pi_native_bridge.PI_NATIVE_CONFIG_ENV_VAR]).parent
         )
-        assert path.read_text() == instructions
-        assert instructions not in args
+        assert path.read_text() == expected_instructions
+        assert expected_instructions not in args
     else:
         assert args.count("--append-system-prompt") == 1
         assert not instructions_path.exists()
@@ -2584,7 +2590,9 @@ async def test_auto_create_claude_terminal_passes_raw_instructions(
     args = captured["spec"].args
     assert "--append-system-prompt" in args, f"missing --append-system-prompt in {args!r}"
     idx = args.index("--append-system-prompt")
-    assert args[idx + 1] == "Be a concise, careful coding assistant."
+    assert args[idx + 1] == (
+        f"Be a concise, careful coding assistant.\n\n{ASK_USER_QUESTION_INSTRUCTION}"
+    )
 
 
 @pytest.mark.asyncio

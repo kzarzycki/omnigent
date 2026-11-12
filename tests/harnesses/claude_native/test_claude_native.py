@@ -43,6 +43,7 @@ from omnigent.native import native_terminal
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from omnigent.runtime import tool_result_replay as trc
 from omnigent.runtime import workflow
+from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
 from omnigent.spec import load_omnigent_yaml
 from omnigent.terminals.ws_common import (
     WS_CLOSE_TERMINAL_DETACHED,
@@ -6784,6 +6785,7 @@ def test_wrapper_spec_raw_instructions_resolves_prompt(tmp_path: Path) -> None:
     result = claude_native._wrapper_spec_raw_instructions(spec_path)
     assert result is not None
     assert "Claude Code is running in the session terminal" in result
+    assert ASK_USER_QUESTION_INSTRUCTION in result
 
 
 def test_wrapper_spec_raw_instructions_degrades_on_malformed_spec(tmp_path: Path) -> None:

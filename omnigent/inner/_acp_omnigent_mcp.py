@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from omnigent.harnesses.claude_native.bridge import ClaudeNativeToolRelay, ToolExecutor
+    from omnigent.inner.executor import ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,15 @@ class OmnigentAcpMcp:
         self._bridge_dir: Path | None = None
         # ``None`` = not yet resolved; a list (possibly empty) = resolved+cached.
         self._acp_servers: list[_JsonObject] | None = None
+
+    def served_tools(self, tools: Sequence[ToolSpec]) -> list[ToolSpec]:
+        """
+        Return the tools the agent can really call: *tools* once the relay has started.
+
+        Nothing is served while the relay is off (per-agent or the global kill
+        switch), failed to start, or was never started (no tool executor yet).
+        """
+        return list(tools) if self._acp_servers and _mcp_enabled() else []
 
     def session_new_servers(
         self,
