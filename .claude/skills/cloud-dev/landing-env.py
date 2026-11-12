@@ -28,7 +28,7 @@ def body(name: str, init_script: str) -> dict:
     return {
         "name": name,
         "kind": "anthropic_cloud",
-        "description": "omnigent landing - GitHub only, no package registries, owner-added signing key",
+        "description": "omnigent landing - GitHub only, no registries, owner-added signing key",
         "config": {
             "environment_type": "anthropic",
             "cwd": "/home/user",
@@ -45,7 +45,9 @@ def request_body(name: str) -> dict:
 
 
 def main(name: str) -> None:
-    spec = importlib.util.spec_from_file_location("cloud_env", HERE.parent / "fork-sync" / "cloud-env.py")
+    spec = importlib.util.spec_from_file_location(
+        "cloud_env", HERE.parent / "fork-sync" / "cloud-env.py"
+    )
     cloud_env = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cloud_env)
     existing = cloud_env.api("/v1/environment_providers?limit=100").get("environments", [])
@@ -58,9 +60,14 @@ def main(name: str) -> None:
 def selftest() -> None:
     config = request_body("omnigent-land")["config"]
     assert config["environment"] == {MARKER: "1"}, "the marker is the only variable: no key"
-    assert config["network_config"] == {"allowed_hosts": GITHUB_HOSTS, "allow_default_hosts": False}
+    assert config["network_config"] == {
+        "allowed_hosts": GITHUB_HOSTS,
+        "allow_default_hosts": False,
+    }
     assert "landing-guard.py" in config["init_script"]
-    assert not any(word in config["init_script"] for word in ("apt-get", "pip ", "npm ", "uv tool"))
+    assert not any(
+        word in config["init_script"] for word in ("apt-get", "pip ", "npm ", "uv tool")
+    )
     print("landing-env selftest ok")
 
 

@@ -25,7 +25,18 @@ TEXT_RULES = [
 PRINTERS = {"env", "printenv"}
 # Bash builtins that list every variable when given only flags (`set`: no arguments).
 LISTERS = {"export", "declare", "typeset", "readonly"}
-WRAPPERS = {"sudo", "exec", "command", "builtin", "nohup", "time", "nice", "xargs", "timeout", "stdbuf"}
+WRAPPERS = {
+    "sudo",
+    "exec",
+    "command",
+    "builtin",
+    "nohup",
+    "time",
+    "nice",
+    "xargs",
+    "timeout",
+    "stdbuf",
+}
 SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "$(", "\n", "{", "}", "!"}
 
 
@@ -77,8 +88,10 @@ def refusal(words: list[str]) -> str | None:
         or (rest[0] == "compgen" and any(re.fullmatch(r"-\w*[ev]\w*|-A", arg) for arg in rest[1:]))
     ):
         return f"runs `{' '.join(rest)}`, which lists every variable"
-    if rest and os.path.basename(rest[0]) == "ps" and any(
-        not arg.startswith("-") and "e" in arg for arg in rest[1:]
+    if (
+        rest
+        and os.path.basename(rest[0]) == "ps"
+        and any(not arg.startswith("-") and "e" in arg for arg in rest[1:])
     ):
         return "runs `ps` with `e`, which prints each process's environment"
     return None

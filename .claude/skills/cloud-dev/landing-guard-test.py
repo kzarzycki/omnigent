@@ -25,7 +25,7 @@ REFUSED = [
     "echo $(env)",
     "echo `printenv`",
     "bash -c 'env | grep KEY'",
-    "sh -c \"printenv\"",
+    'sh -c "printenv"',
     "xargs env < /dev/null",
     "timeout 5 env",
     "cat /proc/self/environ",
@@ -33,8 +33,8 @@ REFUSED = [
     "strings /proc/$$/environ",
     "tr '\\0' '\\n' < /proc/*/environ",
     "echo $OMNIGENT_LANDING_SIGNING_KEY",
-    "echo \"${OMNIGENT_LANDING_SIGNING_KEY}\"",
-    "printf %s \"$LOOP_SIGNING_KEY\" | base64 -d",
+    'echo "${OMNIGENT_LANDING_SIGNING_KEY}"',
+    'printf %s "$LOOP_SIGNING_KEY" | base64 -d',
     "echo ${!OMNIGENT*}",
     "set",
     "export",
@@ -77,14 +77,22 @@ ALLOWED = [
 ]
 
 
-def run(tool_input: dict, marker: str | None = "1", tool: str = "Bash") -> subprocess.CompletedProcess:
-    environment = {key: value for key, value in os.environ.items() if key != "OMNIGENT_LANDING_ENVIRONMENT"}
+def run(
+    tool_input: dict, marker: str | None = "1", tool: str = "Bash"
+) -> subprocess.CompletedProcess:
+    environment = {
+        key: value for key, value in os.environ.items() if key != "OMNIGENT_LANDING_ENVIRONMENT"
+    }
     if marker is not None:
         environment["OMNIGENT_LANDING_ENVIRONMENT"] = marker
     call = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
     return subprocess.run(
-        [sys.executable, str(GUARD)], input=json.dumps(call), env=environment,
-        capture_output=True, text=True, check=False,
+        [sys.executable, str(GUARD)],
+        input=json.dumps(call),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -104,20 +112,33 @@ class LandingGuard(unittest.TestCase):
 
     def test_refuses_other_tools_reading_the_environment(self) -> None:
         self.assertEqual(run({"file_path": "/proc/self/environ"}, tool="Read").returncode, 2)
-        self.assertEqual(run({"pattern": "KEY", "path": "/proc/1/environ"}, tool="Grep").returncode, 2)
-        self.assertEqual(run({"file_path": "/home/user/omnigent/README.md"}, tool="Read").returncode, 0)
+        self.assertEqual(
+            run({"pattern": "KEY", "path": "/proc/1/environ"}, tool="Grep").returncode, 2
+        )
+        self.assertEqual(
+            run({"file_path": "/home/user/omnigent/README.md"}, tool="Read").returncode, 0
+        )
 
     def test_passes_everything_outside_the_landing_environment(self) -> None:
         for marker in (None, "", "0"):
-            for command in ("env", "printenv", "cat /proc/self/environ", "echo $OMNIGENT_LANDING_SIGNING_KEY"):
+            for command in (
+                "env",
+                "printenv",
+                "cat /proc/self/environ",
+                "echo $OMNIGENT_LANDING_SIGNING_KEY",
+            ):
                 with self.subTest(marker=marker, command=command):
                     self.assertEqual(run({"command": command}, marker=marker).returncode, 0)
 
     def test_refuses_an_unreadable_call(self) -> None:
         environment = dict(os.environ, OMNIGENT_LANDING_ENVIRONMENT="1")
         result = subprocess.run(
-            [sys.executable, str(GUARD)], input="not json", env=environment,
-            capture_output=True, text=True, check=False,
+            [sys.executable, str(GUARD)],
+            input="not json",
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         self.assertEqual(result.returncode, 2)
 
