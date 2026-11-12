@@ -35,7 +35,7 @@ import pytest
 import yaml
 
 from omnigent.host import HOST_FATAL_EXIT_CODE
-from omnigent.host.runner_registry import stop_registered_runners
+from omnigent.host.runner_registry import read_registry, stop_registered_runners
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
@@ -76,6 +76,7 @@ def _spawn_host_daemon(
     closed_console: str | None = None,
     host_id: str | None = None,
     log_name: str = "host-daemon.log",
+    keep_runners_on_restart: bool | None = None,
 ) -> _SpawnedHostDaemon:
     """
     Spawn an isolated host daemon for a single host e2e test.
@@ -103,6 +104,8 @@ def _spawn_host_daemon(
     :param host_id: Restart the daemon this test already spawned under this id,
         keeping its config and data directory.
     :param log_name: File name of the daemon log under *tmp_path*.
+    :param keep_runners_on_restart: ``host.keep_runners_on_restart`` for a
+        new config; ``None`` leaves the key out.
     :returns: The spawned daemon handle and its host_id.
     """
     omni_dir = tmp_path / ".omnigent"
@@ -112,9 +115,12 @@ def _spawn_host_daemon(
         # bare form, so _wait_for_host_online's comparison must see the same.
         host_id = uuid.uuid4().hex
         host_name = f"e2e-host-{uuid.uuid4().hex[:12]}"
+        host_section: dict[str, object] = {"host_id": host_id, "name": host_name}
+        if keep_runners_on_restart is not None:
+            host_section["keep_runners_on_restart"] = keep_runners_on_restart
         (omni_dir / "config.yaml").write_text(
             yaml.safe_dump(
-                {"host": {"host_id": host_id, "name": host_name}},
+                {"host": host_section},
                 default_flow_style=False,
                 sort_keys=True,
             )
@@ -746,6 +752,7 @@ def test_host_runner_survives_host_disconnect(
         tmp_path=tmp_path,
         live_server=live_server,
         mock_llm_server_url=mock_llm_server_url,
+        keep_runners_on_restart=True,
     )
     host_proc = daemon.proc
     host_id = daemon.host_id
@@ -839,25 +846,35 @@ def test_host_runner_survives_host_disconnect(
         _end_host_daemon(daemon)
 
 
+@pytest.mark.parametrize(
+    ("stop_signal", "keep_runners_on_restart"),
+    [(signal.SIGKILL, None), (signal.SIGTERM, None), (signal.SIGTERM, False)],
+    ids=["sigkill", "sigterm-key-missing", "sigterm-key-off"],
+)
 def test_host_death_kills_runners(
     live_server: str,
     http_client: httpx.Client,
     tmp_path: Path,
     mock_llm_server_url: str,
+    stop_signal: signal.Signals,
+    keep_runners_on_restart: bool | None,
 ) -> None:
     """
-    Start host, launch a runner, kill the host, verify the runner
+    Start host, launch a runner, stop the host, verify the runner
     exits within a few seconds.
 
     The runner's parent-PID watchdog polls every 1s and exits when
     the parent (host daemon) is gone. If the runner stays alive
     after the host dies, the watchdog is broken and we'd accumulate
-    orphaned runner processes.
+    orphaned runner processes. Without ``host.keep_runners_on_restart``
+    a SIGTERM (a service-manager restart) ends the runner the same way
+    and leaves the registry unreleased.
     """
     daemon = _spawn_host_daemon(
         tmp_path=tmp_path,
         live_server=live_server,
         mock_llm_server_url=mock_llm_server_url,
+        keep_runners_on_restart=keep_runners_on_restart,
     )
     host_proc = daemon.proc
     host_id = daemon.host_id
@@ -906,9 +923,13 @@ def test_host_death_kills_runners(
             f"{daemon.daemon_log.read_text()}"
         )
 
-        # Kill the host daemon.
-        host_proc.kill()
-        host_proc.wait()
+        host_proc.send_signal(stop_signal)
+        host_proc.wait(timeout=15)
+        registries = list((tmp_path / ".omnigent" / "daemons").glob("*.runners"))
+        assert registries, "the daemon wrote no runner registry"
+        for registry in registries:
+            snapshot = read_registry(registry)
+            assert snapshot is not None and not snapshot.owner.released
 
         # The orphaned runner must exit (parent-PID watchdog). Assert on
         # the runner PROCESS — the invariant this test protects (no orphan
@@ -929,11 +950,8 @@ def test_host_death_kills_runners(
             "runner processes will accumulate."
         )
 
-    except Exception:
-        if host_proc.poll() is None:
-            host_proc.kill()
-            host_proc.wait()
-        raise
+    finally:
+        _end_host_daemon(daemon)
 
 
 def test_runner_outlives_a_daemon_restart_and_is_adopted(
@@ -952,7 +970,10 @@ def test_runner_outlives_a_daemon_restart_and_is_adopted(
     marker2 = "HOST_RESTART_POST"
     configure_mock_llm(mock_llm_server_url, [{"text": marker1}, {"text": marker2}])
     first = _spawn_host_daemon(
-        tmp_path=tmp_path, live_server=live_server, mock_llm_server_url=mock_llm_server_url
+        tmp_path=tmp_path,
+        live_server=live_server,
+        mock_llm_server_url=mock_llm_server_url,
+        keep_runners_on_restart=True,
     )
     second: _SpawnedHostDaemon | None = None
     runner_pid: int | None = None

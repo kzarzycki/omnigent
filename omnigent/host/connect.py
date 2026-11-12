@@ -1320,6 +1320,8 @@ class HostProcess:
         lifecycle_lock: DaemonLifecycleLock | None = None,
         interactive_shells: list[str] | None = None,
         server_still_ours: Callable[[], bool] | None = None,
+        *,
+        keep_runners_on_restart: bool = False,
     ) -> None:
         """Initialize the host process.
 
@@ -1329,6 +1331,9 @@ class HostProcess:
             to its registry record. When present, the daemon holds the lock
             and self-terminates once the record is deleted or reassigned.
         :param interactive_shells: Optional shell inventory override for tests.
+        :param keep_runners_on_restart: ``host.keep_runners_on_restart``: a
+            ``SIGTERM`` releases the runners to the next daemon instead of
+            ending them.
             By default the host discovers its installed shells once at startup.
         :param server_still_ours: For a local-mode host, reports whether the
             local server it started is still the one on ``server_url``; while
@@ -1507,6 +1512,7 @@ class HostProcess:
         # _lifecycle_lost and aborts the live tunnel so run() breaks out of its
         # serve and tears down cleanly instead of lingering as a stale daemon.
         self._lifecycle_lock = lifecycle_lock
+        self._keep_runners_on_restart = keep_runners_on_restart
         # Runners on disk, so the next daemon for this target can adopt them.
         self._runner_registry = (
             RunnerRegistry(runner_registry_path(lifecycle_lock.target))
@@ -5116,7 +5122,11 @@ class HostProcess:
                     self._adopt_runner(entry)
                 from omnigent.host.crash_reporting import set_runner_release_hook
 
-                set_runner_release_hook(self._runner_registry.release)
+                # Unreleased, the runners end themselves and their sessions
+                # once this daemon is gone.
+                set_runner_release_hook(
+                    self._runner_registry.release if self._keep_runners_on_restart else None
+                )
             self._lifecycle_task = asyncio.create_task(
                 self._lifecycle_monitor_loop(), name="host-lifecycle-monitor"
             )
@@ -6458,12 +6468,17 @@ def _serve_host_until_exit(
 
     telemetry.init("omni-host")
 
-    from omnigent.host.identity import export_configured_slice_key, host_config_path
+    from omnigent.host.identity import (
+        export_configured_slice_key,
+        host_config_path,
+        load_keep_runners_on_restart,
+    )
 
     path = host_config_path(config_path)
     export_configured_slice_key(path)
     try:
         identity = load_or_create_host_identity(path)
+        keep_runners_on_restart = load_keep_runners_on_restart(path)
     except ValueError as exc:
         crash_reporting.report_host_exit(
             "identity_error", exit_code=HOST_FATAL_EXIT_CODE, error=str(exc)
@@ -6535,6 +6550,7 @@ def _serve_host_until_exit(
         lifecycle_lock=lifecycle_lock,
         interactive_shells=interactive_shells,
         server_still_ours=server_still_ours,
+        keep_runners_on_restart=keep_runners_on_restart,
     )
     crash_reporting.set_hangup_callback(host.signal_runners_finish_work)
     try:
