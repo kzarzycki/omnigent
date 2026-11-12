@@ -42,30 +42,41 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
   || { echo "!! fork-env.sh: $(cat "$tmp/err" 2>/dev/null)"; exit 1; }
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
-# landing-setup.sh: installs the guard as a managed PreToolUse hook, keeps other managed
-# settings, adds it once on a rerun, and logs FAILED with no checkout to copy it from.
-land() {  # land: landing-setup.sh with its paths under $tmp
-  sed -e "s#/tmp/omnigent-land-init.log#$tmp/land.log#" -e "s#/etc/claude-code#$tmp/managed#" \
-    -e "s#/home/user#$tmp/landuser#g" "$here/landing-setup.sh" > "$tmp/landing-setup.sh"
-  bash "$tmp/landing-setup.sh" >/dev/null 2>&1
+# landing-setup.sh as landing-env.py sends it: installs the inlined guard as a managed
+# PreToolUse hook, keeps other managed settings and adds it once on a rerun, with the
+# checkout's guard replaced by `exit 0` or missing; unfilled, it logs FAILED.
+export OMNIGENT_LAND_LOG="$tmp/land.log" OMNIGENT_LAND_MANAGED_DIR="$tmp/managed" OMNIGENT_LAND_NO_SUDO=1
+checkout="$tmp/landuser/omnigent"
+land() {  # land [script]: the setup script from the fake checkout, /home/user moved under $tmp
+  [ $# = 1 ] || { python3 "$here/landing-env.py" --setup-script > "$tmp/landing-setup.sh" || return 9; }
+  [ $# = 0 ] || cp "$1" "$tmp/landing-setup.sh"
+  sed -i "s#/home/user#$tmp/landuser#g" "$tmp/landing-setup.sh"
+  (cd "${checkout}" 2>/dev/null || cd "$tmp"; HOME="$tmp/landuser" bash "$tmp/landing-setup.sh" >/dev/null 2>&1)
 }
-mkdir -p "$tmp/landuser/omnigent/.claude/skills/cloud-dev" "$tmp/managed"
-land; rc=$?
-[ "$rc" = 0 ] && grep -q "omnigent-land init FAILED: no landing-guard.py" "$tmp/land.log" \
-  || { echo "!! landing-setup without a checkout: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
-cp "$here/landing-guard.py" "$tmp/landuser/omnigent/.claude/skills/cloud-dev/"
-echo '{"permissions": {"deny": ["WebFetch"]}}' > "$tmp/managed/managed-settings.json"
-land && land; rc=$?
-hook=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["permissions"]["deny"] == ["WebFetch"]
+landed() {  # landed <case>: one guard hook, other settings kept, the repo's guard refusing printenv
+  hook=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["permissions"]["deny"] == ["WebFetch"]
 entries = s["hooks"]["PreToolUse"]; assert len(entries) == 1 and entries[0]["matcher"] == "*", entries
 print(entries[0]["hooks"][0]["command"])' "$tmp/managed/managed-settings.json") \
-  && [ "$rc" = 0 ] && grep -q "omnigent-land init done" "$tmp/land.log" \
-  || { echo "!! landing-setup: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
-call='{"tool_name": "Bash", "tool_input": {"command": "printenv"}}'
-echo "$call" | OMNIGENT_LANDING_ENVIRONMENT=1 $hook 2>/dev/null; rc=$?
-echo "$call" | env -u OMNIGENT_LANDING_ENVIRONMENT $hook; outside=$?
-[ "$rc" = 2 ] && [ "$outside" = 0 ] \
-  || { echo "!! the installed hook ($hook) did not refuse printenv only in the landing environment"; exit 1; }
+    && [ "$rc" = 0 ] && grep -q "omnigent-land init done" "$tmp/land.log" && ! grep -q FAILED "$tmp/land.log" \
+    && cmp -s "$here/landing-guard.py" "$tmp/managed/landing-guard.py" \
+    || { echo "!! landing-setup, $1: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
+  call='{"tool_name": "Bash", "tool_input": {"command": "printenv"}}'
+  echo "$call" | OMNIGENT_LANDING_ENVIRONMENT=1 $hook 2>/dev/null; inside=$?
+  echo "$call" | env -u OMNIGENT_LANDING_ENVIRONMENT $hook; outside=$?
+  [ "$inside" = 2 ] && [ "$outside" = 0 ] \
+    || { echo "!! landing-setup, $1: the installed hook did not refuse printenv only in the landing environment"; exit 1; }
+}
+fresh() { rm -rf "$tmp/managed" "$tmp/land.log"; mkdir -p "$tmp/managed"
+  echo '{"permissions": {"deny": ["WebFetch"]}}' > "$tmp/managed/managed-settings.json"; }
+mkdir -p "$checkout/.claude/skills/cloud-dev"
+printf '#!/bin/sh\nexit 0\n' > "$checkout/.claude/skills/cloud-dev/landing-guard.py"
+fresh; land && land; rc=$?; landed "checkout's guard is exit 0"
+rm -rf "$tmp/landuser"
+fresh; land; rc=$?; landed "no checkout"
+fresh; land "$here/landing-setup.sh"; rc=$?
+[ "$rc" = 0 ] && grep -q "omnigent-land init FAILED: the guard is not the one" "$tmp/land.log" \
+  && ! grep -q "init done" "$tmp/land.log" \
+  || { echo "!! landing-setup unfilled: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
 echo "cloud-dev landing-setup.sh: ok"
 python3 "$here/landing-guard-test.py" -q 2>&1 | tail -1 | grep -qx OK \
   || { python3 "$here/landing-guard-test.py"; exit 1; }

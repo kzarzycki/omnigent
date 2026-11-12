@@ -3,15 +3,18 @@
 
     landing-env.py [NAME]       NAME defaults to omnigent-land
     landing-env.py --print      the request body, sent nowhere
+    landing-env.py --setup-script   the setup script it sends, with the guard inlined
     landing-env.py --selftest
 
 Run it on the machine whose `claude` login owns the cloud sessions, with
 CLAUDE_CLOUD_BRIDGE set to the claude-cloud-acp directory, as fork-sync's
 cloud-env.py, whose API call it reuses. The environment's network reaches GitHub
-only, package registries off; its setup script is landing-setup.sh, which installs
-no packages; it sets OMNIGENT_LANDING_ENVIRONMENT=1, the marker landing-guard.py
-acts on. It holds no key: the owner adds the signing key's variable by hand in the
-environment's settings, and no script generates or reads it.
+only, package registries off; its setup script is landing-setup.sh with
+landing-guard.py inlined, so the guard is fixed when the environment is created and no
+branch a session checks out can replace it. It installs no packages; it sets
+OMNIGENT_LANDING_ENVIRONMENT=1, the marker landing-guard.py acts on. It holds no key:
+the owner adds the signing key's variable by hand in the environment's settings, and
+no script generates or reads it.
 """
 
 import importlib.util
@@ -22,6 +25,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 GITHUB_HOSTS = ["github.com", "api.github.com"]
 MARKER = "OMNIGENT_LANDING_ENVIRONMENT"
+GUARD_LINE = "@LANDING_GUARD_PY@\n"
+GUARD_END = "LANDING_GUARD_EOF"
 
 
 def body(name: str, init_script: str) -> dict:
@@ -40,8 +45,17 @@ def body(name: str, init_script: str) -> dict:
     }
 
 
+def setup_script() -> str:
+    """landing-setup.sh with landing-guard.py in place of its one placeholder line."""
+    template = (HERE / "landing-setup.sh").read_text()
+    guard = (HERE / "landing-guard.py").read_text()
+    assert template.count(GUARD_LINE) == 1, "landing-setup.sh has one guard placeholder line"
+    assert GUARD_END not in guard, "the guard can't hold the heredoc's end line"
+    return template.replace(GUARD_LINE, guard if guard.endswith("\n") else guard + "\n")
+
+
 def request_body(name: str) -> dict:
-    return body(name, (HERE / "landing-setup.sh").read_text())
+    return body(name, setup_script())
 
 
 def main(name: str) -> None:
@@ -64,7 +78,10 @@ def selftest() -> None:
         "allowed_hosts": GITHUB_HOSTS,
         "allow_default_hosts": False,
     }
-    assert "landing-guard.py" in config["init_script"]
+    guard = (HERE / "landing-guard.py").read_text()
+    assert guard in config["init_script"], "the guard is inlined"
+    assert GUARD_LINE not in config["init_script"]
+    assert "/home/user" not in config["init_script"], "setup reads no checkout"
     assert not any(
         word in config["init_script"] for word in ("apt-get", "pip ", "npm ", "uv tool")
     )
@@ -76,5 +93,7 @@ if __name__ == "__main__":
         selftest()
     elif sys.argv[1:] == ["--print"]:
         print(json.dumps(request_body("omnigent-land"), indent=2))
+    elif sys.argv[1:] == ["--setup-script"]:
+        sys.stdout.write(setup_script())
     else:
         main(sys.argv[1] if len(sys.argv) > 1 else "omnigent-land")

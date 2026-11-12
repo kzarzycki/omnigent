@@ -46,6 +46,9 @@ helper below, which stays the fallback.
   `allowed_signers`, so removing that line stops cloud landings and leaves host ones.
 - **The guard.** Its setup script, `landing-setup.sh`, puts `landing-guard.py` in Claude
   Code's managed settings as a PreToolUse hook, where a checked-out branch can't drop it.
+  `landing-env.py` inlines the guard into that script when it creates the environment,
+  so setup reads nothing from the checkout and a branch can't swap the guard; after a
+  change to the guard, recreate the environment.
   It refuses calls that would show the environment or the key (`env`, `printenv`,
   `/proc/*/environ`, `os.environ`, a `*SIGNING_KEY*` name, bare `set` or `export -p`)
   and acts only where `OMNIGENT_LANDING_ENVIRONMENT=1`. `land` reads the key itself:
