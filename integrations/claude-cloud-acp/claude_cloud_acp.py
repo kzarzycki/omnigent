@@ -328,9 +328,13 @@ def stream_events(session_id: str, after: int) -> Iterator[dict | Exception | No
 MODEL_ALIASES = ("haiku", "sonnet", "opus")
 # Effort for new cloud sessions; unset leaves the account default.
 EFFORT = os.environ.get("CLAUDE_CLOUD_EFFORT", "").strip()
+# The levels ``claude --effort`` takes (from ``claude --help``).
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
-def create_cloud_session(text: str, cwd: str, model: str | None = None) -> str:
+def create_cloud_session(
+    text: str, cwd: str, model: str | None = None, effort: str | None = None
+) -> str:
     """Start ``claude --cloud "<text>" [--model m] [--effort e]``; return the new session id.
 
     Creating a cloud session is interactive-only in the CLI (``--cloud`` refuses
@@ -350,7 +354,7 @@ def create_cloud_session(text: str, cwd: str, model: str | None = None) -> str:
     proc = subprocess.Popen(
         [CLAUDE_CLI, "--cloud", text]
         + (["--model", model] if model else [])
-        + (["--effort", EFFORT] if EFFORT else []),
+        + (["--effort", effort or EFFORT] if effort or EFFORT else []),
         cwd=cwd,
         stdin=slave,
         stdout=slave,
@@ -727,10 +731,14 @@ class Session:
         self.cloud_id: str | None = None
         # Picked through ``session/set_model``; it applies when the cloud session is created.
         self.model: str | None = None
+        # Picked through ``session/set_config_option``; applies at creation like the model.
+        self.effort: str | None = None
         # The model the cloud session was created with ("" = account default); None if adopted.
         self.started_model: str | None = None
         # A pick already answered with the adopted-session note.
         self.noted_model: str | None = None
+        # The effort the cloud session was created with ("" = default); None if adopted.
+        self.started_effort: str | None = None
         self.mcp: dict[str, McpProxy] = {}
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
@@ -1061,8 +1069,9 @@ def announce(acp_id: str, s: Session) -> None:
 
 def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
     """Start the cloud session, recorded under the Omnigent session's *first* prompt."""
-    s.cloud_id = create_cloud_session(cli_prompt, s.cwd, s.model)
+    s.cloud_id = create_cloud_session(cli_prompt, s.cwd, s.model, s.effort)
     s.started_model = s.model or ""
+    s.started_effort = s.effort or ""
     # Recorded first: nothing after it may lose the link to a session that exists.
     remember(first_prompt_key(s.cwd, first), s.cloud_id)
     log(f"created {s.cloud_id}")
@@ -1105,6 +1114,7 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
         elif same or stop == "cancelled":
             return stop
     check_model(acp_id, s)
+    check_effort(s)
     after, unarchived = _send(s, text)
     if unarchived:
         thought(acp_id, "[cloud] unarchived the session; files from before the archive are gone\n")
@@ -1237,12 +1247,45 @@ def _send(s: Session, text: str) -> tuple[int, bool]:
 def new_session_result(acp_id: str) -> dict:
     """The ``session/new`` answer; the catalog makes Omnigent send ``session/set_model``."""
     models = [{"modelId": m, "name": m} for m in MODEL_ALIASES]
-    return {"sessionId": acp_id, "models": {"availableModels": models}}
+    effort = {
+        "id": "effort",
+        "name": "Effort",
+        "type": "select",
+        "currentValue": EFFORT or "",
+        "options": [{"value": level, "name": level} for level in EFFORT_LEVELS],
+    }
+    return {
+        "sessionId": acp_id,
+        "models": {"availableModels": models},
+        "configOptions": [effort],
+    }
 
 
 def set_model(params: dict) -> None:
     """Record Omnigent's pick. Omnigent's executor ignores a refusal here, so the turn refuses."""
     session_for(params["sessionId"]).model = params.get("modelId")
+
+
+def set_effort(params: dict) -> None:
+    """Record Omnigent's effort pick; refuse a level the cloud CLI does not take."""
+    level = params.get("value")
+    if level not in EFFORT_LEVELS:
+        raise ValueError(
+            f"effort {level!r} is not supported by Claude cloud sessions; "
+            f"allowed levels: {', '.join(EFFORT_LEVELS)}"
+        )
+    session_for(params["sessionId"]).effort = level
+
+
+def check_effort(s: Session) -> None:
+    """Refuse a level the running cloud session can't take: the CLI fixes it at creation."""
+    if not s.effort or s.started_effort is None or s.effort == (s.started_effort or EFFORT):
+        return
+    current = s.started_effort or EFFORT or "the account default"
+    raise RuntimeError(
+        f"this cloud session runs at effort {current}; "
+        f"it cannot switch to {s.effort}. Start a new session for that effort."
+    )
 
 
 def check_model(acp_id: str, s: Session) -> None:
@@ -1327,6 +1370,12 @@ def serve() -> None:
             }
             log(f"session {acp_id} cwd={SESSIONS[acp_id].cwd}")
             send({"jsonrpc": "2.0", "id": mid, "result": new_session_result(acp_id)})
+        elif method == "session/set_config_option" and params.get("configId") == "effort":
+            try:
+                set_effort(params)
+                send({"jsonrpc": "2.0", "id": mid, "result": {}})
+            except ValueError as exc:
+                send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": str(exc)}})
         elif method == "session/set_model":
             set_model(params)
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
@@ -1395,12 +1444,15 @@ def self_check() -> None:
         assert create_cloud_session("hi", str(not_repo), model) == "session_01ArgsArgsArgs"
         assert (not_repo / "args").read_text().strip() == "--cloud hi" + flags
     globals()["EFFORT"] = ""
+    # A per-session pick wins over the bridge-wide default.
+    assert create_cloud_session("hi", str(not_repo), None, "max")
+    assert (not_repo / "args").read_text().strip() == "--cloud hi --effort max"
     init_upd, _ = to_updates({"type": "system", "subtype": "init", "model": "test-model-1"})
     assert "model: test-model-1" in init_upd[0]["content"]["text"], init_upd
     globals()["CLAUDE_CLI"] = real_cli
     # Negotiation: the catalog, then a pick, reach creation; a later different pick refuses.
     picked: list[str | None] = []
-    globals()["create_cloud_session"] = lambda _p, _c, model=None: (
+    globals()["create_cloud_session"] = lambda _p, _c, model=None, _effort=None: (
         picked.append(model) or "session_01PickedPicked"
     )
     globals()["remember"] = lambda *_: None
@@ -1416,6 +1468,23 @@ def self_check() -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         _mirror_turn("acp-pick", first, "go")
     assert picked == ["haiku"], picked
+    # An effort pick reaches the CLI; a level the CLI lacks is refused naming the allowed ones.
+    set_effort({"sessionId": "acp-pick", "value": "low"})
+    assert first.effort == "low"
+    try:
+        set_effort({"sessionId": "acp-pick", "value": "ultra"})
+        raise AssertionError("an unsupported effort was accepted")
+    except ValueError as exc:
+        assert "low, medium, high, xhigh, max" in str(exc), exc
+    first.started_effort = "low"
+    first.effort = "max"
+    try:
+        check_effort(first)
+        raise AssertionError("a running session switched effort")
+    except RuntimeError as exc:
+        assert "cannot switch to max" in str(exc), exc
+    first.effort = "low"
+    check_effort(first)
     set_model({"sessionId": "acp-pick", "modelId": "opus"})
     try:
         _mirror_turn("acp-pick", first, "again")
@@ -1462,6 +1531,19 @@ def self_check() -> None:
         new = call(2, "session/new", {"cwd": str(not_repo / "nowhere")})["result"]
         assert new["models"]["availableModels"], new
         sid = new["sessionId"]
+        assert [o["id"] for o in new["configOptions"]] == ["effort"], new
+        bad = call(
+            9,
+            "session/set_config_option",
+            {"sessionId": sid, "configId": "effort", "value": "ultra"},
+        )
+        assert "allowed levels" in bad["error"]["message"], bad
+        ok = call(
+            10,
+            "session/set_config_option",
+            {"sessionId": sid, "configId": "effort", "value": "low"},
+        )
+        assert ok["result"] == {}, ok
         assert call(3, "session/set_model", {"sessionId": sid, "modelId": "haiku"})["result"] == {}
         reply = call(
             4, "session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}]}
@@ -1643,7 +1725,7 @@ def self_check() -> None:
     # and the new bridge continues that cloud session instead of creating one.
     globals()["remember"] = real_remember
     created: list[str] = []
-    globals()["create_cloud_session"] = lambda prompt, _cwd, _model=None: (
+    globals()["create_cloud_session"] = lambda prompt, _cwd, _model=None, _effort=None: (
         created.append(prompt) or "session_01StalledStalled"
     )
     stalled = SESSIONS["acp-stalled"] = Session("/repo", "acp-stalled")

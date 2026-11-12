@@ -252,6 +252,8 @@ def test_efforts_for_harness_distinguishes_unsupported_from_unknown() -> None:
     assert efforts_for_harness("codex") == CODEX_EFFORTS
     # Known, but declared EffortFamily.NONE.
     assert efforts_for_harness("opencode-native") == frozenset()
+    # ACP agents refuse a level themselves, so the level must reach them undropped.
+    assert efforts_for_harness("acp") == EFFORT_VALUES
     # Not in the registry at all — unclassifiable, not unsupported.
     assert efforts_for_harness("some-plugin-harness") is None
     assert efforts_for_harness(None) is None
@@ -264,3 +266,18 @@ def test_efforts_for_harness_resolves_aliases() -> None:
 
     canonical = canonicalize_harness("claude-code") or "claude-code"
     assert efforts_for_harness("claude-code") == efforts_for_harness(canonical)
+
+
+def test_subagent_effort_validator_accepts_a_level_for_acp_harness() -> None:
+    """
+    A subagent on an ACP harness may carry an effort; the agent decides.
+
+    **What breaks if this fails**: a subagent start on ``claude-cloud`` fails
+    with "does not support a reasoning-effort override" before the bridge can
+    negotiate the level.
+    """
+    from omnigent.util.reasoning_effort import validate_effort_for_harness
+
+    assert validate_effort_for_harness("low", "acp") == "low"
+    with pytest.raises(ValueError, match="does not support"):
+        validate_effort_for_harness("low", "opencode-native")
