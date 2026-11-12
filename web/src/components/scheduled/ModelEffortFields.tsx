@@ -17,6 +17,7 @@
 // from the create/update body so the fire path uses the agent's configured
 // model + effort.
 
+import { withoutBlockedEfforts } from "@/lib/capabilities";
 import { Label } from "@/components/scheduled/Label";
 import {
   Select,
@@ -126,7 +127,7 @@ export function ModelEffortFields({
               className="w-(--radix-select-trigger-width)"
             >
               <SelectItem value={EFFORT_SELECT_NONE}>Default</SelectItem>
-              {CLAUDE_NATIVE_EFFORTS.map((e) => (
+              {withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS).map((e) => (
                 <SelectItem key={e.value} value={e.value}>
                   {e.label}
                 </SelectItem>

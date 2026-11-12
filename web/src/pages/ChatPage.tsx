@@ -258,7 +258,7 @@ import {
   nativeModelTooltip,
 } from "@/lib/composerModelLabel";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
-import type { ServerInfo } from "@/lib/capabilities";
+import { type ServerInfo, withoutBlockedEfforts } from "@/lib/capabilities";
 import { MainTerminalView } from "@/shell/MainTerminalView";
 import { UNTITLED_CONVERSATION_LABEL } from "@/shell/sidebarNav";
 import { ComposerAgentIcon, NewChatLandingScreen } from "@/shell/NewChatDialog";
@@ -4709,6 +4709,17 @@ export function effortLevelsForConv(
   codexModelOptions: readonly NativeModelOption[] = [],
   currentModel: string | null = null,
   effortFamily: string | null = null,
+): readonly string[] {
+  return withoutBlockedEfforts(
+    unfilteredEffortLevelsForConv(conv, codexModelOptions, currentModel, effortFamily),
+  );
+}
+
+function unfilteredEffortLevelsForConv(
+  conv: Parameters<typeof effectiveWrapperLabel>[0],
+  codexModelOptions: readonly NativeModelOption[],
+  currentModel: string | null,
+  effortFamily: string | null,
 ): readonly string[] {
   switch (effectiveWrapperLabel(conv)) {
     case "claude-code-native-ui":

@@ -85,6 +85,7 @@ from omnigent.server.host_registry import (
     HostRegistry,
     update_harness_accounts,
 )
+from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
@@ -1102,15 +1103,16 @@ def create_hosts_router(
         models = result.get("models")
         routable = result.get("routable_models")
         error = result.get("error")
+        block_list = current_model_block_list()
         return HostModelOptionsResponse(
-            models=(
+            models=block_list.filter_model_options(
                 [model for model in models if isinstance(model, dict)]
                 if isinstance(models, list)
                 else []
             ),
             # Every id the harness's endpoint routes: the picker names one
             # row per model, while a launch takes an exact id.
-            routable_models=(
+            routable_models=block_list.filter_model_ids(
                 [m for m in routable if isinstance(m, str)] if isinstance(routable, list) else []
             ),
             error=error if isinstance(error, str) and error else None,

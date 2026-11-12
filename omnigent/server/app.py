@@ -273,6 +273,8 @@ class ServerInfoResponse(BaseModel):
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
     # Scheduled tasks accept ``project_id`` / ``project_name``; older servers reject them.
     scheduled_task_projects: bool = False
+    # Effort levels the ``blocked_efforts`` setting hides from every picker.
+    blocked_efforts: list[str] = []
     branding: BrandingInfo
 
 
@@ -1660,6 +1662,12 @@ def create_app(
     resolved_server_config = load_server_config() if server_config is None else server_config
     branding_snapshot = load_branding_snapshot(resolved_server_config)
     title_instructions = session_title_instructions(resolved_server_config)
+    from omnigent.server.model_block_list import (
+        configure_model_block_list,
+        current_model_block_list,
+    )
+
+    configure_model_block_list(resolved_server_config)
     resolved_feature_flags = feature_flags or resolve_feature_flags()
     if harness_install is None:
         app_harness_install: bool | Callable[[], bool] = resolved_feature_flags.enabled(
@@ -3494,6 +3502,7 @@ def create_app(
                     "all_types": filesystem_attachment_policy.all_types,
                 },
                 "scheduled_task_projects": project_store is not None,
+                "blocked_efforts": sorted(current_model_block_list().efforts),
                 "branding": branding_snapshot.config(),
             }
         )

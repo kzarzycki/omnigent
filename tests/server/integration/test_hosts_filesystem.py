@@ -416,6 +416,57 @@ async def test_host_model_options_returns_prelaunch_catalog(
     }
 
 
+async def test_host_model_options_hide_blocked_models_and_efforts(
+    fs_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new-session picker never lists a model or effort the server blocks."""
+    from omnigent.server import model_block_list
+
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list(
+            {"blocked_models": ["fixture-model-blocked"], "blocked_efforts": ["max"]}
+        ),
+    )
+    app, _reg, _comm, replies, _drain = fs_setup
+    replies["model:claude-native"] = {
+        "models": [
+            {"id": "blocked", "model": "fixture-model-blocked[1m]", "isDefault": True},
+            {
+                "id": "kept",
+                "model": "fixture-model-kept",
+                "defaultReasoningEffort": "max",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "high"},
+                    {"reasoningEffort": "max"},
+                ],
+            },
+        ],
+        "routable_models": ["fixture-model-blocked", "fixture-model-kept"],
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options")
+
+    assert resp.status_code == 200
+    assert resp.json()["models"] == [
+        {
+            "id": "kept",
+            "model": "fixture-model-kept",
+            "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+        }
+    ]
+    assert resp.json()["routable_models"] == ["fixture-model-kept"]
+
+
 async def test_host_model_options_probe_failure_returns_bad_gateway(
     fs_setup: tuple[
         FastAPI,

@@ -142,7 +142,12 @@ import {
 
 // Re-exported for tests that import the readiness helpers from this module.
 export { harnessUnavailableReasonOnHost, harnessUnconfiguredOnHost, harnessWarningBadgeText };
-import { isFeatureEnabled, sandboxOptionLabel, sandboxProviderOptions } from "@/lib/capabilities";
+import {
+  isFeatureEnabled,
+  sandboxOptionLabel,
+  sandboxProviderOptions,
+  withoutBlockedEfforts,
+} from "@/lib/capabilities";
 import { useHeading, usePoweredBy } from "@/lib/branding";
 import {
   isSlashCommandText,
@@ -3836,30 +3841,32 @@ export function NewChatLandingScreen() {
   const visiblePermissionRow =
     pickerLoading && !interactiveWhileLoading ? cachedPermission?.row : permissionConfigRow;
   useEffect(() => setPickerModelSearch(""), [selectedNativeHarness]);
-  const pickerEffortOptions = sandboxDefaultModelsEnabled
-    ? codexEffortLevelsForModel(pickerModelOptions, pickedModel).map((value) => ({
-        value,
-        label: normalizeEffortLabel(value),
-      }))
-    : supportsPermissionMode
-      ? CLAUDE_NATIVE_EFFORTS
-      : selectedNativeHarness === "devin-native"
-        ? // Devin encodes effort as a model-variant suffix, and the rung set is
-          // PER MODEL (swe-2 exposes only medium/high/max; `swe-2-low` is a
-          // different Fusion model), so derive it from the selected model's catalog
-          // entry rather than offering a fixed ladder the model can't honor.
-          codexEffortLevelsForModel(
-            devinModelOptions,
-            pickedModel || devinModelOptions.find((option) => option.isDefault)?.id,
-          ).map((value) => ({ value, label: normalizeEffortLabel(value) }))
-        : selectedNativeHarness === "pi-native"
-          ? PI_NATIVE_EFFORTS
-          : selectedNativeHarness === "codex-native"
-            ? codexEffortLevelsForModel(
-                codexModelOptions,
-                pickedModel || codexModelOptions.find((option) => option.isDefault)?.id,
-              ).map((value) => ({ value, label: normalizeEffortLabel(value) }))
-            : [];
+  const pickerEffortOptions = withoutBlockedEfforts(
+    sandboxDefaultModelsEnabled
+      ? codexEffortLevelsForModel(pickerModelOptions, pickedModel).map((value) => ({
+          value,
+          label: normalizeEffortLabel(value),
+        }))
+      : supportsPermissionMode
+        ? CLAUDE_NATIVE_EFFORTS
+        : selectedNativeHarness === "devin-native"
+          ? // Devin encodes effort as a model-variant suffix, and the rung set is
+            // PER MODEL (swe-2 exposes only medium/high/max; `swe-2-low` is a
+            // different Fusion model), so derive it from the selected model's catalog
+            // entry rather than offering a fixed ladder the model can't honor.
+            codexEffortLevelsForModel(
+              devinModelOptions,
+              pickedModel || devinModelOptions.find((option) => option.isDefault)?.id,
+            ).map((value) => ({ value, label: normalizeEffortLabel(value) }))
+          : selectedNativeHarness === "pi-native"
+            ? PI_NATIVE_EFFORTS
+            : selectedNativeHarness === "codex-native"
+              ? codexEffortLevelsForModel(
+                  codexModelOptions,
+                  pickedModel || codexModelOptions.find((option) => option.isDefault)?.id,
+                ).map((value) => ({ value, label: normalizeEffortLabel(value) }))
+              : [],
+  );
   const rememberPickerOptions = (harness: string, options: HarnessOptions) => {
     const previous = pickerEdits;
     setPickerEdits({
@@ -4397,7 +4404,8 @@ export function NewChatLandingScreen() {
       );
       seedEffort(
         projectEffortSeed(piModelOptions, ""),
-        stored.effort != null && PI_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
+        stored.effort != null &&
+          withoutBlockedEfforts(PI_NATIVE_EFFORTS).some((e) => e.value === stored.effort)
           ? stored.effort
           : "",
       );
@@ -4422,7 +4430,7 @@ export function NewChatLandingScreen() {
         projectEffortSeed(claudeModelOptions, ""),
         !storedRoutingOn &&
           stored.effort != null &&
-          CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
+          withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS).some((e) => e.value === stored.effort)
           ? stored.effort
           : "",
       );

@@ -613,6 +613,31 @@ async def test_info_reports_the_filesystem_attachment_policy(
     assert info["filesystem_attachments"] == expected
 
 
+@pytest.mark.parametrize(
+    ("server_config", "expected"),
+    [({}, []), ({"blocked_efforts": ["MAX", "xhigh"]}, ["max", "xhigh"])],
+)
+async def test_info_reports_the_configured_blocked_efforts(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    server_config: dict[str, object],
+    expected: list[str],
+) -> None:
+    """The web's built-in effort ladders drop the levels the server config blocks."""
+    from omnigent.server import model_block_list
+
+    # create_app installs the server-wide list; restore it after the test.
+    monkeypatch.setattr(model_block_list, "_current", model_block_list.ModelBlockList())
+    app = _build_branding_app(db_uri, tmp_path, "blocked", server_config=server_config)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        info = (await client.get("/v1/info")).json()
+
+    assert info["blocked_efforts"] == expected
+
+
 async def test_info_evaluates_a_callable_policy_per_request(
     db_uri: str,
     runtime_init: None,

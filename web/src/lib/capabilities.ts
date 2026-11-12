@@ -259,6 +259,8 @@ export interface ServerInfo {
   filesystem_attachments?: FilesystemAttachmentsInfo | null;
   /** Scheduled tasks accept a project; absent on older servers (off). */
   scheduled_task_projects?: boolean;
+  /** Effort levels the server's ``blocked_efforts`` setting hides; absent on older servers. */
+  blocked_efforts?: string[];
   /** Operator branding, or null when the built-in identity should be used. */
   branding?: Branding | null;
 }
@@ -476,6 +478,9 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
             : [],
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           scheduled_task_projects: data.scheduled_task_projects === true,
+          blocked_efforts: Array.isArray(data.blocked_efforts)
+            ? data.blocked_efforts.filter((e): e is string => typeof e === "string")
+            : [],
           branding: parseBranding(data.branding),
         };
         return cachedServerInfo;
@@ -500,6 +505,25 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
  */
 export function getCachedServerInfo(): ServerInfo | null {
   return cachedServerInfo;
+}
+
+/**
+ * Drop the effort levels the server blocks from an effort ladder.
+ *
+ * :param levels: Ordered effort ids (``"max"``) or picker rows (``{ value: "max" }``).
+ * :param blocked: Blocked effort ids; defaults to the cached ``/v1/info``
+ *     ``blocked_efforts``, which the app resolves before its first render.
+ * :returns: *levels* without the blocked entries, or *levels* itself when none are.
+ */
+export function withoutBlockedEfforts<T extends string | { value: string }>(
+  levels: readonly T[],
+  blocked: readonly string[] = cachedServerInfo?.blocked_efforts ?? [],
+): readonly T[] {
+  if (blocked.length === 0) return levels;
+  const hidden = new Set(blocked.map((effort) => effort.toLowerCase()));
+  return levels.filter(
+    (level) => !hidden.has((typeof level === "string" ? level : level.value).toLowerCase()),
+  );
 }
 
 /**

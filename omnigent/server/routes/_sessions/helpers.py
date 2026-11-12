@@ -144,6 +144,7 @@ from omnigent.server.managed_hosts import (
     ManagedSandboxDeployment,
     RepoWorkspace,
 )
+from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import (
     require_access as _require_access,
 )
@@ -10076,6 +10077,7 @@ def _parse_session_create_metadata(metadata: str) -> SessionCreateMetadata:
         # Bounds-check the native-terminal args; raises ValueError
         # (wrapped below) on a malformed or oversized list.
         _validate_terminal_launch_args(parsed.terminal_launch_args)
+        current_model_block_list().refuse_blocked(effort=reasoning_effort)
         return parsed.model_copy(update={"reasoning_effort": reasoning_effort})
     except (ValidationError, ValueError) as exc:
         raise OmnigentError(

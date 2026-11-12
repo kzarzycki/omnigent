@@ -343,3 +343,25 @@ describe("custom agents settings capability", () => {
     },
   );
 });
+
+describe("blocked efforts", () => {
+  it("parses blocked_efforts from the probe and defaults it to none", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ blocked_efforts: ["max", 3] }));
+    const { resolveServerInfo } = await import("./capabilities");
+    expect((await resolveServerInfo()).blocked_efforts).toEqual(["max"]);
+
+    vi.resetModules();
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    const fresh = await import("./capabilities");
+    expect((await fresh.resolveServerInfo()).blocked_efforts).toEqual([]);
+    expect(fresh.withoutBlockedEfforts(["low", "max"])).toEqual(["low", "max"]);
+  });
+
+  it("filters effort ids and picker rows case-insensitively", async () => {
+    const { withoutBlockedEfforts } = await import("./capabilities");
+    expect(withoutBlockedEfforts(["low", "XHigh", "max"], ["xhigh"])).toEqual(["low", "max"]);
+    expect(withoutBlockedEfforts([{ value: "low" }, { value: "max" }], ["max"])).toEqual([
+      { value: "low" },
+    ]);
+  });
+});

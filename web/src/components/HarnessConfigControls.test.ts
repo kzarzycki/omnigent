@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLAUDE_NATIVE_EFFORTS,
   PI_NATIVE_EFFORTS,
@@ -75,5 +75,41 @@ describe("nativeModelLabel", () => {
         { id: "opus", model: "claude-opus-4-6", displayName: "Opus", isDefault: true },
       ]),
     ).toBe("Default (Opus)");
+  });
+});
+
+describe("nativeEffortOptions with blocked efforts", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("hides the levels the server's blocked_efforts setting names", async () => {
+    vi.resetModules();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ blocked_efforts: ["xhigh", "max"] }) })),
+    );
+    const { resolveServerInfo } = await import("@/lib/capabilities");
+    await resolveServerInfo();
+    const { nativeEffortOptions: options } = await import("./HarnessConfigControls");
+
+    expect(options("claude-native", [], null)?.map((option) => option.value)).toEqual([
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(
+      options(
+        "codex-native",
+        [
+          {
+            id: "gpt-5.5",
+            supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "xhigh" }],
+          },
+        ],
+        "gpt-5.5",
+      )?.map((option) => option.value),
+    ).toEqual(["high"]);
   });
 });

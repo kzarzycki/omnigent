@@ -180,6 +180,10 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
+from omnigent.server.model_block_list import (
+    current_model_block_list,
+    refuse_blocked_start_defaults,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
@@ -1626,7 +1630,8 @@ def _build_session_response(
         # Replay the last native Plan after a Server restart.
         todos=conv.session_todos,
         model_options=[
-            NativeModelOption.model_validate(option) for option in (model_options or [])
+            NativeModelOption.model_validate(option)
+            for option in current_model_block_list().filter_model_options(model_options or [])
         ],
         # Replay terminal spin-up state so a client connecting while the
         # runner is still creating a terminal-first session's terminal
@@ -12419,6 +12424,17 @@ async def _create_session_from_existing_agent(
         conversation_store=conversation_store,
         host_store=getattr(request.app.state, "host_store", None),
         parent=_parent_for_routing,
+    )
+
+    # A blocked default is refused, not run silently; checked before any worktree exists.
+    await refuse_blocked_start_defaults(
+        host_registry=getattr(request.app.state, "host_registry", None),
+        host_id=body.host_id,
+        harness=selected_harness,
+        spec=selection_spec,
+        inference_snapshot=inference_snapshot,
+        model_override=model_override,
+        reasoning_effort=reasoning_effort,
     )
 
     # Git worktree options (optional). Two modes on body.git:

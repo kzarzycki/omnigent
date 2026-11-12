@@ -1052,6 +1052,38 @@ async def _spec_reasoning_effort(deps: FireDeps, task: ScheduledTask) -> str | N
         return None
 
 
+async def _refuse_blocked_fire_defaults(deps: FireDeps, task: ScheduledTask) -> None:
+    """Refuse a fire whose default model or effort the server blocks.
+
+    The explicit task values are checked by ``validate_session_model_metadata``.
+    """
+    from omnigent.models.model_catalog import spec_harness
+    from omnigent.server.model_block_list import (
+        current_model_block_list,
+        refuse_blocked_start_defaults,
+    )
+
+    if not current_model_block_list() or deps.agent_cache is None:
+        return
+    try:
+        agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
+        if agent is None or getattr(agent, "bundle_location", None) is None:
+            return
+        loaded = await asyncio.to_thread(deps.agent_cache.load, agent.id, agent.bundle_location)
+    except Exception:
+        _logger.debug("scheduled fire: spec load for block-list defaults failed", exc_info=True)
+        return
+    await refuse_blocked_start_defaults(
+        host_registry=deps.host_registry,
+        host_id=task.host_id,
+        harness=spec_harness(loaded.spec),
+        spec=loaded.spec,
+        inference_snapshot=None,
+        model_override=task.model_override,
+        reasoning_effort=task.reasoning_effort,
+    )
+
+
 async def _presentation_labels(deps: FireDeps, task: ScheduledTask) -> dict[str, str]:
     """Resolve the terminal-first presentation labels for a fired session.
 
@@ -1380,6 +1412,7 @@ async def _validate_fire_session_inputs(
             model_override=task.model_override,
             reasoning_effort=task.reasoning_effort,
         )
+        await _refuse_blocked_fire_defaults(deps, task)
         validate_session_permission_mode(task.permission_mode)
         # NB: the harness gate for permission_mode is enforced fail-safe in
         # _permission_mode_launch_args (the flag is injected only for a confirmed
