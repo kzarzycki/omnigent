@@ -11223,9 +11223,14 @@ def _stop_daemon_runners(
         stop_registered_runners,
     )
 
-    leader_pids, seen_at = sessions or _runner_sessions(record)
+    late_pids, late_seen_at = _runner_sessions(record)
     stop_registered_runners(runner_registry_path(record.target))
-    end_runner_sessions(leader_pids, started_before=seen_at)
+    if sessions is not None:
+        end_runner_sessions(sessions[0], started_before=sessions[1])
+        # What is left are sessions a harness started after that snapshot.
+        late_pids -= sessions[0]
+    if late_pids:
+        end_runner_sessions(late_pids, started_before=late_seen_at)
 
 
 def _terminate_daemon(

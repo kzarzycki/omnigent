@@ -155,7 +155,9 @@ from omnigent.host.runner_registry import (
     AdoptedRunnerProc,
     RegisteredRunner,
     RunnerRegistry,
+    end_runner_sessions,
     runner_registry_path,
+    session_leaders,
 )
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
@@ -5170,6 +5172,12 @@ class HostProcess:
 
         :returns: None.
         """
+        # The service manager no longer sweeps what the runners leave in their
+        # sessions (tool calls, background jobs), so this shutdown does.
+        leaders = session_leaders(
+            {handle.proc.pid for handle in self._runners.values() if handle.proc.poll() is None}
+        )
+        seen_at = time.time()
         for runner_id, handle in self._runners.items():
             if handle.proc.poll() is None:
                 _logger.info("Terminating runner %s on shutdown", runner_id)
@@ -5179,6 +5187,7 @@ class HostProcess:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
+        end_runner_sessions(leaders, started_before=seen_at)
         self._runners.clear()
         if self._runner_registry is not None:
             self._runner_registry.clear()

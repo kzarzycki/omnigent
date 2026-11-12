@@ -189,8 +189,9 @@ class RunnerRegistry:
             # The runners cannot see an owner that is not on disk, so they would
             # serve on with no daemon to stop them. End them as a crash would.
             self._runners = {}
-        for entry in adopted:
-            _signal_recorded(entry, signal.SIGTERM)
+        leaders, seen_at = session_leaders({entry.pid for entry in adopted}), time.time()
+        _end_recorded(adopted, grace_s=5.0)
+        end_runner_sessions(leaders, started_before=seen_at)
         return []
 
     def add(
@@ -341,6 +342,8 @@ def session_leaders(pids: Collection[int]) -> set[int]:
     background jobs there, not in its runner's session.
     """
     leaders = set(pids)
+    if not hasattr(os, "getsid"):
+        return leaders
     for pid in pids:
         with contextlib.suppress(psutil.Error):
             for child in psutil.Process(pid).children(recursive=True):
@@ -355,6 +358,14 @@ def live_runner_pids(path: Path) -> set[int]:
     return session_leaders({entry.pid for entry in _live_runners(read_registry(path))})
 
 
+def _started_after(pid: int, when: float) -> bool:
+    """Whether a live process *pid* started after *when*."""
+    try:
+        return psutil.Process(pid).create_time() > when
+    except psutil.Error:
+        return False
+
+
 def end_runner_sessions(
     leader_pids: Collection[int], *, started_before: float, grace_s: float = 2.0
 ) -> list[int]:
@@ -363,21 +374,23 @@ def end_runner_sessions(
     A runner leads its own session, so its tool calls and background jobs
     carry its pid, or its harness's (see :func:`session_leaders`), as their
     session id; a service manager no longer sweeps them. *started_before* is
-    when the leaders were seen alive: a session id stays taken while a member
-    lives, so an older process with that id is a member of that session and
-    not of one that reused the pid.
+    when the leaders were seen alive. A session id stays taken while a member
+    lives, so a session with a listed id is the one that was seen, unless
+    every member died and the pid was reused: a leader that started later
+    marks that, and its session is left alone.
 
     :returns: The pids that were signalled.
     """
+    if not hasattr(os, "getsid"):
+        return []
+    # ponytail: a reused leader that is already gone again leaves members this
+    # cannot tell apart; that needs the pid reused within the seconds of a stop.
+    leaders = {pid for pid in leader_pids if not _started_after(pid, started_before)}
     members = []
     for proc in psutil.process_iter():
         with contextlib.suppress(psutil.Error, OSError):
             # Pid 0 (listed on macOS) would read as this process's own session.
-            if (
-                proc.pid not in (0, os.getpid())
-                and os.getsid(proc.pid) in leader_pids
-                and proc.create_time() <= started_before
-            ):
+            if proc.pid not in (0, os.getpid()) and os.getsid(proc.pid) in leaders:
                 members.append(proc)
     for proc in members:
         with contextlib.suppress(psutil.Error):
@@ -387,6 +400,19 @@ def end_runner_sessions(
         with contextlib.suppress(psutil.Error):
             proc.kill()
     return [proc.pid for proc in members]
+
+
+def _end_recorded(entries: Collection[RegisteredRunner], *, grace_s: float) -> None:
+    """SIGTERM the recorded runners, then SIGKILL the ones still there after *grace_s*."""
+    for entry in entries:
+        _signal_recorded(entry, signal.SIGTERM)
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline and any(
+        process_matches(entry.pid, entry.started_at) for entry in entries
+    ):
+        time.sleep(0.1)
+    for entry in entries:
+        _signal_recorded(entry, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def stop_registered_runners(path: Path, *, grace_s: float = 5.0) -> list[int]:
@@ -399,15 +425,7 @@ def stop_registered_runners(path: Path, *, grace_s: float = 5.0) -> list[int]:
     :returns: The pids that were signalled.
     """
     live = _live_runners(read_registry(path))
-    for entry in live:
-        _signal_recorded(entry, signal.SIGTERM)
-    deadline = time.monotonic() + grace_s
-    while time.monotonic() < deadline and any(
-        process_matches(entry.pid, entry.started_at) for entry in live
-    ):
-        time.sleep(0.1)
-    for entry in live:
-        _signal_recorded(entry, getattr(signal, "SIGKILL", signal.SIGTERM))
+    _end_recorded(live, grace_s=grace_s)
     with contextlib.suppress(OSError):
         path.unlink()
     return [entry.pid for entry in live]

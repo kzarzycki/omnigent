@@ -570,9 +570,6 @@ def test_end_runner_sessions_ends_what_a_runner_left_in_its_session(spawn_proces
     bystander = spawn_process()
     seen_at = time.time()
 
-    assert end_runner_sessions({leader.pid}, started_before=seen_at - 3600) == []
-    assert process_start_stamp(job_pid) is not None
-
     assert sorted(
         end_runner_sessions({leader.pid}, started_before=seen_at, grace_s=0.5)
     ) == sorted([job_pid, stubborn_pid])
@@ -658,3 +655,45 @@ def test_watchdog_still_forces_the_exit_when_the_session_sweep_fails(
     _end(daemon)
 
     assert exited.wait(timeout=5)
+
+
+def test_end_runner_sessions_ends_a_late_job_but_leaves_a_reused_leaders_session() -> None:
+    # The runner stand-in starts a job only when told to, after the snapshot.
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import subprocess, sys, time\n"
+            "print('ready', flush=True)\n"
+            "input()\n"
+            "job = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "print(job.pid, flush=True)\n"
+            "time.sleep(120)\n",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert runner.stdout is not None and runner.stdin is not None
+        assert runner.stdout.readline().strip() == "ready"
+        seen_at = time.time()
+        time.sleep(0.2)
+        runner.stdin.write("go\n")
+        runner.stdin.flush()
+        job_pid = int(runner.stdout.readline())
+
+        # A leader that started after the snapshot holds a reused pid.
+        assert end_runner_sessions({runner.pid}, started_before=seen_at - 3600) == []
+        assert process_start_stamp(job_pid) is not None
+
+        assert set(end_runner_sessions({runner.pid}, started_before=seen_at)) == {
+            runner.pid,
+            job_pid,
+        }
+        assert process_start_stamp(job_pid) is None
+    finally:
+        runner.kill()
+        runner.wait()
