@@ -55,6 +55,7 @@ Design notes:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -2330,41 +2331,37 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
     }
 
 
-def _github_identity(root: str, owner: str, repo: str) -> str | None:
-    """The account a signed-in read of ``owner/repo`` runs as, or ``None`` when signed out.
+def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, str | None]:
+    """Decide once who a link preview reads as: ``(signed_in, token, cache_identity)``.
 
-    An older ``gh`` that can't list accounts but is logged in reads as ``"gh"``.
+    The read and the cache key both come from this, so they cannot disagree. A token
+    selects the account itself and is keyed by its hash. Without one ``gh`` uses its
+    active account, keyed by that login; when the accounts can't be listed (an older
+    ``gh``) the identity is unknown and ``cache_identity`` is ``None``: don't cache.
     """
     authenticated, accounts = _list_accounts(root)
-    if not accounts:
-        return "gh" if authenticated else None
     logins = [
-        str(account.get("login"))
+        account
         for account in accounts
         if account.get("host") == "github.com" and account.get("state") == "success"
     ]
-    if not logins:
-        return None
-    preferred = (
-        None if _in_sandbox() else _config.github_account_preference(f"github.com/{owner}/{repo}")
-    )
-    if preferred:
-        return preferred
-    active = [
-        str(account.get("login"))
-        for account in accounts
-        if account.get("host") == "github.com" and account.get("active")
-    ]
-    return (active or logins)[0]
+    if (accounts and not logins) or (not authenticated and not accounts):
+        return False, None, ""
+    token = _repo_token(root, f"github.com/{owner}/{repo}")
+    if token:
+        return True, token, "token:" + hashlib.sha256(token.encode()).hexdigest()
+    if not accounts:
+        return True, None, None
+    active = next((a for a in logins if a.get("active")), logins[0])
+    return True, None, f"active:{active.get('login')}"
 
 
 def _read_link_preview(
-    root: str, owner: str, repo: str, kind: str, ref: str, *, signed_in: bool
+    root: str, owner: str, repo: str, kind: str, ref: str, *, signed_in: bool, token: str | None
 ) -> dict[str, Any] | None:
     repo_path = f"/repos/{owner}/{repo}"
     if not signed_in:
         return _rest_preview(_public_get, repo_path, kind, ref)
-    token = _repo_token(root, f"github.com/{owner}/{repo}")
 
     def get(path: str) -> dict[str, Any] | None:
         return _gh_api_get(root, path, token)
@@ -2395,22 +2392,25 @@ def github_link_preview(
         raise ValueError("Invalid preview reference")
     if not _gh_installed():
         return None
-    identity = _github_identity(root, owner, repo)
-    signed_in = identity is not None
+    signed_in, token, identity = _read_identity(root, owner, repo)
     key = (identity or "", owner.lower(), repo.lower(), kind, ref.lower())
     now = time.monotonic()
-    with _preview_lock:
-        cached = _preview_cache.get(key)
-    if cached is not None and cached[0] > now:
-        return cached[1]
+    if identity is not None:
+        with _preview_lock:
+            cached = _preview_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
     try:
-        preview = _read_link_preview(root, owner, repo, kind, ref, signed_in=signed_in)
+        preview = _read_link_preview(
+            root, owner, repo, kind, ref, signed_in=signed_in, token=token
+        )
     except _PreviewReadError as exc:
         _logger.info("github_resource: link preview not read: %s", exc)
         return None
     ttl = _PREVIEW_TTL_SECONDS if signed_in else _PUBLIC_PREVIEW_TTL_SECONDS
-    with _preview_lock:
-        if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
-            _preview_cache.clear()
-        _preview_cache[key] = (now + ttl, preview)
+    if identity is not None:
+        with _preview_lock:
+            if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+                _preview_cache.clear()
+            _preview_cache[key] = (now + ttl, preview)
     return preview

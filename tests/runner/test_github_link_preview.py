@@ -18,6 +18,7 @@ SIGNED_IN = json.dumps(
 )
 LEGACY_GH = "legacy"
 SIGNED_OUT = json.dumps({"hosts": {}})
+REAL_REPO_TOKEN = github._repo_token  # the autouse fixture stubs the module's
 GhCall = tuple[list[str], str | None]
 
 
@@ -400,6 +401,7 @@ def _signed_in_as(login: str) -> str:
 def test_cached_results_do_not_cross_an_account_change(monkeypatch: pytest.MonkeyPatch) -> None:
     private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
     fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: None)
 
     seen_by_alice = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
     fake.auth, fake.api = _signed_in_as("bob"), {}
@@ -418,14 +420,40 @@ def test_cached_results_follow_the_repos_preferred_account(
 ) -> None:
     private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
     fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
-    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
     preference = {"login": "alice"}
-    monkeypatch.setattr(
-        github._config, "github_account_preference", lambda _key: preference["login"]
-    )
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: f"token-{preference['login']}")
 
     assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is not None
     preference["login"] = "bob"
+    fake.api = {}
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+
+
+def test_a_preferred_account_whose_token_is_missing_is_keyed_by_the_active_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+    # A saved preference whose token can't be fetched: gh reads as the active account.
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    monkeypatch.setattr(github._config, "github_account_preference", lambda _key: "alice")
+    monkeypatch.setattr(github, "_gh_auth_token", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(github, "_repo_token", REAL_REPO_TOKEN)
+
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is not None
+    fake.auth, fake.api = _signed_in_as("bob"), {}
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+
+
+def test_an_older_gh_never_shares_a_cached_preview_between_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=LEGACY_GH, api=private)
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: None)
+
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is not None
+    # The account switched; an older gh can't say so, so the read must go to GitHub again.
     fake.api = {}
     assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
 
