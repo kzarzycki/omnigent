@@ -26,4 +26,4 @@ land:
 
 `land`: every machine's `omnigent-update` and the nightly sync refuse a `mine` head that a key outside the allowed signers signed, and GitHub signs its own merges with GitHub's key. So `approvals.py land` squashes and signs the PR in the landing host's checkout (AGENTS.md, This fork: landing PRs into `mine`).
 
-`loop.ci: false`: the fork runs no GitHub Actions, so `approvals.py local-ci <pr>` is the merge proof: it runs `mise run check:all` from the root `mise.toml`, which is fork-only and holds tasks only (no tools or env). Upstream has no `mise.toml`; a sync conflict there keeps ours.
+`loop.ci: false`: the fork runs no GitHub Actions, so `approvals.py local-ci <pr>` is the merge proof: it runs `mise run check:all` from the root `mise.toml`, which is fork-only and holds tasks only (no tools or env). Upstream has no `mise.toml`; a sync conflict there keeps ours. The gate first runs `check:setup`, which installs what the hooks need (the Python environment and the web packages, which custom-lint's TypeScript check needs for any change), so it also passes in the fresh worktree `land` gates in; it is quick when they are installed.
