@@ -470,6 +470,25 @@ def test_claim_that_cannot_be_written_ends_the_runners_instead_of_adopting(
         _end_runner_tree(runner, harness_pid)
 
 
+def test_claim_that_cannot_be_written_ends_a_runner_outside_a_session_of_its_own(
+    tmp_path: Path, spawn_process, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A runner an older build launched shares a session, so no sweep reaches it.
+    path = tmp_path / "target.runners"
+    old_daemon, runner = spawn_process(), spawn_process()
+    owner = _owner(old_daemon, released=True)
+    _end(old_daemon)
+    _write(path, owner, _runner("runner-1", runner, tmp_path / "log"))
+
+    def full_disk(*_args: object) -> None:
+        raise OSError("no space left")
+
+    monkeypatch.setattr(runner_registry, "_write_registry", full_disk)
+
+    assert RunnerRegistry(path).claim() == []
+    assert runner.wait(timeout=5) == -signal.SIGTERM
+
+
 def _runner_with_a_nested_harness() -> tuple[subprocess.Popen[bytes], int]:
     """Start a runner stand-in whose child starts a harness in a session of its own."""
     idle = [sys.executable, "-c", "import time; time.sleep(120)"]
