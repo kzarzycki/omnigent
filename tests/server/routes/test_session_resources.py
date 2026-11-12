@@ -3330,6 +3330,9 @@ async def test_github_link_preview_refuses_a_viewer_without_read_access(
         {"owner": "o..o"},
         {"repo": "app/../x"},
         {"ref": "1?x=1"},
+        {"owner": "acme\n"},
+        {"repo": "app\n"},
+        {"ref": "42\n"},
     ],
 )
 async def test_github_link_preview_rejects_invalid_parts_before_the_runner(

@@ -16,6 +16,7 @@ from tests.runner.helpers import NullServerClient
 SIGNED_IN = json.dumps(
     {"hosts": {"github.com": [{"login": "octo", "active": True, "state": "success"}]}}
 )
+LEGACY_GH = "legacy"
 SIGNED_OUT = json.dumps({"hosts": {}})
 GhCall = tuple[list[str], str | None]
 
@@ -40,6 +41,9 @@ class FakeGh:
         self.cwds.add(cwd)
         self.calls.append((argv, token))
         if argv[:2] == ["auth", "status"]:
+            if self.auth == LEGACY_GH:
+                # An older gh has no --json for auth status, but its plain status succeeds.
+                return (1, "", "unknown flag: --json") if "--json" in argv else (0, "", "")
             return 0, self.auth, ""
         if argv[:2] == ["pr", "view"]:
             if self.pr is None:
@@ -251,6 +255,10 @@ def test_missing_gh_leaves_the_link_plain(monkeypatch: pytest.MonkeyPatch) -> No
         ("o..o", "app", "pull", "1"),
         ("acme", "app/../x", "pull", "1"),
         ("acme", "app", "pull", "1?x=1"),
+        ("acme\n", "app", "pull", "1"),
+        ("acme", "app\n", "pull", "1"),
+        ("acme", "app", "pull", "42\n"),
+        ("acme", "app", "commit", "abc1234\n"),
     ],
 )
 def test_invalid_parts_run_nothing(
@@ -381,3 +389,56 @@ async def test_runner_route_serves_the_preview_and_rejects_invalid_parts(
     assert served.status_code == 200, served.text
     assert served.json()["preview"]["title"] == "CI"
     assert invalid.status_code == 400
+
+
+def _signed_in_as(login: str) -> str:
+    return json.dumps(
+        {"hosts": {"github.com": [{"login": login, "active": True, "state": "success"}]}}
+    )
+
+
+def test_cached_results_do_not_cross_an_account_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+
+    seen_by_alice = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
+    fake.auth, fake.api = _signed_in_as("bob"), {}
+    seen_by_bob = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
+    # A cached null does not hide a repo the new account can read either.
+    fake.auth, fake.api = _signed_in_as("carol"), private
+    seen_by_carol = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
+
+    assert seen_by_alice is not None and seen_by_alice["title"] == "Private"
+    assert seen_by_bob is None
+    assert seen_by_carol is not None and seen_by_carol["title"] == "Private"
+
+
+def test_cached_results_follow_the_repos_preferred_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    preference = {"login": "alice"}
+    monkeypatch.setattr(
+        github._config, "github_account_preference", lambda _key: preference["login"]
+    )
+
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is not None
+    preference["login"] = "bob"
+    fake.api = {}
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+
+
+def test_an_older_gh_with_a_login_reads_through_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _install(
+        monkeypatch,
+        auth=LEGACY_GH,
+        api=dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})]),
+    )
+    _forbid_public_reads(monkeypatch)
+
+    preview = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
+
+    assert preview is not None and preview["title"] == "Private"
+    assert any(argv[0] == "api" for argv, _ in fake.calls)

@@ -2171,8 +2171,8 @@ def valid_preview_parts(owner: str, repo: str, kind: str, ref: str) -> bool:
     ref_pattern = PREVIEW_REF.get(kind)
     return bool(
         ref_pattern
-        and ref_pattern.match(ref)
-        and all(GITHUB_NAME.match(name) and ".." not in name for name in (owner, repo))
+        and ref_pattern.fullmatch(ref)
+        and all(GITHUB_NAME.fullmatch(name) and ".." not in name for name in (owner, repo))
     )
 
 
@@ -2330,12 +2330,32 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
     }
 
 
-def _signed_in_to_github(root: str) -> bool:
-    _, accounts = _list_accounts(root)
-    return any(
-        account.get("host") == "github.com" and account.get("state") == "success"
+def _github_identity(root: str, owner: str, repo: str) -> str | None:
+    """The account a signed-in read of ``owner/repo`` runs as, or ``None`` when signed out.
+
+    An older ``gh`` that can't list accounts but is logged in reads as ``"gh"``.
+    """
+    authenticated, accounts = _list_accounts(root)
+    if not accounts:
+        return "gh" if authenticated else None
+    logins = [
+        str(account.get("login"))
         for account in accounts
+        if account.get("host") == "github.com" and account.get("state") == "success"
+    ]
+    if not logins:
+        return None
+    preferred = (
+        None if _in_sandbox() else _config.github_account_preference(f"github.com/{owner}/{repo}")
     )
+    if preferred:
+        return preferred
+    active = [
+        str(account.get("login"))
+        for account in accounts
+        if account.get("host") == "github.com" and account.get("active")
+    ]
+    return (active or logins)[0]
 
 
 def _read_link_preview(
@@ -2375,8 +2395,9 @@ def github_link_preview(
         raise ValueError("Invalid preview reference")
     if not _gh_installed():
         return None
-    signed_in = _signed_in_to_github(root)
-    key = (str(signed_in), owner.lower(), repo.lower(), kind, ref.lower())
+    identity = _github_identity(root, owner, repo)
+    signed_in = identity is not None
+    key = (identity or "", owner.lower(), repo.lower(), kind, ref.lower())
     now = time.monotonic()
     with _preview_lock:
         cached = _preview_cache.get(key)
