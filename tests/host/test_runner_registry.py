@@ -614,3 +614,19 @@ def test_session_leaders_include_a_runners_children_that_lead_a_session() -> Non
     finally:
         runner.kill()
         runner.wait()
+
+
+def test_end_runner_sessions_skips_pid_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # macOS lists pid 0, and getsid(0) answers with the caller's own session.
+    class _KernelTask:
+        pid = 0
+
+        def create_time(self) -> float:
+            return 0.0
+
+        def terminate(self) -> None:
+            raise ValueError("refusing to signal pid 0")
+
+    monkeypatch.setattr(runner_registry.psutil, "process_iter", lambda: [_KernelTask()])
+
+    assert end_runner_sessions({os.getsid(0)}, started_before=time.time(), grace_s=0.0) == []

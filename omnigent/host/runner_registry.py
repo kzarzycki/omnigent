@@ -372,8 +372,9 @@ def end_runner_sessions(
     members = []
     for proc in psutil.process_iter():
         with contextlib.suppress(psutil.Error, OSError):
+            # Pid 0 (listed on macOS) would read as this process's own session.
             if (
-                proc.pid != os.getpid()
+                proc.pid not in (0, os.getpid())
                 and os.getsid(proc.pid) in leader_pids
                 and proc.create_time() <= started_before
             ):

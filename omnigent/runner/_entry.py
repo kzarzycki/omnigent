@@ -1353,8 +1353,10 @@ def _run_parent_death_killer(
         owner_is_gone = _watch_adopting_daemon(*new_owner)
     request_shutdown()
     if end_session is not None:
-        with contextlib.suppress(Exception):
+        try:
             end_session()
+        except Exception:  # the hard exit below must still run
+            _logger.exception("could not end the processes left in the runner's session")
     time.sleep(grace_s)
     # The hard exit is a backstop reached only when graceful shutdown did not
     # finish within the grace window; record it since os._exit skips the
