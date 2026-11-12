@@ -287,3 +287,39 @@ async def test_update_forwards_conversation_reuse_fields() -> None:
     )
     _, _, body = client.calls[0]
     assert body == {"reuse_conversation": True, "reset_conversation": True}
+
+
+@pytest.mark.asyncio
+async def test_create_forwards_max_cost_usd() -> None:
+    client = _RecordingClient()
+    await _execute_scheduled_task_tool(
+        "sys_scheduled_task_create",
+        json.dumps({"name": "n", "prompt": "p", "rrule": "FREQ=DAILY", "max_cost_usd": 2.5}),
+        server_client=client,
+    )
+    assert client.calls[0][2]["max_cost_usd"] == 2.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_cls_name", "tool_name"),
+    [
+        ("SysScheduledTaskCreateTool", "sys_scheduled_task_create"),
+        ("SysScheduledTaskUpdateTool", "sys_scheduled_task_update"),
+    ],
+)
+async def test_every_advertised_field_is_forwarded(tool_cls_name: str, tool_name: str) -> None:
+    """A property added to a tool schema must reach the server request."""
+    from omnigent.tools.builtins import scheduled_tasks
+
+    schema = getattr(scheduled_tasks, tool_cls_name)().get_schema()
+    properties = schema["function"]["parameters"]["properties"]
+    # The id goes in the URL, not the body.
+    fields = [name for name in properties if name != "scheduled_task_id"]
+    arguments = dict.fromkeys(fields, "x")
+    arguments["scheduled_task_id"] = _TASK_ID
+    client = _RecordingClient()
+    await _execute_scheduled_task_tool(tool_name, json.dumps(arguments), server_client=client)
+    body = client.calls[0][2]
+    assert body is not None
+    assert sorted(body) == sorted(fields)

@@ -4789,6 +4789,7 @@ _SCHEDULED_TASK_CREATE_FIELDS = (
     "reasoning_effort",
     "permission_mode",
     "archive_when_done",
+    "max_cost_usd",
     "reuse_conversation",
     "workspace",
     "host_id",
