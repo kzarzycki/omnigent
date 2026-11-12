@@ -630,3 +630,31 @@ def test_end_runner_sessions_skips_pid_zero(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(runner_registry.psutil, "process_iter", lambda: [_KernelTask()])
 
     assert end_runner_sessions({os.getsid(0)}, started_before=time.time(), grace_s=0.0) == []
+
+
+def test_watchdog_still_forces_the_exit_when_the_session_sweep_fails(
+    spawn_process, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ZYGOTE_RUNNER_FORKED_ENV_VAR, "1")
+
+    def broken_sweep() -> None:
+        raise RuntimeError("sweep failed")
+
+    daemon = spawn_process()
+    exited = threading.Event()
+    watchdog = threading.Thread(
+        target=_entry._run_parent_death_killer,
+        args=(daemon.pid, lambda: None),
+        kwargs={
+            "end_session": broken_sweep,
+            "poll_interval_s": 0.02,
+            "grace_s": 0.0,
+            "exit_fn": lambda _code: exited.set(),
+        },
+        daemon=True,
+    )
+    watchdog.start()
+
+    _end(daemon)
+
+    assert exited.wait(timeout=5)
