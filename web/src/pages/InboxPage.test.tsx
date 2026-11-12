@@ -20,6 +20,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { InboxPage } from "./InboxPage";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
+import {
+  expectMarkdownQuestionCard,
+  MARKDOWN_QUESTION_PAYLOAD,
+} from "@/test/markdownQuestionFixture";
 import type * as approvalCard from "@/components/blocks/ApprovalCard";
 import type { ComponentProps } from "react";
 import type { Conversation } from "@/hooks/useConversations";
@@ -234,6 +238,24 @@ function selectTab(name: string) {
   fireEvent.focus(tab);
   fireEvent.click(tab);
 }
+
+describe("InboxPage question cards", () => {
+  it("renders Markdown in a pending question card", async () => {
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation()]),
+    );
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("question_md", "Pick a path", {
+          policy_name: "sys_ask_user_question",
+          ask_user_question: MARKDOWN_QUESTION_PAYLOAD,
+        }),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+    await expectMarkdownQuestionCard();
+  });
+});
 
 describe("InboxPage states", () => {
   it("shows a loading state while the session list is still loading", () => {

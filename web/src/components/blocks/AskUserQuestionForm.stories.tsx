@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { userEvent } from "storybook/test";
 import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { AskUserQuestionForm } from "./AskUserQuestionForm";
@@ -7,6 +8,14 @@ const meta = {
   title: "Components/Blocks/AskUserQuestionForm",
   component: AskUserQuestionForm,
   tags: ["visual-snapshot"],
+  // Markdown links render previews through react-query.
+  decorators: [
+    (Story) => (
+      <QueryClientProvider client={new QueryClient()}>
+        <Story />
+      </QueryClientProvider>
+    ),
+  ],
   args: {
     onSubmit: () => undefined,
     onReject: () => undefined,
@@ -37,6 +46,28 @@ export const SingleSelectWithPreview: Story = {
             label: "Overlay",
             description: "Blend changed pixels over the baseline.",
           },
+        ],
+      },
+    ],
+  },
+};
+
+export const MarkdownContext: Story = {
+  args: {
+    elicitationId: "elic_markdown_story",
+    questions: [
+      {
+        id: "rollout",
+        question:
+          "Which rollout should we use?\n\n- **Canary** first, then everyone\n- Everyone at once, with `--force`\n\nSee the [rollout notes](https://example.com/rollout).",
+        header: "Rollout",
+        multiSelect: false,
+        options: [
+          {
+            label: "Canary",
+            description: "Slower, safer. Checklist in [the runbook](https://example.com/runbook).",
+          },
+          { label: "All at once", description: "Fastest; **no** rollback window." },
         ],
       },
     ],

@@ -28,7 +28,9 @@ class SysAskUserQuestionTool(Tool):
             "a user message starting with `[answer to <question_id>]`, one line per "
             "question. Do not wait or poll for it: carry on with other work, or end "
             "your turn if you cannot continue without the answer. Messages from other "
-            "sessions keep reaching you while the question is open."
+            "sessions keep reaching you while the question is open. The question text and "
+            "each option description are rendered as Markdown (lists, bold, inline code, "
+            "links); option labels and previews are plain text."
         )
 
     def get_schema(self) -> dict[str, Any]:
