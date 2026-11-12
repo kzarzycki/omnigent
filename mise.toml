@@ -1,4 +1,8 @@
 # Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `loop.ci: false`).
+[tasks."pin-pr-target"]
+description = "Make a bare `gh pr create` in this clone and its worktrees target the fork, not upstream."
+run = "bash .claude/skills/fork-sync/pin-pr-target.sh"
+
 [tasks."check:setup"]
 description = "Install what the hooks need (the Python env and the web packages, which custom-lint's TypeScript check needs for any change) so check:all runs in a fresh worktree. Quick when installed."
 run = """
@@ -12,7 +16,7 @@ fi
 
 [tasks."check:all"]
 alias = "check"
-depends = ["check:setup"]
+depends = ["pin-pr-target", "check:setup"]
 description = "pre-commit on the files the branch changes since mine, then the fork-sync and cloud-dev skills' tests and the claude-cloud bridge's self-check."
 run = [
   'pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD',

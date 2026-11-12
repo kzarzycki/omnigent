@@ -164,6 +164,13 @@ instructions:
 
 Open PRs against `mine`, the fork's default branch; `main` only mirrors upstream.
 
+Name the target every time: `gh pr create --repo kzarzycki/omnigent --base mine`
+(in a cloud session, the `gh api` form in the cloud-dev skill). A bare
+`gh pr create` in a fork opens the PR on upstream `omnigent-ai/omnigent`, with
+every fork-only commit in it. As a backstop, `mise run pin-pr-target` makes the
+fork the default for bare `gh` commands; run it once per clone (worktrees share
+it), and `mise run check:all` runs it too.
+
 Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
 commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR on a landing host
