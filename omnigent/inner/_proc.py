@@ -198,12 +198,14 @@ def _killpg(pid: int, sig: int, *, owned_pgid: int | None = None) -> bool:
     """
     POSIX fast path: signal the child's whole process group.
 
-    Refuses to signal our OWN process group. A child spawned without
+    Refuses to signal a group the child does not lead. A child spawned without
     ``start_new_session`` never becomes a group leader, so ``getpgid(pid)``
-    resolves to the group we *share* with our parent — pytest, the
-    harness/runner supervisor, the CI job step. ``killpg`` on that group would
-    take down this process and everything around it (observed in CI as a
-    job-wide "runner received shutdown signal" cancelling e2e at ~96%). The old
+    resolves to a group it *shares*: ours and our parent's (pytest, the
+    harness/runner supervisor, the CI job step), or its forker's (a harness
+    the zygote forked sits in the host daemon's group, not the runner's).
+    ``killpg`` on that group would take down everything around the child
+    (observed in CI as a job-wide "runner received shutdown signal" cancelling
+    e2e at ~96%, and as a runner stopping its harness ending the daemon). The old
     code passed ``pid`` itself as the pgid, which failed safe for a non-leader
     (no group is numbered ``pid`` → ``ProcessLookupError`` → caller falls back);
     resolving the real group removed that accidental safety. Returning False
@@ -212,7 +214,7 @@ def _killpg(pid: int, sig: int, *, owned_pgid: int | None = None) -> bool:
 
     :returns: True if the group signal was delivered, False if process groups
         are unavailable (Windows), the lookup failed, or the target group is
-        our own.
+        our own or one the child does not lead.
     """
     if not IS_POSIX or _killpg_fn is None or _getpgid_fn is None:
         return False
@@ -223,6 +225,8 @@ def _killpg(pid: int, sig: int, *, owned_pgid: int | None = None) -> bool:
         # down the CI runner when a mocked pid coerced to 1) - and 0/negative
         # would re-target our own group.
         if target_pgid <= 1 or target_pgid == _getpgid_fn(0):
+            return False
+        if owned_pgid is None and target_pgid != pid:
             return False
         _killpg_fn(target_pgid, sig)
         return True

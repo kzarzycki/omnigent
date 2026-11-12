@@ -337,6 +337,24 @@ def test_pipe_supervisor_keeps_windows_direct_launch(monkeypatch: pytest.MonkeyP
     assert _proc.pipe_supervised_command("claude", "-p", "/model") == ("claude", "-p", "/model")
 
 
+def test_killpg_refuses_a_group_the_child_does_not_lead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-leader sits in someone else's group; signalling it would end them.
+
+    This is a harness the zygote forked: it shares the host daemon's group,
+    while the runner that stops it has a group of its own.
+    """
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(_proc, "IS_POSIX", True)
+    monkeypatch.setattr(_proc, "_getpgid_fn", lambda pid: {0: 500, 700: 600}[pid])
+    monkeypatch.setattr(_proc, "_killpg_fn", lambda pgid, sig: sent.append((pgid, sig)))
+
+    assert _proc._killpg(700, signal.SIGTERM) is False
+    assert sent == []
+    # A group remembered while its leader was alive is still ours to signal.
+    assert _proc._killpg(700, signal.SIGTERM, owned_pgid=600) is True
+    assert sent == [(600, signal.SIGTERM)]
+
+
 def test_killpg_refuses_the_broadcast_group(monkeypatch: pytest.MonkeyPatch) -> None:
     """A target pgid of 1 must never be signalled.
 

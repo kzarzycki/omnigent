@@ -150,6 +150,15 @@ from omnigent.host.git_worktree import (
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
+from omnigent.host.runner_registry import (
+    RUNNER_HOST_REGISTRY_ENV_VAR,
+    AdoptedRunnerProc,
+    RegisteredRunner,
+    RunnerRegistry,
+    end_runner_sessions,
+    runner_registry_path,
+    session_leaders,
+)
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
@@ -1203,7 +1212,7 @@ class _RunnerHandle:
         or superseded launches, even after the exit watcher pops them.
     """
 
-    proc: subprocess.Popen[bytes] | ZygoteRunnerProc
+    proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc
     log_path: Path
     session_id: str | None = None
     connect_marker: Path | None = None
@@ -1461,6 +1470,12 @@ class HostProcess:
         # _lifecycle_lost and aborts the live tunnel so run() breaks out of its
         # serve and tears down cleanly instead of lingering as a stale daemon.
         self._lifecycle_lock = lifecycle_lock
+        # Runners on disk, so the next daemon for this target can adopt them.
+        self._runner_registry = (
+            RunnerRegistry(runner_registry_path(lifecycle_lock.target))
+            if lifecycle_lock is not None
+            else None
+        )
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._lifecycle_lost = asyncio.Event()
 
@@ -1590,7 +1605,7 @@ class HostProcess:
         """
         dead = [rid for rid, handle in self._runners.items() if handle.proc.poll() is not None]
         for rid in dead:
-            self._runners.pop(rid)
+            self._forget_runner(rid)
         if dead:
             self._trigger_maintenance("runner_exited_during_reconnect")
         return list(self._runners.keys())
@@ -2177,7 +2192,13 @@ class HostProcess:
         # the spawn land and then tear that runner down.
         with self._host_subprocess_op():
             spawn = asyncio.ensure_future(
-                asyncio.to_thread(self._spawn_runner_proc, env, _session_slug, workspace)
+                asyncio.to_thread(
+                    self._spawn_runner_proc,
+                    env,
+                    _session_slug,
+                    workspace,
+                    session_id=frame.session_id or None,
+                )
             )
             try:
                 proc, log_path = await asyncio.shield(spawn)
@@ -2232,7 +2253,7 @@ class HostProcess:
         else:
             superseded = []
         for rid, handle in superseded:
-            self._runners.pop(rid, None)
+            self._forget_runner(rid)
             handle.stop_requested = True
             self._spawn_superseded_stop(rid, handle, frame.session_id or "")
         self._runners[runner_id] = _RunnerHandle(
@@ -2310,7 +2331,52 @@ class HostProcess:
             return None
         return zygote
 
+    def _forget_runner(self, runner_id: str) -> _RunnerHandle | None:
+        """Drop a runner from the tracked set and from the on-disk registry."""
+        if self._runner_registry is not None:
+            self._runner_registry.remove(runner_id)
+        return self._runners.pop(runner_id, None)
+
+    def _adopt_runner(self, entry: RegisteredRunner) -> None:
+        """Track a runner the previous daemon for this target left running."""
+        _logger.info("Adopting runner %s (pid %d)", entry.runner_id, entry.pid)
+        self._runners[entry.runner_id] = _RunnerHandle(
+            proc=AdoptedRunnerProc(entry),
+            log_path=Path(entry.log_path),
+            session_id=entry.session_id,
+            connect_marker=Path(entry.connect_marker) if entry.connect_marker else None,
+        )
+        watcher = asyncio.create_task(self._watch_runner(entry.runner_id))
+        self._watcher_tasks.add(watcher)
+        watcher.add_done_callback(self._watcher_tasks.discard)
+
     def _spawn_runner_proc(
+        self,
+        env: dict[str, str],
+        session_slug: str,
+        workspace: Path,
+        *,
+        session_id: str | None = None,
+    ) -> tuple[subprocess.Popen[bytes] | ZygoteRunnerProc, Path]:
+        """Open the session log, spawn the runner and record it in the registry.
+
+        The record is written here, on the spawning thread, so a runner started
+        while the daemon is being stopped is still listed for the next daemon.
+        """
+        if self._runner_registry is not None:
+            env[RUNNER_HOST_REGISTRY_ENV_VAR] = str(self._runner_registry.path)
+        proc, log_path = self._spawn_runner_proc_unrecorded(env, session_slug, workspace)
+        if self._runner_registry is not None:
+            self._runner_registry.add(
+                env[RUNNER_ID_ENV_VAR],
+                proc.pid,
+                session_id=session_id,
+                log_path=log_path,
+                connect_marker=_connect_marker_path(log_path),
+            )
+        return proc, log_path
+
+    def _spawn_runner_proc_unrecorded(
         self,
         env: dict[str, str],
         session_slug: str,
@@ -2398,6 +2464,9 @@ class HostProcess:
                     stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=log_fh,
+                    # Own session: a service manager that stops the daemon's
+                    # process group must not take the runner with it.
+                    start_new_session=True,
                     **logging_kwargs,
                 )
             return proc, log_path
@@ -2428,6 +2497,8 @@ class HostProcess:
             "Launch cancelled after runner spawn (pid=%s); terminating the orphan",
             proc.pid,
         )
+        if self._runner_registry is not None:
+            self._runner_registry.remove_pid(proc.pid)
         try:
             await self._stop_runner_and_trigger(proc, "runner_spawn_abandoned")
         except Exception:  # detached cleanup must be observed
@@ -2448,7 +2519,7 @@ class HostProcess:
         :param frame: The stop request frame.
         :returns: Result frame with status.
         """
-        handle = self._runners.pop(frame.runner_id, None)
+        handle = self._forget_runner(frame.runner_id)
         if handle is None:
             return HostStopRunnerResultFrame(
                 request_id=frame.request_id,
@@ -2518,7 +2589,7 @@ class HostProcess:
 
     async def _stop_runner_and_trigger(
         self,
-        proc: subprocess.Popen[bytes] | ZygoteRunnerProc,
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc,
         reason: str,
     ) -> None:
         """Finish runner termination before triggering host maintenance."""
@@ -2534,7 +2605,9 @@ class HostProcess:
                 self._trigger_maintenance(reason)
 
     @staticmethod
-    def _stop_runner_proc(proc: subprocess.Popen[bytes] | ZygoteRunnerProc) -> None:
+    def _stop_runner_proc(
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc,
+    ) -> None:
         """Terminate a runner: SIGTERM, brief wait, then SIGKILL. Blocking.
 
         Runs on a worker thread (see :meth:`_handle_stop`) because for a
@@ -2650,7 +2723,7 @@ class HostProcess:
             # _handle_stop (or _cleanup_runners) removed it first —
             # an intentional termination, not a crash to report.
             return
-        self._runners.pop(runner_id)
+        self._forget_runner(runner_id)
         self._trigger_maintenance("runner_exited")
         had_connected = None
         if handle.connect_marker is not None:
@@ -4785,6 +4858,12 @@ class HostProcess:
         # classify a still-shutting-down runner as live and miss it forever.
         if self._lifecycle_lock is not None:
             self._lifecycle_lock.acquire()
+            if self._runner_registry is not None:
+                for entry in self._runner_registry.claim():
+                    self._adopt_runner(entry)
+                from omnigent.host.crash_reporting import set_runner_release_hook
+
+                set_runner_release_hook(self._runner_registry.release)
             self._lifecycle_task = asyncio.create_task(
                 self._lifecycle_monitor_loop(), name="host-lifecycle-monitor"
             )
@@ -5093,6 +5172,11 @@ class HostProcess:
 
         :returns: None.
         """
+        # The service manager no longer sweeps what the runners leave in their
+        # sessions (tool calls, background jobs), so this shutdown does.
+        # A runner that exited a moment ago may have left jobs too, so it counts.
+        leaders = session_leaders({handle.proc.pid for handle in self._runners.values()})
+        seen_at = time.time()
         for runner_id, handle in self._runners.items():
             if handle.proc.poll() is None:
                 _logger.info("Terminating runner %s on shutdown", runner_id)
@@ -5102,7 +5186,10 @@ class HostProcess:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
+        end_runner_sessions(leaders, started_before=seen_at)
         self._runners.clear()
+        if self._runner_registry is not None:
+            self._runner_registry.clear()
 
     async def _connect_and_serve(self) -> None:
         """Single connection attempt: connect, hello, serve.
