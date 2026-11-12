@@ -118,25 +118,29 @@ export interface GithubLinkPreview {
   checks: { passed: number; failed: number; pending: number } | null;
 }
 
-/** Shape of ``GET .../github/repos/{owner}/{repo}/previews/{kind}/{ref}``. */
+/** Shape of ``GET /v1/sessions/{id}/resources/github/preview``. */
 export interface GithubLinkPreviewResult {
-  /** False when the user hasn't connected GitHub. */
-  connected: boolean;
-  /** Null when the user's connection can't read it. */
+  /** Null when the session's host can't read it. */
   preview: GithubLinkPreview | null;
 }
 
 /**
- * Fetch a chat link's preview from this server, which reads GitHub with the
- * user's own connection. Takes parsed parts, never the link itself.
+ * Fetch a chat link's preview from this server, which reads GitHub through the
+ * session host's `gh`. Takes parsed parts, never the link itself.
  */
 export async function fetchGithubLinkPreview(
+  sessionId: string,
   link: GithubLinkRef,
 ): Promise<GithubLinkPreviewResult> {
-  const path = [link.owner, link.repo, "previews", link.kind, link.ref]
-    .map(encodeURIComponent)
-    .join("/");
-  const res = await authenticatedFetch(`/v1/connections/github/repos/${path}`);
+  const query = new URLSearchParams({
+    owner: link.owner,
+    repo: link.repo,
+    kind: link.kind,
+    ref: link.ref,
+  });
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/resources/github/preview?${query}`,
+  );
   if (!res.ok) {
     throw new Error(`GitHub link preview failed: ${res.status}`);
   }

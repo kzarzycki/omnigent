@@ -62,12 +62,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 from urllib.parse import quote
+
+import httpx
 
 from omnigent import config as _config
 from omnigent.host.identity_env import in_managed_sandbox
@@ -955,13 +958,19 @@ def _repo_argument(ref: PullRequestRef) -> str:
     return f"{ref.host}/{ref.repository}"
 
 
-def _pr_token(root: str, reference: PullRequestRef) -> str | None:
+def _repo_token(root: str, repo_argument: str) -> str | None:
+    """The token of the account preferred for ``[host/]owner/repo``, or ``None``."""
     if _in_sandbox():
         return None
-    login = _config.github_account_preference(_repo_argument(reference))
+    login = _config.github_account_preference(repo_argument)
     if login:
-        return _gh_auth_token(root, login, reference.host)
+        host = repo_argument.split("/")[0] if repo_argument.count("/") > 1 else "github.com"
+        return _gh_auth_token(root, login, host)
     return None
+
+
+def _pr_token(root: str, reference: PullRequestRef) -> str | None:
+    return _repo_token(root, _repo_argument(reference))
 
 
 def _pr_json(root: str, reference: PullRequestRef, fields: str) -> dict[str, Any] | None:
@@ -2124,3 +2133,263 @@ def _upload_attachment(
     if detail and "(HTTP 422)" in err:
         raise ValueError(f"GitHub rejected the file: {detail}")
     raise ValueError("GitHub could not upload the file. Try again.")
+
+
+# ── Chat link previews ───────────────────────────────────────────────────────
+# A preview of a PR, issue, commit or Actions run named by a chat link. Callers
+# pass validated parts, never a URL; every read is a ``gh`` call or, with no
+# ``gh`` login, an unauthenticated read of GitHub's public API.
+
+GITHUB_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+PREVIEW_REF = {
+    "pull": re.compile(r"^[0-9]{1,12}$"),
+    "issue": re.compile(r"^[0-9]{1,12}$"),
+    "run": re.compile(r"^[0-9]{1,20}$"),
+    "commit": re.compile(r"^[0-9a-fA-F]{7,40}$"),
+}
+_PREVIEW_TTL_SECONDS = 60.0
+# Unauthenticated reads share GitHub's 60 requests an hour per address.
+_PUBLIC_PREVIEW_TTL_SECONDS = 15 * 60.0
+_PUBLIC_RATE_LIMIT_BACKOFF_SECONDS = 15 * 60.0
+_PREVIEW_CACHE_MAX = 512
+_PUBLIC_API = "https://api.github.com"
+_UNREADABLE_STATUSES = frozenset({403, 404, 410, 422})
+_PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_PREVIEW_PR_FIELDS = "title,state,isDraft,labels,statusCheckRollup"
+
+_preview_lock = threading.Lock()
+_preview_cache: dict[tuple[str, ...], tuple[float, dict[str, Any] | None]] = {}
+_public_blocked_until = 0.0
+
+
+class _PreviewReadError(Exception):
+    """GitHub answered something other than a readable object or a refusal."""
+
+
+def valid_preview_parts(owner: str, repo: str, kind: str, ref: str) -> bool:
+    """Whether the parts name a PR, issue, commit or run with safe path segments."""
+    ref_pattern = PREVIEW_REF.get(kind)
+    return bool(
+        ref_pattern
+        and ref_pattern.match(ref)
+        and all(GITHUB_NAME.match(name) and ".." not in name for name in (owner, repo))
+    )
+
+
+def _public_get(path: str) -> dict[str, Any] | None:
+    """Read ``path`` from GitHub's API with no token; ``None`` when not readable.
+
+    :raises _PreviewReadError: On rate limiting, which also pauses further public reads.
+    """
+    global _public_blocked_until
+    if time.monotonic() < _public_blocked_until:
+        raise _PreviewReadError("public GitHub API rate limit")
+    try:
+        response = httpx.get(
+            _PUBLIC_API + path,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=_gh_timeout_seconds(),
+        )
+    except httpx.HTTPError as exc:
+        raise _PreviewReadError(str(exc)) from exc
+    if response.status_code == 429 or (
+        response.status_code == 403 and response.headers.get("x-ratelimit-remaining") == "0"
+    ):
+        _public_blocked_until = time.monotonic() + _PUBLIC_RATE_LIMIT_BACKOFF_SECONDS
+        raise _PreviewReadError("public GitHub API rate limit")
+    if response.status_code in _UNREADABLE_STATUSES:
+        return None
+    if response.status_code != 200:
+        raise _PreviewReadError(f"GitHub returned {response.status_code}")
+    data = response.json()
+    return data if isinstance(data, dict) else None
+
+
+def _gh_api_get(root: str, path: str, token: str | None) -> dict[str, Any] | None:
+    """Read ``path`` through ``gh api``; ``None`` when this login can't read it."""
+    rc, out, err = _gh(["api", "--hostname", "github.com", path], cwd=root, token=token)
+    if rc == 0:
+        try:
+            data = json.loads(out)
+        except ValueError as exc:
+            raise _PreviewReadError("unreadable gh output") from exc
+        return data if isinstance(data, dict) else None
+    status = re.search(r"\(HTTP (\d{3})\)", err)
+    if status and int(status.group(1)) in _UNREADABLE_STATUSES:
+        return None
+    raise _PreviewReadError(err.strip()[:200] or "gh api failed")
+
+
+def _rest_checks(get: Any, repo_path: str, sha: str) -> dict[str, int] | None:
+    """Check-run and commit-status counts for ``sha``; ``None`` when it has none."""
+    # ponytail: first 100 of each; page on if a repo runs more.
+    runs = (get(f"{repo_path}/commits/{sha}/check-runs?per_page=100") or {}).get(
+        "check_runs"
+    ) or []
+    statuses = (get(f"{repo_path}/commits/{sha}/status?per_page=100") or {}).get("statuses") or []
+    if not runs and not statuses:
+        return None
+    counts = {"passed": 0, "failed": 0, "pending": 0}
+    for run in runs:
+        if run.get("status") != "completed":
+            counts["pending"] += 1
+        elif run.get("conclusion") in _PASSING_CONCLUSIONS:
+            counts["passed"] += 1
+        else:
+            counts["failed"] += 1
+    for status in statuses:
+        state = status.get("state")
+        counts[
+            "passed" if state == "success" else "pending" if state == "pending" else "failed"
+        ] += 1
+    return counts
+
+
+def _rest_pull_preview(get: Any, repo_path: str, number: str) -> dict[str, Any] | None:
+    pull = get(f"{repo_path}/pulls/{number}")
+    if pull is None:
+        return None
+    state = str(pull.get("state") or "")
+    if pull.get("merged"):
+        state = "merged"
+    elif state == "open" and pull.get("draft"):
+        state = "draft"
+    head_sha = str((pull.get("head") or {}).get("sha") or "")
+    return {
+        "kind": "pull",
+        "title": str(pull.get("title") or ""),
+        "state": state,
+        "labels": _shape_labels(pull.get("labels")),
+        "checks": _rest_checks(get, repo_path, head_sha) if head_sha else None,
+    }
+
+
+def _pull_view_preview(data: dict[str, Any]) -> dict[str, Any]:
+    """A PR preview from ``gh pr view --json``, with the panel's check summary."""
+    state = str(data.get("state") or "").lower()
+    if state == "open" and data.get("isDraft"):
+        state = "draft"
+    summary = _summarize_checks(data.get("statusCheckRollup"))
+    checks = (
+        {
+            "passed": summary["passing"] + summary["skipped"],
+            "failed": summary["failing"] + summary["cancelled"],
+            "pending": summary["pending"],
+        }
+        if summary["total"]
+        else None
+    )
+    return {
+        "kind": "pull",
+        "title": str(data.get("title") or ""),
+        "state": state,
+        "labels": _shape_labels(data.get("labels")),
+        "checks": checks,
+    }
+
+
+def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, Any] | None:
+    if kind == "issue":
+        issue = get(f"{repo_path}/issues/{ref}")
+        if issue is None:
+            return None
+        if issue.get("pull_request"):
+            return _rest_pull_preview(get, repo_path, ref)
+        closed_as = "not_planned" if issue.get("state_reason") == "not_planned" else ""
+        return {
+            "kind": "issue",
+            "title": str(issue.get("title") or ""),
+            "state": closed_as or str(issue.get("state") or ""),
+            "labels": _shape_labels(issue.get("labels")),
+            "checks": None,
+        }
+    if kind == "pull":
+        return _rest_pull_preview(get, repo_path, ref)
+    if kind == "commit":
+        commit = get(f"{repo_path}/commits/{ref}")
+        if commit is None:
+            return None
+        message = str((commit.get("commit") or {}).get("message") or "")
+        return {
+            "kind": "commit",
+            "title": message.split("\n", 1)[0],
+            "state": None,
+            "labels": [],
+            "checks": _rest_checks(get, repo_path, str(commit.get("sha") or ref)),
+        }
+    run = get(f"{repo_path}/actions/runs/{ref}")
+    if run is None:
+        return None
+    status = str(run.get("status") or "")
+    return {
+        "kind": "run",
+        "title": str(run.get("display_title") or run.get("name") or ""),
+        "state": str(run.get("conclusion") or status) if status == "completed" else status,
+        "labels": [],
+        "checks": None,
+    }
+
+
+def _signed_in_to_github(root: str) -> bool:
+    _, accounts = _list_accounts(root)
+    return any(
+        account.get("host") == "github.com" and account.get("state") == "success"
+        for account in accounts
+    )
+
+
+def _read_link_preview(
+    root: str, owner: str, repo: str, kind: str, ref: str, *, signed_in: bool
+) -> dict[str, Any] | None:
+    repo_path = f"/repos/{owner}/{repo}"
+    if not signed_in:
+        return _rest_preview(_public_get, repo_path, kind, ref)
+    token = _repo_token(root, f"github.com/{owner}/{repo}")
+
+    def get(path: str) -> dict[str, Any] | None:
+        return _gh_api_get(root, path, token)
+
+    if kind == "pull":
+        data = _gh_pr_view(
+            [ref, "-R", f"github.com/{owner}/{repo}"], _PREVIEW_PR_FIELDS, cwd=root, token=token
+        )
+        return _pull_view_preview(data) if data is not None else None
+    return _rest_preview(get, repo_path, kind, ref)
+
+
+def github_link_preview(
+    root: str, owner: str, repo: str, kind: str, ref: str
+) -> dict[str, Any] | None:
+    """Preview a GitHub PR, issue, commit or Actions run for a chat link.
+
+    Reads through the host's ``gh`` login (as the repository's preferred account,
+    like the PR panel), or without a token for a public repo when ``gh`` is signed
+    out. Results are cached on the runner.
+
+    :param root: The session workspace, used as ``gh``'s working directory.
+    :returns: ``{kind, title, state, labels, checks}``, or ``None`` when ``gh`` is
+        missing, the object is unreadable to this login, or GitHub can't be reached.
+    :raises ValueError: When the parts are not valid.
+    """
+    if not valid_preview_parts(owner, repo, kind, ref):
+        raise ValueError("Invalid preview reference")
+    if not _gh_installed():
+        return None
+    signed_in = _signed_in_to_github(root)
+    key = (str(signed_in), owner.lower(), repo.lower(), kind, ref.lower())
+    now = time.monotonic()
+    with _preview_lock:
+        cached = _preview_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    try:
+        preview = _read_link_preview(root, owner, repo, kind, ref, signed_in=signed_in)
+    except _PreviewReadError as exc:
+        _logger.info("github_resource: link preview not read: %s", exc)
+        return None
+    ttl = _PREVIEW_TTL_SECONDS if signed_in else _PUBLIC_PREVIEW_TTL_SECONDS
+    with _preview_lock:
+        if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+            _preview_cache.clear()
+        _preview_cache[key] = (now + ttl, preview)
+    return preview

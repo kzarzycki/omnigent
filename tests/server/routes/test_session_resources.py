@@ -3259,6 +3259,92 @@ async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
     ) in fake_runner.calls
 
 
+_PREVIEW_SESSION = "79b22ebd2309e48fdeb450c65611d51b"
+_PREVIEW_PATH = f"/v1/sessions/{_PREVIEW_SESSION}/resources/github/preview"
+_PREVIEW_QUERY = {"owner": "acme", "repo": "app", "kind": "pull", "ref": "42"}
+
+
+def _preview_app(viewer_level: int | None) -> tuple[FastAPI, _FakeRunnerClient]:
+    """An app where ``bob`` holds ``viewer_level`` on the session (no grant when ``None``)."""
+    conversations = _ConversationStore()
+    permissions = _StubPermissionStore()
+    if viewer_level is not None:
+        permissions.add_grant("bob@example.com", _PREVIEW_SESSION, viewer_level)
+    runner = _FakeRunnerClient(payload={"preview": {"kind": "pull", "title": "Fix"}})
+    set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+    application = _sessions_app(
+        conversations,
+        auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+        permission_store=permissions,  # type: ignore[arg-type]
+    )
+    return application, runner
+
+
+async def _get_preview(application: FastAPI, params: dict[str, str]) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://server"
+    ) as client:
+        return await client.get(
+            _PREVIEW_PATH, params=params, headers={"X-Forwarded-Email": "bob@example.com"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_github_link_preview_proxies_validated_parts_for_a_reader(
+    runner_globals_reset: None,
+) -> None:
+    """A viewer with read access gets the runner's preview, asked with the validated parts."""
+    del runner_globals_reset
+    application, runner = _preview_app(LEVEL_READ)
+
+    resp = await _get_preview(application, _PREVIEW_QUERY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["preview"]["title"] == "Fix"
+    assert runner.calls == [("GET", _PREVIEW_PATH)]
+    assert runner.get_params == [_PREVIEW_QUERY]
+
+
+@pytest.mark.asyncio
+async def test_github_link_preview_refuses_a_viewer_without_read_access(
+    runner_globals_reset: None,
+) -> None:
+    """No grant on the session: refused before the runner is asked."""
+    del runner_globals_reset
+    application, runner = _preview_app(None)
+
+    resp = await _get_preview(application, _PREVIEW_QUERY)
+
+    assert resp.status_code in (403, 404), resp.text
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"kind": "page"},
+        {"kind": "pull", "ref": "abc"},
+        {"kind": "commit", "ref": "xyz1234"},
+        {"kind": "commit", "ref": "abc"},
+        {"owner": "o..o"},
+        {"repo": "app/../x"},
+        {"ref": "1?x=1"},
+    ],
+)
+async def test_github_link_preview_rejects_invalid_parts_before_the_runner(
+    runner_globals_reset: None, override: dict[str, str]
+) -> None:
+    """Anything but a validated owner, repo, kind and ref is a 400 with no runner call."""
+    del runner_globals_reset
+    application, runner = _preview_app(LEVEL_READ)
+
+    resp = await _get_preview(application, {**_PREVIEW_QUERY, **override})
+
+    assert resp.status_code == 400, resp.text
+    assert runner.calls == []
+
+
 def _pr_app(db_uri: str, **router_options: Any) -> FastAPI:
     """App whose sessions keep their pull requests in a real SQLite store."""
     SqlAlchemyConversationStore(db_uri).create_conversation(conversation_id=_PR_SESSION)

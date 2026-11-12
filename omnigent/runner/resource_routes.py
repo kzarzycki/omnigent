@@ -1406,6 +1406,22 @@ def register_resource_routes(
             default_pr_url=default_pr_url,
         )
 
+    @app.get("/v1/sessions/{session_id}/resources/github/preview")
+    async def read_github_link_preview(
+        session_id: str, owner: str, repo: str, kind: str, ref: str
+    ) -> JSONResponse:
+        from omnigent.runner import github_resource
+
+        if not github_resource.valid_preview_parts(owner, repo, kind, ref):
+            raise HTTPException(status_code=400, detail="Invalid preview reference")
+        root = await _github_workspace_root(session_id)
+        preview = await asyncio.to_thread(
+            github_resource.github_link_preview, root, owner, repo, kind, ref
+        )
+        return JSONResponse(
+            status_code=200, content={"object": "session.github.link_preview", "preview": preview}
+        )
+
     @app.get("/v1/sessions/{session_id}/resources/github/changes")
     async def read_github_changes(
         session_id: str,

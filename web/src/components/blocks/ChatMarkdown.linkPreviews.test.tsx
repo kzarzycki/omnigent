@@ -7,8 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
-import type { ServerInfo } from "@/lib/capabilities";
+import { FileViewerContext } from "@/shell/FileViewerContext";
 import { FilePathAwareMessageResponse } from "./ChatMarkdown";
 
 const fetchMock = vi.fn();
@@ -48,14 +47,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderMarkdown(markdown: string, enabledConnections: string[] = []): QueryClient {
+const CHAT_SESSION_ID = "conv_chat";
+
+// The chat's own session scopes GitHub previews; none, as outside a session.
+function renderMarkdown(markdown: string, sessionId: string | null = CHAT_SESSION_ID) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
-    <CapabilitiesProvider info={{ enabled_connections: enabledConnections } as ServerInfo}>
+    <FileViewerContext.Provider
+      value={{
+        openFile: () => {},
+        openGithubTab: () => {},
+        isChangedPath: () => false,
+        conversationId: sessionId ?? undefined,
+        workspaceRoot: null,
+        workspaceHome: null,
+      }}
+    >
       <QueryClientProvider client={client}>
         <FilePathAwareMessageResponse>{markdown}</FilePathAwareMessageResponse>
       </QueryClientProvider>
-    </CapabilitiesProvider>,
+    </FileViewerContext.Provider>,
   );
   return client;
 }
@@ -92,7 +103,6 @@ describe("chat link previews at the fetch layer", () => {
   it("asks only this server for a GitHub PR and shows its state, labels and checks", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({
-        connected: true,
         preview: {
           kind: "pull",
           title: "Fix rendering on narrow screens",
@@ -102,14 +112,18 @@ describe("chat link previews at the fetch layer", () => {
         },
       }),
     );
-    renderMarkdown("See https://github.com/acme/app/pull/42 and https://attacker.example/x", [
-      "github",
-    ]);
+    renderMarkdown("See https://github.com/acme/app/pull/42 and https://attacker.example/x");
 
     expect(await screen.findByLabelText("Pull request status: Merged")).toBeVisible();
     const urls = requestedUrls();
     expect(urls.map((url) => url.origin)).toEqual([window.location.origin]);
-    expect(urls[0].pathname).toBe("/v1/connections/github/repos/acme/app/previews/pull/42");
+    expect(urls[0].pathname).toBe(`/v1/sessions/${CHAT_SESSION_ID}/resources/github/preview`);
+    expect(Object.fromEntries(urls[0].searchParams)).toEqual({
+      owner: "acme",
+      repo: "app",
+      kind: "pull",
+      ref: "42",
+    });
 
     await userEvent.hover(screen.getByRole("link", { name: "app#42" }));
     const card = await screen.findByTestId("github-link-preview");
@@ -118,21 +132,19 @@ describe("chat link previews at the fetch layer", () => {
     expect(card).toHaveTextContent("Checks: 1 failed, 5 passed");
   });
 
-  it("sends no GitHub preview request when the GitHub connection is off", async () => {
-    renderMarkdown("https://github.com/acme/app/pull/42", []);
+  it("sends no GitHub preview request outside a session", async () => {
+    renderMarkdown("https://github.com/acme/app/pull/42", null);
 
     expect(await screen.findByRole("link", { name: "app#42" })).toBeVisible();
     await new Promise((resolve) => {
       setTimeout(resolve, 50);
     });
-    expect(
-      requestedUrls().filter((url) => url.pathname.startsWith("/v1/connections/github/")),
-    ).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("leaves a GitHub link plain when the viewer's connection can't read it", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ connected: true, preview: null }));
-    renderMarkdown("https://github.com/acme/private/issues/3", ["github"]);
+  it("leaves a GitHub link plain when the session host can't read it", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ preview: null }));
+    renderMarkdown("https://github.com/acme/private/issues/3");
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("link", { name: "private#3" })).toBeVisible();
