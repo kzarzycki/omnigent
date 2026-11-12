@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager, suppress
 from pathlib import PureWindowsPath
@@ -108,6 +108,7 @@ from omnigent.stores.conversation_store import (
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
     FORK_SOURCE_LABEL_KEY,
+    MAX_OPEN_QUESTIONS,
     MAX_PENDING_INPUTS,
     MAX_SUBSCRIPTIONS_PER_SESSION,
     PENDING_INPUT_RESPONSE_ID,
@@ -119,6 +120,7 @@ from omnigent.stores.conversation_store import (
     ConversationUpdateResult,
     CreatedSession,
     DailyCostState,
+    OpenQuestionLimitError,
     SessionConnectivity,
     SessionSubscription,
     SubscriptionCycleError,
@@ -136,33 +138,57 @@ from omnigent.stores.conversation_store.overrides import (
 _logger = logging.getLogger(__name__)
 
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
+# Open ``sys_ask_user_question`` cards, kept beside policy state so they outlive a restart.
+_SESSION_QUESTIONS_STATE_KEY = "_omnigent_open_questions_v1"
+_RESERVED_SESSION_STATE_KEYS = (_SESSION_TODOS_STATE_KEY, _SESSION_QUESTIONS_STATE_KEY)
 
 
 def _decode_session_state(
     value: str | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Split policy state from the reserved native Plan snapshot."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split policy state from the reserved keys the server stores beside it."""
     state = json.loads(value) if value else {}
     if not isinstance(state, dict):
         raise TypeError("session_state must decode to an object")
-    raw_todos = state.pop(_SESSION_TODOS_STATE_KEY, None)
-    todos: list[dict[str, Any]] = []
+    reserved = {key: state.pop(key) for key in _RESERVED_SESSION_STATE_KEYS if key in state}
+    return state, reserved
+
+
+def _encode_session_state(state: dict[str, Any], reserved: dict[str, Any]) -> str:
+    """Serialize policy state with the non-empty reserved keys."""
+    payload = dict(state)
+    for key in _RESERVED_SESSION_STATE_KEYS:
+        payload.pop(key, None)
+        if reserved.get(key):
+            payload[key] = reserved[key]
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _session_todos(reserved: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the stored Plan snapshot, or ``[]`` when it is absent or invalid."""
+    raw_todos = reserved.get(_SESSION_TODOS_STATE_KEY)
     if raw_todos is not None:
         with suppress(TypeError, ValueError):
-            todos = validate_session_todos(raw_todos)
-    return state, todos
+            return validate_session_todos(raw_todos)
+    return []
 
 
-def _encode_session_state(
-    state: dict[str, Any],
-    todos: list[dict[str, Any]] | None,
-) -> str:
-    """Serialize policy state while preserving an optional Plan snapshot."""
-    payload = dict(state)
-    payload.pop(_SESSION_TODOS_STATE_KEY, None)
-    if todos:
-        payload[_SESSION_TODOS_STATE_KEY] = todos
-    return json.dumps(payload, separators=(",", ":"))
+def _is_ancestor_copy(event: dict[str, Any]) -> bool:
+    """Whether a stored card is an ancestor's copy of a sub-agent's question."""
+    params = event.get("params")
+    return isinstance(params, dict) and params.get("target_session_id") is not None
+
+
+def _open_questions(reserved: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return stored question cards by id, skipping malformed entries."""
+    raw = reserved.get(_SESSION_QUESTIONS_STATE_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        question_id: event
+        for question_id, event in raw.items()
+        if isinstance(question_id, str) and isinstance(event, dict)
+    }
 
 
 # Server-side deadline (ms) for a whole content search in ``list_conversations``
@@ -360,7 +386,7 @@ def _to_conversation(
         callers pass the JOINed ``{key: value}`` map.
     :returns: A :class:`Conversation` dataclass instance.
     """
-    session_state, session_todos = _decode_session_state(meta.session_state if meta else None)
+    session_state, reserved_state = _decode_session_state(meta.session_state if meta else None)
     session_usage: dict[str, Any] = {}
     if meta and meta.session_usage:
         session_usage = json.loads(meta.session_usage)
@@ -383,7 +409,8 @@ def _to_conversation(
         labels=labels if labels is not None else {},
         session_state=session_state,
         session_usage=session_usage,
-        session_todos=session_todos,
+        session_todos=_session_todos(reserved_state),
+        open_questions=_open_questions(reserved_state),
         reasoning_effort=overrides["reasoning_effort"],
         model_override=overrides["model_override"],
         inference_snapshot=(
@@ -1732,8 +1759,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                 q = q.with_for_update()
             meta = session.scalars(q).first()
             if meta is not None:
-                _, todos = _decode_session_state(meta.session_state)
-                meta.session_state = _encode_session_state(state, todos)
+                _, reserved = _decode_session_state(meta.session_state)
+                meta.session_state = _encode_session_state(state, reserved)
 
         run_write_transaction(self._session_immediate, "set_session_state", write)
 
@@ -1792,11 +1819,72 @@ class SqlAlchemyConversationStore(ConversationStore):
             meta = session.scalars(q).first()
             if meta is None:
                 return False
-            state, _ = _decode_session_state(meta.session_state)
-            meta.session_state = _encode_session_state(state, validated)
+            state, reserved = _decode_session_state(meta.session_state)
+            reserved[_SESSION_TODOS_STATE_KEY] = validated
+            meta.session_state = _encode_session_state(state, reserved)
             return True
 
         return run_write_transaction(self._session_immediate, "set_session_todos", write)
+
+    def add_open_question(
+        self,
+        conversation_id: str,
+        question_id: str,
+        event: dict[str, Any],
+    ) -> bool:
+        """Store an open question card; see :meth:`ConversationStore.add_open_question`."""
+
+        def add(questions: dict[str, Any]) -> None:
+            if (
+                question_id not in questions
+                and not _is_ancestor_copy(event)
+                and sum(not _is_ancestor_copy(held) for held in questions.values())
+                >= MAX_OPEN_QUESTIONS
+            ):
+                raise OpenQuestionLimitError(
+                    f"session {conversation_id} already has {MAX_OPEN_QUESTIONS} open questions"
+                )
+            questions[question_id] = event
+
+        return self._update_open_questions(conversation_id, "add_open_question", add)
+
+    def remove_open_question(self, conversation_id: str, question_id: str) -> bool:
+        """Forget an answered question card; see :meth:`ConversationStore.remove_open_question`."""
+        return self._update_open_questions(
+            conversation_id,
+            "remove_open_question",
+            lambda questions: questions.pop(question_id, None),
+        )
+
+    def _update_open_questions(
+        self,
+        conversation_id: str,
+        operation: str,
+        mutate: Callable[[dict[str, Any]], object],
+    ) -> bool:
+        """Apply ``mutate`` to the stored question cards under a row lock.
+
+        :returns: ``False`` when the metadata row no longer exists, else ``True``.
+        """
+
+        def write(session: Session) -> bool:
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            if meta is None:
+                return False
+            state, reserved = _decode_session_state(meta.session_state)
+            questions = _open_questions(reserved)
+            mutate(questions)
+            reserved[_SESSION_QUESTIONS_STATE_KEY] = questions
+            meta.session_state = _encode_session_state(state, reserved)
+            return True
+
+        return run_write_transaction(self._session_immediate, operation, write)
 
     def set_conversation_project(
         self,

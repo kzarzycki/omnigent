@@ -20,6 +20,9 @@ from omnigent.session_import import IMPORT_PROVENANCE_LABEL_KEYS
 # Pending inputs share the item store, but are not harness transcript history yet.
 PENDING_INPUT_RESPONSE_ID = "pending_input"
 MAX_PENDING_INPUTS = 100
+# Open ``sys_ask_user_question`` cards one session may ask at once; ancestor
+# copies of its sub-agents' cards do not count.
+MAX_OPEN_QUESTIONS = 10
 # Items one find-in-chat request scans, newest first; a longer chat pages by cursor.
 FIND_WINDOW_ITEMS = 2000
 
@@ -353,6 +356,10 @@ class ConversationNotFoundError(Exception):
 
 class ConversationAlreadyExistsError(Exception):
     """Raised when a caller-supplied conversation id is already in use."""
+
+
+class OpenQuestionLimitError(Exception):
+    """The session already stores the most open questions it may hold."""
 
 
 class NameAlreadyExistsError(Exception):
@@ -1402,6 +1409,36 @@ class ConversationStore(ABC):
         todos: list[dict[str, Any]],
     ) -> bool:
         """Persist the native Plan snapshot; empty clears, missing metadata returns false."""
+        raise NotImplementedError
+
+    def add_open_question(
+        self,
+        conversation_id: str,
+        question_id: str,
+        event: dict[str, Any],
+    ) -> bool:
+        """
+        Store an open ``sys_ask_user_question`` card so it outlives a server restart.
+
+        :param conversation_id: Session that asked, e.g. ``"conv_abc123"``.
+        :param question_id: The card's id, e.g. ``"question_0f3a..."``.
+        :param event: The card's ``response.elicitation_request`` event dict.
+        :returns: ``False`` when the session's metadata row no longer exists.
+        :raises OpenQuestionLimitError: The session already holds
+            :data:`MAX_OPEN_QUESTIONS` of its own open questions. An ancestor's
+            copy of a sub-agent's card (``params.target_session_id`` set) is
+            always stored.
+        """
+        raise NotImplementedError
+
+    def remove_open_question(self, conversation_id: str, question_id: str) -> bool:
+        """
+        Forget a stored question card once it is answered; unknown ids are a no-op.
+
+        :param conversation_id: Session that asked, e.g. ``"conv_abc123"``.
+        :param question_id: The card's id, e.g. ``"question_0f3a..."``.
+        :returns: ``False`` when the session's metadata row no longer exists.
+        """
         raise NotImplementedError
 
     @abstractmethod

@@ -106,6 +106,9 @@ class Conversation:
         dict when no LLM calls have been recorded yet.
     :param session_todos: Latest native Plan display snapshot, restored after
         Server restart without invoking the harness or replaying task work.
+    :param open_questions: Unanswered ``sys_ask_user_question`` cards by
+        question id, each its ``response.elicitation_request`` event dict.
+        Restored into the pending-prompt index after a server restart.
     :param reasoning_effort: Per-session reasoning-effort hint,
         e.g. ``"high"``. ``None`` means use the agent default.
         Set at session creation via ``POST /v1/sessions`` metadata
@@ -246,6 +249,7 @@ class Conversation:
     session_state: dict[str, Any] = field(default_factory=dict)
     session_usage: dict[str, Any] = field(default_factory=dict)
     session_todos: list[dict[str, Any]] = field(default_factory=list)
+    open_questions: dict[str, dict[str, Any]] = field(default_factory=dict)
     reasoning_effort: str | None = None
     model_override: str | None = None
     inference_snapshot: dict[str, Any] | None = None

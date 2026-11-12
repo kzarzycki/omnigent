@@ -132,6 +132,7 @@ from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.telemetry import telemetry_guarded
 from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.server import (
+    open_questions,
     session_live_state,
     session_revival,
     session_subscriptions,
@@ -266,6 +267,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
     SessionLiveness,
+    _ancestor_session_ids,
     _antigravity_subagent_labels_from_body,
     _antigravity_subagent_title,
     _await_settled_managed_launch,
@@ -2571,6 +2573,10 @@ async def _answer_question(
     :raises OmnigentError: When this server cannot post the answer.
     """
     entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
+    if entry is None and conversation_store is not None:
+        # Asked before a server restart: the card is only in the store.
+        await open_questions.restore_session(conversation_store, session_id)
+        entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
     if entry is None or question_id in _answering_questions:
         return
     if post_answer is None:
@@ -2582,6 +2588,15 @@ async def _answer_question(
     _answering_questions.add(question_id)
     try:
         await post_answer(text)
+        if conversation_store is not None:
+            await open_questions.forget(
+                conversation_store,
+                session_id,
+                question_id,
+                ancestor_ids=await asyncio.to_thread(
+                    _ancestor_session_ids, conversation_store, session_id
+                ),
+            )
         _publish_elicitation_resolved(session_id, question_id, action=data.get("action"))
         if conversation_store is not None:
             await asyncio.to_thread(

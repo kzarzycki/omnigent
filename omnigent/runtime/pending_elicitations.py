@@ -197,6 +197,30 @@ def record_publish(conversation_id: str, event: dict[str, Any]) -> None:
         _notify_observer(conversation_id, event)
 
 
+def restore(conversation_id: str, event: dict[str, Any]) -> bool:
+    """
+    Re-add a stored prompt after a server restart, unless it is already tracked.
+
+    Unlike :func:`record_publish`, observers are not notified: the prompt is
+    not new, so nothing should wake or notify again.
+
+    :param conversation_id: Session that owns the prompt, e.g. ``"conv_abc123"``.
+    :param event: The stored ``response.elicitation_request`` event dict.
+    :returns: Whether the prompt was added.
+    """
+    elicitation_id = event.get("elicitation_id")
+    if not isinstance(elicitation_id, str) or not elicitation_id:
+        return False
+    with _lock:
+        ids = _pending.setdefault(conversation_id, {})
+        if elicitation_id in ids:
+            return False
+        ids[elicitation_id] = copy.deepcopy(event)
+        count = len(ids)
+    _notify_count_hook(conversation_id, count)
+    return True
+
+
 def _notify_observer(conversation_id: str, event: dict[str, Any]) -> None:
     """
     Invoke the registered elicitation observer, if any.
