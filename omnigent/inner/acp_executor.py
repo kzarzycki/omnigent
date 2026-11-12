@@ -145,6 +145,7 @@ _UPDATE_CONFIG_OPTION = "config_option_update"
 # not ``optionId``).
 _AGENT_METHOD_SET_CONFIG_OPTION = "session/set_config_option"
 _CONFIG_OPTION_MODEL = "model"
+_CONFIG_OPTION_EFFORT = "effort"
 
 # ACP ``session/set_model`` — the model-selection API an agent advertises by
 # returning a ``models`` object from ``session/new`` (``availableModels`` plus
@@ -266,6 +267,10 @@ class AcpAgentConfig:
     available_models: tuple[str, ...] = ()
     env_unset: tuple[str, ...] = ()
     default_model: str | None = None
+
+
+class _AcpEffortError(Exception):
+    """The agent refused the requested reasoning effort."""
 
 
 class _AcpModelSwitchError(RuntimeError):
@@ -485,6 +490,8 @@ class AcpExecutor(Executor):
         self._active_model: str | None = None
         self._model_config_option_id: str | None = None
         self._initial_model: str | None = None
+        # Last effort the agent accepted via its ``effort`` config option.
+        self._active_effort: str | None = None
         # Latches off once an agent proves it can't warm-switch, so we don't
         # retry a failing request on every turn.
         self._model_switch_supported: bool = True
@@ -1523,6 +1530,7 @@ class AcpExecutor(Executor):
         """Forget state that is only valid for the current ACP session."""
         self._session_id = None
         self._initial_model = None
+        self._active_effort = None
         self._system_prompt_sent = False
         self._tool_names.clear()
         self._tool_inputs.clear()
@@ -1762,6 +1770,29 @@ class AcpExecutor(Executor):
             "acp[%s] model set to %s (transcript kept)", self._config.name, self._active_model
         )
 
+    async def _apply_effort_override(self, session_id: str, effort: object) -> None:
+        """Send a reasoning effort to an agent that advertises an ``effort`` option.
+
+        Agents without the option ignore the effort, as before. A rejection
+        raises so the agent's message (which names the allowed levels) reaches
+        the user before any prompt is sent.
+
+        :param session_id: The live ACP session to configure.
+        :param effort: Requested level, or ``None`` for the agent's default.
+        """
+        if not isinstance(effort, str) or not effort:
+            return
+        if _CONFIG_OPTION_EFFORT not in self._config_option_ids or effort == self._active_effort:
+            return
+        response = await self._rpc(
+            _AGENT_METHOD_SET_CONFIG_OPTION,
+            {"sessionId": session_id, "configId": _CONFIG_OPTION_EFFORT, "value": effort},
+        )
+        if "error" in response:
+            error = response["error"]
+            raise _AcpEffortError(str(error.get("message", error)))
+        self._active_effort = effort
+
     async def _set_model_via_catalog(self, session_id: str, model: str) -> None:
         """Warm-switch the model with ``session/set_model``.
 
@@ -1889,6 +1920,16 @@ class AcpExecutor(Executor):
                 return
             self._model_switch_supported = False
             logger.warning("acp[%s] model switch failed: %s", self._config.name, exc)
+
+        requested_effort = (config.extra or {}).get("reasoning_effort") if config else None
+        try:
+            await self._apply_effort_override(session_id, requested_effort)
+        except _AcpEffortError as exc:
+            yield ExecutorError(
+                message=f"ACP effort selection failed: {exc} No prompt was sent.",
+                retryable=False,
+            )
+            return
 
         # A fresh ACP session holds no prior context. Captured before the latch
         # flips so we know whether to replay history into this turn.

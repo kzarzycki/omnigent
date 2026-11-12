@@ -2966,3 +2966,120 @@ async def test_start_process_guard_deleted_process_cwd_relative_cwd() -> None:
     msg = error_events[0].message
     assert "deleted" in msg, f"expected 'deleted' in: {msg!r}"
     assert "/workspace/project" in msg, f"expected path in: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# reasoning effort (session/set_config_option, only when the agent offers it)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_effort_override_sent_when_agent_advertises_effort_option() -> None:
+    """
+    A turn's ``reasoning_effort`` reaches an agent that advertises an ``effort`` option.
+
+    **What breaks if this fails**: a cloud session started with an effort runs at
+    the account default, and nothing tells the caller.
+    """
+    ex = AcpExecutor(AcpAgentConfig(command="x"))
+    ex._note_config_options([{"id": "effort", "type": "select", "currentValue": ""}])
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_rpc(method, params, timeout=30.0):
+        calls.append((method, params))
+        return {"result": {}}
+
+    ex._rpc = fake_rpc  # type: ignore[assignment]
+    await ex._apply_effort_override("s1", "low")
+    await ex._apply_effort_override("s1", "low")  # unchanged: not re-sent
+
+    assert calls == [
+        ("session/set_config_option", {"sessionId": "s1", "configId": "effort", "value": "low"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_effort_override_ignored_without_effort_option() -> None:
+    """An agent with no ``effort`` option never sees the request (generic ACP agents)."""
+    ex = AcpExecutor(AcpAgentConfig(command="x"))
+    ex._rpc = AsyncMock()  # type: ignore[assignment]
+    await ex._apply_effort_override("s1", "low")
+    ex._rpc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_effort_rejection_surfaces_agent_message_before_prompt() -> None:
+    """A refused level fails the turn with the agent's message and sends no prompt."""
+    ex = AcpExecutor(AcpAgentConfig(command="x"))
+    ex._note_config_options([{"id": "effort", "type": "select"}])
+
+    async def fake_rpc(method, params, timeout=30.0):
+        return {"error": {"message": "allowed levels: low, medium"}}
+
+    ex._rpc = fake_rpc  # type: ignore[assignment]
+    with pytest.raises(acp_executor_module._AcpEffortError, match="allowed levels: low, medium"):
+        await ex._apply_effort_override("s1", "ultra")
+    assert ex._active_effort is None
+
+
+@pytest.mark.asyncio
+async def test_unsupported_effort_refused_at_start_by_claude_cloud_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # not a git repo: a turn that reaches the prompt fails fast
+    """
+    A level the cloud CLI lacks fails the first turn, naming the allowed levels.
+
+    Runs the real bridge as the agent: the refusal comes before ``session/prompt``,
+    so no cloud session is created. Removing the effort step from ``run_turn`` lets
+    the turn reach the prompt instead (here: the "not a git repository" error).
+    """
+    bridge = Path(__file__).parents[2] / "integrations/claude-cloud-acp/claude_cloud_acp.py"
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join([sys.executable, str(bridge)]),
+            name="claude-cloud",
+            env_passthrough=("XDG_STATE_HOME",),
+        )
+    )
+    events = []
+    try:
+        async for event in ex.run_turn(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "",
+            ExecutorConfig(extra={"reasoning_effort": "ultra"}),
+        ):
+            events.append(event)
+    finally:
+        await ex.close()
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1
+    assert "low, medium, high, xhigh, max" in errors[0].message
+    assert not [e for e in events if isinstance(e, TextChunk)]
+
+
+@pytest.mark.asyncio
+async def test_effort_resent_to_the_new_session_after_a_reset() -> None:
+    """
+    A restarted agent gets a new ACP session, which must be sent the effort again.
+
+    **What breaks if this fails**: a fresh cloud session runs at the account
+    default while the cache says the requested level is already applied.
+    """
+    ex = AcpExecutor(AcpAgentConfig(command="x"))
+    ex._note_config_options([{"id": "effort", "type": "select"}])
+    sessions: list[str] = []
+
+    async def fake_rpc(method, params, timeout=30.0):
+        sessions.append(params["sessionId"])
+        return {"result": {}}
+
+    ex._rpc = fake_rpc  # type: ignore[assignment]
+    await ex._apply_effort_override("old", "low")
+    ex._reset_session_state()
+    await ex._apply_effort_override("new", "low")
+
+    assert sessions == ["old", "new"]

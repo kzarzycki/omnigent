@@ -121,7 +121,7 @@ def efforts_for_harness(harness: str | None) -> frozenset[str] | None:
     # of the package, and a module-level edge from here has produced an
     # import cycle before.
     from omnigent.harness_aliases import canonicalize_harness
-    from omnigent.harness_capabilities import EffortFamily
+    from omnigent.harness_capabilities import EffortFamily, IntegrationMode
     from omnigent.harness_plugins import harness_capabilities
 
     if harness is None:
@@ -130,6 +130,10 @@ def efforts_for_harness(harness: str | None) -> frozenset[str] | None:
     capabilities = harness_capabilities().get(canonical)
     if capabilities is None:
         return None
+    # An ACP agent decides for itself (it refuses a level it lacks), so any
+    # legal level reaches it instead of being dropped as "no effort plumbing".
+    if capabilities.integration_mode is IntegrationMode.ACP_SUBPROCESS:
+        return EFFORT_VALUES
     # Every family that has a vocabulary must be listed: an unmapped family
     # falls through to the empty set, which callers read as "known harness with
     # no effort plumbing" and silently drop the effort. A new EffortFamily
