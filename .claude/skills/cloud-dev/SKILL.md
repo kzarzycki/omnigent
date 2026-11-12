@@ -1,6 +1,6 @@
 ---
 name: cloud-dev
-description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on the bridge host, and the VM's limits. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
+description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on the bridge host, and the VM's limits. Also how a landing session in the `omnigent-land` environment lands a PR with no host. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
 ---
 
 # Developing in a Claude cloud session
@@ -17,7 +17,7 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 
 - Sessions use the `omnigent-dev` cloud environment (its ID:
   `fork-env.sh OMNIGENT_DEV_ENVIRONMENT_ID`). It holds no secrets and no signing key:
-  landing signs on a host.
+  landing signs on a host, or in the landing environment (below).
 - The host workspace a session starts from pins it in `.claude/settings.local.json`:
   `{"remote": {"defaultEnvironmentId": "<that ID>"}}`. Without that the
   session lands in the account's default environment, which lacks the tools below.
@@ -31,6 +31,43 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `name`, `description` and `config`, `config.init_script` set to the file's content
   (the call `.claude/skills/fork-sync/cloud-env.py` makes to create one, under the same
   headers).
+
+## Landing from the cloud
+
+A change can land with no host: the build session gates, and a separate landing session
+signs and fast-forwards `mine`. It needs kzarzycki/agent-skills#802 (`approvals.py`
+without GraphQL, `land` in a cloud session); until that ships, land through the host
+helper below, which stays the fallback.
+
+- **The landing environment** (`omnigent-land`) is used only by landing sessions. It
+  reaches GitHub only, with package registries off, and installs nothing. It sets
+  `OMNIGENT_LANDING_ENVIRONMENT=1`, which nothing else sets, and holds the signing key
+  the owner added by hand; `omnigent-dev` holds neither. Its public key is in
+  `allowed_signers`, so removing that line stops cloud landings and leaves host ones.
+- **The guard.** Its setup script, `landing-setup.sh`, puts `landing-guard.py` in Claude
+  Code's managed settings as a PreToolUse hook, where a checked-out branch can't drop it.
+  `landing-env.py` inlines the guard into that script when it creates the environment,
+  so setup reads nothing from the checkout and a branch can't swap the guard; after a
+  change to the guard, recreate the environment.
+  It refuses calls that would show the environment or the key (`env`, `printenv`,
+  `/proc/*/environ`, `os.environ`, a `*SIGNING_KEY*` name, bare `set` or `export -p`)
+  and acts only where `OMNIGENT_LANDING_ENVIRONMENT=1`. `land` reads the key itself:
+  no step of yours reads it, and a refusal is never worked around.
+- **The build session** runs the Gate and records it on the final head with
+  `approvals.py local-ci <pr> --record`, then hands the PR on.
+- **The landing session** builds nothing:
+  1. `cat /tmp/omnigent-land-init.log`; on a `FAILED` line, or none, land nothing.
+  2. Check out the PR head, which reuses the build session's gate pass for that tree.
+  3. `approvals.py check merge <pr>`: the approvals and the verifier's verdict.
+  4. `approvals.py land <pr> --wait`: it signs the squash with the environment's key,
+     checks it against `allowed_signers` and fast-forwards `mine`.
+  Run `approvals.py` with `python3`, not `uv run`, since `uv` would fetch PyYAML from a
+  registry the environment can't reach.
+- **Landing sessions stay private**: never share one.
+- **Creating the environment** is a host step: `landing-env.py` with the same login as
+  fork-sync's `cloud-env.py` (`landing-env.py --print` shows the request body). Then the
+  owner adds the key's variable in the environment's settings, and its public key to
+  dotagents' `allowed_signers` and each consumer's trust list.
 
 ## In the VM
 
@@ -66,6 +103,9 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   then `/tmp/agent-skills/engineering/skills/engineering-loop/`.
 
 ## On the host
+
+Until cloud landing works (above), and for whatever only a host can do, a host helper
+runs these steps.
 
 The engineering loop's scripts on the bridge host are in its agent-skills checkout, not an
 installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
