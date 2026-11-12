@@ -599,6 +599,21 @@ function PlainTextFallback({ text }: { text: string }) {
   );
 }
 
+interface MarkdownTreeNode {
+  type: string;
+  value?: string;
+  children?: MarkdownTreeNode[];
+}
+
+/** Remark plugin: turns raw HTML nodes into literal text so tags show as typed. */
+function remarkHtmlAsText() {
+  const convert = (node: MarkdownTreeNode) => {
+    if (node.type === "html") node.type = "text";
+    node.children?.forEach(convert);
+  };
+  return convert;
+}
+
 /**
  * Wraps `MessageResponse` with {@link WorkspacePathInlineCode} via Streamdown's
  * `inlineCode` slot — NOT `code` — so fenced code blocks keep their default
@@ -612,21 +627,29 @@ function PlainTextFallback({ text }: { text: string }) {
  * `remarkPlugins` prop *replaces* its defaults rather than merging, so we
  * extend `defaultRemarkPlugins` (which carries remark-gfm) — passing
  * `[remarkBreaks]` alone would silently drop GFM tables / strikethrough.
+ *
+ * When `escapeHtml` is set, raw HTML in the source shows as literal text instead
+ * of being parsed (for text an agent writes into a card, not a chat message).
  */
 export function FilePathAwareMessageResponse({
   children,
   breaks = false,
+  escapeHtml = false,
   ...props
-}: React.ComponentProps<typeof MessageResponse> & { breaks?: boolean }) {
+}: React.ComponentProps<typeof MessageResponse> & { breaks?: boolean; escapeHtml?: boolean }) {
   const components = FILE_PATH_AWARE_COMPONENTS;
 
   // Extend (don't replace) Streamdown's defaults so remark-gfm survives;
   // append remark-breaks only when `breaks` is requested. When `breaks` is
   // false we pass `undefined` so Streamdown uses its own defaults unchanged.
-  const remarkPlugins = useMemo(
-    () => (breaks ? [...Object.values(defaultRemarkPlugins), remarkBreaks] : undefined),
-    [breaks],
-  );
+  const remarkPlugins = useMemo(() => {
+    if (!breaks && !escapeHtml) return undefined;
+    return [
+      ...Object.values(defaultRemarkPlugins),
+      ...(breaks ? [remarkBreaks] : []),
+      ...(escapeHtml ? [remarkHtmlAsText] : []),
+    ];
+  }, [breaks, escapeHtml]);
 
   // Throttle the markdown so the live (still-growing) bubble re-parses a few
   // times per second instead of on every store commit. `children` is a string

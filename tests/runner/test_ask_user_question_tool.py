@@ -13,6 +13,7 @@ from omnigent.harnesses.codex_native.app_server import framework_approved_tools
 from omnigent.harnesses.cursor_native.bridge import _CURSOR_AUTO_APPROVE_TOOLS
 from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas, execute_tool
 from omnigent.spec.types import AgentSpec
+from omnigent.tools.builtins.ask_user_question import SysAskUserQuestionTool
 from omnigent.tools.manager import ToolManager
 
 _QUESTIONS = [{"question": "Ship it?", "options": [{"label": "Yes"}, {"label": "No"}]}]
@@ -80,3 +81,9 @@ async def test_a_refused_question_comes_back_as_a_tool_error() -> None:
         )
 
     assert json.loads(output) == {"error": "sys_ask_user_question returned 400: no options"}
+
+
+def test_description_tells_the_agent_the_text_takes_markdown() -> None:
+    description = SysAskUserQuestionTool.description()
+    assert "Markdown" in description
+    assert "option description" in description

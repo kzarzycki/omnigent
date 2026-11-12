@@ -5,6 +5,7 @@ import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-reac
 import { type ChangeEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
+import { FilePathAwareMessageResponse } from "./ChatMarkdown";
 
 /**
  * Map from question id/text → either a single selected label
@@ -210,8 +211,8 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
         className="flex flex-col gap-2 mb-2"
         data-testid="ask-user-question-section"
       >
-        <legend className="text-foreground text-ui font-medium flex items-center gap-2 mb-2">
-          {current.question}
+        <legend className="text-foreground text-ui font-medium mb-2">
+          <FilePathAwareMessageResponse escapeHtml>{current.question}</FilePathAwareMessageResponse>
         </legend>
         <div className="flex flex-col gap-2">
           {current.options.map((opt) => {
@@ -235,7 +236,14 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
                   <span className="flex flex-col">
                     <span>{opt.label}</span>
                     {opt.description && (
-                      <span className="text-muted-foreground text-sm">{opt.description}</span>
+                      <div
+                        className="text-muted-foreground text-sm"
+                        data-testid="ask-user-question-description"
+                      >
+                        <FilePathAwareMessageResponse escapeHtml>
+                          {opt.description}
+                        </FilePathAwareMessageResponse>
+                      </div>
                     )}
                   </span>
                 </label>
@@ -260,7 +268,14 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
                 <span className="flex flex-col">
                   <span>{opt.label}</span>
                   {opt.description && (
-                    <span className="text-muted-foreground text-sm">{opt.description}</span>
+                    <div
+                      className="text-muted-foreground text-sm"
+                      data-testid="ask-user-question-description"
+                    >
+                      <FilePathAwareMessageResponse escapeHtml>
+                        {opt.description}
+                      </FilePathAwareMessageResponse>
+                    </div>
                   )}
                 </span>
               </label>

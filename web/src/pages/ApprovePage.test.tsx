@@ -8,10 +8,15 @@
 // (bad status, network throw, missing params).
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovePage } from "./ApprovePage";
 import * as identity from "@/lib/identity";
+import {
+  expectMarkdownQuestionCard,
+  MARKDOWN_QUESTION_PAYLOAD,
+} from "@/test/markdownQuestionFixture";
 
 vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(),
@@ -28,12 +33,15 @@ function jsonResponse(body: unknown, { ok = true, status = 200 } = {}): Response
 
 /** Render the page at a concrete `/approve/:sessionId/:elicitationId` route. */
 function renderPage(sessionId = "sess_1", elicitationId = "eli_1") {
+  // Markdown links in a question card resolve previews through react-query.
   return render(
-    <MemoryRouter initialEntries={[`/approve/${sessionId}/${elicitationId}`]}>
-      <Routes>
-        <Route path="/approve/:sessionId/:elicitationId" element={<ApprovePage />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter initialEntries={[`/approve/${sessionId}/${elicitationId}`]}>
+        <Routes>
+          <Route path="/approve/:sessionId/:elicitationId" element={<ApprovePage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -213,6 +221,19 @@ describe("ApprovePage submission", () => {
         content: { "Ship it?": "Yes" },
       });
     });
+  });
+
+  it("renders Markdown in a question card opened from a notification link", async () => {
+    vi.mocked(identity.authenticatedFetch).mockResolvedValueOnce(
+      jsonResponse({
+        status: "pending",
+        message: "Pick a path",
+        policy_name: "sys_ask_user_question",
+        ask_user_question: MARKDOWN_QUESTION_PAYLOAD,
+      }),
+    );
+    renderPage("sess_q", "question_md");
+    await expectMarkdownQuestionCard();
   });
 
   it("shows a resolve error when the POST returns a non-ok status", async () => {

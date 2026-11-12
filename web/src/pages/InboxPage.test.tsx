@@ -17,6 +17,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { InboxPage } from "./InboxPage";
+import {
+  expectMarkdownQuestionCard,
+  MARKDOWN_QUESTION_PAYLOAD,
+} from "@/test/markdownQuestionFixture";
 import type * as approvalCard from "@/components/blocks/ApprovalCard";
 import type { ComponentProps } from "react";
 import type { Conversation } from "@/hooks/useConversations";
@@ -35,7 +39,7 @@ vi.mock("@/components/blocks/ApprovalCard", async (importActual) => {
   const actual = await importActual<typeof approvalCard>();
   return {
     ApprovalCard: (props: ComponentProps<typeof actual.ApprovalCard>) => {
-      if (props.nativeDelivery || props.permissionDirectories)
+      if (props.nativeDelivery || props.permissionDirectories || props.askUserQuestion)
         return <actual.ApprovalCard {...props} />;
       const { elicitationId, message, status, allowAutoMode, onSubmit, requester } = props;
       return (
@@ -184,6 +188,24 @@ function selectTab(name: string) {
   fireEvent.focus(tab);
   fireEvent.click(tab);
 }
+
+describe("InboxPage question cards", () => {
+  it("renders Markdown in a pending question card", async () => {
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation()]),
+    );
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("question_md", "Pick a path", {
+          policy_name: "sys_ask_user_question",
+          ask_user_question: MARKDOWN_QUESTION_PAYLOAD,
+        }),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+    await expectMarkdownQuestionCard();
+  });
+});
 
 describe("InboxPage states", () => {
   it("shows a loading state while the session list is still loading", () => {
