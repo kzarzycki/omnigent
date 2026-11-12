@@ -107,9 +107,10 @@ function GithubPreviewCard({ preview }: { preview: GithubLinkPreview }) {
 }
 
 /**
- * Wraps a chat link: a previewable one gets its state beside it and a hover
- * card with the details, loaded once the link scrolls into view; any other
- * link is returned unchanged and nothing is fetched for it.
+ * Wraps a chat link: a previewable one gets its state beside it and a card
+ * with the details, opened by hover or by tapping the state, loaded once the
+ * link scrolls into view; any other link is returned unchanged and nothing is
+ * fetched for it.
  *
  * @param href - The link's destination, already rebased under the base path.
  * @param children - The rendered anchor.
@@ -124,6 +125,8 @@ export function ChatLinkPreview({
   const github = parseGithubLink(href);
   const sessionId = github ? null : parseSessionLink(href, window.location.origin);
   const triggerRef = useRef<HTMLSpanElement>(null);
+  const labelRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
   const seen = useSeen(triggerRef, github !== null || sessionId !== null);
   // GitHub is read through the chat's session host; outside a session, ask nothing.
   const chatSessionId = useFileViewerConversationId();
@@ -131,6 +134,13 @@ export function ChatLinkPreview({
   const session = useSessionPreview(sessionId, seen);
 
   if (!github && !sessionId) return children;
+
+  // The label's own state: a GitHub link's, or the session's.
+  const label = preview?.state ? (
+    <PullRequestStatus state={preview.state} subject={SUBJECT[preview.kind]} />
+  ) : session ? (
+    <PullRequestStatus state={session.status} subject="Session" />
+  ) : null;
 
   const card = preview ? (
     <GithubPreviewCard preview={preview} />
@@ -142,20 +152,39 @@ export function ChatLinkPreview({
   ) : null;
 
   return (
-    <HoverCard openDelay={200} closeDelay={100}>
+    <HoverCard open={open} onOpenChange={setOpen} openDelay={200} closeDelay={100}>
       <HoverCardTrigger asChild>
         <span ref={triggerRef} className="inline">
           {children}
-          {preview?.state && (
-            <PullRequestStatus
-              state={preview.state}
-              subject={SUBJECT[preview.kind]}
-              className="ml-1 align-[0.1em]"
-            />
+          {label && (
+            // A button so touch and keyboard can open the card, which hover alone can't.
+            <button
+              ref={labelRef}
+              type="button"
+              className="ml-1 inline cursor-pointer rounded-full align-[0.1em] outline-offset-2"
+              aria-expanded={open}
+              onClick={() => setOpen((wasOpen) => !wasOpen)}
+              // Focus alone must not open the card, or Enter would then close it.
+              onFocus={(event) => event.stopPropagation()}
+            >
+              {label}
+            </button>
           )}
         </span>
       </HoverCardTrigger>
-      {card && <HoverCardContent className="w-72">{card}</HoverCardContent>}
+      {card && (
+        <HoverCardContent
+          className="w-72"
+          // A tap on the label toggles; it must not also count as an outside tap.
+          onPointerDownOutside={(event) => {
+            if (event.target instanceof Node && labelRef.current?.contains(event.target)) {
+              event.preventDefault();
+            }
+          }}
+        >
+          {card}
+        </HoverCardContent>
+      )}
     </HoverCard>
   );
 }

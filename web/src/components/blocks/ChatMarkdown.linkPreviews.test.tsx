@@ -196,3 +196,83 @@ describe("chat link previews at the fetch layer", () => {
     await waitFor(() => expect(screen.queryByTestId("session-link-preview")).toBeNull());
   });
 });
+
+const PULL_PREVIEW = {
+  preview: {
+    kind: "pull",
+    title: "Fix rendering on narrow screens",
+    state: "open",
+    labels: [{ name: "bug", color: "d73a4a", description: null }],
+    checks: { passed: 5, failed: 1, pending: 0 },
+  },
+};
+
+// A single finger tap on `target`, as a touch screen sends it.
+async function tap(target: Element): Promise<void> {
+  const user = userEvent.setup();
+  await user.pointer([{ keys: "[TouchA>]", target }, { keys: "[/TouchA]" }]);
+}
+
+describe("chat link preview on touch and keyboard", () => {
+  it("opens the card on a tap of the status label, not of the link text", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(PULL_PREVIEW));
+    renderMarkdown("See https://github.com/acme/app/pull/42");
+    const label = await screen.findByRole("button", { name: "Pull request status: Open" });
+
+    await tap(screen.getByRole("link", { name: "app#42" }));
+    expect(screen.queryByTestId("github-link-preview")).toBeNull();
+    expect(screen.getByRole("link", { name: "app#42" })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/app/pull/42",
+    );
+
+    await tap(label);
+    const card = await screen.findByTestId("github-link-preview");
+    expect(card).toHaveTextContent("Fix rendering on narrow screens");
+    expect(card).toHaveTextContent("bug");
+    expect(card).toHaveTextContent("Checks: 1 failed, 5 passed");
+  });
+
+  it("closes the card on a tap outside it or on the label again", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(PULL_PREVIEW));
+    renderMarkdown("See https://github.com/acme/app/pull/42");
+    const label = await screen.findByRole("button", { name: "Pull request status: Open" });
+
+    await tap(label);
+    await screen.findByTestId("github-link-preview");
+    await tap(label);
+    await waitFor(() => expect(screen.queryByTestId("github-link-preview")).toBeNull());
+
+    await tap(label);
+    await screen.findByTestId("github-link-preview");
+    await tap(document.body);
+    await waitFor(() => expect(screen.queryByTestId("github-link-preview")).toBeNull());
+  });
+
+  it("gives a session link a status label whose tap opens the session card", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ id: "conv_9", agent_id: "ag_1", title: "Auth refactor", status: "idle" }),
+    );
+    renderMarkdown(`[the session](${window.location.origin}/c/conv_9)`);
+
+    const label = await screen.findByRole("button", { name: "Session status: Idle" });
+    await tap(label);
+    expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
+  });
+
+  it("opens the card with Enter or Space on the focused label and closes it with Escape", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(PULL_PREVIEW));
+    renderMarkdown("See https://github.com/acme/app/pull/42");
+    const label = await screen.findByRole("button", { name: "Pull request status: Open" });
+    const user = userEvent.setup();
+
+    label.focus();
+    await user.keyboard("{Enter}");
+    await screen.findByTestId("github-link-preview");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("github-link-preview")).toBeNull());
+
+    await user.keyboard(" ");
+    await screen.findByTestId("github-link-preview");
+  });
+});
