@@ -113,6 +113,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.server import (
+    open_questions,
     presence,
     session_live_state,
     session_pull_requests,
@@ -1812,6 +1813,7 @@ def _pending_elicitation_snapshot_for_session(
     :returns: Pending elicitation event dicts suitable for
         :class:`SessionResponse.pending_elicitations`.
     """
+    open_questions.restore([conv])
     events = pending_elicitations.snapshot_for(conv.id)
     if not (set(pending_elicitations.pending_session_ids()) - {conv.id}):
         return events

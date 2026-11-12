@@ -17,6 +17,7 @@ from omnigent.runtime import (
     pending_elicitations,
 )
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.server import open_questions
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -43,9 +44,11 @@ from omnigent.server.routes._sessions.common import (
     set_server_runner_router,
 )
 from omnigent.server.routes._sessions.helpers import (
+    _ancestor_session_ids,
     _apply_pending_policy_ask_writes,
     _publish_elicitation_request_to_ancestors,
     _structured_ask_user_question,
+    _targeted_elicitation_event,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _resolve_elicitation,
@@ -56,6 +59,7 @@ from omnigent.server.schemas import (
     ElicitationResult,
 )
 from omnigent.stores import AgentStore, ConversationStore
+from omnigent.stores.conversation_store import OpenQuestionLimitError
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.tools.builtins.ask_user_question import QUESTION_ID_PREFIX, SysAskUserQuestionTool
 
@@ -202,8 +206,6 @@ def register_elicitations_routes(
                 "questions must hold at least one question with a text and labelled options",
                 code=ErrorCode.INVALID_INPUT,
             )
-        # ponytail: the card lives in the in-memory pending index, so a server
-        # restart drops it; persist questions with the session if that matters.
         question_id = f"{QUESTION_ID_PREFIX}{secrets.token_hex(16)}"
         params = ElicitationRequestParams(
             mode="form",
@@ -216,6 +218,23 @@ def register_elicitations_routes(
             elicitation_id=question_id,
             params=params,
         ).model_dump()
+        ancestor_ids = await asyncio.to_thread(
+            _ancestor_session_ids, conversation_store, session_id
+        )
+        try:
+            await open_questions.store(
+                conversation_store,
+                session_id,
+                question_id,
+                event_payload,
+                ancestor_ids=ancestor_ids,
+                mirror=_targeted_elicitation_event(event_payload, target_session_id=session_id),
+            )
+        except OpenQuestionLimitError as exc:
+            raise OmnigentError(
+                f"{exc}; wait for an answer before asking more",
+                code=ErrorCode.INVALID_INPUT,
+            ) from exc
         session_stream.publish(session_id, event_payload)
         await asyncio.to_thread(
             _publish_elicitation_request_to_ancestors,

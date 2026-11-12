@@ -81,6 +81,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.server import (
     managed_host_keepalive,
+    open_questions,
     session_live_state,
     session_pull_requests,
     session_recaps,
@@ -4907,6 +4908,8 @@ def create_app(
                             roots.append((conv, routed.client))
                         else:
                             prefetch_session_routing_catalogs(conv.id, conv, routed.client)
+                        # Questions asked before a restart are only in the store.
+                        open_questions.restore([conv])
                         # A crash can leave a persisted count absent from the live index.
                         session_live_state.persist_pending_count(
                             conv.id, pending_elicitations.count_for(conv.id)

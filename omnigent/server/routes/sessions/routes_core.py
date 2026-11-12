@@ -64,6 +64,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.server import open_questions
 from omnigent.server import session_pull_requests as server_prs
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -2319,6 +2320,7 @@ def register_core_routes(
             agent_names_by_id, harnesses_by_id = agent_metadata
             # In-memory lookup — no I/O, so batching avoids re-acquiring
             # the index's lock per row but otherwise has no DB cost.
+            open_questions.restore(list_batch)
             pending_counts = pending_elicitations.counts_for(conv_ids)
             comments_fingerprints = await _comments_fingerprints_for(conv_ids)
             pull_requests = await _pull_requests_for(conv_ids)
@@ -2552,6 +2554,7 @@ def register_core_routes(
             _pull_requests_for(conv_ids),
         )
         agent_names_by_id, harnesses_by_id = agent_metadata
+        open_questions.restore(convs)
         pending_counts = pending_elicitations.counts_for(conv_ids)
         items = [
             _build_session_list_item(
