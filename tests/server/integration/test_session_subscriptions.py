@@ -628,6 +628,32 @@ async def test_a_pending_notice_to_an_unsubscribed_session_is_dropped(
     assert poster.posted == []
 
 
+async def test_a_pending_notice_survives_its_target_being_archived(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    # What archiving does: flag the target, then drop the subscriptions aimed at it.
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == [
+        (
+            watcher,
+            f"[System: session worker ({target}) ended its turn (completed). "
+            "Read it with sys_session_get_history.]",
+        )
+    ]
+
+
 async def test_more_than_a_thousand_subscribers_all_hear_a_fan_out(
     outbox: tuple[SqlAlchemyConversationStore, str, str],
 ) -> None:
