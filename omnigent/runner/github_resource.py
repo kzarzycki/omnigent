@@ -2338,7 +2338,9 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     selects the account itself and is keyed by its hash. Without one ``gh`` uses its
     active account, keyed by that login; when the accounts can't be listed (an older
     ``gh``) or the active one isn't signed in properly, the identity is unknown and
-    ``cache_identity`` is ``None``: don't cache.
+    ``cache_identity`` is ``None``: don't cache. ``gh`` ranks an ambient ``GH_TOKEN`` /
+    ``GITHUB_TOKEN`` above its stored accounts (a sandbox scrubs them), so that token
+    names the identity when it is set.
     """
     authenticated, accounts = _list_accounts(root)
     logins = [
@@ -2351,6 +2353,11 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     token = _repo_token(root, f"github.com/{owner}/{repo}")
     if token:
         return True, token, "token:" + hashlib.sha256(token.encode()).hexdigest()
+    ambient = (
+        None if _in_sandbox() else os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    )
+    if ambient:
+        return True, None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
     if not accounts:
         return True, None, None
     # gh reads as the active account even when its auth check failed; only a
@@ -2413,7 +2420,9 @@ def github_link_preview(
         _logger.info("github_resource: link preview not read: %s", exc)
         return None
     ttl = _PREVIEW_TTL_SECONDS if signed_in else _PUBLIC_PREVIEW_TTL_SECONDS
-    if identity is not None:
+    # An account switched during the read may have answered it: remember it only if
+    # the identity is the same after.
+    if identity is not None and _read_identity(root, owner, repo)[2] == identity:
         with _preview_lock:
             if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
                 _preview_cache.clear()

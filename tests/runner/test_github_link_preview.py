@@ -56,6 +56,8 @@ class FakeGh:
 
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     github._preview_cache.clear()
     monkeypatch.setattr(github, "_public_blocked_until", 0.0)
     monkeypatch.setattr(github.shutil, "which", lambda _name: "/usr/bin/gh")
@@ -494,4 +496,46 @@ def test_a_failed_active_account_is_not_cached_under_another_login(
     fake.auth, fake.api = _signed_in_as("bob"), readable
     preview = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
 
+    assert preview is not None and preview["title"] == "Private"
+
+
+def test_an_ambient_gh_token_names_the_identity_over_the_active_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: None)
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "token-one")
+
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is not None
+    # Same active account, but gh now runs as another token's owner.
+    monkeypatch.setenv("GH_TOKEN", "token-two")
+    fake.api = {}
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+
+
+def test_a_result_read_while_the_account_switched_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    fake = _install(monkeypatch, auth=_signed_in_as("alice"), api=private)
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: None)
+    original = fake.__call__
+    switched = []
+
+    def switch_before_the_read(argv: list[str], **kwargs: Any) -> tuple[int | None, str, str]:
+        if argv[0] == "api" and not switched:
+            switched.append(True)
+            # Bob became active after the identity was decided, and the read ran as Bob.
+            fake.auth, fake.api = _signed_in_as("bob"), {}
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(github, "_gh", switch_before_the_read)
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+
+    # Alice is active again: Bob's refusal must not be remembered under her name.
+    fake.auth, fake.api = _signed_in_as("alice"), private
+    preview = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
     assert preview is not None and preview["title"] == "Private"
