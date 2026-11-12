@@ -4886,6 +4886,7 @@ _SCHEDULED_TASK_CREATE_FIELDS = (
     "session_mode",
     "session_id",
     "archive_when_done",
+    "max_cost_usd",
     "workspace",
     "host_id",
     "execution_target",
