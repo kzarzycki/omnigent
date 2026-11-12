@@ -529,6 +529,22 @@ omnigent login https://your-host    # sign in once; run / attach / host reuse th
 omnigent host  https://your-host    # new sessions can now run on this machine
 ```
 
+When the host daemon is stopped with `SIGTERM` (how a service manager restarts
+it), it ends its runners and their sessions by default. To keep sessions running
+through a daemon restart instead, set `host.keep_runners_on_restart` in
+`~/.omnigent/config.yaml`:
+
+```yaml
+host:
+  keep_runners_on_restart: true   # default false
+```
+
+With it on, the stopped daemon leaves its runners serving and the next daemon
+for the same server adopts them; a busy session stays on the old runner build
+until it idles out (`runner.idle_timeout_s`). The daemon reads the key when it
+starts, and refuses to start when the value is not `true` or `false`.
+`omnigent host stop` always ends the runners.
+
 > [!TIP]
 > On your own network you don't need a deploy. Open your machine's LAN
 > address on your phone (e.g. `http://192.168.x.x:6767`).

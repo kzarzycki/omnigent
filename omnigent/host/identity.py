@@ -80,6 +80,29 @@ def export_configured_slice_key(path: Path) -> None:
         os.environ[HOST_SLICE_KEY_ENABLED_ENV_VAR] = "1" if enabled else "0"
 
 
+def load_keep_runners_on_restart(path: Path) -> bool:
+    """Read ``host.keep_runners_on_restart``: whether runners outlive a ``SIGTERM``.
+
+    :param path: The host's ``config.yaml``.
+    :returns: The configured value; ``False`` when the file or key is missing.
+    :raises ValueError: If the value is not a boolean.
+    """
+    if not path.exists():
+        return False
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    host_section = cfg.get("host") if isinstance(cfg, dict) else None
+    if not isinstance(host_section, dict) or "keep_runners_on_restart" not in host_section:
+        return False
+    # An explicit null or blank value is invalid, not the same as a missing key.
+    value = host_section["keep_runners_on_restart"]
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"host.keep_runners_on_restart in {path} must be true or false, got {value!r}."
+        )
+    return value
+
+
 def host_config_path(path: Path | None = None) -> Path:
     """Return the effective config path used for host identity."""
     return path if path is not None else global_config_path(CONFIG_PATH)

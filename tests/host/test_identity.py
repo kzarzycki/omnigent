@@ -14,6 +14,7 @@ from omnigent.host.identity import (
     export_configured_slice_key,
     host_identity_env_override_active,
     load_host_identity_if_present,
+    load_keep_runners_on_restart,
     load_or_create_host_identity,
     reset_host_id,
 )
@@ -471,3 +472,40 @@ def test_export_configured_slice_key_defers_to_the_env_var(
     export_configured_slice_key(path)
 
     assert os.environ.get(HOST_SLICE_KEY_ENABLED_ENV_VAR) == expected
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (None, False),
+        ({"host": {"name": "box"}}, False),
+        ({"host": {"keep_runners_on_restart": True}}, True),
+        ({"host": {"keep_runners_on_restart": False}}, False),
+    ],
+    ids=["no-config", "key-missing", "on", "off"],
+)
+def test_load_keep_runners_on_restart(
+    tmp_path: Path, config: dict[str, object] | None, expected: bool
+) -> None:
+    """A missing file or key reads as off; a boolean reads as itself."""
+    path = tmp_path / "config.yaml"
+    if config is not None:
+        path.write_text(yaml.safe_dump(config))
+    assert load_keep_runners_on_restart(path) is expected
+
+
+@pytest.mark.parametrize("value", ["yes please", 1, "true", ["on"], None])
+def test_load_keep_runners_on_restart_refuses_a_non_boolean(tmp_path: Path, value: object) -> None:
+    """Any non-boolean value is refused with a message naming the key."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"host": {"keep_runners_on_restart": value}}))
+    with pytest.raises(ValueError, match=r"host\.keep_runners_on_restart"):
+        load_keep_runners_on_restart(path)
+
+
+def test_load_keep_runners_on_restart_refuses_a_blank_value(tmp_path: Path) -> None:
+    """A present key with no value is refused, unlike a missing key."""
+    path = tmp_path / "config.yaml"
+    path.write_text("host:\n  keep_runners_on_restart:\n")
+    with pytest.raises(ValueError, match=r"host\.keep_runners_on_restart"):
+        load_keep_runners_on_restart(path)

@@ -4156,6 +4156,7 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
             HostIdentity(host_id="host_test_connect", name="test-laptop"),
             "https://app.example.databricks.com",
             lifecycle_lock=_StubLifecycleLock(),  # type: ignore[arg-type]
+            keep_runners_on_restart=True,
         )
 
         await host.run()
@@ -4222,6 +4223,7 @@ host = HostProcess(
     HostIdentity(host_id="host_test_connect", name="test-laptop"),
     "https://app.example.databricks.com",
     lifecycle_lock=Lock(),
+    keep_runners_on_restart=os.environ["KEEP_RUNNERS_ON_RESTART"] == "1",
 )
 host._zygote_disabled = True
 host._ensure_model_options_prewarm = lambda: None
@@ -4245,16 +4247,22 @@ except HostConnectError:
 """
 
 
-@pytest.mark.parametrize("ending", ["exception", "sigterm"])
+@pytest.mark.parametrize(
+    ("ending", "keep_runners_on_restart"),
+    [("exception", True), ("sigterm", True), ("sigterm", False)],
+    ids=["exception", "sigterm-key-on", "sigterm-key-off"],
+)
 def test_daemon_shutdown_ends_runner_sessions_unless_it_released_them(
-    tmp_path: Path, ending: str
+    tmp_path: Path, ending: str, keep_runners_on_restart: bool
 ) -> None:
     """A daemon that stops on its own ends what its runners left; a SIGTERM leaves them.
 
     The runner stand-in leaves a job in its session and a harness leading a
     session of its own. An exception out of ``run()`` takes the daemon's own
-    shutdown, which must end both; a service manager's SIGTERM releases the
-    runners to a successor, so nothing of theirs may be swept.
+    shutdown, which must end both; with ``host.keep_runners_on_restart`` a
+    service manager's SIGTERM releases the runners to a successor, so nothing
+    of theirs may be swept. With the key off the SIGTERM leaves the registry
+    unreleased, which ends real runners (``tests/e2e/test_host_e2e.py``).
     """
     host = subprocess.Popen(
         [sys.executable, "-c", _SHUTDOWN_CHILD],
@@ -4262,7 +4270,11 @@ def test_daemon_shutdown_ends_runner_sessions_unless_it_released_them(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "OMNIGENT_DATA_DIR": str(tmp_path)},
+        env={
+            **os.environ,
+            "OMNIGENT_DATA_DIR": str(tmp_path),
+            "KEEP_RUNNERS_ON_RESTART": "1" if keep_runners_on_restart else "0",
+        },
     )
     started: list[int] = []
     try:
@@ -4279,6 +4291,9 @@ def test_daemon_shutdown_ends_runner_sessions_unless_it_released_them(
         code = host.wait(timeout=30)
 
         left = {pid: process_start_stamp(pid) is not None for pid in started}
+        registry = read_registry(runner_registry_path("test-target", base_dir=tmp_path))
+        assert registry is not None
+        assert registry.owner.released is (ending == "sigterm" and keep_runners_on_restart)
         if ending == "sigterm":
             assert code == -signal.SIGTERM
             assert left == {runner_pid: True, job_pid: True, harness_pid: True}
@@ -8072,6 +8087,36 @@ async def test_run_host_process_invalid_host_id_exits_actionably(
     assert "Could not start host" in err
     assert "OMNIGENT_HOST_ID" in err
     assert "not-a-uuid" in err
+
+
+@pytest.mark.parametrize("value", ["yes please", 1, "true", None])
+def test_run_host_process_refuses_an_invalid_keep_runners_on_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    value: object,
+) -> None:
+    """A non-boolean ``host.keep_runners_on_restart`` stops the start, naming the key."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / ".omnigent"))
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "host:\n"
+        "  host_id: 0123456789abcdef0123456789abcdef\n"
+        "  name: test-host\n"
+        f"  keep_runners_on_restart: {json.dumps(value)}\n"
+    )
+    spy = _ConnectSpy([asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_host_process(server_url="https://srv.example.com", config_path=config)
+
+    assert excinfo.value.code == HOST_FATAL_EXIT_CODE
+    err = capsys.readouterr().err
+    assert "Could not start host" in err
+    assert "host.keep_runners_on_restart" in err
+    assert spy.calls == []
 
 
 def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
