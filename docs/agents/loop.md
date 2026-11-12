@@ -15,11 +15,14 @@ Workers code and test in Claude cloud sessions in the `omnigent-dev` environment
 ```yaml
 loop:
   ci: false
+  delegate: all
 
 land:
   signed_squash_to: mine
   allowed_signers: ~/.config/omnigent/allowed_signers
 ```
+
+`loop.delegate: all`: the delegated approver's go counts for a PR into `mine` too, so a low or medium risk PR lands after the gate and the verifier without waiting for the owner. A `risk:high` PR still waits for the owner's own go on its head: the tool would accept the delegate's go there, and the delegated approver doesn't give one. Undo: delete the line, which also withdraws the delegate's goes on open PRs.
 
 `land`: every machine's `omnigent-update` and the nightly sync refuse a `mine` head that a key outside the allowed signers signed, and GitHub signs its own merges with GitHub's key. So `approvals.py land` squashes and signs the PR in the landing host's checkout (AGENTS.md, This fork: landing PRs into `mine`).
 
