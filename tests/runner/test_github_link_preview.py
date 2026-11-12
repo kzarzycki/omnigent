@@ -470,3 +470,28 @@ def test_an_older_gh_with_a_login_reads_through_gh(monkeypatch: pytest.MonkeyPat
 
     assert preview is not None and preview["title"] == "Private"
     assert any(argv[0] == "api" for argv, _ in fake.calls)
+
+
+def test_a_failed_active_account_is_not_cached_under_another_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readable = dict([_api("/repos/acme/secret/issues/1", {"title": "Private", "state": "open"})])
+    both = json.dumps(
+        {
+            "hosts": {
+                "github.com": [
+                    {"login": "alice", "active": True, "state": "error"},
+                    {"login": "bob", "active": False, "state": "success"},
+                ]
+            }
+        }
+    )
+    fake = _install(monkeypatch, auth=both, api={})
+    monkeypatch.setattr(github, "_repo_token", lambda _root, _repo: None)
+
+    # gh reads as alice (active, failing): a refusal must not be remembered for bob.
+    assert github.github_link_preview("/workspace", "acme", "secret", "issue", "1") is None
+    fake.auth, fake.api = _signed_in_as("bob"), readable
+    preview = github.github_link_preview("/workspace", "acme", "secret", "issue", "1")
+
+    assert preview is not None and preview["title"] == "Private"

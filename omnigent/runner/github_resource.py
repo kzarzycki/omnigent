@@ -2337,7 +2337,8 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     The read and the cache key both come from this, so they cannot disagree. A token
     selects the account itself and is keyed by its hash. Without one ``gh`` uses its
     active account, keyed by that login; when the accounts can't be listed (an older
-    ``gh``) the identity is unknown and ``cache_identity`` is ``None``: don't cache.
+    ``gh``) or the active one isn't signed in properly, the identity is unknown and
+    ``cache_identity`` is ``None``: don't cache.
     """
     authenticated, accounts = _list_accounts(root)
     logins = [
@@ -2352,7 +2353,11 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
         return True, token, "token:" + hashlib.sha256(token.encode()).hexdigest()
     if not accounts:
         return True, None, None
-    active = next((a for a in logins if a.get("active")), logins[0])
+    # gh reads as the active account even when its auth check failed; only a
+    # working active account names the identity, else don't cache.
+    active = next((a for a in accounts if a.get("host") == "github.com" and a.get("active")), None)
+    if active is None or active.get("state") != "success":
+        return True, None, None
     return True, None, f"active:{active.get('login')}"
 
 
