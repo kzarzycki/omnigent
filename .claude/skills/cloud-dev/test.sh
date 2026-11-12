@@ -42,3 +42,32 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
   || { echo "!! fork-env.sh: $(cat "$tmp/err" 2>/dev/null)"; exit 1; }
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
+# landing-setup.sh: installs the guard as a managed PreToolUse hook, keeps other managed
+# settings, adds it once on a rerun, and logs FAILED with no checkout to copy it from.
+land() {  # land: landing-setup.sh with its paths under $tmp
+  sed -e "s#/tmp/omnigent-land-init.log#$tmp/land.log#" -e "s#/etc/claude-code#$tmp/managed#" \
+    -e "s#/home/user#$tmp/landuser#g" "$here/landing-setup.sh" > "$tmp/landing-setup.sh"
+  bash "$tmp/landing-setup.sh" >/dev/null 2>&1
+}
+mkdir -p "$tmp/landuser/omnigent/.claude/skills/cloud-dev" "$tmp/managed"
+land; rc=$?
+[ "$rc" = 0 ] && grep -q "omnigent-land init FAILED: no landing-guard.py" "$tmp/land.log" \
+  || { echo "!! landing-setup without a checkout: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
+cp "$here/landing-guard.py" "$tmp/landuser/omnigent/.claude/skills/cloud-dev/"
+echo '{"permissions": {"deny": ["WebFetch"]}}' > "$tmp/managed/managed-settings.json"
+land && land; rc=$?
+hook=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["permissions"]["deny"] == ["WebFetch"]
+entries = s["hooks"]["PreToolUse"]; assert len(entries) == 1 and entries[0]["matcher"] == "*", entries
+print(entries[0]["hooks"][0]["command"])' "$tmp/managed/managed-settings.json") \
+  && [ "$rc" = 0 ] && grep -q "omnigent-land init done" "$tmp/land.log" \
+  || { echo "!! landing-setup: exit $rc, log: $(cat "$tmp/land.log")"; exit 1; }
+call='{"tool_name": "Bash", "tool_input": {"command": "printenv"}}'
+echo "$call" | OMNIGENT_LANDING_ENVIRONMENT=1 $hook 2>/dev/null; rc=$?
+echo "$call" | env -u OMNIGENT_LANDING_ENVIRONMENT $hook; outside=$?
+[ "$rc" = 2 ] && [ "$outside" = 0 ] \
+  || { echo "!! the installed hook ($hook) did not refuse printenv only in the landing environment"; exit 1; }
+echo "cloud-dev landing-setup.sh: ok"
+python3 "$here/landing-guard-test.py" -q 2>&1 | tail -1 | grep -qx OK \
+  || { python3 "$here/landing-guard-test.py"; exit 1; }
+echo "cloud-dev landing-guard.py: ok"
+python3 "$here/landing-env.py" --selftest || exit 1

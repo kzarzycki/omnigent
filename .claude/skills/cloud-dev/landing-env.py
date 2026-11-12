@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Create the fork's landing-only Claude cloud environment, without a key.
+
+    landing-env.py [NAME]       NAME defaults to omnigent-land
+    landing-env.py --print      the request body, sent nowhere
+    landing-env.py --selftest
+
+Run it on the machine whose `claude` login owns the cloud sessions, with
+CLAUDE_CLOUD_BRIDGE set to the claude-cloud-acp directory, as fork-sync's
+cloud-env.py, whose API call it reuses. The environment's network reaches GitHub
+only, package registries off; its setup script is landing-setup.sh, which installs
+no packages; it sets OMNIGENT_LANDING_ENVIRONMENT=1, the marker landing-guard.py
+acts on. It holds no key: the owner adds the signing key's variable by hand in the
+environment's settings, and no script generates or reads it.
+"""
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+GITHUB_HOSTS = ["github.com", "api.github.com"]
+MARKER = "OMNIGENT_LANDING_ENVIRONMENT"
+
+
+def body(name: str, init_script: str) -> dict:
+    return {
+        "name": name,
+        "kind": "anthropic_cloud",
+        "description": "omnigent landing - GitHub only, no package registries, owner-added signing key",
+        "config": {
+            "environment_type": "anthropic",
+            "cwd": "/home/user",
+            "init_script": init_script,
+            "environment": {MARKER: "1"},
+            "languages": [{"name": "python", "version": "3.11"}],
+            "network_config": {"allowed_hosts": GITHUB_HOSTS, "allow_default_hosts": False},
+        },
+    }
+
+
+def request_body(name: str) -> dict:
+    return body(name, (HERE / "landing-setup.sh").read_text())
+
+
+def main(name: str) -> None:
+    spec = importlib.util.spec_from_file_location("cloud_env", HERE.parent / "fork-sync" / "cloud-env.py")
+    cloud_env = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cloud_env)
+    existing = cloud_env.api("/v1/environment_providers?limit=100").get("environments", [])
+    if any(env.get("name") == name for env in existing):
+        sys.exit(f"!! an environment named {name!r} exists; pick another name")
+    created = cloud_env.api("/v1/environment_providers/cloud/create", request_body(name))
+    print(f"environment: {created.get('environment_id')} ({name})")
+
+
+def selftest() -> None:
+    config = request_body("omnigent-land")["config"]
+    assert config["environment"] == {MARKER: "1"}, "the marker is the only variable: no key"
+    assert config["network_config"] == {"allowed_hosts": GITHUB_HOSTS, "allow_default_hosts": False}
+    assert "landing-guard.py" in config["init_script"]
+    assert not any(word in config["init_script"] for word in ("apt-get", "pip ", "npm ", "uv tool"))
+    print("landing-env selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        selftest()
+    elif sys.argv[1:] == ["--print"]:
+        print(json.dumps(request_body("omnigent-land"), indent=2))
+    else:
+        main(sys.argv[1] if len(sys.argv) > 1 else "omnigent-land")
