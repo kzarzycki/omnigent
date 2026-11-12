@@ -275,6 +275,8 @@ class ServerInfoResponse(BaseModel):
     scheduled_task_projects: bool = False
     # Effort levels the ``blocked_efforts`` setting hides from every picker.
     blocked_efforts: list[str] = []
+    # Model ids ``blocked_models`` hides from the web's built-in model lists.
+    blocked_models: list[str] = []
     branding: BrandingInfo
 
 
@@ -3503,6 +3505,7 @@ def create_app(
                 },
                 "scheduled_task_projects": project_store is not None,
                 "blocked_efforts": sorted(current_model_block_list().efforts),
+                "blocked_models": sorted(current_model_block_list().models),
                 "branding": branding_snapshot.config(),
             }
         )

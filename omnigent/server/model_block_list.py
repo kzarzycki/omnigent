@@ -224,7 +224,9 @@ async def refuse_blocked_start_defaults(
     """Refuse a start whose default model or effort is blocked.
 
     A start that names no model runs the agent's model, else its inference
-    binding's default, else the harness's own default on the host.
+    binding's default, else the harness's own default on the host. While
+    ``blocked_models`` is set, a start whose default cannot be learned (no
+    host, no answer, no catalog for the harness) is refused too.
 
     :param host_registry: Live host connections, or ``None``.
     :param host_id: Target host, or ``None`` (e.g. a sandbox).
@@ -233,7 +235,7 @@ async def refuse_blocked_start_defaults(
     :param inference_snapshot: The session's captured inference configuration.
     :param model_override: The model the request chose, if any.
     :param reasoning_effort: The effort the request chose, if any.
-    :raises OmnigentError: When the default is blocked.
+    :raises OmnigentError: When the default is blocked or cannot be learned.
     """
     block_list = current_model_block_list()
     if not block_list:
@@ -250,4 +252,11 @@ async def refuse_blocked_start_defaults(
         default_model = binding.default_model if binding is not None else None
     if default_model is None and harness and host_registry is not None and host_id:
         default_model = await _host_default_model(host_registry, host_id, harness)
+    if default_model is None:
+        # An unknown default might be a blocked one, so the start names its model.
+        raise OmnigentError(
+            f"Cannot tell whether the default model of harness {harness or 'auto'!r} is "
+            f"blocked by the server setting {BLOCKED_MODELS_KEY!r}; choose a model",
+            code=ErrorCode.INVALID_INPUT,
+        )
     block_list.refuse_blocked(model=default_model)

@@ -504,7 +504,11 @@ Blocked entries are left out of the web UI's model and effort pickers. A
 session start or a model/effort switch that names one (through the API,
 `sys_session_create`, a scheduled task or a sub-agent) is refused with an
 error naming the entry and the setting. So is a start that names no model when
-the agent's or the harness's default model is blocked: set another default. A
+the agent's or the harness's default model is blocked: set another default.
+While `blocked_models` is set, a start that names no model is also refused when
+Omnigent cannot learn the default (the host is offline or does not answer, the
+harness has no model catalog, or a sandbox has no configured default); choose a
+model for it. A
 session already running on an entry that is blocked later keeps running; the
 block applies to its next start or switch. Restart the server after a change.
 

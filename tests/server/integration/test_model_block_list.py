@@ -63,8 +63,8 @@ async def test_create_refuses_a_blocked_model_or_effort(
 
     _assert_refused(await client.post("/v1/sessions", json=body), value, setting)
 
-    allowed = {"model_override": ALLOWED_MODEL, "reasoning_effort": "high"}[field]
-    resp = await client.post("/v1/sessions", json={**body, field: allowed})
+    allowed = {"model_override": ALLOWED_MODEL, "reasoning_effort": "high"}
+    resp = await client.post("/v1/sessions", json={**body, **allowed})
     assert resp.status_code == 201, resp.text
 
 

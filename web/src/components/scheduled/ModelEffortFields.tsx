@@ -17,7 +17,7 @@
 // from the create/update body so the fire path uses the agent's configured
 // model + effort.
 
-import { withoutBlockedEfforts } from "@/lib/capabilities";
+import { withoutBlockedEfforts, withoutBlockedModels } from "@/lib/capabilities";
 import { Label } from "@/components/scheduled/Label";
 import {
   Select,
@@ -77,7 +77,7 @@ export function ModelEffortFields({
   const modelOptions =
     hostModelOptions && hostModelOptions.length > 0
       ? hostModelOptions.map((o) => ({ id: o.id, label: o.displayName ?? o.id }))
-      : CLAUDE_NATIVE_MODELS.map((m) => ({ id: m.id, label: m.label }));
+      : withoutBlockedModels(CLAUDE_NATIVE_MODELS).map((m) => ({ id: m.id, label: m.label }));
 
   return (
     <div className="flex flex-col gap-3 sm:gap-4">

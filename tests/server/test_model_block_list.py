@@ -112,3 +112,57 @@ async def test_a_blocked_host_default_model_is_refused(monkeypatch: pytest.Monke
         **start, model_override="fixture-model-mini"
     )
     assert asked == ["claude-native"]
+
+
+@pytest.mark.parametrize(
+    ("host_id", "answer"),
+    [
+        (None, None),
+        ("host_fixture", {"status": "unsupported", "models": []}),
+        ("host_fixture", {"status": "ok", "models": CATALOG[1:]}),
+        ("host_fixture", TimeoutError()),
+    ],
+    ids=["no-host", "no-catalog", "no-default-row", "no-answer"],
+)
+async def test_a_start_whose_default_cannot_be_learned_is_refused(
+    monkeypatch: pytest.MonkeyPatch, host_id: str | None, answer: Any
+) -> None:
+    """An unknown default might be a blocked one, so such a start must name its model."""
+
+    async def _host_options(**_kwargs: Any) -> dict[str, Any]:
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._host_model_options.request_host_model_options", _host_options
+    )
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        parse_model_block_list({"blocked_models": ["fixture-model-opus"]}),
+    )
+
+    with pytest.raises(OmnigentError, match="Cannot tell whether the default model of harness "):
+        await model_block_list.refuse_blocked_start_defaults(
+            host_registry=_Registry(),
+            host_id=host_id,
+            harness="cursor-native",
+            spec=None,
+            inference_snapshot=None,
+            model_override=None,
+            reasoning_effort=None,
+        )
+    # Only a blocked model list makes the default matter.
+    monkeypatch.setattr(
+        model_block_list, "_current", parse_model_block_list({"blocked_efforts": ["max"]})
+    )
+    await model_block_list.refuse_blocked_start_defaults(
+        host_registry=_Registry(),
+        host_id=host_id,
+        harness="cursor-native",
+        spec=None,
+        inference_snapshot=None,
+        model_override=None,
+        reasoning_effort=None,
+    )

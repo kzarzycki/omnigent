@@ -26,7 +26,7 @@ import { useProjectConfig, useUpdateProjectConfig } from "@/hooks/useConversatio
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { selectableSessionAgents } from "@/lib/agentGrouping";
-import { sandboxOptionLabel } from "@/lib/capabilities";
+import { sandboxOptionLabel, withoutBlockedModels } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { readAlwaysUseWorktree } from "@/lib/worktreeDefaultPreferences";
 import { SANDBOX_HOST_CHOICE } from "@/lib/hostPreferences";
@@ -287,7 +287,7 @@ export function ProjectSettingsDialog({
     }));
     if (live.length > 0) return live;
     return selectedNativeSpec?.harness === "claude-native"
-      ? CLAUDE_NATIVE_MODELS.map((m) => ({ id: m.id, label: m.label }))
+      ? withoutBlockedModels(CLAUDE_NATIVE_MODELS).map((m) => ({ id: m.id, label: m.label }))
       : [];
   }, [hostModelOptions, selectedNativeSpec]);
   // Keep a stored model the current options don't list as a labeled fallback

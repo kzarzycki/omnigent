@@ -147,6 +147,7 @@ import {
   sandboxOptionLabel,
   sandboxProviderOptions,
   withoutBlockedEfforts,
+  withoutBlockedModels,
 } from "@/lib/capabilities";
 import { useHeading, usePoweredBy } from "@/lib/branding";
 import {
@@ -3420,7 +3421,10 @@ export function NewChatLandingScreen() {
         ? (sandboxCatalog ??
           (sandboxCatalogPending || sandboxCatalogError
             ? []
-            : CLAUDE_NATIVE_MODELS.map((model) => ({ id: model.id, displayName: model.id }))))
+            : withoutBlockedModels(CLAUDE_NATIVE_MODELS).map((model) => ({
+                id: model.id,
+                displayName: model.id,
+              }))))
         : (availableClaudeModels ?? []).map((option) => ({
             id: option.id,
             model: option.model,

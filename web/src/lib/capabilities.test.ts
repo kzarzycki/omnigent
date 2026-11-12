@@ -365,3 +365,19 @@ describe("blocked efforts", () => {
     ]);
   });
 });
+
+describe("blocked models", () => {
+  it("matches built-in ids as the server does: no case, no variant suffix", async () => {
+    const { withoutBlockedModels } = await import("./capabilities");
+    const rows = [{ id: "opus" }, { id: "Sonnet" }, { id: "haiku" }];
+    expect(withoutBlockedModels(rows, ["OPUS", "sonnet[1m]"])).toEqual([{ id: "haiku" }]);
+    expect(withoutBlockedModels(rows, [])).toBe(rows);
+  });
+
+  it("parses blocked_models from the probe", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ blocked_models: ["opus", 1] }));
+    const { resolveServerInfo, withoutBlockedModels } = await import("./capabilities");
+    expect((await resolveServerInfo()).blocked_models).toEqual(["opus"]);
+    expect(withoutBlockedModels([{ id: "opus" }, { id: "haiku" }])).toEqual([{ id: "haiku" }]);
+  });
+});

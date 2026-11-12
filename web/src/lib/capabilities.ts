@@ -261,6 +261,8 @@ export interface ServerInfo {
   scheduled_task_projects?: boolean;
   /** Effort levels the server's ``blocked_efforts`` setting hides; absent on older servers. */
   blocked_efforts?: string[];
+  /** Model ids the server's ``blocked_models`` setting hides; absent on older servers. */
+  blocked_models?: string[];
   /** Operator branding, or null when the built-in identity should be used. */
   branding?: Branding | null;
 }
@@ -481,6 +483,9 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           blocked_efforts: Array.isArray(data.blocked_efforts)
             ? data.blocked_efforts.filter((e): e is string => typeof e === "string")
             : [],
+          blocked_models: Array.isArray(data.blocked_models)
+            ? data.blocked_models.filter((m): m is string => typeof m === "string")
+            : [],
           branding: parseBranding(data.branding),
         };
         return cachedServerInfo;
@@ -515,6 +520,31 @@ export function getCachedServerInfo(): ServerInfo | null {
  *     ``blocked_efforts``, which the app resolves before its first render.
  * :returns: *levels* without the blocked entries, or *levels* itself when none are.
  */
+/** A model id compared as the server does: no case, no ``[1m]``-style variant suffix. */
+function blockKey(model: string): string {
+  return model
+    .trim()
+    .replace(/\[[^[\]]*\]$/, "")
+    .toLowerCase();
+}
+
+/**
+ * Drop the models the server blocks from a built-in model list.
+ *
+ * :param models: Picker rows keyed by ``id`` (an alias such as ``"opus"``).
+ * :param blocked: Blocked model ids; defaults to the cached ``/v1/info``
+ *     ``blocked_models``.
+ * :returns: *models* without the blocked rows, or *models* itself when none are.
+ */
+export function withoutBlockedModels<T extends { id: string }>(
+  models: readonly T[],
+  blocked: readonly string[] = cachedServerInfo?.blocked_models ?? [],
+): readonly T[] {
+  if (blocked.length === 0) return models;
+  const hidden = new Set(blocked.map(blockKey));
+  return models.filter((model) => !hidden.has(blockKey(model.id)));
+}
+
 export function withoutBlockedEfforts<T extends string | { value: string }>(
   levels: readonly T[],
   blocked: readonly string[] = cachedServerInfo?.blocked_efforts ?? [],

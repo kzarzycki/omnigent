@@ -615,7 +615,13 @@ async def test_info_reports_the_filesystem_attachment_policy(
 
 @pytest.mark.parametrize(
     ("server_config", "expected"),
-    [({}, []), ({"blocked_efforts": ["MAX", "xhigh"]}, ["max", "xhigh"])],
+    [
+        ({}, {"blocked_efforts": [], "blocked_models": []}),
+        (
+            {"blocked_efforts": ["MAX", "xhigh"], "blocked_models": ["Opus"]},
+            {"blocked_efforts": ["max", "xhigh"], "blocked_models": ["opus"]},
+        ),
+    ],
 )
 async def test_info_reports_the_configured_blocked_efforts(
     db_uri: str,
@@ -623,9 +629,9 @@ async def test_info_reports_the_configured_blocked_efforts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     server_config: dict[str, object],
-    expected: list[str],
+    expected: dict[str, list[str]],
 ) -> None:
-    """The web's built-in effort ladders drop the levels the server config blocks."""
+    """The web's built-in model and effort lists drop what the server config blocks."""
     from omnigent.server import model_block_list
 
     # create_app installs the server-wide list; restore it after the test.
@@ -635,7 +641,7 @@ async def test_info_reports_the_configured_blocked_efforts(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         info = (await client.get("/v1/info")).json()
 
-    assert info["blocked_efforts"] == expected
+    assert {key: info[key] for key in expected} == expected
 
 
 async def test_info_evaluates_a_callable_policy_per_request(
