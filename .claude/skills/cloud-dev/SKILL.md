@@ -1,6 +1,6 @@
 ---
 name: cloud-dev
-description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on the bridge host, and the VM's limits.  Also how a landing session in the `omnigent-land` environment lands a PR with no host. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
+description: How to develop this fork from a Claude cloud session (the `claude-cloud` agent, environment `omnigent-dev`) - what runs in the cloud VM, what goes through a host helper on the bridge host, and the VM's limits. Also how a landing session in the `omnigent-land` environment lands a PR with no host. Use at the start of any engineering-loop run in a Claude cloud session, and when changing the `omnigent-dev` environment.
 ---
 
 # Developing in a Claude cloud session
