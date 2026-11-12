@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import { FilePathAwareMessageResponse } from "./ChatMarkdown";
 
+const CHAT_SESSION_ID = "conv_chat";
 const fetchMock = vi.fn();
 
 // Every observed element is in view at once, as if the message scrolled in.
@@ -47,22 +48,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const CHAT_SESSION_ID = "conv_chat";
-
 // The chat's own session scopes GitHub previews; none, as outside a session.
-function renderMarkdown(markdown: string, sessionId: string | null = CHAT_SESSION_ID) {
+function viewerContext(sessionId: string | null) {
+  return {
+    openFile: () => {},
+    openGithubTab: () => {},
+    isChangedPath: () => false,
+    conversationId: sessionId ?? undefined,
+    workspaceRoot: null,
+    workspaceHome: null,
+  };
+}
+
+const IN_CHAT = viewerContext(CHAT_SESSION_ID);
+const OUTSIDE_A_SESSION = viewerContext(null);
+
+function renderMarkdown(markdown: string, context = IN_CHAT): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
-    <FileViewerContext.Provider
-      value={{
-        openFile: () => {},
-        openGithubTab: () => {},
-        isChangedPath: () => false,
-        conversationId: sessionId ?? undefined,
-        workspaceRoot: null,
-        workspaceHome: null,
-      }}
-    >
+    <FileViewerContext.Provider value={context}>
       <QueryClientProvider client={client}>
         <FilePathAwareMessageResponse>{markdown}</FilePathAwareMessageResponse>
       </QueryClientProvider>
@@ -133,7 +137,7 @@ describe("chat link previews at the fetch layer", () => {
   });
 
   it("sends no GitHub preview request outside a session", async () => {
-    renderMarkdown("https://github.com/acme/app/pull/42", null);
+    renderMarkdown("https://github.com/acme/app/pull/42", OUTSIDE_A_SESSION);
 
     expect(await screen.findByRole("link", { name: "app#42" })).toBeVisible();
     await new Promise((resolve) => {
