@@ -512,6 +512,12 @@ export function getCachedServerInfo(): ServerInfo | null {
   return cachedServerInfo;
 }
 
+/** Tests only: stand in for the boot-time ``/v1/info`` probe (``null`` clears it). */
+export function setCachedServerInfoForTests(info: ServerInfo | null): void {
+  cachedServerInfo = info;
+  pendingServerInfo = null;
+}
+
 /**
  * Drop the effort levels the server blocks from an effort ladder.
  *
