@@ -75,6 +75,8 @@ _state = _HostExitState()
 _hooks_installed = False
 _faulthandler_file: IO[bytes] | None = None
 _signal_exit_started = threading.Event()
+# Run first on a SIGTERM exit: lets the daemon's runners outlive it.
+_runner_release_hook: Callable[[], None] | None = None
 # The thread ending the process after a stop signal; see await_signal_exit().
 _signal_exit_thread: threading.Thread | None = None
 # The stop signal that owns the exit, once one does.
@@ -159,6 +161,18 @@ def _enable_faulthandler() -> None:
         faulthandler.enable(file=_faulthandler_file, all_threads=True)
     except Exception:  # crash capture must never block startup
         _logger.debug("Could not enable faulthandler for the host", exc_info=True)
+
+
+def set_runner_release_hook(hook: Callable[[], None] | None) -> None:
+    """Set what runs when the daemon is asked to stop with ``SIGTERM``.
+
+    A service manager restarts the daemon with ``SIGTERM``, so that is the one
+    exit where the hook marks the runners as free to keep running. ``SIGHUP``
+    (the terminal closed) and every crash skip it, and runners exit with the
+    daemon.
+    """
+    global _runner_release_hook
+    _runner_release_hook = hook
 
 
 def set_host_exit_context(*, daemon_target: str | None = None, host_id: str | None = None) -> None:
@@ -409,6 +423,11 @@ def _exit_on_signal(signum: int) -> None:
         _run_hangup_callback(signum, log_failures=False)
         _die_by_signal(signum)
     try:
+        hook = _runner_release_hook
+        if hook is not None and signum == signal.SIGTERM:
+            # Before anything that can stall: runners read this once we are gone.
+            with contextlib.suppress(Exception):
+                hook()
         _run_hangup_callback(signum)
         report_host_exit("signal", exit_code=exit_code, signal=signal.Signals(signum).name)
         drain_debug_sink()

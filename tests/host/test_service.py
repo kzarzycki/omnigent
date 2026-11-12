@@ -52,6 +52,8 @@ def test_enable_launchd_user_service(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ]
     assert payload["EnvironmentVariables"]["PATH"] == "/usr/bin:/bin"
     assert payload["KeepAlive"] == {"SuccessfulExit": False}
+    # Runners keep serving while launchd restarts the daemon.
+    assert payload["AbandonProcessGroup"] is True
     assert "ProcessType" not in payload
     assert calls == [
         ["launchctl", "bootout", "gui/501/ai.omnigent.host"],
@@ -205,6 +207,8 @@ def test_enable_systemd_user_service(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ) in unit
     assert "Restart=on-failure" in unit
     assert "RestartPreventExitStatus=78 143" in unit
+    # Stopping the unit ends only the daemon; runners keep serving.
+    assert "\nKillMode=process\n" in unit
     assert calls == [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", "omnigent-host.service"],

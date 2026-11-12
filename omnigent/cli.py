@@ -11234,6 +11234,7 @@ def host_disable() -> None:
     for record in _list_daemon_records():
         if not _pid_alive(record.pid):
             _delete_daemon_record(record)
+            _stop_daemon_runners(record)
     click.echo("Disabled the Omnigent host user service.")
     click.echo(f"Removed service definition: {_display_path(service.path)}")
 
@@ -11506,7 +11507,55 @@ def _record_daemon_stop_requested(record: _HostDaemonRecord, *, reason: str, for
     )
 
 
-def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> str:
+def _runner_sessions(record: _HostDaemonRecord) -> tuple[set[int], float]:
+    """The daemon's live runner pids and when they were seen, for the stop sweep."""
+    from omnigent.host.runner_registry import live_runner_pids, runner_registry_path
+
+    return live_runner_pids(runner_registry_path(record.target)), time.time()
+
+
+def _stop_daemon_runners(
+    record: _HostDaemonRecord, sessions: tuple[set[int], float] | None = None
+) -> None:
+    """End the runners a stopped daemon left behind for a successor to adopt.
+
+    A daemon stopped with ``SIGTERM`` releases its runners so a restart keeps
+    them. A deliberate stop has no successor, so it ends them here, and with
+    them the tool calls and background jobs left in their sessions.
+
+    :param sessions: :func:`_runner_sessions` taken before the caller stopped
+        any session, so runners that already exited are swept too.
+    """
+    from omnigent.host.runner_registry import (
+        end_runner_sessions,
+        runner_registry_path,
+        stop_registered_runners,
+    )
+
+    late_pids, late_seen_at = _runner_sessions(record)
+    stop_registered_runners(runner_registry_path(record.target))
+    if sessions is not None:
+        end_runner_sessions(sessions[0], started_before=sessions[1])
+        # What is left are sessions a harness started after that snapshot.
+        late_pids -= sessions[0]
+    if late_pids:
+        end_runner_sessions(late_pids, started_before=late_seen_at)
+
+
+def _terminate_daemon(
+    record: _HostDaemonRecord,
+    *,
+    force: bool,
+    sessions: tuple[set[int], float] | None = None,
+) -> str:
+    """Stop a daemon and its runners; see :func:`_terminate_daemon_process`."""
+    outcome = _terminate_daemon_process(record, force=force)
+    if outcome != _STOP_DROPPED_FOREIGN:
+        _stop_daemon_runners(record, sessions)
+    return outcome
+
+
+def _terminate_daemon_process(record: _HostDaemonRecord, *, force: bool) -> str:
     """
     Terminate one local daemon process.
 
@@ -11602,10 +11651,11 @@ def host_stop(
     stopped_local_daemon = False
     for record in records:
         stopped = 0
+        sessions = _runner_sessions(record)
         if not daemon_only and not force:
             stopped = _stop_daemon_sessions(record)
         _record_daemon_stop_requested(record, reason="host_stop", force=force)
-        outcome = _terminate_daemon(record, force=force)
+        outcome = _terminate_daemon(record, force=force, sessions=sessions)
         target = _host_display_url(record.target)
         if outcome == _STOP_DROPPED_FOREIGN:
             click.echo(

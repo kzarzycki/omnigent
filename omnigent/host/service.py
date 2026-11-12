@@ -94,6 +94,9 @@ def _launchd_payload(
         "ProgramArguments": list(command),
         "EnvironmentVariables": dict(environment),
         "RunAtLoad": True,
+        # Leave the job's other processes alone when the daemon stops, so
+        # runners keep serving through a restart.
+        "AbandonProcessGroup": True,
         # service_entry maps permanent host failures to a successful exit.
         "KeepAlive": {"SuccessfulExit": False},
         "ThrottleInterval": 10,
@@ -130,6 +133,8 @@ def _systemd_unit(
         "",
         "[Service]",
         "Type=simple",
+        # Stop only the daemon: its runners keep serving through a restart.
+        "KillMode=process",
         *env_lines,
         "ExecStart=" + " ".join(_systemd_quote(part, escape_dollar=True) for part in command),
         "Restart=on-failure",

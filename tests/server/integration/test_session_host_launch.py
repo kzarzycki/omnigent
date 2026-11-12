@@ -160,12 +160,15 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     )
 
 
-async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
+async def _connect_host(
+    app: FastAPI, *, runners: list[str] | None = None
+) -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
 
     :param app: The FastAPI app under test (its ``state.host_registry``
         is the same instance the session-create launch path reads).
+    :param runners: Runner ids the host's hello reports as alive.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
@@ -175,7 +178,12 @@ async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
     assert accepted["type"] == "websocket.accept"
 
     hello = encode_host_frame(
-        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop")
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="laptop",
+            runners=runners or [],
+        )
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
     registry = app.state.host_registry
@@ -1551,6 +1559,52 @@ async def test_concurrent_sends_after_host_reconnect_share_one_launch(
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def test_host_restart_keeps_the_session_on_its_surviving_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host daemon restart whose runner kept its own tunnel relaunches nothing."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    comm = await _connect_host(app)
+    session = await _inline_launch_session(client, comm)
+    session_id, runner_id = session["id"], session["runner_id"]
+    app.state.tunnel_registry.register(runner_id, _NoopRunnerWS(), _runner_hello())
+
+    await comm.send_input({"type": "websocket.disconnect", "code": 1001})
+    await comm.wait(timeout=budget(5.0))
+    reconnected = await _connect_host(app, runners=[runner_id])
+
+    requests: list[httpx.Request] = []
+
+    def accept(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(202 if request.url.path.endswith("/events") else 200, json={})
+
+    store = SqlAlchemyConversationStore(db_uri)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(accept), base_url="http://runner"
+    ) as runner:
+
+        async def resolve(sid: str, router: object, **kwargs: Any) -> httpx.AsyncClient | None:
+            conv = kwargs.get("conversation") or store.get_conversation(sid)
+            return runner if app.state.tunnel_registry.get(conv.runner_id) else None
+
+        monkeypatch.setattr(sessions_module, "_get_runner_client", resolve)
+        monkeypatch.setattr(sessions_module, "_ensure_runner_relay_ready", AsyncMock())
+        response = await _post_hello(client, session_id)
+
+    assert response.status_code == 202, response.text
+    assert not await _expect_no_launch(reconnected, budget_s=budget(0.2))
+    assert store.get_conversation(session_id).runner_id == runner_id
+    assert (await client.get(f"/v1/sessions/{session_id}")).json()["status"] != "failed"
+    assert [r.url.path for r in requests if r.method == "POST"][-1] == (
+        f"/v1/sessions/{session_id}/events"
+    )
 
 
 async def test_send_rides_replacement_started_during_host_grace(
@@ -2938,7 +2992,7 @@ async def test_first_message_during_host_spawn_does_not_launch_replacement(
     spawned: list[subprocess.Popen[bytes]] = []
     forwarded: list[str] = []
 
-    def _spawn(*_args: object) -> tuple[subprocess.Popen[bytes], Path]:
+    def _spawn(*_args: object, **_kwargs: object) -> tuple[subprocess.Popen[bytes], Path]:
         proc = Mock(spec=subprocess.Popen, pid=1234 + len(spawned))
         proc.poll.return_value = None
         spawned.append(proc)

@@ -261,6 +261,7 @@ def test_stop_signal_reaches_sink_then_dies_by_signal(tmp_path: Path, signum: in
     proc = _run_child(
         f"""
         cr.set_hangup_callback(lambda: open({str(marker)!r}, "w").close())
+        cr.set_runner_release_hook(lambda: open(out + ".released", "w").close())
         cr.install_host_signal_handlers()
         print("ready", flush=True)
         while True:
@@ -281,6 +282,9 @@ def test_stop_signal_reaches_sink_then_dies_by_signal(tmp_path: Path, signum: in
     assert proc.returncode == -signum
     # A terminal hangup lets runners finish their turns first; a stop does not.
     assert marker.exists() is (signum == signal.SIGHUP)
+    # Only a service manager's SIGTERM releases runners to a successor.
+    released = Path(f"{rows_path}.released").exists()
+    assert released is (signum == signal.SIGTERM)
     (row,) = _exit_rows(rows_path)
     attrs = row["attributes"]
     assert isinstance(attrs, dict)

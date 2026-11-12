@@ -674,6 +674,73 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
     assert seen == {"auth_token_factory": None, "auth_resolved": True}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("registry_path", "leads_session", "sweeps"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+    ids=["daemon-launched-leader", "not-a-session-leader", "no-daemon-registry"],
+)
+async def test_tunnel_boot_sweeps_its_session_only_as_a_daemon_launched_leader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    registry_path: bool,
+    leads_session: bool,
+    sweeps: bool,
+) -> None:
+    """The parent-death watchdog ends the runner's session only when the runner leads one."""
+    import gc
+    from types import SimpleNamespace
+
+    import omnigent.runner._entry as entry_mod
+    import omnigent.runner.transports.ws_tunnel.serve as serve_mod
+    from omnigent.host.runner_registry import RUNNER_HOST_REGISTRY_ENV_VAR
+
+    class _Lifespan:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(), router=SimpleNamespace(lifespan_context=lambda _app: _Lifespan())
+    )
+    watchdogs: list[dict[str, object]] = []
+
+    async def _tunnel_closes_at_once(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    if registry_path:
+        monkeypatch.setenv(RUNNER_HOST_REGISTRY_ENV_VAR, str(tmp_path / "target.runners"))
+    else:
+        monkeypatch.delenv(RUNNER_HOST_REGISTRY_ENV_VAR, raising=False)
+    real_getsid = entry_mod.os.getsid
+    monkeypatch.setattr(
+        entry_mod.os,
+        "getsid",
+        lambda pid: (os.getpid() if leads_session else 1) if pid == 0 else real_getsid(pid),
+    )
+    monkeypatch.setattr(entry_mod, "_runner_auth_factory", None)
+    monkeypatch.setattr(entry_mod, "_server_url_from_env", lambda: "http://runner.test")
+    monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(entry_mod, "_runner_tunnel_binding_token_from_env", lambda: None)
+    monkeypatch.setattr(entry_mod, "_runner_parent_pid_from_env", lambda: 4242)
+    monkeypatch.setattr(entry_mod, "_load_runner_idle_timeout_s_from_config", lambda: 0)
+    monkeypatch.setattr(entry_mod, "_install_signal_handlers", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(entry_mod, "create_app", lambda **_kwargs: app)
+    monkeypatch.setattr(
+        entry_mod, "_run_parent_death_killer", lambda *_args, **kwargs: watchdogs.append(kwargs)
+    )
+    monkeypatch.setattr(serve_mod, "serve_tunnel", _tunnel_closes_at_once)
+    monkeypatch.setattr("omnigent.runner.identity.get_stable_runner_id", lambda: "runner-test-id")
+    monkeypatch.setattr(gc, "freeze", lambda: None)
+
+    await entry_mod._run_tunnel_from_env()
+
+    (kwargs,) = watchdogs
+    assert kwargs["end_session"] is (entry_mod._end_own_session if sweeps else None)
+
+
 def test_make_auth_token_factory_none_without_creds_or_binding_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

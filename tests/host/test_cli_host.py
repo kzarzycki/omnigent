@@ -22,6 +22,7 @@ from omnigent import cli as cli_module
 from omnigent.cli import _add_daemon_host_status, _ensure_host_daemon, _host_daemon_alive, cli
 from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host.local_server import LocalServerStartup
+from omnigent.host.runner_registry import runner_registry_path
 
 
 @dataclass(frozen=True)
@@ -490,12 +491,21 @@ def test_host_disable_subcommand_removes_user_service(
         return HostService(kind="systemd_user", path=service_path, label=service_path.name)
 
     monkeypatch.setattr("omnigent.host.service.disable_user_host_service", _disable)
-    monkeypatch.setattr("omnigent.cli._list_daemon_records", list)
+    stopped_daemon = _record_for("https://omnigent.example.com")
+    monkeypatch.setattr("omnigent.cli._list_daemon_records", lambda: [stopped_daemon])
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda _pid: False)
+    monkeypatch.setattr("omnigent.cli._delete_daemon_record", lambda _record: None)
+    stopped_runners: list[Path] = []
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.stop_registered_runners", stopped_runners.append
+    )
 
     result = CliRunner().invoke(cli, ["host", "disable"])
 
     assert result.exit_code == 0, result.output
     assert removed == [True]
+    # The service's SIGTERM released the runners; disabling has no successor.
+    assert stopped_runners == [runner_registry_path(stopped_daemon.target)]
     assert "Disabled the Omnigent host user service" in result.output
 
 
@@ -1282,6 +1292,130 @@ def test_terminate_daemon_permission_error_discards_record(
 
     assert _read_daemon_record(_daemon_record_path(record.target)) is None
     assert "owned by another user" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("outcome", "ends_runners"),
+    [
+        (cli_module._STOP_TERMINATED, True),
+        (cli_module._STOP_DROPPED_STALE, True),
+        # Another user's daemon: its runners are not ours to signal.
+        (cli_module._STOP_DROPPED_FOREIGN, False),
+    ],
+)
+def test_terminate_daemon_ends_the_runners_it_released(
+    monkeypatch: pytest.MonkeyPatch, outcome: str, ends_runners: bool
+) -> None:
+    """A deliberate stop has no successor to adopt the runners, so it ends them."""
+    from omnigent.cli import _terminate_daemon
+
+    record = _record_for("https://omnigent.example.com")
+    stopped: list[Path] = []
+    monkeypatch.setattr(
+        "omnigent.cli._terminate_daemon_process", lambda _record, *, force: outcome
+    )
+    monkeypatch.setattr("omnigent.host.runner_registry.stop_registered_runners", stopped.append)
+    swept: list[tuple[set[int], float]] = []
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.end_runner_sessions",
+        lambda leaders, *, started_before: swept.append((set(leaders), started_before)),
+    )
+
+    # The snapshot taken before the sessions were stopped is the one swept.
+    assert _terminate_daemon(record, force=False, sessions=({4242}, 50.0)) == outcome
+
+    assert stopped == ([runner_registry_path(record.target)] if ends_runners else [])
+    assert swept == ([({4242}, 50.0)] if ends_runners else [])
+
+
+@pytest.mark.parametrize(
+    ("early", "sweeps"),
+    [
+        (({1}, 50.0), [({1}, 50.0), ({2}, 60.0)]),
+        # Without the caller's snapshot, the one taken here is swept whole.
+        (None, [({1, 2}, 60.0)]),
+    ],
+    ids=["with-early-snapshot", "without"],
+)
+def test_stop_daemon_runners_sweeps_sessions_seen_before_and_after_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    early: tuple[set[int], float] | None,
+    sweeps: list[tuple[set[int], float]],
+) -> None:
+    """Sessions a harness started after the caller's snapshot are swept too, once each."""
+    record = _record_for("https://omnigent.example.com")
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "omnigent.cli._runner_sessions",
+        lambda _record: calls.append("snapshot") or ({1, 2}, 60.0),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.stop_registered_runners",
+        lambda _path: calls.append("stop runners"),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.end_runner_sessions",
+        lambda leaders, *, started_before: calls.append((set(leaders), started_before)),
+    )
+
+    cli_module._stop_daemon_runners(record, early)
+
+    # The second snapshot is taken while the runners still run.
+    assert calls == ["snapshot", "stop runners", *sweeps]
+
+
+def test_runner_sessions_lists_the_daemons_live_runners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop sweeps the sessions of the runners its daemon's registry lists."""
+    from omnigent.host.runner_registry import RunnerRegistry
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    record = _record_for("https://omnigent.example.com")
+    runner = subprocess.Popen(["sleep", "60"])
+    try:
+        registry = RunnerRegistry(runner_registry_path(record.target))
+        registry.add(
+            "runner-1", runner.pid, session_id=None, log_path=tmp_path / "log", connect_marker=None
+        )
+        before = time.time()
+
+        leaders, seen_at = cli_module._runner_sessions(record)
+
+        assert leaders == {runner.pid}
+        assert seen_at >= before
+    finally:
+        runner.kill()
+        runner.wait()
+
+
+def test_host_stop_snapshots_runner_sessions_before_stopping_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runners that exit while their sessions stop still get their sessions swept."""
+    record = _record_for("https://omnigent.example.com")
+    calls: list[str] = []
+    snapshot = ({4242}, 50.0)
+    terminated_with: list[object] = []
+    monkeypatch.setattr("omnigent.cli._selected_daemon_records", lambda **_kwargs: [record])
+    monkeypatch.setattr(
+        "omnigent.cli._runner_sessions", lambda _record: calls.append("snapshot") or snapshot
+    )
+    monkeypatch.setattr(
+        "omnigent.cli._stop_daemon_sessions", lambda _record: calls.append("stop sessions") or 0
+    )
+
+    def _terminate(_record: object, *, force: bool, sessions: object = None) -> str:
+        terminated_with.append(sessions)
+        return cli_module._STOP_TERMINATED
+
+    monkeypatch.setattr("omnigent.cli._terminate_daemon", _terminate)
+
+    result = CliRunner().invoke(cli, ["host", "stop", "--server", record.target])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["snapshot", "stop sessions"]
+    assert terminated_with == [snapshot]
 
 
 def test_pid_identity_survives_slow_daemon_startup() -> None:
