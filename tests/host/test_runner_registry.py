@@ -438,26 +438,36 @@ def test_claim_that_cannot_be_written_ends_the_runners_instead_of_adopting(
     tmp_path: Path, spawn_process, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "target.runners"
-    old_daemon, runner = spawn_process(), spawn_process()
-    owner = _owner(old_daemon, released=True)
-    _end(old_daemon)
-    _write(path, owner, _runner("runner-1", runner, tmp_path / "log"))
+    old_daemon = spawn_process()
+    # The released runner has a job in its session and a harness leading another.
+    runner, harness_pid = _runner_with_a_nested_harness()
+    try:
+        (job,) = psutil.Process(runner.pid).children()
+        owner = _owner(old_daemon, released=True)
+        _end(old_daemon)
+        _write(path, owner, _runner("runner-1", runner, tmp_path / "log"))
 
-    def full_disk(*_args: object) -> None:
-        raise OSError("no space left")
+        def full_disk(*_args: object) -> None:
+            raise OSError("no space left")
 
-    real_write = runner_registry._write_registry
-    monkeypatch.setattr(runner_registry, "_write_registry", full_disk)
-    registry = RunnerRegistry(path)
+        real_write = runner_registry._write_registry
+        monkeypatch.setattr(runner_registry, "_write_registry", full_disk)
+        registry = RunnerRegistry(path)
 
-    assert registry.claim() == []
-    assert runner.wait(timeout=5) == -signal.SIGTERM
-    # Once the disk has room again, the ended runner is not listed as this daemon's.
-    monkeypatch.setattr(runner_registry, "_write_registry", real_write)
-    registry.release()
-    snapshot = read_registry(path)
-    assert snapshot is not None
-    assert snapshot.runners == {}
+        assert registry.claim() == []
+        # The session sweep reaps the exited runner, so only its absence is observable.
+        assert process_start_stamp(runner.pid) is None
+        # With no daemon to stop them later, what the runner left is ended too.
+        assert process_start_stamp(job.pid) is None
+        assert process_start_stamp(harness_pid) is None
+        # Once the disk has room again, the ended runner is not listed as this daemon's.
+        monkeypatch.setattr(runner_registry, "_write_registry", real_write)
+        registry.release()
+        snapshot = read_registry(path)
+        assert snapshot is not None
+        assert snapshot.runners == {}
+    finally:
+        _end_runner_tree(runner, harness_pid)
 
 
 def _runner_with_a_nested_harness() -> tuple[subprocess.Popen[bytes], int]:

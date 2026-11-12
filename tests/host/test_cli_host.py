@@ -1328,6 +1328,42 @@ def test_terminate_daemon_ends_the_runners_it_released(
     assert swept == ([({4242}, 50.0)] if ends_runners else [])
 
 
+@pytest.mark.parametrize(
+    ("early", "sweeps"),
+    [
+        (({1}, 50.0), [({1}, 50.0), ({2}, 60.0)]),
+        # Without the caller's snapshot, the one taken here is swept whole.
+        (None, [({1, 2}, 60.0)]),
+    ],
+    ids=["with-early-snapshot", "without"],
+)
+def test_stop_daemon_runners_sweeps_sessions_seen_before_and_after_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    early: tuple[set[int], float] | None,
+    sweeps: list[tuple[set[int], float]],
+) -> None:
+    """Sessions a harness started after the caller's snapshot are swept too, once each."""
+    record = _record_for("https://omnigent.example.com")
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "omnigent.cli._runner_sessions",
+        lambda _record: calls.append("snapshot") or ({1, 2}, 60.0),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.stop_registered_runners",
+        lambda _path: calls.append("stop runners"),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.runner_registry.end_runner_sessions",
+        lambda leaders, *, started_before: calls.append((set(leaders), started_before)),
+    )
+
+    cli_module._stop_daemon_runners(record, early)
+
+    # The second snapshot is taken while the runners still run.
+    assert calls == ["snapshot", "stop runners", *sweeps]
+
+
 def test_runner_sessions_lists_the_daemons_live_runners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

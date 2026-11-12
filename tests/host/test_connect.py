@@ -8,6 +8,7 @@ import errno
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -4171,6 +4172,129 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
         if runner.poll() is None:
             runner.kill()
         runner.wait()
+
+
+_SHUTDOWN_CHILD = """
+import asyncio, os, subprocess, sys
+from pathlib import Path
+from omnigent.host import crash_reporting
+from omnigent.host.connect import HostConnectError, HostProcess, _RunnerHandle
+from omnigent.host.identity import HostIdentity
+from omnigent.host.maintenance import HostMaintenanceJanitor
+
+
+class Lock:
+    target = "test-target"
+
+    def acquire(self):
+        return True
+
+    def still_owner(self):
+        return True
+
+    def release(self):
+        pass
+
+
+def no_janitor(**_kwargs):
+    raise RuntimeError("no janitor in this test")
+
+
+HostMaintenanceJanitor.for_host = staticmethod(no_janitor)
+idle = [sys.executable, "-c", "import time; time.sleep(120)"]
+runner = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import subprocess, sys, time\\n"
+        f"job = subprocess.Popen({idle!r})\\n"
+        f"harness = subprocess.Popen({idle!r}, start_new_session=True)\\n"
+        "print(job.pid, harness.pid, flush=True)\\n"
+        "time.sleep(120)\\n",
+    ],
+    stdout=subprocess.PIPE,
+    start_new_session=True,
+)
+print(runner.pid, runner.stdout.readline().decode().strip(), flush=True)
+crash_reporting.install_host_crash_hooks()
+crash_reporting.install_host_signal_handlers()
+host = HostProcess(
+    HostIdentity(host_id="host_test_connect", name="test-laptop"),
+    "https://app.example.databricks.com",
+    lifecycle_lock=Lock(),
+)
+host._zygote_disabled = True
+host._ensure_model_options_prewarm = lambda: None
+host._start_capability_discovery = lambda: None
+host._runners["runner-1"] = _RunnerHandle(
+    proc=runner, log_path=Path(os.environ["OMNIGENT_DATA_DIR"]) / "runner.log"
+)
+
+
+async def serve():
+    print("serving", flush=True)
+    await asyncio.to_thread(sys.stdin.readline)
+    raise HostConnectError("the test ends the daemon")
+
+
+host._connect_and_serve = serve
+try:
+    asyncio.run(host.run())
+except HostConnectError:
+    pass
+"""
+
+
+@pytest.mark.parametrize("ending", ["exception", "sigterm"])
+def test_daemon_shutdown_ends_runner_sessions_unless_it_released_them(
+    tmp_path: Path, ending: str
+) -> None:
+    """A daemon that stops on its own ends what its runners left; a SIGTERM leaves them.
+
+    The runner stand-in leaves a job in its session and a harness leading a
+    session of its own. An exception out of ``run()`` takes the daemon's own
+    shutdown, which must end both; a service manager's SIGTERM releases the
+    runners to a successor, so nothing of theirs may be swept.
+    """
+    host = subprocess.Popen(
+        [sys.executable, "-c", _SHUTDOWN_CHILD],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "OMNIGENT_DATA_DIR": str(tmp_path)},
+    )
+    started: list[int] = []
+    try:
+        assert host.stdout is not None and host.stdin is not None
+        started = [int(pid) for pid in host.stdout.readline().split()]
+        runner_pid, job_pid, harness_pid = started
+        assert host.stdout.readline().strip() == "serving"
+
+        if ending == "sigterm":
+            host.send_signal(signal.SIGTERM)
+        else:
+            host.stdin.write("\n")
+            host.stdin.flush()
+        code = host.wait(timeout=30)
+
+        left = {pid: process_start_stamp(pid) is not None for pid in started}
+        if ending == "sigterm":
+            assert code == -signal.SIGTERM
+            assert left == {runner_pid: True, job_pid: True, harness_pid: True}
+        else:
+            assert code == 0, host.stderr.read() if host.stderr else ""
+            assert left == {runner_pid: False, job_pid: False, harness_pid: False}
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.wait()
+        for pid in started:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+            # An earlier run() test can make this process a subreaper: reap what it adopted.
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
 
 
 async def test_adopted_runner_answers_status_and_stops(tmp_path: Path) -> None:
