@@ -41,6 +41,14 @@ class SysSessionMessageTool(Tool):
                     "properties": {
                         "session_id": {"type": "string", "description": "Destination session ID."},
                         "message": {"type": "string", "minLength": 1, "maxLength": 8000},
+                        "expires_in_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "Drop the message if it is still waiting after this long "
+                                "(default 3600). It is also dropped when you end."
+                            ),
+                        },
                     },
                     "required": ["session_id", "message"],
                     "additionalProperties": False,

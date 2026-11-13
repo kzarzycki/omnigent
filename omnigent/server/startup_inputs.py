@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -42,9 +43,23 @@ from omnigent.stores.conversation_store import (
     ConversationStore,
 )
 from omnigent.stores.host_store import host_is_live
+from omnigent.util.session_lifecycle import is_session_closed
 
 _logger = logging.getLogger(__name__)
 STARTUP_LABEL = "omnigent.startup"
+_DROPPED_PREVIEW_CHARS = 200
+
+
+def _startup_options(item: ConversationItem) -> StartupInputOptions | None:
+    data = item.data
+    return data.startup_options if isinstance(data, (MessageData, SlashCommandData)) else None
+
+
+def _session_ended(conv: Conversation) -> bool:
+    """Whether a session is closed, archived or failed, so its messages no longer matter."""
+    return (
+        conv.archived or is_session_closed(conv.labels, conv.title) or conv.live_status == "failed"
+    )
 
 
 def initial_input_id(session_id: str) -> str:
@@ -132,6 +147,79 @@ def wake_startup_worker(host_id: str) -> None:
             entry[2].set()
 
 
+def message_text(data: dict[str, Any]) -> str:
+    """The text blocks of a message payload, joined."""
+    return " ".join(
+        block["text"]
+        for block in data.get("content", [])
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+
+
+async def message_drop_reason(
+    conversations: ConversationStore, expires_at: float | None, sender_session_id: str | None
+) -> str | None:
+    """Why a message with these lifecycle fields must not be delivered, if it must not."""
+    if expires_at is not None and expires_at <= time.time():
+        return "expired"
+    if sender_session_id is not None:
+        sender = await asyncio.to_thread(conversations.get_conversation, sender_session_id)
+        if sender is None or _session_ended(sender):
+            return "sender ended"
+    return None
+
+
+async def report_dropped_message(
+    app: Any,
+    conversations: ConversationStore,
+    session_id: str,
+    sender_session_id: str,
+    text: str,
+    reason: str,
+) -> None:
+    """Tell the sender's parent (or a live parentless sender) what was dropped."""
+    _logger.info("Dropped message for session %s: %s", session_id, reason)
+    sender = await asyncio.to_thread(conversations.get_conversation, sender_session_id)
+    if sender is None:
+        return
+    target_id = sender.parent_conversation_id or (None if _session_ended(sender) else sender.id)
+    if target_id is None:
+        return
+    notice = (
+        f"[System: A message from session {sender.id} to session {session_id} was not "
+        f"delivered ({reason}). It began: {text[:_DROPPED_PREVIEW_CHARS]!r}]"
+    )
+    from omnigent.server.routes._sessions.orchestration import _wake_parent_for_blocked_child
+
+    try:
+        woke = await _wake_parent_for_blocked_child(
+            target_id,
+            sender,
+            notice,
+            conversation_store=conversations,
+            runner_router=getattr(app.state, "runner_router", None),
+            agent_store=getattr(app.state, "agent_store", None),
+        )
+        if woke:
+            return
+        # No runner to wake: keep the event in the recipient's history instead.
+        await asyncio.to_thread(
+            conversations.append,
+            target_id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id=f"dropped_{uuid4().hex}",
+                    data=MessageData(
+                        role="user", content=[{"type": "input_text", "text": notice}]
+                    ),
+                )
+            ],
+        )
+    except Exception:
+        _logger.exception("Unable to report dropped message for session %s", session_id)
+
+
 class ManagedStartupInputs:
     """Recover pending conversation items on the replica connected to their host."""
 
@@ -188,6 +276,8 @@ class ManagedStartupInputs:
                     tools=event.tools,
                     background_titles_enabled=background_session_titles_enabled(headers),
                     scheduled_run=current_scheduled_run(),
+                    expires_at=event.expires_at,
+                    sender_session_id=event.sender_session_id,
                 )
             }
         )
@@ -361,6 +451,8 @@ class ManagedStartupInputs:
         if state == "failed":
             return False
         items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
+        if state != "cancelled":
+            items = await self._drop_undeliverable(app, session_id, items)
         if state == "cancelled":
             if not items:
                 await self._finish(session_id)
@@ -443,6 +535,8 @@ class ManagedStartupInputs:
                 or current.response_id != PENDING_INPUT_RESPONSE_ID
                 or current.status != "in_progress"
             ):
+                return
+            if not await self._drop_undeliverable(app, session_id, [current]):
                 return
             options = (
                 item.data.startup_options
@@ -572,6 +666,58 @@ class ManagedStartupInputs:
             return False
         _logger.info("Saved message for session %s waits for /clear to finish", session_id)
         return True
+
+    async def _drop_undeliverable(
+        self, app: Any, session_id: str, items: list[ConversationItem]
+    ) -> list[ConversationItem]:
+        """Drop waiting inputs that expired or whose sender ended; return the rest."""
+        kept: list[ConversationItem] = []
+        for item in items:
+            reason = (
+                await self._undeliverable_reason(item) if item.status == "in_progress" else None
+            )
+            if reason is None:
+                kept.append(item)
+            elif await asyncio.to_thread(
+                self.conversations.transition_pending_input,
+                session_id,
+                item.id,
+                expected="in_progress",
+                status=None,
+            ):
+                await self._notify_dropped(app, session_id, item, reason)
+        return kept
+
+    async def _undeliverable_reason(self, item: ConversationItem) -> str | None:
+        options = _startup_options(item)
+        if options is None:
+            return None
+        return await self.drop_reason(options.expires_at, options.sender_session_id)
+
+    async def drop_reason(
+        self, expires_at: float | None, sender_session_id: str | None
+    ) -> str | None:
+        return await message_drop_reason(self.conversations, expires_at, sender_session_id)
+
+    async def _notify_dropped(
+        self, app: Any, session_id: str, item: ConversationItem, reason: str
+    ) -> None:
+        options = _startup_options(item)
+        if options is not None and options.sender_session_id is not None:
+            await self.report_drop(
+                app,
+                session_id,
+                options.sender_session_id,
+                message_text({"content": input_content(item)}),
+                reason,
+            )
+
+    async def report_drop(
+        self, app: Any, session_id: str, sender_session_id: str, text: str, reason: str
+    ) -> None:
+        await report_dropped_message(
+            app, self.conversations, session_id, sender_session_id, text, reason
+        )
 
     async def retry(self, session_id: str) -> bool:
         changed = False

@@ -1,6 +1,7 @@
 """Tool wire contracts, native discovery, and uncertain delivery handling."""
 
 import json
+import time
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -640,10 +641,11 @@ async def test_managed_message_resolves_host_after_wrong_replica(target_kind):
     ]
     for request in (requests[0], requests[-1]):
         assert request.headers[ORCHESTRATION_SOURCE_HEADER] == parent
-        assert json.loads(request.content) == {
-            "type": "session_message",
-            "data": {"message": "Work"},
-        }
+        payload = json.loads(request.content)
+        expires_at = payload["data"].pop("expires_at")
+        assert payload == {"type": "session_message", "data": {"message": "Work"}}
+        # The sender always bounds how long its message may wait.
+        assert 3500 < expires_at - time.time() <= 3600
 
 
 @pytest.mark.asyncio

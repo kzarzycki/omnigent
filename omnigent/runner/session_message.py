@@ -1,6 +1,7 @@
 """Adapt peer messages to the existing session event API."""
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -13,6 +14,10 @@ from omnigent.runner.session_requests import (
     session_host_id,
 )
 from omnigent.tools.builtins.session_message import peer_session_messaging_enabled
+
+# A queued message older than this is dropped instead of landing out of context.
+DEFAULT_MESSAGE_TTL_SECONDS = 3600
+MAX_MESSAGE_TTL_SECONDS = 7 * 24 * 3600
 
 
 async def execute_message_tool(
@@ -31,7 +36,17 @@ async def execute_message_tool(
         return json.dumps({"error": "Messaging other sessions is disabled on this runner"})
     try:
         path = f"/v1/sessions/{target}/events"
-        payload = {"type": "session_message", "data": {"message": message}}
+        ttl = args.get("expires_in_seconds", DEFAULT_MESSAGE_TTL_SECONDS)
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not 1 <= ttl <= MAX_MESSAGE_TTL_SECONDS
+        ):
+            ttl = DEFAULT_MESSAGE_TTL_SECONDS
+        payload = {
+            "type": "session_message",
+            "data": {"message": message, "expires_at": time.time() + ttl},
+        }
         headers = {ORCHESTRATION_SOURCE_HEADER: source_id}
         response = await client.post(path, headers=headers, json=payload, timeout=60)
         if is_wrong_replica(response):

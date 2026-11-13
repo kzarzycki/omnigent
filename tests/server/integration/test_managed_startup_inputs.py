@@ -7,6 +7,8 @@ import base64
 import json
 import logging
 import threading
+import time
+import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -1460,3 +1462,228 @@ async def test_saved_delivery_identifies_failed_boundary(
             if getattr(r, "event_name", None) == "scheduled_run_prompt_sent"
         ]
     ) == int(reported_stage == "post_delivery")
+
+
+_FOLLOWUP_TEXT = "Follow-up that should not outlive its sender."
+_FOLLOWUP = {
+    "type": "message",
+    "data": {"role": "user", "content": [{"type": "input_text", "text": _FOLLOWUP_TEXT}]},
+}
+
+
+def _lapse_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Move the delivery clock past a queued message's expiry."""
+    monkeypatch.setattr(
+        "omnigent.server.startup_inputs.time",
+        types.SimpleNamespace(time=lambda: time.time() + 3600),
+    )
+
+
+async def _queue_from_sender(
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    end_sender: bool = False,
+    lapse: bool = False,
+) -> tuple[str, str, list[tuple[str, str]], list[dict[str, Any]]]:
+    """Queue a follow-up carrying ``fields`` and return what delivery does with it."""
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe")
+    response = await env.client.post(
+        f"/v1/sessions/{target_id}/events",
+        json={
+            **_FOLLOWUP,
+            "sender_session_id": sender_id,
+            **({"expires_at": time.time() + 60} if lapse else {}),
+        },
+    )
+    assert response.status_code == 202, response.text
+    assert response.json().get("queued") is True
+    if lapse:
+        _lapse_clock(monkeypatch)
+    if end_sender:
+        env.conv_store.set_labels(sender_id, {"omnigent.closed": "true"})
+    notices: list[tuple[str, str]] = []
+
+    async def record_notice(target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append((target, notice))
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    _bind(env, target_id)
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        for item in env.conv_store.list_pending_inputs(target_id):
+            await env.app.state.startup_inputs._deliver(env.app, target_id, item)
+    finally:
+        await runner.aclose()
+    return sender_id, target_id, notices, forwarded
+
+
+async def test_expired_pending_input_is_dropped_and_reported(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id, target_id, notices, forwarded = await _queue_from_sender(
+        env, monkeypatch, lapse=True
+    )
+    texts = [json.dumps(event) for event in forwarded if event.get("type") == "message"]
+    # The saved first input is delivered; only the expired follow-up is gone.
+    assert len(texts) == 1 and _TEXT in texts[0]
+    [(notice_target, notice)] = notices
+    assert notice_target == sender_id
+    assert target_id in notice and "expired" in notice and _FOLLOWUP_TEXT in notice
+
+
+async def test_pending_input_from_ended_sender_is_dropped(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    _, target_id, notices, forwarded = await _queue_from_sender(env, monkeypatch, end_sender=True)
+    texts = [json.dumps(event) for event in forwarded if event.get("type") == "message"]
+    assert len(texts) == 1 and _TEXT in texts[0]
+    assert env.conv_store.list_pending_inputs(target_id) == []
+    # A closed sender with no parent has nobody to tell.
+    assert notices == []
+
+
+async def test_pending_input_without_sender_fields_is_kept(startup_env: _Env) -> None:
+    env = startup_env
+    session_id = await _create(env)
+    items = env.conv_store.list_pending_inputs(session_id)
+    kept = await env.app.state.startup_inputs._drop_undeliverable(env.app, session_id, items)
+    assert kept == items
+
+
+async def test_expired_message_to_an_ordinary_session_is_not_forwarded(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe", initial_input=None)
+    notices: list[str] = []
+
+    async def record_notice(_target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append(notice)
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        response = await env.client.post(
+            f"/v1/sessions/{target_id}/events",
+            json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": 1},
+        )
+    finally:
+        await runner.aclose()
+    assert response.status_code == 202, response.text
+    assert response.json() == {"queued": False, "dropped": "expired"}
+    assert not [event for event in forwarded if event.get("type") == "message"]
+    assert env.conv_store.list_pending_inputs(target_id) == []
+    [notice] = notices
+    assert target_id in notice and _FOLLOWUP_TEXT in notice
+
+
+async def test_drop_notice_is_kept_in_history_when_the_recipient_has_no_runner(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe")
+    response = await env.client.post(
+        f"/v1/sessions/{target_id}/events",
+        json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": time.time() + 60},
+    )
+    assert response.status_code == 202, response.text
+    _lapse_clock(monkeypatch)
+    # The real wake helper runs; the sender has no runner, so the notice goes to history.
+    _bind(env, target_id)
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    stubbed_lookup = routes_core._get_runner_client
+
+    async def lookup_without_sender_runner(session_id: str, *args: Any, **kwargs: Any) -> Any:
+        if session_id == sender_id:
+            return None
+        return await stubbed_lookup(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._get_runner_client", lookup_without_sender_runner
+    )
+    try:
+        for item in env.conv_store.list_pending_inputs(target_id):
+            await env.app.state.startup_inputs._deliver(env.app, target_id, item)
+    finally:
+        await runner.aclose()
+    history = (await env.client.get(f"/v1/sessions/{sender_id}/items")).json()["data"]
+    texts = [json.dumps(item) for item in history if item["type"] == "message"]
+    assert any("was not delivered (expired)" in text and _FOLLOWUP_TEXT in text for text in texts)
+
+
+async def test_live_lifecycle_fields_reach_the_runner_for_an_ordinary_session(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = await create_test_agent(client)
+    ids = []
+    for _ in range(2):
+        created = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+        assert created.status_code == 201, created.text
+        ids.append(created.json()["id"])
+    sender_id, target_id = ids
+    expires_at = time.time() + 600
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        response = await client.post(
+            f"/v1/sessions/{target_id}/events",
+            json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": expires_at},
+        )
+    finally:
+        await runner.aclose()
+    assert response.status_code == 202, response.text
+    [turn] = [event for event in forwarded if event.get("type") == "message"]
+    assert turn["expires_at"] == expires_at and turn["sender_session_id"] == sender_id
+
+
+async def test_unauthorized_sender_cannot_trigger_a_drop_notice(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notices: list[str] = []
+
+    async def record_notice(_target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append(notice)
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    sessions: dict[str, str] = {}
+    for user in ("alice@example.com", "bob@example.com"):
+        auth_client.headers["X-Forwarded-Email"] = user
+        agent = await create_test_agent(auth_client, name=f"agent-{user.split('@')[0]}")
+        response = await auth_client.post("/v1/sessions", json={"agent_id": agent["id"]})
+        assert response.status_code == 201, response.text
+        sessions[user] = response.json()["id"]
+    # Alice may post to her own session but has no access to Bob's.
+    auth_client.headers["X-Forwarded-Email"] = "alice@example.com"
+    response = await auth_client.post(
+        f"/v1/sessions/{sessions['alice@example.com']}/events",
+        json={
+            **_FOLLOWUP,
+            "sender_session_id": sessions["bob@example.com"],
+            "expires_at": 1,
+        },
+    )
+    assert response.status_code in (403, 404), response.text
+    assert notices == []
