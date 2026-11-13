@@ -8675,6 +8675,7 @@ def _tool_relay_handler_factory(
                 fail_defer_hook_output,
                 hook_payload_to_evaluation_request,
             )
+            from omnigent.runner.server_restart_retry import FAIL_FAST_EXTENSION
 
             raw_event = payload.get("hook_event_name")
             hook_event = raw_event if isinstance(raw_event, str) else ""
@@ -8722,8 +8723,13 @@ def _tool_relay_handler_factory(
                 attempts += 1
                 retry_delay = 0.4
                 attempt_started = time.monotonic()
+                # The loop above owns the outage budget; the client's restart
+                # window would hold the hook for minutes instead.
                 future = asyncio.run_coroutine_threadsafe(
-                    policy_client.post(url, json=request_body), loop
+                    policy_client.post(
+                        url, json=request_body, extensions={FAIL_FAST_EXTENSION: True}
+                    ),
+                    loop,
                 )
                 try:
                     resp = future.result(timeout=86400.0)
