@@ -393,12 +393,16 @@ export function InboxPage() {
       isFirstRender.current = false;
       return;
     }
-    // A placeholder is the previous snapshot, not fresh server data.
-    if (snapshotQueries.some((q) => q.isPlaceholderData)) return;
+    // A placeholder is the previous snapshot, not fresh server data; other
+    // sessions' fresh snapshots still reconcile their own verdicts.
+    const placeholderRowIds = new Set(
+      rows.filter((_, i) => snapshotQueries[i]?.isPlaceholderData).map((row) => row.id),
+    );
     setResponded((prev) => {
       if (Object.keys(prev).length === 0) return prev;
       const stale = items
-        .filter(({ elicitation }) => {
+        .filter(({ elicitation, row }) => {
+          if (placeholderRowIds.has(row.id)) return false;
           const verdict = prev[elicitation.elicitationId];
           return (
             verdict &&

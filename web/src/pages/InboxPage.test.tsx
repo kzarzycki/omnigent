@@ -689,6 +689,56 @@ describe("InboxPage approval items", () => {
     expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded");
   });
 
+  it("reconciles a re-parked prompt while another session's snapshot is loading", async () => {
+    // WHY: a placeholder in one session must not hold back verdict cleanup for
+    // sessions whose own snapshots are fresh.
+    const rowA = conversation({ id: "sess_a", updated_at: 1_700_000_010 });
+    const rowB = conversation({ id: "sess_b", updated_at: 1_700_000_000 });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([rowA, rowB]));
+    vi.mocked(sessionsApi.getSession).mockImplementation(
+      async (id) =>
+        ({
+          pendingElicitations: [rawElicitation(`eli_${id}`, `Approve ${id}?`)],
+        }) as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>,
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    const [acceptA] = await screen.findAllByRole("button", { name: "Stub Accept" });
+    fireEvent.click(acceptA!);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("approval-card")[0]).toHaveAttribute("data-status", "responded"),
+    );
+
+    // A's snapshot refreshes (still pending: re-parked) while B's stays in flight.
+    vi.mocked(sessionsApi.getSession).mockImplementation((id) =>
+      id === "sess_b"
+        ? new Promise(() => {})
+        : (Promise.resolve({
+            pendingElicitations: [rawElicitation("eli_sess_a", "Approve sess_a?")],
+          }) as unknown as ReturnType<typeof sessionsApi.getSession>),
+    );
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([
+        { ...rowA, updated_at: 1_700_000_011 },
+        { ...rowB, updated_at: 1_700_000_001 },
+      ]),
+    );
+    rerender(tree());
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("approval-card")[0]).toHaveAttribute("data-status", "pending"),
+    );
+  });
+
   it("keeps a card's DOM node when it ages into the next recency group", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: 1_700_000_000_000 + 60_000 });
     onTestFinished(() => {
