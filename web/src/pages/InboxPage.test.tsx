@@ -623,6 +623,38 @@ describe("InboxPage approval items", () => {
     );
   });
 
+  it("keeps the rendered card while a no-change list poll refetches its snapshot", async () => {
+    // WHY: the list poll bumps `updated_at` on every row, which changes the
+    // snapshot query key. The card must stay the same DOM node while the new
+    // snapshot is in flight, not drop out and remount.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    const card = await screen.findByTestId("approval-card");
+
+    vi.mocked(sessionsApi.getSession).mockReturnValue(new Promise(() => {}));
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
+    );
+    rerender(tree());
+    await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByTestId("approval-card")).toBe(card);
+  });
+
   it("routes the verdict to the child session when the prompt is mirrored", async () => {
     // WHY: a mirrored child prompt carries target_session_id; the resolve POST
     // must target that session, not the row it surfaced under.

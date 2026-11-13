@@ -251,6 +251,13 @@ export function InboxPage() {
       queryKey: ["inbox-elicitations", row.id, row.pending_elicitations_count, row.updated_at],
       queryFn: () => getSession(row.id),
       retry: 1,
+      // A list poll bumps `updated_at` and so the key. Show this session's
+      // last snapshot until the new one lands, so the card isn't remounted.
+      placeholderData: () =>
+        queryClient
+          .getQueriesData<Session>({ queryKey: ["inbox-elicitations", row.id] })
+          .map(([, data]) => data)
+          .findLast(Boolean),
       // The count and snapshot can disagree briefly while a native request re-parks.
       refetchInterval: (query: Query<Session>) =>
         query.state.data?.pendingElicitations?.length === 0 ||
