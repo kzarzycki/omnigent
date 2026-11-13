@@ -2973,6 +2973,7 @@ def augment_claude_args(
     turn_routing: bool = False,
     active_harnesses: Collection[str] | None = None,
     session_id: str | None = None,
+    config_settings: _JsonObject | None = None,
 ) -> list[str]:
     """
     Return Claude CLI args with Omnigent MCP/hook/skill injection.
@@ -3029,6 +3030,8 @@ def augment_claude_args(
         ``False`` keeps every prompt off the routing round trip.
     :param session_id: The launching session, reported as
         ``omnigent.session.id`` when the server's telemetry setting applies.
+    :param config_settings: Settings parsed from config ``harness.claude-native.args``
+        (see :func:`extract_settings_args`); merged under the caller's ``--settings``.
     :returns: Augmented argument list for the terminal resource.
     """
     hook_settings = build_hook_settings(
@@ -3050,7 +3053,12 @@ def augment_claude_args(
     hook_settings = apply_claude_settings(
         hook_settings, executor="claude-native", active_harnesses=active_harnesses
     )
-    args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
+    # Claude keeps only the last --settings, so a caller's would be dropped.
+    remaining_args, caller_settings = extract_settings_args(claude_args, base_dir=workspace)
+    hook_settings = _merge_settings_objects(
+        _merge_settings_objects(dict(config_settings or {}), caller_settings), hook_settings
+    )
+    args = _merge_disallowed_tools(remaining_args, _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
     if workspace is not None:
         from omnigent.config import harness_telemetry_for
@@ -3166,6 +3174,71 @@ def _arg_value(args: tuple[str, ...], flag: str) -> str | None:
             if candidate and not candidate.startswith("--"):
                 value = candidate
     return value
+
+
+def _merge_settings_objects(base: _JsonObject, overlay: _JsonObject) -> _JsonObject:
+    """Deep-merge ``overlay`` over ``base``; non-object values in ``overlay`` replace."""
+    merged = dict(base)
+    for key, value in overlay.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_settings_objects(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def extract_settings_args(
+    args: Sequence[str], *, base_dir: Path | None = None
+) -> tuple[list[str], _JsonObject]:
+    """
+    Remove every caller ``--settings`` flag from ``args`` and parse its value.
+
+    The value is a JSON object string or a file path. Later flags override
+    earlier ones. An unreadable or non-object value is logged and skipped.
+
+    :param args: Claude CLI args, e.g. ``("--settings", '{"env":{"X":"1"}}')``.
+    :param base_dir: Directory a relative settings file path resolves from, i.e.
+        the cwd Claude launches in. ``None`` uses the process cwd.
+    :returns: ``(args without --settings, merged caller settings)``.
+    """
+    remaining: list[str] = []
+    merged: _JsonObject = {}
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--settings" and index + 1 < len(args):
+            value = args[index + 1]
+            index += 2
+        elif arg.startswith("--settings="):
+            value = arg.partition("=")[2]
+            index += 1
+        else:
+            remaining.append(arg)
+            index += 1
+            continue
+        parsed = _parse_settings_value(value, base_dir)
+        if parsed is None:
+            _logger.warning("Ignoring a --settings value that is not a JSON object or file.")
+        else:
+            merged = _merge_settings_objects(merged, parsed)
+    return remaining, merged
+
+
+def _parse_settings_value(value: str, base_dir: Path | None) -> _JsonObject | None:
+    """Parse a ``--settings`` value given as inline JSON or a file path."""
+    text = value.strip()
+    if not text.startswith("{"):
+        path = Path(value).expanduser()
+        try:
+            text = (base_dir / path if base_dir is not None else path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _launch_effort_arg(args: tuple[str, ...]) -> str | None:
