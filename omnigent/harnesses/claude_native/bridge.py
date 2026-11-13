@@ -9366,7 +9366,8 @@ _TASK_NOTIFICATION_REQUIRED_MARKERS: tuple[str, ...] = (
 )
 _TEAMMATE_MESSAGE_RE = re.compile(
     r'(?:<teammate-message\s+[^>]*\bteammate_id="[^"]+"[^>]*>.*?</teammate-message>'
-    r'|<agent-message\s+[^>]*\bfrom="[^"]+"[^>]*>.*?</agent-message>)',
+    r'|<agent-message\s+[^>]*\bfrom="[^"]+"[^>]*>.*?</agent-message>'
+    r'|<cross-session-message\s+[^>]*\bfrom="[^"]+"[^>]*>.*?</cross-session-message>)',
     re.DOTALL,
 )
 _TEAMMATE_MESSAGE_PREFIXES = (
@@ -9377,6 +9378,7 @@ _TEAMMATE_MESSAGE_PREFIXES = (
 _TEAMMATE_DELIVERY_GUIDANCE = (
     "This came from another Claude session — not typed by your user,",
     'That "other Claude session" is an agent working inside this same session —',
+    "IMPORTANT: This is NOT from your user — it came from a different Claude session",
 )
 
 # Substrings Claude Code writes to a ``/compact`` command's
