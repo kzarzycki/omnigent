@@ -776,6 +776,43 @@ async def test_a_claimed_notice_is_not_posted_once_its_subscriber_unsubscribes(
     assert poster.posted == []
 
 
+@pytest.mark.parametrize("other_sweep_settles", [False, True], ids=["reclaimed", "settled"])
+async def test_a_retry_whose_row_another_sweep_took_stops_before_preparing_it(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    other_sweep_settles: bool,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    await _turn_end(target, "completed", "resp_1")
+
+    # A sweep claims the failed row and pauses past its lease; another sweep takes it.
+    lease = 10**10 + 60
+    (delivery,) = store.claim_due_subscription_deliveries(now=10**10, lease_until=lease, limit=10)
+    (taken,) = store.claim_due_subscription_deliveries(now=lease, lease_until=lease + 60, limit=10)
+    if other_sweep_settles:
+        store.settle_subscription_delivery(
+            watcher, target, taken.event_key, settled_at=lease, leased_until=lease + 60
+        )
+    prepared: list[str] = []
+
+    async def deliverable(*_args: Any) -> None:
+        prepared.append("deliverable")
+
+    async def busy(*_args: Any) -> bool:
+        prepared.append("busy")
+        return False
+
+    monkeypatch.setattr(session_subscriptions, "_deliverable", deliverable)
+    monkeypatch.setattr(session_subscriptions, "_busy_or_unknown", busy)
+    await session_subscriptions._retry(store, delivery, lease_until=lease)
+
+    assert prepared == []
+    assert poster.posted == []
+
+
 async def test_an_unsubscribe_while_a_notice_is_prepared_stops_its_post(
     outbox: tuple[SqlAlchemyConversationStore, str, str],
     monkeypatch: pytest.MonkeyPatch,
