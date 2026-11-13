@@ -15377,8 +15377,14 @@ class _ScriptedPolicyClient:
         self.calls = 0
         self.bodies: list[dict[str, object] | None] = []
         self.urls: list[str] = []
+        self.extensions: list[dict[str, object] | None] = []
 
-    async def post(self, url: str, json: dict[str, object] | None = None) -> SimpleNamespace:
+    async def post(
+        self,
+        url: str,
+        json: dict[str, object] | None = None,
+        extensions: dict[str, object] | None = None,
+    ) -> SimpleNamespace:
         """Replay the next step as a minimal httpx-Response-shaped namespace.
 
         :param url: Forwarded session path, recorded for routing checks.
@@ -15389,6 +15395,7 @@ class _ScriptedPolicyClient:
 
         self.urls.append(url)
         self.bodies.append(json)
+        self.extensions.append(extensions)
         step = self.steps[min(self.calls, len(self.steps) - 1)]
         self.calls += 1
         if step is None:
@@ -15679,7 +15686,12 @@ class _HeldPolicyClient(_ScriptedPolicyClient):
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    async def post(self, url: str, json: dict[str, object] | None = None) -> SimpleNamespace:
+    async def post(
+        self,
+        url: str,
+        json: dict[str, object] | None = None,
+        extensions: dict[str, object] | None = None,
+    ) -> SimpleNamespace:
         """Hold the first POST until :attr:`release` is set, then answer it."""
         if self.calls == 0:
             self.entered.set()
@@ -15769,6 +15781,28 @@ async def test_hook_evaluate_endpoint_returns_deny_hook_output(
         output = json.loads(body)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "blocked by test" in output["hookSpecificOutput"]["permissionDecisionReason"]
+    finally:
+        relay.close()
+
+
+@pytest.mark.asyncio
+async def test_hook_evaluate_endpoint_skips_the_server_restart_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The policy check opts out of the runner client's restart window.
+
+    With a refused connect the client would otherwise hold the hook for its
+    whole window, so Claude's own permission mode would decide minutes late.
+    """
+    from omnigent.runner.server_restart_retry import FAIL_FAST_EXTENSION
+
+    client = _ScriptedPolicyClient({"result": "POLICY_ACTION_ALLOW"})
+    relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
+    try:
+        await asyncio.to_thread(
+            _relay_request_raw, bridge_dir, "/hook/claude/evaluate-policy", _PRE_TOOL_USE_PAYLOAD
+        )
+        assert client.extensions == [{FAIL_FAST_EXTENSION: True}]
     finally:
         relay.close()
 
@@ -15902,10 +15936,14 @@ async def test_hook_evaluate_endpoint_preserves_non_connect_retries(
     if held:
         scripted_post = client.post
 
-        async def held_post(url: str, json: dict[str, object] | None = None) -> SimpleNamespace:
+        async def held_post(
+            url: str,
+            json: dict[str, object] | None = None,
+            extensions: dict[str, object] | None = None,
+        ) -> SimpleNamespace:
             """Hold the poll past the floor before the gateway severs it."""
             _policy_retry_clock.monotonic.return_value += 300.0
-            return await scripted_post(url, json=json)
+            return await scripted_post(url, json=json, extensions=extensions)
 
         client.post = held_post  # type: ignore[method-assign]
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
