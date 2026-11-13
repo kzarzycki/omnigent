@@ -168,7 +168,12 @@ async def resolve_project_placement(
         raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
     host_id = project.config.get("host_id")
     workspace = project.config.get("workspace")
-    if not isinstance(host_id, str) or not host_id or not isinstance(workspace, str) or not workspace:
+    if (
+        not isinstance(host_id, str)
+        or not host_id
+        or not isinstance(workspace, str)
+        or not workspace
+    ):
         raise OmnigentError(
             "Project has no host_id and workspace to start the session in",
             code=ErrorCode.INVALID_INPUT,

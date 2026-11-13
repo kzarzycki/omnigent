@@ -1,6 +1,5 @@
 """An orchestrated create can start on the host and workspace a project pins."""
 
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -8,7 +7,6 @@ from fastapi import FastAPI
 
 from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
-from omnigent.server.app import create_app
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.integration.test_session_orchestration_projects import _project, auth_app
 from tests.server.integration.test_sessions_attribution import _bind_runner
@@ -76,9 +74,11 @@ async def test_create_takes_host_and_workspace_from_the_named_project(
         "Cloud",
         {"host_id": pinned_host, "workspace": PINNED_WORKSPACE, "environment_id": ENVIRONMENT_ID},
     )
-    named = {"project_id": project_id} if named_by == "project_id" else {
-        "environment_id": ENVIRONMENT_ID
-    }
+    named = (
+        {"project_id": project_id}
+        if named_by == "project_id"
+        else {"environment_id": ENVIRONMENT_ID}
+    )
 
     response = await _orchestrate(auth_client, source, **named)
 
