@@ -36,6 +36,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO
 
@@ -142,6 +143,8 @@ class ZygoteManager:
     :param python_executable: Interpreter to launch the zygote with; defaults
         to ``sys.executable``.
     :param log_path: Optional file for the zygote's own stdout/stderr.
+    :param command_prefix: argv prefix the zygote is launched through, e.g. a
+        ``systemd-run --scope`` that puts it and its runners in a slice.
     """
 
     def __init__(
@@ -149,9 +152,11 @@ class ZygoteManager:
         *,
         python_executable: str | None = None,
         log_path: Path | None = None,
+        command_prefix: Sequence[str] = (),
     ) -> None:
         self._python = python_executable or sys.executable
         self._log_path = log_path
+        self._command_prefix = tuple(command_prefix)
         self._proc: subprocess.Popen[bytes] | None = None
         self._sock: socket.socket | None = None
         self._generation = 0
@@ -250,7 +255,7 @@ class ZygoteManager:
                 # -P keeps the daemon's cwd off sys.path, so a daemon started
                 # inside an omnigent checkout can't hand forked runners a
                 # different omnigent than the installed one.
-                [self._python, "-P", "-m", "omnigent.runner._zygote"],
+                [*self._command_prefix, self._python, "-P", "-m", "omnigent.runner._zygote"],
                 env=env,
                 pass_fds=pass_fds,
                 stdin=subprocess.DEVNULL,

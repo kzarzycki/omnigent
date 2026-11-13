@@ -1425,8 +1425,16 @@ class HarnessProcessManager:
         :param effective_env: The harness subprocess environment.
         :returns: The process handle (real ``Process`` or ``ZygoteHarnessProc``).
         """
+        from omnigent.runner.session_limits import runner_has_session_slice
+
         zygote = self._harness_zygote
-        if zygote is not None and not self._harness_zygote_disabled:
+        # A zygote-forked harness lives in the zygote's cgroup, outside this
+        # runner's per-session slice, so a limited session execs its harnesses.
+        if (
+            zygote is not None
+            and not self._harness_zygote_disabled
+            and not runner_has_session_slice()
+        ):
             try:
                 return await zygote.fork_harness(runner_argv, effective_env)
             except ZygoteHarnessUnavailable as exc:

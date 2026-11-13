@@ -32,6 +32,7 @@ from omnigent.inner.datamodel import (
     OSEnvSandboxSpec,
     OSEnvSpec,
     TerminalEnvSpec,
+    parse_sandbox_resources,
     parse_write_paths,
 )
 from omnigent.inner.git_ssh_policy import parse_git_ssh_bindings as _parse_git_ssh
@@ -1148,6 +1149,10 @@ def _parse_os_env_sandbox(
     macos_reason = _credential_proxy_macos_unsupported_reason(credential_proxy, sandbox_type)
     if macos_reason is not None:
         raise OmnigentError(macos_reason, code=ErrorCode.INVALID_INPUT)
+    try:
+        resources = parse_sandbox_resources(raw.get("resources"), sandbox_type)
+    except ValueError as exc:
+        raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
     allow_private = raw.get("egress_allow_private_destinations", False)
     if not isinstance(allow_private, bool):
         raise OmnigentError(
@@ -1171,6 +1176,7 @@ def _parse_os_env_sandbox(
         egress_allow_private_destinations=allow_private,
         credential_proxy=credential_proxy,
         git_ssh=git_ssh,
+        resources=resources,
     )
 
 

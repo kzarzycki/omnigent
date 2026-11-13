@@ -69,11 +69,12 @@ def isolated_host(
 
     ``command`` can preserve a CLI entry point or install a caller's fault.
     Use a fresh root for each host; existing identity files are rejected.
-    ``config`` seeds non-identity settings before startup.
+    ``config`` seeds non-identity settings before startup, ``host:`` ones included.
     Readiness is explicit: pass a callback or call wait_online with an authenticated
     client. Cleanup also runs when the callback or the test raises.
     """
-    if config is not None and "host" in config:
+    host_settings = dict((config or {}).get("host") or {})
+    if {"host_id", "name"} & host_settings.keys():
         raise ValueError("Set host identity through host_id and name")
     home = root / "home"
     overrides = dict(env or {})
@@ -92,7 +93,10 @@ def isolated_host(
     host_id = host_id or uuid.uuid4().hex
     name = name or f"e2e-host-{host_id[:12]}"
     with (config_dir / "config.yaml").open("x") as identity:
-        yaml.safe_dump({**(config or {}), "host": {"host_id": host_id, "name": name}}, identity)
+        yaml.safe_dump(
+            {**(config or {}), "host": {**host_settings, "host_id": host_id, "name": name}},
+            identity,
+        )
     log_path = root / "host.log"
     process_env.update(
         OMNIGENT_CONFIG_HOME=str(config_dir), OMNIGENT_HOST_ID=host_id, OMNIGENT_HOST_NAME=name

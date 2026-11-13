@@ -44,6 +44,7 @@ from omnigent.runner.native import (
     _unwrap_resolved_spec,
 )
 from omnigent.runner.resource_registry import SessionResourceRegistry
+from omnigent.runner.session_limits import apply_spec_session_limits
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.spec.types import AgentSpec
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -195,6 +196,8 @@ def register_mcp_routes(
                         }
                     },
                 )
+            # Discovery starts the session's MCP servers, so its limits come first.
+            apply_spec_session_limits(session_id, spec)
             try:
                 result = await mcp_manager.schemas_for(spec)
             except Exception as exc:  # noqa: BLE001
@@ -262,6 +265,7 @@ def register_mcp_routes(
                             }
                         },
                     )
+                apply_spec_session_limits(session_id, spec)
                 from omnigent.tools.mcp import McpElicitationRequired
 
                 try:
@@ -328,6 +332,8 @@ def register_mcp_routes(
                         spec = _unwrap_resolved_spec(resolved_entry)
                     except (OmnigentError, httpx.HTTPError, RuntimeError):
                         pass
+                if spec is not None:
+                    apply_spec_session_limits(session_id, spec)
                 _agent_id_local = _session_agent_ids.get(session_id)
                 try:
                     dispatch_workspace = await _session_runtime_cwd(session_id)

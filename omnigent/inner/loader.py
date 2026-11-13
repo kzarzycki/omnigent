@@ -18,6 +18,7 @@ from .datamodel import (
     OSEnvSpec,
     ParamDef,
     TerminalEnvSpec,
+    parse_sandbox_resources,
     parse_write_paths,
 )
 from .policies import (
@@ -929,6 +930,7 @@ def _parse_os_env_sandbox_spec(data: YamlData | str | bool | None) -> OSEnvSandb
         egress_allow_private_destinations=allow_private,
         credential_proxy=credential_proxy,
         git_ssh=git_ssh,
+        resources=parse_sandbox_resources(data.get("resources"), sandbox_type),
     )
 
 

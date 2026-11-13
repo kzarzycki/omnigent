@@ -566,6 +566,89 @@ def parse_write_paths(raw: object) -> list[str | WritePathSpec] | None:
     return result
 
 
+@dataclass(frozen=True)
+class SandboxResourcesSpec:
+    """``os_env.sandbox.resources``: cgroup limits for one session's processes.
+
+    Applied to a user-systemd slice around the session's runner, so it needs
+    Linux with a user manager but works with any sandbox type, ``none``
+    included. Sizes use systemd's form, e.g. ``"4G"`` or ``"25%"``.
+    """
+
+    memory_high: str | None = None
+    memory_max: str | None = None
+    memory_swap_max: str | None = None
+    cpu_weight: int | None = None
+
+    def systemd_properties(self) -> dict[str, str]:
+        """Return the set limits as systemd slice properties, e.g. ``{"MemoryMax": "4G"}``."""
+        properties = {
+            "MemoryHigh": self.memory_high,
+            "MemoryMax": self.memory_max,
+            "MemorySwapMax": self.memory_swap_max,
+            "CPUWeight": str(self.cpu_weight) if self.cpu_weight is not None else None,
+        }
+        return {name: value for name, value in properties.items() if value is not None}
+
+
+_SANDBOX_RESOURCE_MEMORY_KEYS = ("memory_high", "memory_max", "memory_swap_max")
+# systemd's CPUWeight= range; 100 is the default share.
+_CPU_WEIGHT_RANGE = range(1, 10001)
+
+
+def parse_sandbox_resources(raw: object, sandbox_type: str) -> SandboxResourcesSpec | None:
+    """Validate ``os_env.sandbox.resources`` for *sandbox_type*.
+
+    :param raw: The raw ``resources:`` value, e.g. ``{"memory_max": "4G"}``.
+    :param sandbox_type: The resolved sandbox type; ``darwin_seatbelt`` and
+        ``windows_jobobject`` are refused because no user systemd exists there.
+    :returns: The limits, or ``None`` when the block is absent.
+    :raises ValueError: If the block is malformed or the platform cannot apply it.
+    """
+    from omnigent.util.user_systemd import is_memory_limit
+
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("os_env.sandbox.resources must be a mapping")
+    unknown = set(raw) - {*_SANDBOX_RESOURCE_MEMORY_KEYS, "cpu_weight"}
+    if unknown:
+        raise ValueError(
+            f"os_env.sandbox.resources does not accept {', '.join(sorted(map(str, unknown)))}; "
+            "use memory_high, memory_max, memory_swap_max or cpu_weight"
+        )
+    if sandbox_type not in ("linux_bwrap", "none"):
+        raise ValueError(
+            "os_env.sandbox.resources needs Linux with a user systemd manager, "
+            f"which sandbox.type={sandbox_type!r} does not run on. "
+            "Fix: remove os_env.sandbox.resources from agents that run on macOS or Windows."
+        )
+    memory: dict[str, str] = {}
+    for key in _SANDBOX_RESOURCE_MEMORY_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str) or not is_memory_limit(value):
+            raise ValueError(
+                f"os_env.sandbox.resources.{key} must be a size such as '4G', "
+                f"a percentage such as '25%', or 'infinity', got {value!r}"
+            )
+        memory[key] = value
+    cpu_weight = raw.get("cpu_weight")
+    if cpu_weight is not None and (
+        isinstance(cpu_weight, bool)
+        or not isinstance(cpu_weight, int)
+        or cpu_weight not in _CPU_WEIGHT_RANGE
+    ):
+        raise ValueError(
+            f"os_env.sandbox.resources.cpu_weight must be an integer from 1 to 10000, "
+            f"got {cpu_weight!r}"
+        )
+    return SandboxResourcesSpec(cpu_weight=cpu_weight, **memory)
+
+
 @dataclass
 class OSEnvSandboxSpec:
     """Sandbox configuration for an OS environment."""
@@ -802,6 +885,9 @@ class OSEnvSandboxSpec:
     # Git's SSH transport runs in the trusted parent. Only the private
     # broker socket and a Git helper command are exposed to the sandbox.
     git_ssh: list[GitSshBinding] | None = None
+    # Memory and CPU limits for the session's whole process tree, applied
+    # through a user-systemd slice rather than the sandbox backend.
+    resources: SandboxResourcesSpec | None = None
 
     @property
     def requires_network_enforcement(self) -> bool:
