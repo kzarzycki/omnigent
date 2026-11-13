@@ -4,7 +4,7 @@ import hashlib
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -998,6 +998,7 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        root_conversation_ids: Sequence[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1024,6 +1025,10 @@ class ConversationStore(ABC):
             parent pointers are accepted. Powers the
             ``sys_session_list`` builtin and the ambient-hint
             injection.
+        :param root_conversation_ids: When set, only return conversations
+            whose ``root_conversation_id`` is one of these, so several spawn
+            trees load in one read. Combines with ``root_conversation_id``
+            (both must match).
         :param root_conversation_id: When set, only return
             conversations whose
             ``root_conversation_id == root_conversation_id``

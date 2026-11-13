@@ -11,7 +11,10 @@ from fastapi import APIRouter, Query, Request
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
 from omnigent.errors import restart_on_stale_cursor
-from omnigent.runtime.policies.builder import load_session_usage_and_tree
+from omnigent.runtime.policies.builder import (
+    _sum_subtree_usage,
+    load_session_usage_and_tree,
+)
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes._auth_helpers import require_user
@@ -115,6 +118,38 @@ def _session_cost(usage: dict[str, Any]) -> float:
         return 0.0
 
 
+_TREE_PAGE_SIZE = 500
+
+
+def _load_trees_by_root(
+    conversation_store: ConversationStore,
+    root_ids: list[str],
+) -> dict[str, list[Conversation]]:
+    """
+    Load the spawn trees of many roots in a few reads instead of one per root.
+
+    :param conversation_store: Store to read from.
+    :param root_ids: Tree roots, e.g. one listing page's sessions.
+    :returns: Every conversation (archived included) grouped by root id.
+    """
+    trees: dict[str, list[Conversation]] = {root_id: [] for root_id in root_ids}
+    after: str | None = None
+    while root_ids:
+        page = conversation_store.list_conversations(
+            limit=_TREE_PAGE_SIZE,
+            after=after,
+            kind=None,
+            root_conversation_ids=root_ids,
+            include_archived=True,
+        )
+        for tree_conv in page.data:
+            trees.setdefault(tree_conv.root_conversation_id, []).append(tree_conv)
+        if not page.has_more or page.last_id is None:
+            break
+        after = page.last_id
+    return trees
+
+
 @restart_on_stale_cursor
 def _build_usage_report(
     conversation_store: ConversationStore,
@@ -184,22 +219,24 @@ def _build_usage_report(
             order="desc",
             sort_by="updated_at",
         )
+        trees = _load_trees_by_root(
+            conversation_store,
+            [conv.root_conversation_id for conv in page.data],
+        )
         for conv in page.data:
             if cutoff_epoch is not None and conv.updated_at < cutoff_epoch:
                 window_exhausted = True
                 break
             if conv.agent_id is None:
                 continue
-            # The list page already holds each row, so pass its root to skip
-            # re-reading the same conversation once per listed session. Sums and
-            # rows come from ONE tree load: the harness roll-up below needs the
-            # same tree the sums came from, and loading it again doubled the tree
-            # pages read for every listed session.
-            usage, tree = load_session_usage_and_tree(
-                conv.id,
-                conversation_store,
-                root_conversation_id=conv.root_conversation_id,
-            )
+            # One batched read covers the whole page's trees. A row missing
+            # from its tree (deleted and recreated mid-request) falls back to
+            # the verified per-session load.
+            tree = trees.get(conv.root_conversation_id, [])
+            if any(member.id == conv.id for member in tree):
+                usage = _sum_subtree_usage(tree, conv.id)
+            else:
+                usage, tree = load_session_usage_and_tree(conv.id, conversation_store)
             primary_harness = _resolve_session_harness(conv) if include_page_details else None
             other_harnesses = (
                 _collect_other_harnesses(primary_harness, tree, conv.id)

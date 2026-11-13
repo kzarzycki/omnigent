@@ -328,3 +328,33 @@ def test_usage_endpoint_days_param(db_uri: str, monkeypatch: pytest.MonkeyPatch)
     assert [s["id"] for s in client.get("/v1/usage?days=2").json()["sessions"]] == [new_id]
     assert len(client.get("/v1/usage").json()["sessions"]) == 2
     assert client.get("/v1/usage?days=0").status_code == 422
+
+
+def test_usage_report_without_window_batches_tree_reads(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that sends no window still reads trees per page, not per session."""
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_784_678_400 + 3_600
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+    for index in range(300):
+        conv_id = _add_session(
+            store,
+            monkeypatch,
+            ts=now - index * 60,
+            cost=1.0,
+            by_model={"m": {"total_cost_usd": 1.0}},
+            title=f"s{index}",
+        )
+        store.create_conversation(
+            kind="sub_agent", parent_conversation_id=conv_id, agent_id=_AGENT_ID
+        )
+
+    statements = _count_statements(store)
+    report = _build_usage_report(store, None)
+
+    assert len(report.sessions) == 300
+    assert {s.cost_usd for s in report.sessions} == {1.0}
+    # Per-session tree reads would take ~2000 statements here.
+    assert len(statements) < 150
