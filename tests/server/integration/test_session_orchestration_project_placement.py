@@ -24,9 +24,12 @@ PINNED_WORKSPACE = "/pinned/launch"
 ENVIRONMENT_ID = "env_fixture"
 
 
-@pytest.fixture(autouse=True)
-def standalone_orchestration(monkeypatch):
-    monkeypatch.setenv("OMNIGENT_FEATURES", "-sibling_sessions")
+@pytest.fixture(autouse=True, params=[False, True], ids=["standalone", "nested"])
+def orchestration_environment(monkeypatch, request):
+    monkeypatch.setenv(
+        "OMNIGENT_FEATURES", "sibling_sessions" if request.param else "-sibling_sessions"
+    )
+    return request.param
 
 
 @pytest.fixture
@@ -172,3 +175,32 @@ async def test_sys_session_create_passes_the_environment_to_the_server(auth_clie
 
     assert "error" not in result, result
     assert store.get_conversation(result["conversation_id"]).workspace == PINNED_WORKSPACE
+
+
+@pytest.mark.parametrize("source_filed", [False, True])
+async def test_named_project_wins_over_the_source_project(
+    auth_client, db_uri, stack, source_filed
+):
+    source, pinned_host, store = stack
+    project_id = await _project(
+        auth_client, "Cloud", {"host_id": pinned_host, "workspace": PINNED_WORKSPACE}
+    )
+    if source_filed:
+        other = await _project(auth_client, "Elsewhere")
+        response = await auth_client.patch(f"/v1/sessions/{source['id']}", json={"project_id": other})
+        assert response.status_code == 200, response.text
+
+    response = await _orchestrate(auth_client, source, project_id=project_id)
+
+    assert response.status_code == 201, response.text
+    created = store.get_conversation(response.json()["id"])
+    assert (created.project_id, created.workspace) == (project_id, PINNED_WORKSPACE)
+    assert created.family_id is None
+
+
+async def test_sys_session_create_schema_offers_the_project_and_environment():
+    from omnigent.tools.builtins.spawn import SysSessionCreateTool
+
+    properties = SysSessionCreateTool().get_schema()["function"]["parameters"]["properties"]
+
+    assert {"project_id", "environment_id"} <= properties.keys()

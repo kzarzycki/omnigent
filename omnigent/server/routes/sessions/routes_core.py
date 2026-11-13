@@ -1194,6 +1194,7 @@ def register_core_routes(
         await _check_initial_input(request, body.initial_input)
         if body.requested_host_id is not None:
             await _check_requested_host_id(request, body.requested_host_id, user_id)
+        project_placement = None
         if orchestration_source is not None:
             # Recheck source permissions and placement after asynchronous validation.
             source = await asyncio.to_thread(
@@ -1259,8 +1260,11 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
-        if source is not None and request.app.state.feature_flags.enabled(
-            Feature.SIBLING_SESSIONS
+        # A named project places the worker in that project, outside the source's family.
+        if (
+            source is not None
+            and project_placement is None
+            and request.app.state.feature_flags.enabled(Feature.SIBLING_SESSIONS)
         ):
             body.sibling_source_id = source.root_conversation_id
         if body.sibling_source_id is not None:
