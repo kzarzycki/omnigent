@@ -188,7 +188,9 @@ class _Delivery:
 
 
 @pytest.mark.parametrize("draft_visible", [True, False], ids=["verified", "blind-submit"])
-@pytest.mark.parametrize("record", [_typed(_CONTENT), _enqueued(_CONTENT)], ids=["typed", "queued"])
+@pytest.mark.parametrize(
+    "record", [_typed(_CONTENT), _enqueued(_CONTENT)], ids=["typed", "queued"]
+)
 def test_a_delivered_message_returns_only_once_claude_records_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: JsonObject, draft_visible: bool
 ) -> None:

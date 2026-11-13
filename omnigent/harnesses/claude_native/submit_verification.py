@@ -128,7 +128,7 @@ def has_recorded_prompt(
     *,
     normalize_prompt: Callable[[str], str],
 ) -> bool:
-    """Whether Claude recorded *submitted_text* since *boundary*: started a turn with it, or queued it.
+    """Whether Claude recorded *submitted_text* since *boundary*, as a new turn or a queued one.
 
     Claude writes either record only once its UserPromptSubmit hooks have run. The
     text must match, so a late record of an earlier prompt or one the person typed
