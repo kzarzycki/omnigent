@@ -223,6 +223,7 @@ class HostFrameKind(str, Enum):
     HELLO = "host.hello"
     CONNECTION_ERROR = "host.connection_error"
     HARNESS_READINESS = "host.harness_readiness"
+    RESOURCES = "host.resources"
     LAUNCH_RUNNER = "host.launch_runner"
     LAUNCH_RUNNER_RESULT = "host.launch_runner_result"
     STOP_RUNNER = "host.stop_runner"
@@ -373,6 +374,29 @@ class HostHarnessReadinessFrame:
     configured_harnesses: dict[str, HarnessAvailability]
     harness_accounts: HarnessAccounts | None = None
     gateway_inference: dict[str, bool] | None = None
+
+
+# How often a host reports its resources. The server marks a report older than
+# two intervals stale, so one late frame doesn't hide the numbers.
+HOST_RESOURCES_INTERVAL_S = 60.0
+
+
+@dataclass
+class HostResourcesFrame:
+    """Host's periodic load and memory report, for placing sessions.
+
+    :param load_1m: 1-minute load average, e.g. ``3.42``.
+    :param cpu_count: Logical CPUs, e.g. ``8``.
+    :param memory_total_mb: Physical memory in MB, e.g. ``15872``.
+    :param memory_available_mb: Memory a new process can get without
+        swapping, in MB: ``MemAvailable`` on Linux, free plus inactive
+        pages on macOS.
+    """
+
+    load_1m: float
+    cpu_count: int
+    memory_total_mb: int
+    memory_available_mb: int
 
 
 @dataclass
@@ -1567,6 +1591,7 @@ HostFrame = (
     HostHelloFrame
     | HostConnectionErrorFrame
     | HostHarnessReadinessFrame
+    | HostResourcesFrame
     | HostLaunchRunnerFrame
     | HostLaunchRunnerResultFrame
     | HostStopRunnerFrame
@@ -1733,6 +1758,16 @@ def encode_host_frame(frame: HostFrame) -> str:
                 **_encode_configured_harnesses(frame.configured_harnesses),
                 "harness_accounts": frame.harness_accounts,
                 "gateway_inference": frame.gateway_inference,
+            }
+        )
+    if isinstance(frame, HostResourcesFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.RESOURCES.value,
+                "load_1m": frame.load_1m,
+                "cpu_count": frame.cpu_count,
+                "memory_total_mb": frame.memory_total_mb,
+                "memory_available_mb": frame.memory_available_mb,
             }
         )
     if isinstance(frame, HostLaunchRunnerFrame):
@@ -2597,6 +2632,8 @@ def _decode_known_host_frame(
             )
         case HostFrameKind.HARNESS_READINESS:
             return _decode_harness_readiness(msg)
+        case HostFrameKind.RESOURCES:
+            return _decode_resources(msg)
         case HostFrameKind.LAUNCH_RUNNER:
             return _decode_launch_runner(msg)
         case HostFrameKind.LAUNCH_RUNNER_RESULT:
@@ -2864,6 +2901,19 @@ def _decode_harness_readiness(msg: _JsonObject) -> HostHarnessReadinessFrame:
         configured_harnesses=configured_harnesses,
         harness_accounts=normalize_harness_accounts(msg.get("harness_accounts")),
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
+    )
+
+
+def _decode_resources(msg: _JsonObject) -> HostResourcesFrame:
+    """Decode a host resources report; every field is required."""
+    load = msg.get("load_1m")
+    if isinstance(load, bool) or not isinstance(load, int | float):
+        raise ValueError("resources frame requires a numeric load_1m")
+    return HostResourcesFrame(
+        load_1m=float(load),
+        cpu_count=_required_int(msg, "cpu_count"),
+        memory_total_mb=_required_int(msg, "memory_total_mb"),
+        memory_available_mb=_required_int(msg, "memory_available_mb"),
     )
 
 

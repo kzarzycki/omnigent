@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import secrets
@@ -47,6 +48,7 @@ from omnigent.host.frames import (
     CAP_HARNESS_LOGIN,
     CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_RESOURCES_INTERVAL_S,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
@@ -231,6 +233,20 @@ def _host_update(hello: HostHelloFrame | None) -> dict[str, str | None] | None:
     current = hello.commit[:9] if hello.commit else f"{hello.version} (unknown commit)"
     command = (os.environ.get(_DEPLOY_UPDATE_COMMAND_ENV) or "").strip() or None
     return {"current": current, "target": target_commit[:9], "command": command}
+
+
+def _host_resources(conn: HostConnection | None, now: float) -> dict[str, Any] | None:
+    """The host's latest load/memory report, or ``None`` if it sent none here.
+
+    ``stale`` is true once the report is older than two report intervals.
+    """
+    if conn is None or conn.resources is None or conn.resources_at is None:
+        return None
+    return {
+        **dataclasses.asdict(conn.resources),
+        "reported_at": conn.resources_at,
+        "stale": now - conn.resources_at > 2 * HOST_RESOURCES_INTERVAL_S,
+    }
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -916,13 +932,17 @@ def create_hosts_router(
         return conn.hello.configured_harnesses, conn.hello.harness_accounts
 
     def _reported_build(host_id: str) -> dict[str, Any]:
-        """Version, commit and update target from the live hello; ``None`` if not here."""
+        """Version, commit, update target and resources from the live connection.
+
+        Each is ``None`` when the host is not connected to this replica.
+        """
         conn = host_registry.get(host_id)
         hello = conn.hello if conn is not None else None
         return {
             "version": hello.version if hello else None,
             "commit": hello.commit if hello else None,
             "update": _host_update(hello),
+            "resources": _host_resources(conn, time.time()),
         }
 
     @router.get("/hosts")
@@ -937,7 +957,8 @@ def create_hosts_router(
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
             ``configured_harnesses``, ``gateway_inference`` (``None`` when
             no connected host has reported it to this replica), and
-            ``version`` / ``commit`` / ``update`` (see :func:`_host_update`).
+            ``version`` / ``commit`` / ``update`` (see :func:`_host_update`),
+            and ``resources`` (see :func:`_host_resources`).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user

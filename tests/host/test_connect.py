@@ -8219,6 +8219,8 @@ async def test_host_diagnostics_correlate_real_socket_closes_and_reset_on_reconn
 
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    # The peer below scripts an exact frame sequence; no resources report in it.
+    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     caplog.set_level(logging.INFO, logger="omnigent.host.connect")
     hellos: list[HostHelloFrame] = []
 
@@ -10288,6 +10290,8 @@ async def test_filesystem_frame_keeps_host_control_responsive(
             finished.set()
 
     monkeypatch.setattr(host, f"_handle_{operation}", blocked_filesystem)
+    # The tunnel below reads frames in order; no resources report in it.
+    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     serving = asyncio.create_task(host._serve_frames(ws))  # type: ignore[arg-type]
     replacement = _CollectingWs()
     try:

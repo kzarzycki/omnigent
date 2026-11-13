@@ -48,6 +48,7 @@ from omnigent.host.frames import (
     HostMcpToolsResultFrame,
     HostPluginsResultFrame,
     HostProbeAccountsFrame,
+    HostResourcesFrame,
     HostSetMcpServerEnabledResultFrame,
     HostSkillContentResultFrame,
     HostSkillsResultFrame,
@@ -506,6 +507,10 @@ class HostConnection:
     # user machine reusing a managed host's id under ordinary login. Read by the
     # default-public policy so only genuine sandboxes count as managed.
     registered_with_managed_token: bool = False
+    # Latest load/memory report and its epoch-seconds receive time; ``None``
+    # until the host reports (older hosts never do).
+    resources: HostResourcesFrame | None = None
+    resources_at: float | None = None
     pending_launches: dict[str, asyncio.Future[HostLaunchResult]] = field(
         default_factory=dict,
     )
