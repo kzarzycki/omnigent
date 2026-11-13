@@ -169,6 +169,26 @@ describe("chat link previews at the fetch layer", () => {
     expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
   });
 
+  it("renders a relative session link as an anchor under the base path, with a preview", async () => {
+    vi.stubGlobal("window", Object.assign(window, { __OMNIGENT_BASE_PATH__: "/proxy/6767" }));
+    try {
+      fetchMock.mockResolvedValue(
+        jsonResponse({ id: "conv_9", agent_id: "ag_1", title: "Auth refactor", status: "idle" }),
+      );
+      renderMarkdown("[the new chat](/c/conv_9) and [notes](/abs/ws/notes.md)");
+
+      const link = screen.getByRole("link", { name: "the new chat" });
+      expect(link.getAttribute("href")).toBe("/proxy/6767/c/conv_9");
+      expect(link.hasAttribute("data-omnigent-file")).toBe(false);
+      await userEvent.hover(link);
+      expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
+      // A workspace path still goes to the file viewer, not a session read.
+      expect(screen.queryByRole("link", { name: "notes" })).toBeNull();
+    } finally {
+      delete window.__OMNIGENT_BASE_PATH__;
+    }
+  });
+
   it("shows nothing for a session the viewer can't open", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ detail: "Forbidden" }, 403));
     renderMarkdown(`[the session](${window.location.origin}/c/conv_secret)`);

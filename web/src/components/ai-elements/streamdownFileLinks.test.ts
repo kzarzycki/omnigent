@@ -57,6 +57,24 @@ function expectHandedOver(properties: Record<string, unknown>, path: string): vo
   expect(properties.href).toMatch(/^#./);
 }
 
+describe("markWorkspaceFileLinks app routes", () => {
+  it("leaves a session link alone, with or without the base path", () => {
+    expect(markHref("/c/conv_9")).toEqual({ href: "/c/conv_9" });
+    expect(markHref("/c/conv_9/")).toEqual({ href: "/c/conv_9/" });
+    window.__OMNIGENT_BASE_PATH__ = "/proxy/6767";
+    try {
+      expect(markHref("/proxy/6767/c/conv_9")).toEqual({ href: "/proxy/6767/c/conv_9" });
+    } finally {
+      delete window.__OMNIGENT_BASE_PATH__;
+    }
+  });
+
+  it("still hands a workspace path to the file viewer", () => {
+    expectHandedOver(markHref("/abs/ws/notes.md"), "/abs/ws/notes.md");
+    expectHandedOver(markHref("/c/dir/file.md"), "/c/dir/file.md");
+  });
+});
+
 describe("markWorkspaceFileLinks", () => {
   it("hands an absolute workspace path to the FileViewer renderer", () => {
     // Rendered as a live anchor before this pass, so a click hit the server.
