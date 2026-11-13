@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator
 import httpx
 import pytest
 
-from omnigent.runner.server_restart_retry import ServerRestartRetryClient
+from omnigent.runner.server_restart_retry import FAIL_FAST_EXTENSION, ServerRestartRetryClient
 
 _Outcome = int | type[httpx.TransportError]
 
@@ -90,6 +90,18 @@ async def test_other_errors_fail_at_once() -> None:
     with pytest.raises(httpx.ReadError):
         await client.get("/b")
     assert sent == ["GET", "GET"]
+
+
+@pytest.mark.asyncio
+async def test_fail_fast_request_is_not_retried() -> None:
+    fake_time = _FakeTime()
+    client, sent = _client(iter([httpx.ConnectError, 200]), fake_time)
+
+    with pytest.raises(httpx.ConnectError):
+        await client.post("/policies/evaluate", json={}, extensions={FAIL_FAST_EXTENSION: True})
+
+    assert sent == ["POST"]
+    assert fake_time.sleeps == []
 
 
 @pytest.mark.parametrize(
