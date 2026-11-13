@@ -1023,7 +1023,7 @@ def _canonical_tool_input(tool_input: dict[str, Any] | None) -> dict[str, Any]:
     return tool_input if isinstance(tool_input, dict) else {}
 
 
-def _signal_terminal_resolved_harness_elicitation(*args: Any, **kwargs: Any) -> None:
+def _signal_terminal_resolved_harness_elicitation(*args: Any, **kwargs: Any) -> bool:
     """Call-time proxy so a facade patch of this symbol is honored here."""
     from omnigent.server.routes import sessions as _facade
 
@@ -1034,7 +1034,8 @@ def _signal_terminal_resolved_harness_elicitation_impl(
     session_id: str,
     tool_name: str,
     tool_input: dict[str, Any] | None,
-) -> None:
+    ancestor_ids: Iterable[str] = (),
+) -> bool:
     """
     Resolve the parked prompt a mirrored tool result belongs to,
     ending its long-poll promptly.
@@ -1076,21 +1077,26 @@ def _signal_terminal_resolved_harness_elicitation_impl(
     :param tool_name: Tool name the result is for, e.g. ``"Bash"``.
     :param tool_input: Tool input the result is for, e.g.
         ``{"command": "ls"}``, or ``None`` if unavailable.
+    :param ancestor_ids: ``session_id``'s ancestors. A Claude subagent's
+        prompt parks on the parent while its result mirrors into the child
+        session, so those sessions are searched too.
+    :returns: Whether a parked prompt was resolved.
     """
+    sessions = {session_id, *ancestor_ids}
     candidates = [
         parked
         for parked in _harness_parked_elicitations.values()
-        if parked.session_id == session_id
+        if parked.session_id in sessions
         and parked.tool_name == tool_name
         and not parked.resolved_elsewhere.is_set()
     ]
     if not candidates:
-        return
+        return False
     mirrored_input = _canonical_tool_input(tool_input)
     for parked in candidates:
         if _canonical_tool_input(parked.tool_input) == mirrored_input:
             parked.resolved_elsewhere.set()
-            return
+            return True
     # No exact input match. Correlation is exact-only: resolving a
     # same-named-but-different-input prompt here would clear the wrong
     # card, so leave every candidate to its own result / web verdict /
@@ -1108,6 +1114,7 @@ def _signal_terminal_resolved_harness_elicitation_impl(
         session_id,
         len(candidates),
     )
+    return False
 
 
 def _client_supplied_hook_elicitation_id(

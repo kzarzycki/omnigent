@@ -152,7 +152,9 @@ class _SideEffectRecorder:
     ) -> None:
         self.published.append(item.id)
 
-    def drive(self, session_id: str, persisted: ConversationItem) -> None:
+    async def drive(
+        self, session_id: str, persisted: ConversationItem, conversation_store: object
+    ) -> None:
         self.driven.append(persisted.id)
 
     def patch(self):

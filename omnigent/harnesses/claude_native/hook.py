@@ -1128,10 +1128,16 @@ def _main_permission_request(argv: list[str]) -> int:
         f"{url_component(session_id)}/hooks/permission-request"
     )
     is_question = payload.get("tool_name") == "AskUserQuestion"
+    # Claude draws a subagent's dialog only after this hook returns, so an empty
+    # pane says nothing about whether it was answered; give up and it shows unseen.
+    from_subagent = bool(payload.get("agent_id"))
     dialog_gone = False
 
     def _dialog_open() -> bool | None:
         nonlocal dialog_gone
+        if from_subagent:
+            # Unreadable, but still open: hold it through an outage like a visible one.
+            return True
         visible = terminal_prompt_visible(bridge_dir)
         dialog_gone = visible is False
         return visible
