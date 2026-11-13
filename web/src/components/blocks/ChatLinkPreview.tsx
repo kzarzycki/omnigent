@@ -1,6 +1,6 @@
 // Previews for chat links Omnigent can read through its own APIs: GitHub
-// issues, PRs, commits and Actions runs (via the server, with the viewer's
-// GitHub connection) and sessions on this server. No other link is fetched.
+// issues, PRs, commits and Actions runs (via the server, through the chat's
+// session host) and sessions on this server. No other link is fetched.
 
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
@@ -10,8 +10,8 @@ import { fetchGithubLinkPreview, type GithubLinkPreview } from "@/lib/githubInte
 import { parseGithubLink, parseSessionLink, type GithubLinkRef } from "@/lib/linkPreview";
 import { PullRequestLabelChip } from "@/shell/PullRequestLabels";
 import { PullRequestStatus } from "@/shell/PullRequestStatus";
-import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { getSessionSlim } from "@/lib/sessionsApi";
+import { useFileViewerConversationId } from "@/shell/FileViewerContext";
 
 // A preview's state and checks change; a minute keeps them close to live.
 const PREVIEW_STALE_MS = 60_000;
@@ -50,11 +50,15 @@ const PREVIEW_QUERY = {
   retry: false,
 } as const;
 
-function useGithubPreview(link: GithubLinkRef | null, enabled: boolean) {
+function useGithubPreview(
+  sessionId: string | undefined,
+  link: GithubLinkRef | null,
+  enabled: boolean,
+) {
   const { data, isError } = useQuery({
-    queryKey: ["github-link-preview", link?.owner, link?.repo, link?.kind, link?.ref],
-    queryFn: () => fetchGithubLinkPreview(link as GithubLinkRef),
-    enabled: enabled && link !== null,
+    queryKey: ["github-link-preview", sessionId, link?.owner, link?.repo, link?.kind, link?.ref],
+    queryFn: () => fetchGithubLinkPreview(sessionId as string, link as GithubLinkRef),
+    enabled: enabled && link !== null && sessionId !== undefined,
     ...PREVIEW_QUERY,
   });
   return isError ? null : (data?.preview ?? null);
@@ -121,10 +125,9 @@ export function ChatLinkPreview({
   const sessionId = github ? null : parseSessionLink(href, window.location.origin);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const seen = useSeen(triggerRef, github !== null || sessionId !== null);
-  // Without the GitHub connection the preview route doesn't exist: ask nothing.
-  const info = useServerInfo();
-  const githubEnabled = info !== "loading" && (info.enabled_connections ?? []).includes("github");
-  const preview = useGithubPreview(github, seen && githubEnabled);
+  // GitHub is read through the chat's session host; outside a session, ask nothing.
+  const chatSessionId = useFileViewerConversationId();
+  const preview = useGithubPreview(chatSessionId, github, seen);
   const session = useSessionPreview(sessionId, seen);
 
   if (!github && !sessionId) return children;

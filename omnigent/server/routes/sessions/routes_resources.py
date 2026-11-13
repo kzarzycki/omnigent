@@ -3513,6 +3513,42 @@ def register_resources_routes(
             runner_path=f"/v1/sessions/{session_id}/resources/github/changes",
         )
 
+    @router.get(
+        "/sessions/{session_id}/resources/github/preview",
+        response_model=None,
+    )
+    async def get_session_github_link_preview(
+        request: Request,
+        session_id: str,
+        owner: str,
+        repo: str,
+        kind: str,
+        ref: str,
+    ) -> dict[str, Any]:
+        """
+        Preview a GitHub PR, issue, commit or Actions run for a chat link.
+
+        Read through the session host's ``gh`` login, like the PR panel. Takes
+        validated parts, never a URL; ``preview`` is null when the host can't
+        read the object. An offline host answers like the other GitHub reads.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier.
+        :returns: ``{"object": "session.github.link_preview", "preview": ...}``.
+        """
+        from omnigent.runner.github_resource import valid_preview_parts
+
+        conv = await _validate_session(session_id, request, LEVEL_READ)
+        if not valid_preview_parts(owner, repo, kind, ref):
+            raise HTTPException(status_code=400, detail="Invalid preview reference")
+        return await _proxy_get_to_runner(
+            session_id,
+            f"/v1/sessions/{session_id}/resources/github/preview",
+            conv,
+            params={"owner": owner, "repo": repo, "kind": kind, "ref": ref},
+            timeout=_PR_EDIT_PROXY_TIMEOUT_S,
+        )
+
     @router.post("/sessions/{session_id}/resources/github/prs", response_model=None)
     async def update_session_github_pr(request: Request, session_id: str) -> dict[str, Any]:
         """
