@@ -1182,6 +1182,67 @@ def test_permission_request_hook_stops_once_the_terminal_dialog_is_gone(
     assert len(client.calls) == answered_after
 
 
+# The pane while a subagent's PermissionRequest hook waits: Claude has not drawn
+# the dialog yet, so the main composer still shows.
+_SUBAGENT_WAITING_PANE = """\
+❯ Clean up the scratch directory
+● Agent(cleanup)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+✻ Waiting for 1 background agent to finish
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+  ● main
+  ◯ general-purpose  cleanup                              5m 25s · ↓ 39 tokens
+"""
+
+
+def test_permission_request_hook_does_not_treat_a_missing_subagent_dialog_as_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    A subagent's prompt stays on the web after a held poll is cut and re-posted.
+
+    Its dialog is not on the pane while the hook waits. Reading that as answered
+    in the terminal ended the hook, so Claude showed the dialog with no web card.
+    """
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
+    floor = claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S
+    cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
+    # Two read timeouts on the held poll, then a server restart longer than the retry cap.
+    script = [("severed", floor + 320.0)] * 2 + [("5xx", 0.0)] * (cap + 1) + [("ok", 0.0)]
+    client = _scripted_client(script=script, monkeypatch=monkeypatch)
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+    bridge_dir = _prepare_permission_bridge(tmp_path, "conv_subagent_prompt")
+    (bridge_dir / "tmux.json").write_text(
+        json.dumps({"socket_path": str(tmp_path / "tmux.sock"), "tmux_target": "main"})
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda *_args, **_kwargs: _SUBAGENT_WAITING_PANE,
+    )
+    assert claude_native_hook.terminal_prompt_visible(bridge_dir) is False
+    payload = {
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "a1b2c3d4e5f6a7b8c",
+        "agent_type": "general-purpose",
+        "permission_mode": "bypassPermissions",
+        "tool_name": "Bash",
+        "tool_input": {"command": 'rm -rf "$SCRATCH_ROOT/tmp"', "description": "cleanup"},
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    exit_code = claude_native_hook.main(["permission-request", "--bridge-dir", str(bridge_dir)])
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert len(client.calls) == len(script)
+
+
 @pytest.mark.parametrize("empty_response", [False, True], ids=["transport-failed", "timed-out"])
 def test_permission_request_hook_leaves_other_unforwarded_tools_to_the_terminal(
     tmp_path: Path,

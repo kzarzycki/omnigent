@@ -1015,10 +1015,15 @@ def _main_permission_request(argv: list[str]) -> int:
         f"{url_component(session_id)}/hooks/permission-request"
     )
     is_question = payload.get("tool_name") == "AskUserQuestion"
+    # Claude draws a subagent's dialog only after this hook returns, so an empty
+    # pane says nothing about whether it was answered; give up and it shows unseen.
+    from_subagent = bool(payload.get("agent_id"))
     dialog_gone = False
 
     def _dialog_open() -> bool | None:
         nonlocal dialog_gone
+        if from_subagent:
+            return None
         visible = terminal_prompt_visible(bridge_dir)
         dialog_gone = visible is False
         return visible
@@ -1032,7 +1037,7 @@ def _main_permission_request(argv: list[str]) -> int:
         wait_marker=approval_wait_marker_path(session_id, bridge_dir=bridge_dir),
         # Claude's dialog stays answerable in the terminal while this waits, and
         # the web card comes back as soon as Omnigent answers again.
-        hold_through_outages=is_question,
+        hold_through_outages=is_question or from_subagent,
         prompt_open=_dialog_open,
     )
     # The server returns an empty 200 when the question wait expires.

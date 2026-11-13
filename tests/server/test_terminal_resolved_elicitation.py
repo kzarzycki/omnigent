@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -241,11 +242,15 @@ def test_drive_mirrored_output_resolves_matching_parked_prompt() -> None:
     a = _park("e_a", "Bash", {"command": "ls"})
     b = _park("e_b", "Bash", {"command": "pwd"})
 
-    sessions_route._drive_terminal_resolved_elicitation(
-        SESSION, _function_call_item("toolu_a", "Bash", {"command": "ls"})
+    asyncio.run(
+        sessions_route._drive_terminal_resolved_elicitation(
+            SESSION, _function_call_item("toolu_a", "Bash", {"command": "ls"})
+        )
     )
-    sessions_route._drive_terminal_resolved_elicitation(
-        SESSION, _function_call_output_item("toolu_a")
+    asyncio.run(
+        sessions_route._drive_terminal_resolved_elicitation(
+            SESSION, _function_call_output_item("toolu_a")
+        )
     )
 
     assert a.resolved_elsewhere.is_set()
@@ -259,8 +264,63 @@ def test_drive_output_without_known_call_id_is_noop() -> None:
     """
     a = _park("e_a", "Bash", {"command": "ls"})
 
-    sessions_route._drive_terminal_resolved_elicitation(
-        SESSION, _function_call_output_item("toolu_unknown")
+    asyncio.run(
+        sessions_route._drive_terminal_resolved_elicitation(
+            SESSION, _function_call_output_item("toolu_unknown")
+        )
     )
 
     assert not a.resolved_elsewhere.is_set()
+
+
+class _ParentLinks:
+    """The one store read the ancestor walk makes: ``get_conversation``."""
+
+    def __init__(self, parents: dict[str, str]) -> None:
+        self._parents = parents
+        self.reader_threads: set[int] = set()
+
+    def get_conversation(self, session_id: str) -> Any:
+        from types import SimpleNamespace
+
+        self.reader_threads.add(threading.get_ident())
+        return SimpleNamespace(parent_conversation_id=self._parents.get(session_id))
+
+
+@pytest.mark.parametrize(
+    ("parents", "resolved"),
+    [
+        ({"conv_child": SESSION}, True),
+        ({"conv_grandchild": "conv_child", "conv_child": SESSION}, True),
+        ({"conv_child": "conv_elsewhere"}, False),
+    ],
+    ids=["child", "grandchild", "unrelated"],
+)
+def test_drive_subagent_output_resolves_prompt_parked_on_an_ancestor(
+    parents: dict[str, str], resolved: bool
+) -> None:
+    """
+    A subagent's prompt parks on its parent while its result mirrors into the
+    child session. A child result answered or cancelled in the terminal must
+    still end that wait; a session outside the lineage must not.
+    """
+    parked = _park("e_sub", "Bash", {"command": "rm -rf ${SCRATCH_ROOT:?}/tmp"})
+    store = _ParentLinks(parents)
+    child = next(iter(parents))
+
+    asyncio.run(
+        sessions_route._drive_terminal_resolved_elicitation(
+            child,
+            _function_call_item("toolu_sub", "Bash", {"command": "rm -rf ${SCRATCH_ROOT:?}/tmp"}),
+            store,
+        )
+    )
+    asyncio.run(
+        sessions_route._drive_terminal_resolved_elicitation(
+            child, _function_call_output_item("toolu_sub", "cancelled"), store
+        )
+    )
+
+    assert parked.resolved_elsewhere.is_set() is resolved
+    # The store read stays off the event loop's thread, where it would stall every session.
+    assert store.reader_threads and threading.get_ident() not in store.reader_threads

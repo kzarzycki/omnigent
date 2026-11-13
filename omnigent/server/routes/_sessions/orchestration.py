@@ -3591,8 +3591,8 @@ async def _persist_external_conversation_item_unlocked(
     await _seed_missing_title_from_user_message(conv, item, conversation_store)
     if pending_background_title is not None:
         pending_background_title.schedule(expected_seed_title=conv.title)
-    _publish_persisted_external_item(
-        session_id, body, persisted, cleared_pending_id=cleared_pending_id
+    await _publish_persisted_external_item(
+        session_id, body, persisted, conversation_store, cleared_pending_id=cleared_pending_id
     )
     await record_claude_subagent_return(session_id, persisted, conversation_store)
     return persisted.id
@@ -3639,10 +3639,11 @@ def _new_external_conversation_item(
     return item
 
 
-def _publish_persisted_external_item(
+async def _publish_persisted_external_item(
     session_id: str,
     body: SessionEventInput,
     persisted: ConversationItem,
+    conversation_store: ConversationStore,
     cleared_pending_id: str | None = None,
 ) -> None:
     """Broadcast a newly persisted external item and drive any elicitation it resolves."""
@@ -3653,7 +3654,7 @@ def _publish_persisted_external_item(
         cleared_pending_id=cleared_pending_id,
         message_id=message_id if isinstance(message_id, str) else None,
     )
-    _drive_terminal_resolved_elicitation(session_id, persisted)
+    await _drive_terminal_resolved_elicitation(session_id, persisted, conversation_store)
 
 
 async def _persist_external_conversation_items(
@@ -3688,7 +3689,7 @@ async def _persist_external_conversation_items(
     )
     for body, persisted in zip(bodies[: len(items)], persisted_items, strict=True):
         if not persisted.deduplicated:
-            _publish_persisted_external_item(session_id, body, persisted)
+            await _publish_persisted_external_item(session_id, body, persisted, conversation_store)
         await record_claude_subagent_return(session_id, persisted, conversation_store)
     if error is not None:
         raise error
@@ -4535,7 +4536,11 @@ async def _resend_lost_subagent_notices(
         await _resend_lost_subagent_notice(child, conversation_store)
 
 
-def _drive_terminal_resolved_elicitation(session_id: str, persisted: ConversationItem) -> None:
+async def _drive_terminal_resolved_elicitation(
+    session_id: str,
+    persisted: ConversationItem,
+    conversation_store: ConversationStore | None = None,
+) -> None:
     """
     Feed a mirrored tool item into the terminal-resolved fast path.
 
@@ -4551,6 +4556,8 @@ def _drive_terminal_resolved_elicitation(session_id: str, persisted: Conversatio
         e.g. ``"conv_abc123"``.
     :param persisted: The stored conversation item the forwarder just
         mirrored via ``external_conversation_item``.
+    :param conversation_store: Store to find the session's ancestors, where a
+        subagent's prompt is parked. ``None`` matches this session only.
     """
     data = persisted.data
     if persisted.type == "function_call" and isinstance(data, FunctionCallData):
@@ -4565,9 +4572,23 @@ def _drive_terminal_resolved_elicitation(session_id: str, persisted: Conversatio
     elif persisted.type == "function_call_output" and isinstance(data, FunctionCallOutputData):
         identity = _recent_mirrored_tool_calls.get(data.call_id)
         if identity is not None:
-            _signal_terminal_resolved_harness_elicitation(
+            if _signal_terminal_resolved_harness_elicitation(
                 session_id, identity.tool_name, identity.tool_input
-            )
+            ):
+                return
+            if conversation_store is not None and any(
+                parked.tool_name == identity.tool_name
+                and parked.session_id != session_id
+                and not parked.resolved_elsewhere.is_set()
+                for parked in _harness_parked_elicitations.values()
+            ):
+                ancestors = await asyncio.to_thread(
+                    _ancestor_session_ids, conversation_store, session_id
+                )
+                if ancestors:
+                    _signal_terminal_resolved_harness_elicitation(
+                        session_id, identity.tool_name, identity.tool_input, ancestors
+                    )
 
 
 async def _publish_runner_recovered_status(*args: Any, **kwargs: Any) -> None:
