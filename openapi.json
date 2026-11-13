@@ -6492,6 +6492,22 @@
             "title": "Automations Enabled",
             "type": "boolean"
           },
+          "blocked_efforts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked Efforts",
+            "type": "array"
+          },
+          "blocked_models": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked Models",
+            "type": "array"
+          },
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },

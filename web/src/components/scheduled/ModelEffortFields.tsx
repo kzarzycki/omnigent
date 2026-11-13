@@ -1,6 +1,7 @@
 import { ScheduleSelect as Select } from "./ScheduleSelect";
 // Harness-specific automation controls; Default leaves the agent configuration unchanged.
 
+import { withoutBlockedEfforts, withoutBlockedModels } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import { pickerTriggerClass } from "./pickerStyles";
 import { Label } from "@/components/scheduled/Label";
@@ -39,14 +40,15 @@ export function ModelEffortFields({
    * open dropdown from dismissing the whole modal. */
   onSelectOpenChange?: (open: boolean) => void;
 }) {
-  const modelOptions = settings.models.map((option) => ({
+  // Blocked entries stay off the lists; a task already set to one still shows it.
+  const modelOptions = withoutBlockedModels(settings.models).map((option) => ({
     id: option.id,
     label: option.displayName ?? option.id,
   }));
   if (model && !modelOptions.some((option) => option.id === model)) {
     modelOptions.push({ id: model, label: model });
   }
-  const effortOptions = [...settings.efforts];
+  const effortOptions = [...withoutBlockedEfforts(settings.efforts)];
   if (effort && !effortOptions.some((option) => option.value === effort)) {
     effortOptions.push({ value: effort, label: effort });
   }

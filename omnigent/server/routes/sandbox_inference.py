@@ -19,6 +19,7 @@ from omnigent.inference_config import (
 )
 from omnigent.server.auth import AuthProvider
 from omnigent.server.managed_hosts import NoReachableModels
+from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._session_create_validation import validate_session_agent
 
@@ -179,6 +180,23 @@ def create_sandbox_inference_router(
     ) -> dict[str, Any]:
         user_id = require_user(request, auth_provider)
         response.headers["Cache-Control"] = "private, no-store"
+        catalog = await _unfiltered_model_options(request, provider, harness, agent_id, user_id)
+        block_list = current_model_block_list()
+        if not block_list or not isinstance(catalog.get("models"), list):
+            return catalog
+        catalog = dict(catalog)
+        catalog["models"] = block_list.filter_model_options(catalog["models"])
+        if block_list.model_blocked(catalog.get("default_model")):
+            catalog["default_model"] = None
+        return catalog
+
+    async def _unfiltered_model_options(
+        request: Request,
+        provider: str,
+        harness: str,
+        agent_id: str | None,
+        user_id: str | None,
+    ) -> dict[str, Any]:
         auth = None
         spec = None
         if agent_id is not None:

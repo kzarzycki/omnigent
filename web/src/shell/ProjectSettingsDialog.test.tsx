@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
@@ -9,6 +9,7 @@ import {
   writeProjectLaunchDefaults,
 } from "@/lib/projectLaunchPreferences";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { FALLBACK_SERVER_INFO, setCachedServerInfoForTests } from "@/lib/capabilities";
 
 vi.mock("@/lib/projectsApi", () => ({
   getProject: vi.fn(),
@@ -375,6 +376,27 @@ describe("ProjectSettingsDialog", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("project-settings-model")).not.toBeInTheDocument(),
     );
+  });
+
+  it.each([
+    ["nothing blocked", [], true],
+    ["opus blocked", ["opus"], false],
+  ])("the built-in model list honors the block list (%s)", async (_name, blocked, shown) => {
+    setCachedServerInfoForTests({ ...FALLBACK_SERVER_INFO, blocked_models: blocked });
+    onTestFinished(() => setCachedServerInfoForTests(null));
+    availableAgentsMock.mockReturnValue({ data: [claudeAgent()] });
+    getProjectMock.mockResolvedValue({
+      id: "p_1",
+      name: "Work",
+      config: { agent_id: "ag_claude" },
+    });
+    renderDialog();
+    await waitFor(() => expect(screen.getByTestId("project-settings-model")).toBeInTheDocument());
+
+    fireEvent.keyDown(screen.getByTestId("project-settings-model"), { key: "Enter" });
+    const names = (await screen.findAllByRole("option")).map((option) => option.textContent);
+    expect(names.includes("Opus")).toBe(shown);
+    expect(names).toContain("Sonnet");
   });
 
   it("round-trips a stored model default on save", async () => {

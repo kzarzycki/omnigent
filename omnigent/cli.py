@@ -4845,6 +4845,7 @@ def server(
 
     from omnigent.server.app import _ensure_default_agents, create_app
     from omnigent.server.auth import create_auth_provider
+    from omnigent.server.model_block_list import BLOCKED_EFFORTS_KEY, BLOCKED_MODELS_KEY
     from omnigent.server.server_config import (
         SESSION_TITLE_INSTRUCTIONS_KEY,
         config_str_list,
@@ -4875,12 +4876,11 @@ def server(
     title_server_config = cfg
     if config_path is None:
         global_cfg = _load_global_config()
-        title_instructions = global_cfg.get(SESSION_TITLE_INSTRUCTIONS_KEY)
-        title_server_config = (
-            {SESSION_TITLE_INSTRUCTIONS_KEY: title_instructions}
-            if title_instructions is not None
-            else {}
-        )
+        title_server_config = {
+            key: global_cfg[key]
+            for key in (SESSION_TITLE_INSTRUCTIONS_KEY, BLOCKED_MODELS_KEY, BLOCKED_EFFORTS_KEY)
+            if global_cfg.get(key) is not None
+        }
 
     # Let the server-config reader (branding) see the same ``-c`` file.
     if config_path:

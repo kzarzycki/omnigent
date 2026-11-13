@@ -94,7 +94,11 @@ import { checkHostDirectory, hostDirectoryMissing } from "@/hooks/useHostFilesys
 import { getCliServerUrl } from "@/lib/host";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { randomUUID } from "@/lib/randomUUID";
-import { sandboxOptionLabel, sandboxProviderOptions } from "@/lib/capabilities";
+import {
+  sandboxOptionLabel,
+  sandboxProviderOptions,
+  withoutBlockedEfforts,
+} from "@/lib/capabilities";
 import { sandboxHostChoice, sandboxHostChoiceProvider } from "@/lib/hostPreferences";
 import type { LastSandboxRepo } from "@/lib/repoPreferences";
 import {
@@ -362,7 +366,7 @@ function ForkRunConfig({
     // offered vocabulary (e.g. "minimal") falls back to Default rather than
     // leaving the Select on an empty, unselectable value.
     const effort = sameFamilyAsSource ? sourceSession?.reasoningEffort : null;
-    return effort && CLAUDE_NATIVE_EFFORTS.some((e) => e.value === effort)
+    return effort && withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS).some((e) => e.value === effort)
       ? effort
       : EFFORT_SELECT_NONE;
   }, [sameFamilyAsSource, sourceSession]);
@@ -570,7 +574,7 @@ function ForkRunConfig({
               </SelectTrigger>
               <SelectContent position="popper" align="start" className={FORK_SELECT_ITEM_SM}>
                 <SelectItem value={EFFORT_SELECT_NONE}>Default</SelectItem>
-                {CLAUDE_NATIVE_EFFORTS.map((e) => (
+                {withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS).map((e) => (
                   <SelectItem key={e.value} value={e.value}>
                     {e.label}
                   </SelectItem>

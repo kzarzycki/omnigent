@@ -558,3 +558,41 @@ describe("resolveServerInfo scheduled_task_worktrees", () => {
     );
   });
 });
+
+describe("blocked efforts", () => {
+  it("parses blocked_efforts from the probe and defaults it to none", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ blocked_efforts: ["max", 3] }));
+    const { resolveServerInfo } = await import("./capabilities");
+    expect((await resolveServerInfo()).blocked_efforts).toEqual(["max"]);
+
+    vi.resetModules();
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    const fresh = await import("./capabilities");
+    expect((await fresh.resolveServerInfo()).blocked_efforts).toEqual([]);
+    expect(fresh.withoutBlockedEfforts(["low", "max"])).toEqual(["low", "max"]);
+  });
+
+  it("filters effort ids and picker rows case-insensitively", async () => {
+    const { withoutBlockedEfforts } = await import("./capabilities");
+    expect(withoutBlockedEfforts(["low", "XHigh", "max"], ["xhigh"])).toEqual(["low", "max"]);
+    expect(withoutBlockedEfforts([{ value: "low" }, { value: "max" }], ["max"])).toEqual([
+      { value: "low" },
+    ]);
+  });
+});
+
+describe("blocked models", () => {
+  it("matches built-in ids as the server does: no case, no variant suffix", async () => {
+    const { withoutBlockedModels } = await import("./capabilities");
+    const rows = [{ id: "opus" }, { id: "Sonnet" }, { id: "haiku" }];
+    expect(withoutBlockedModels(rows, ["OPUS", "sonnet[1m]"])).toEqual([{ id: "haiku" }]);
+    expect(withoutBlockedModels(rows, [])).toBe(rows);
+  });
+
+  it("parses blocked_models from the probe", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ blocked_models: ["opus", 1] }));
+    const { resolveServerInfo, withoutBlockedModels } = await import("./capabilities");
+    expect((await resolveServerInfo()).blocked_models).toEqual(["opus"]);
+    expect(withoutBlockedModels([{ id: "opus" }, { id: "haiku" }])).toEqual([{ id: "haiku" }]);
+  });
+});

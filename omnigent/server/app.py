@@ -350,6 +350,10 @@ class ServerInfoResponse(BaseModel):
     scheduled_task_projects: bool = False
     # Bounded latest-failure feed for the Inbox.
     scheduled_task_inbox: bool = False
+    # Effort levels the ``blocked_efforts`` setting hides from every picker.
+    blocked_efforts: list[str] = []
+    # Model ids ``blocked_models`` hides from the web's built-in model lists.
+    blocked_models: list[str] = []
     branding: BrandingInfo
     picker: PickerInfo = PickerInfo()
 
@@ -1888,6 +1892,12 @@ def create_app(
     picker_curation = load_picker_curation(resolved_server_config)
     title_instructions = session_title_instructions(resolved_server_config)
     trigger_poll_minutes = automation_trigger_poll_minutes(resolved_server_config)
+    from omnigent.server.model_block_list import (
+        configure_model_block_list,
+        current_model_block_list,
+    )
+
+    configure_model_block_list(resolved_server_config)
     resolved_feature_flags = feature_flags or resolve_feature_flags()
     if harness_install is None:
         app_harness_install: bool | Callable[[], bool] = resolved_feature_flags.enabled(
@@ -3816,6 +3826,8 @@ def create_app(
                 "scheduled_task_inbox": automations_enabled,
                 "automations_enabled": automations_enabled,
                 "automation_trigger_poll_minutes": trigger_poll_minutes,
+                "blocked_efforts": sorted(current_model_block_list().efforts),
+                "blocked_models": sorted(current_model_block_list().models),
                 "branding": branding_snapshot.config(),
                 "picker": picker_curation.config(),
             }

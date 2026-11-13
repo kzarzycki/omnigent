@@ -319,6 +319,10 @@ export interface ServerInfo {
   scheduled_task_harness_settings?: boolean;
   /** Automations accept modes that skip approval; older servers may reject them. */
   scheduled_task_approval_skipping_modes?: boolean;
+  /** Effort levels the server's ``blocked_efforts`` setting hides; absent on older servers. */
+  blocked_efforts?: string[];
+  /** Model ids the server's ``blocked_models`` setting hides; absent on older servers. */
+  blocked_models?: string[];
   /** Operator branding, or null when the built-in identity should be used. */
   branding?: Branding | null;
   /**
@@ -667,6 +671,12 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           scheduled_task_harness_settings: data.scheduled_task_harness_settings === true,
           scheduled_task_approval_skipping_modes:
             data.scheduled_task_approval_skipping_modes === true,
+          blocked_efforts: Array.isArray(data.blocked_efforts)
+            ? data.blocked_efforts.filter((e): e is string => typeof e === "string")
+            : [],
+          blocked_models: Array.isArray(data.blocked_models)
+            ? data.blocked_models.filter((m): m is string => typeof m === "string")
+            : [],
           branding: parseBranding(data.branding),
           picker: parsePicker(data.picker),
         };
@@ -692,6 +702,56 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
  */
 export function getCachedServerInfo(): ServerInfo | null {
   return cachedServerInfo;
+}
+
+/** Tests only: stand in for the boot-time ``/v1/info`` probe (``null`` clears it). */
+export function setCachedServerInfoForTests(info: ServerInfo | null): void {
+  cachedServerInfo = info;
+  pendingServerInfo = null;
+}
+
+/**
+ * Drop the effort levels the server blocks from an effort ladder.
+ *
+ * :param levels: Ordered effort ids (``"max"``) or picker rows (``{ value: "max" }``).
+ * :param blocked: Blocked effort ids; defaults to the cached ``/v1/info``
+ *     ``blocked_efforts``, which the app resolves before its first render.
+ * :returns: *levels* without the blocked entries, or *levels* itself when none are.
+ */
+/** A model id compared as the server does: no case, no ``[1m]``-style variant suffix. */
+function blockKey(model: string): string {
+  return model
+    .trim()
+    .replace(/\[[^[\]]*\]$/, "")
+    .toLowerCase();
+}
+
+/**
+ * Drop the models the server blocks from a built-in model list.
+ *
+ * :param models: Picker rows keyed by ``id`` (an alias such as ``"opus"``).
+ * :param blocked: Blocked model ids; defaults to the cached ``/v1/info``
+ *     ``blocked_models``.
+ * :returns: *models* without the blocked rows, or *models* itself when none are.
+ */
+export function withoutBlockedModels<T extends { id: string }>(
+  models: readonly T[],
+  blocked: readonly string[] = cachedServerInfo?.blocked_models ?? [],
+): readonly T[] {
+  if (blocked.length === 0) return models;
+  const hidden = new Set(blocked.map(blockKey));
+  return models.filter((model) => !hidden.has(blockKey(model.id)));
+}
+
+export function withoutBlockedEfforts<T extends string | { value: string }>(
+  levels: readonly T[],
+  blocked: readonly string[] = cachedServerInfo?.blocked_efforts ?? [],
+): readonly T[] {
+  if (blocked.length === 0) return levels;
+  const hidden = new Set(blocked.map((effort) => effort.toLowerCase()));
+  return levels.filter(
+    (level) => !hidden.has((typeof level === "string" ? level : level.value).toLowerCase()),
+  );
 }
 
 /**

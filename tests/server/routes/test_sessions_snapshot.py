@@ -3824,3 +3824,41 @@ def test_native_terminal_fallback_respects_child_ownership(agent, ownership: str
     response = _build_session_response(conversation, [], "running", agent_name=agent.agent_name)
     assert response.labels.get("omnigent.ui") == (None if ownership == "mirror" else "terminal")
     assert conversation.labels == labels
+
+
+def test_in_session_picker_hides_blocked_models_and_efforts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model switch inside a running session never offers a blocked entry."""
+    from omnigent.server import model_block_list
+
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list(
+            {"blocked_models": ["fixture-model-blocked"], "blocked_efforts": ["xhigh"]}
+        ),
+    )
+    conversation = Conversation(
+        id="conv_blocked",
+        created_at=1,
+        updated_at=1,
+        root_conversation_id="conv_blocked",
+        agent_id="agent",
+    )
+    options = [
+        {"id": "fixture-model-blocked", "displayName": "Blocked"},
+        {
+            "id": "fixture-model-kept",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "high"},
+                {"reasoningEffort": "xhigh"},
+            ],
+        },
+    ]
+
+    response = _build_session_response(conversation, [], "idle", model_options=options)
+
+    assert [option.id for option in response.model_options] == ["fixture-model-kept"]
+    efforts = response.model_options[0].supportedReasoningEfforts or []
+    assert [effort.reasoningEffort for effort in efforts] == ["high"]

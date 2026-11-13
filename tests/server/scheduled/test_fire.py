@@ -1579,6 +1579,43 @@ async def test_validation_failure_records_failed_without_session() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "entry"),
+    [
+        ({"model_override": "fixture-model-blocked"}, "fixture-model-blocked"),
+        ({"reasoning_effort": "max"}, "max"),
+    ],
+)
+async def test_fire_refuses_a_blocked_model_or_effort(
+    monkeypatch: pytest.MonkeyPatch, fields: dict[str, str], entry: str
+) -> None:
+    """A schedule saved before its model or effort was blocked fails at its next fire."""
+    from omnigent.server import model_block_list
+
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list(
+            {"blocked_models": ["fixture-model-blocked"], "blocked_efforts": ["max"]}
+        ),
+    )
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(**fields)})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert conv_store.created == []
+    assert store.runs[0]["status"] == "failed"
+    assert store.runs[0]["error_code"] == "invalid_input"
+    assert repr(entry) in store.runs[0]["error"]
+
+
+@pytest.mark.asyncio
 async def test_create_failure_records_failed_without_session() -> None:
     store = FakeScheduledTaskStore(rows={"task_1": _task()})
 

@@ -1,4 +1,5 @@
 import type { NativeModelOption } from "./types";
+import { withoutBlockedEfforts } from "./capabilities";
 import { nativeCodingAgentForHarness } from "./nativeCodingAgents";
 import { codexEffortLevelsForModel } from "./codexNativeModels";
 import { findModelLabelOption } from "./composerModelLabel";
@@ -82,6 +83,17 @@ export function effortLevelsForConv(
   codexModelOptions: readonly NativeModelOption[] = [],
   currentModel: string | null = null,
   effortFamily: string | null = null,
+): readonly string[] {
+  return withoutBlockedEfforts(
+    unfilteredEffortLevelsForConv(conv, codexModelOptions, currentModel, effortFamily),
+  );
+}
+
+function unfilteredEffortLevelsForConv(
+  conv: Parameters<typeof effectiveWrapperLabel>[0],
+  codexModelOptions: readonly NativeModelOption[],
+  currentModel: string | null,
+  effortFamily: string | null,
 ): readonly string[] {
   switch (effectiveWrapperLabel(conv)) {
     case "claude-code-native-ui":

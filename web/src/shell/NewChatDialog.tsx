@@ -171,6 +171,8 @@ import {
   sandboxOptionLabel,
   sandboxProviderOptions,
   sandboxProfilesEnabled,
+  withoutBlockedEfforts,
+  withoutBlockedModels,
 } from "@/lib/capabilities";
 import { isBootFallbackInfo } from "@/lib/bootCapabilities";
 import { useHeading, usePoweredBy } from "@/lib/branding";
@@ -3599,7 +3601,10 @@ function NewChatLandingContent({
         ? (sandboxCatalog ??
           (sandboxCatalogPending || sandboxCatalogError
             ? []
-            : CLAUDE_NATIVE_MODELS.map((model) => ({ id: model.id, displayName: model.id }))))
+            : withoutBlockedModels(CLAUDE_NATIVE_MODELS).map((model) => ({
+                id: model.id,
+                displayName: model.id,
+              }))))
         : (availableClaudeModels ?? []).map((option) => ({
             id: option.id,
             model: option.model,
@@ -4023,12 +4028,14 @@ function NewChatLandingContent({
   }, [pickerCacheKey, pickerLoading, permissionPreview]);
   const visiblePermissionRow =
     pickerLoading && !interactiveWhileLoading ? cachedPermission?.row : permissionConfigRow;
-  const pickerEffortOptions = sandboxDefaultModelsEnabled
-    ? sandboxEffortLevels(pickerModelOptions, pickedModel).map((value) => ({
-        value,
-        label: normalizeEffortLabel(value),
-      }))
-    : (nativeEffortOptions(selectedNativeHarness, pickerModelOptions, pickedModel) ?? []);
+  const pickerEffortOptions = withoutBlockedEfforts(
+    sandboxDefaultModelsEnabled
+      ? sandboxEffortLevels(pickerModelOptions, pickedModel).map((value) => ({
+          value,
+          label: normalizeEffortLabel(value),
+        }))
+      : (nativeEffortOptions(selectedNativeHarness, pickerModelOptions, pickedModel) ?? []),
+  );
   const rememberPickerOptions = (harness: string, options: HarnessOptions) => {
     const picked = pickedOptionKeysRef.current.get(harness) ?? new Set<string>();
     for (const key of Object.keys(options)) picked.add(key);
@@ -4553,7 +4560,8 @@ function NewChatLandingContent({
       );
       seedEffort(
         projectEffortSeed(piModelOptions, ""),
-        stored.effort != null && PI_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
+        stored.effort != null &&
+          withoutBlockedEfforts(PI_NATIVE_EFFORTS).some((e) => e.value === stored.effort)
           ? stored.effort
           : "",
       );
@@ -4578,7 +4586,7 @@ function NewChatLandingContent({
         projectEffortSeed(claudeModelOptions, ""),
         !storedRoutingOn &&
           stored.effort != null &&
-          CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
+          withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS).some((e) => e.value === stored.effort)
           ? stored.effort
           : "",
       );

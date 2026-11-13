@@ -90,6 +90,10 @@ from omnigent.server.creation_logging import creation_metadata, creation_stage, 
 from omnigent.server.feature_flags import Feature
 from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostLaunchResult, HostRegistry, RunnerExitReports
+from omnigent.server.model_block_list import (
+    current_model_block_list,
+    refuse_blocked_start_defaults,
+)
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
@@ -1647,6 +1651,15 @@ def register_core_routes(
             conversation_store=conversation_store,
             host_store=getattr(request.app.state, "host_store", None),
             parent=parent_conv,
+        )
+        await refuse_blocked_start_defaults(
+            host_registry=getattr(request.app.state, "host_registry", None),
+            host_id=parsed_metadata.host_id,
+            harness=spec_harness(spec),
+            spec=spec,
+            inference_snapshot=inference_snapshot,
+            model_override=inference_model,
+            reasoning_effort=parsed_metadata.reasoning_effort,
         )
         require_codex_plan_launch_support(
             harness=spec_harness(spec),
@@ -3372,6 +3385,7 @@ def register_core_routes(
                     f"invalid reasoning_effort: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+            current_model_block_list().refuse_blocked(effort=effort)
 
         # Empty / whitespace strings are rejected loud — the only
         # clear path is the explicit ``default | off | reset`` alias.
@@ -3399,6 +3413,7 @@ def register_core_routes(
                     f"invalid model_override: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+            current_model_block_list().refuse_blocked(model=model_override)
         if model_override is not None:
             conv_for_model = await asyncio.to_thread(
                 conversation_store.get_conversation, session_id
@@ -4505,6 +4520,7 @@ def register_core_routes(
                         f"invalid model_override: {exc}",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+                current_model_block_list().refuse_blocked(model=override_model)
             else:
                 # Explicit JSON null clears the override (matches the clear
                 # aliases), so the fork falls back to the bound agent default.
@@ -4534,6 +4550,7 @@ def register_core_routes(
                         f"invalid reasoning_effort: {exc}",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+                current_model_block_list().refuse_blocked(effort=override_effort)
 
         override_launch_args: list[str] | None = None
         if launch_args_set:

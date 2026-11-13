@@ -19,6 +19,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_EDIT, RESERVED_USER_LOCAL, local_single_user_enabled
+from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.server.routes._workspace_validation import _is_subpath_of
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
@@ -192,7 +193,11 @@ def validate_session_model_metadata(
     model_override: str | None,
     reasoning_effort: str | None,
 ) -> tuple[str | None, str | None]:
-    """Validate persisted model metadata shared by sessions and schedules."""
+    """Validate persisted model metadata shared by sessions and schedules.
+
+    :raises OmnigentError: For a malformed value, or one the server's
+        ``blocked_models`` / ``blocked_efforts`` setting blocks.
+    """
     # The persisted override reaches native CLIs as a ``--model`` argv element
     # at terminal launch, so reject shell-/flag-shaped values before any
     # session row or scheduled task row persists it.
@@ -224,6 +229,8 @@ def validate_session_model_metadata(
                 f"invalid reasoning_effort: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+    # Every start (API, agent tools, schedules, sub-agents) passes here.
+    current_model_block_list().refuse_blocked(model=validated_model, effort=validated_effort)
     return validated_model, validated_effort
 
 

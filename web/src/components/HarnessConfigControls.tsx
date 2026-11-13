@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SMART_ROUTING_LABEL } from "@/lib/agentLabels";
+import { withoutBlockedEfforts } from "@/lib/capabilities";
 import { codexEffortLevelsForModel } from "@/lib/codexNativeModels";
 import { normalizeEffortLabel } from "@/lib/composerModelLabel";
 import { MODEL_CATALOG_BROWSE_MIN, groupByModelCreator } from "@/lib/modelCreators";
@@ -180,15 +181,14 @@ export function nativeEffortOptions(
   harness: string | null | undefined,
   modelOptions: readonly NativeModelOption[],
   model: string | null | undefined,
-): { value: string; label: string }[] | null {
-  if (harness === "claude-native") return CLAUDE_NATIVE_EFFORTS;
-  if (harness === "pi-native") return PI_NATIVE_EFFORTS;
+): readonly { value: string; label: string }[] | null {
+  if (harness === "claude-native") return withoutBlockedEfforts(CLAUDE_NATIVE_EFFORTS);
+  if (harness === "pi-native") return withoutBlockedEfforts(PI_NATIVE_EFFORTS);
   if (harness !== "codex-native" && harness !== "devin-native") return null;
   const effortModel = model || modelOptions.find((option) => option.isDefault)?.id;
-  return codexEffortLevelsForModel(modelOptions, effortModel).map((value) => ({
-    value,
-    label: normalizeEffortLabel(value),
-  }));
+  return withoutBlockedEfforts(codexEffortLevelsForModel(modelOptions, effortModel)).map(
+    (value) => ({ value, label: normalizeEffortLabel(value) }),
+  );
 }
 
 /**
