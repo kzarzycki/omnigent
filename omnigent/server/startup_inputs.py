@@ -593,6 +593,7 @@ class ManagedStartupInputs:
             return False
         _logger.info("Saved message for session %s waits for /clear to finish", session_id)
         return True
+
     async def _drop_undeliverable(
         self, app: Any, session_id: str, items: list[ConversationItem]
     ) -> list[ConversationItem]:
