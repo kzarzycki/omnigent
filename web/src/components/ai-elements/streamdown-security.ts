@@ -2,6 +2,7 @@ import { cjk } from "@streamdown/cjk";
 import { createMathPlugin } from "@streamdown/math";
 import { mermaid } from "./mermaidPlugin";
 import { defaultRehypePlugins, type LinkSafetyConfig, type StreamdownProps } from "streamdown";
+import { stripBasePath } from "@/lib/basePath";
 import { lazyCodePlugin } from "./lazyCodePlugin";
 
 type StreamdownRehypePlugins = NonNullable<StreamdownProps["rehypePlugins"]>;
@@ -204,7 +205,7 @@ export function markWorkspaceFileLinks() {
       if (node.tagName !== "a") return;
       const href = node.properties?.href;
       if (typeof href !== "string" || !href) return;
-      if (NON_FILE_HREF.test(href) || href.includes("?")) return;
+      if (NON_FILE_HREF.test(href) || href.includes("?") || isAppSessionRoute(href)) return;
       const cited = splitWorkspaceFileCitation(href);
       if (href.includes("#") && !cited.hasPosition) return;
       node.properties = {
@@ -214,6 +215,11 @@ export function markWorkspaceFileLinks() {
       };
     });
   };
+}
+
+/** The app's own `/c/<id>` session route, with or without the deployment base path. */
+function isAppSessionRoute(href: string): boolean {
+  return /^\/c\/[^/#]+\/?$/.test(stripBasePath(href));
 }
 
 /**

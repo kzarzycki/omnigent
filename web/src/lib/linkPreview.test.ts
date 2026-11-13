@@ -59,6 +59,10 @@ describe("parseSessionLink", () => {
 
   it("ignores another origin and other paths", () => {
     expect(parseSessionLink("https://attacker.example/c/conv_1", origin)).toBeNull();
+    for (const malformed of ["/c/%", "/c/%ZZ", "/c/foo%2"]) {
+      expect(parseSessionLink(malformed, origin)).toBeNull();
+    }
+    expect(parseSessionLink("/c/50%25-done", origin)).toBe("50%-done");
     expect(parseSessionLink("/settings", origin)).toBeNull();
   });
 });

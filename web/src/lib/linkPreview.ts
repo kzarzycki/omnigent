@@ -74,7 +74,12 @@ export function parseSessionLink(href: string | undefined, origin: string): stri
   }
   if (url.origin !== origin) return null;
   const match = url.pathname.match(/(?:^|\/)c\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 const SHORT_PATH_MAX = 24;

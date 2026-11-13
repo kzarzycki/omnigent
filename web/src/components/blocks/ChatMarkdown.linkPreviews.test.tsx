@@ -4,7 +4,7 @@
 // holds for the server and the browser alike.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileViewerContext } from "@/shell/FileViewerContext";
@@ -49,7 +49,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 // The chat's own session scopes GitHub previews; none, as outside a session.
-function viewerContext(sessionId: string | null) {
+type ViewerContext = NonNullable<React.ContextType<typeof FileViewerContext>>;
+
+function viewerContext(sessionId: string | null): ViewerContext {
   return {
     openFile: () => {},
     openGithubTab: () => {},
@@ -63,7 +65,7 @@ function viewerContext(sessionId: string | null) {
 const IN_CHAT = viewerContext(CHAT_SESSION_ID);
 const OUTSIDE_A_SESSION = viewerContext(null);
 
-function renderMarkdown(markdown: string, context = IN_CHAT): QueryClient {
+function renderMarkdown(markdown: string, context: ViewerContext = IN_CHAT): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
     <FileViewerContext.Provider value={context}>
@@ -167,6 +169,33 @@ describe("chat link previews at the fetch layer", () => {
     expect(url.pathname).toBe("/v1/sessions/conv_9");
     await userEvent.hover(screen.getByRole("link", { name: "the session" }));
     expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
+  });
+
+  it("renders a relative session link as an anchor under the base path, with a preview", async () => {
+    vi.stubGlobal("window", Object.assign(window, { __OMNIGENT_BASE_PATH__: "/proxy/6767" }));
+    try {
+      fetchMock.mockResolvedValue(
+        jsonResponse({ id: "conv_9", agent_id: "ag_1", title: "Auth refactor", status: "idle" }),
+      );
+      const openFile = vi.fn();
+      renderMarkdown("[the new chat](/c/conv_9) and [notes](/abs/ws/notes.md)", {
+        ...OUTSIDE_A_SESSION,
+        openFile,
+        isChangedPath: (path: string) => path === "notes.md",
+        workspaceRoot: "/abs/ws",
+      });
+
+      const link = screen.getByRole("link", { name: "the new chat" });
+      expect(link.getAttribute("href")).toBe("/proxy/6767/c/conv_9");
+      expect(link.hasAttribute("data-omnigent-file")).toBe(false);
+      await userEvent.hover(link);
+      expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
+      // A workspace path still opens the file viewer rather than navigating.
+      fireEvent.click(screen.getByRole("button", { name: "notes" }));
+      expect(openFile).toHaveBeenCalledWith("notes.md");
+    } finally {
+      delete window.__OMNIGENT_BASE_PATH__;
+    }
   });
 
   it("shows nothing for a session the viewer can't open", async () => {
