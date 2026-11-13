@@ -14,7 +14,7 @@ install='pnpm install --frozen-lockfile --filter web --filter omnigent-vscode'
 probe() {  # probe <changed file> <node_modules present: none|web|all> <expected pnpm: 0|1>
   git reset -q --hard origin/mine; mkdir -p "$(dirname "$1")"; echo x > "$1"; git add . && git commit -qm probe
   rm -rf web/node_modules editors/vscode/node_modules "$tmp/calls"
-  case "$2" in all) mkdir -p editors/vscode/node_modules ;& web) mkdir -p web/node_modules ;; esac
+  case "$2" in all) mkdir -p editors/vscode/node_modules web/node_modules ;; web) mkdir -p web/node_modules ;; esac
   mise run check:setup >/dev/null 2>&1 || { echo "!! $1: check:setup failed"; exit 1; }
   grep -q '^uv sync --locked --extra all --group test --group lint$' "$tmp/calls" || { echo "!! $1: no uv sync"; exit 1; }
   grep -qxF "$install" "$tmp/calls" && got=1 || got=0
