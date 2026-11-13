@@ -14,10 +14,11 @@ import sys
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -2821,7 +2822,23 @@ async def test_runner_shutdown_closes_terminal_registry(
         "omnigent.terminals.TerminalRegistry",
         _terminal_registry_factory,
     )
+
+    class _TrackingRetryClient(_TrackingAsyncClient):
+        """The runner's server client, recording the stop predicate shutdown wires in."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.stop_retrying: Callable[[], bool] | None = None
+            async_clients.append(self)
+
+        def stop_retrying_when(self, predicate: Callable[[], bool]) -> None:
+            self.stop_retrying = predicate
+
     monkeypatch.setattr(entry_mod.httpx, "AsyncClient", _async_client_factory)
+    monkeypatch.setattr(
+        "omnigent.runner.server_restart_retry.ServerRestartRetryClient", _TrackingRetryClient
+    )
+    monkeypatch.setattr(entry_mod, "ServerRestartRetryClient", _TrackingRetryClient)
     monkeypatch.setattr(entry_mod.httpx, "Client", _sync_client_factory)
     monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda: None)
     monkeypatch.setattr(
@@ -2841,6 +2858,12 @@ async def test_runner_shutdown_closes_terminal_registry(
             assert watching
             assert record.event_name == "runner_event_loop_stalled"
             assert "test_runner_shutdown_closes_terminal_registry" in record.captured_stack_trace
+            # A server outage must not hold up shutdown: a signal stops the retries.
+            stop_retrying = cast(_TrackingRetryClient, async_clients[0]).stop_retrying
+            assert stop_retrying is not None and not stop_retrying()
+            app.state.shutting_down.set()
+            assert stop_retrying()
+            app.state.shutting_down.clear()
     finally:
         watchdog._logger.removeHandler(handler)
         handler.close()
@@ -2862,6 +2885,8 @@ async def test_runner_shutdown_closes_terminal_registry(
         "MCP calls are proxied per-session through ProxyMcpManager"
     )
     assert async_clients and async_clients[0].closed
+    # Lifespan teardown stops the retries too, with no signal.
+    assert not app.state.shutting_down.is_set() and stop_retrying()
     # No sync httpx.Client is wired into the runner after the DBOS
     # removal — the legacy idle-sync client used by background
     # polling was deleted with that path. If a future change

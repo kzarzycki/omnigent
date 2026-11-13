@@ -35,6 +35,7 @@ from omnigent.debug_logging import debug_event, runner_primary_session_id
 from omnigent.inner import _proc
 from omnigent.process_logging import env_truthy
 from omnigent.runner.identity import RUNNER_AUTH_REJECTED_EXIT_CODE
+from omnigent.runner.server_restart_retry import ServerRestartRetryClient
 from omnigent.runner.transports.ws_tunnel.serve import (
     RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
     RUNNER_TUNNEL_REJECTION_PREFIX,
@@ -1669,6 +1670,8 @@ def create_app(
         # hands the auth flow only the terminal HTML login page,
         # defeating the retry. See ``_is_login_redirect_or_unauthorized``.
         follow_redirects=False,
+        # A server restart must not fail the turn that called it meanwhile.
+        retry_server_restart=True,
     )
 
     mcp_manager = RunnerMcpManager(
@@ -1761,6 +1764,12 @@ def create_app(
         auth_token=runner_auth_token,
         auth_token_factory=auth_token_factory,
     )
+    stopping = asyncio.Event()
+    if isinstance(server_client, ServerRestartRetryClient):
+        # Shutdown must not wait out a server outage.
+        server_client.stop_retrying_when(
+            lambda: stopping.is_set() or app.state.shutting_down.is_set()
+        )
 
     async def _start_pm() -> None:
         """Start harness process manager; register MCP prewarm metadata if requested."""
@@ -1819,6 +1828,7 @@ def create_app(
 
         :returns: None.
         """
+        stopping.set()
         _launch_reaper = getattr(app.state, "subagent_launch_reaper", None)
         if _launch_reaper is not None:
             _launch_reaper.cancel()
