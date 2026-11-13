@@ -1,4 +1,4 @@
-# Fork-only, tasks only: the engineering loop's gate (docs/agents/loop.md, `loop.ci: false`).
+# Fork-only, tasks only: the engineering loop's gate (docs/agents/gatekeeper.md, `loop.ci: false`).
 [tasks."pin-pr-target"]
 description = "Make a bare `gh pr create` in this clone and its worktrees target the fork, not upstream."
 run = "bash .claude/skills/fork-sync/pin-pr-target.sh"
