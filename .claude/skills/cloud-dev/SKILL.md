@@ -21,9 +21,12 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 - The host workspace a session starts from pins it in `.claude/settings.local.json`:
   `{"remote": {"defaultEnvironmentId": "<that ID>"}}`. Without that the
   session lands in the account's default environment, which lacks the tools below.
-- `setup.sh` next to this file is the environment's setup script: `bubblewrap`,
+- `setup.sh` next to this file is the environment's setup script: first a `uv` that
+  satisfies `uv.toml`'s `required-version` (the image's is older, so every uv command
+  refuses to run; setup installs one from PyPI, puts `~/.local/bin` first on `PATH` and at the top
+  of `~/.bashrc`, and leaves a satisfying uv alone), then `bubblewrap`,
   `openssh-client`, `pre-commit` and `mise`, plus a bounded warm-up of uv's cache for the
-  Gate's sync, logged to `/tmp/omnigent-dev-init.log`. It
+  Gate's sync, logged to `/tmp/omnigent-dev-init.log`, whose `done` line names the uv version. It
   exits 0 even when an install fails, since a failed setup script fails the whole session
   and the bridge leaves the Omnigent turn hanging; the log says `FAILED` instead. The
   environment keeps its own copy, so after changing the file, apply it from a host with
