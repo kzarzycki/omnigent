@@ -1226,6 +1226,33 @@ async def test_get_session_activity_unreadable_snapshot_is_not_busy() -> None:
     assert not a.is_busy and not a.needs_user_action
 
 
+@respx.mock
+async def test_pending_elicitation_ids_reads_snapshot() -> None:
+    # Listed ids come back as a set; an answered question is absent; a bad read is None.
+    client = OmnigentClient("http://omnigent.test")
+    try:
+        route = respx.get("http://omnigent.test/v1/sessions/conv_1")
+        route.mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "pending_elicitations": [
+                        {"elicitation_id": "question_1"},
+                        {"elicitation_id": "e2"},
+                        {"no_id": True},
+                    ]
+                },
+            )
+        )
+        assert await client.pending_elicitation_ids("conv_1") == {"question_1", "e2"}
+        route.mock(return_value=httpx.Response(200, json={"pending_elicitations": []}))
+        assert await client.pending_elicitation_ids("conv_1") == set()
+        route.mock(return_value=httpx.Response(500))
+        assert await client.pending_elicitation_ids("conv_1") is None
+    finally:
+        await client.aclose()
+
+
 def test_extract_policy_denied() -> None:
     assert (
         extract_policy_denied(
