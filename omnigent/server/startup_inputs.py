@@ -50,6 +50,11 @@ STARTUP_LABEL = "omnigent.startup"
 _DROPPED_PREVIEW_CHARS = 200
 
 
+def _startup_options(item: ConversationItem) -> StartupInputOptions | None:
+    data = item.data
+    return data.startup_options if isinstance(data, (MessageData, SlashCommandData)) else None
+
+
 def _session_ended(conv: Conversation) -> bool:
     """Whether a session is closed, archived or failed, so its messages no longer matter."""
     return (
@@ -610,11 +615,7 @@ class ManagedStartupInputs:
         return kept
 
     async def _undeliverable_reason(self, item: ConversationItem) -> str | None:
-        options = (
-            item.data.startup_options
-            if isinstance(item.data, (MessageData, SlashCommandData))
-            else None
-        )
+        options = _startup_options(item)
         if options is None:
             return None
         if options.expires_at is not None and options.expires_at <= time.time():
@@ -632,9 +633,10 @@ class ManagedStartupInputs:
     ) -> None:
         """Tell the sender's parent (or a live parentless sender) what was dropped."""
         _logger.info("Dropped pending input %s for session %s: %s", item.id, session_id, reason)
-        options = item.data.startup_options
+        options = _startup_options(item)
         sender = await asyncio.to_thread(
-            self.conversations.get_conversation, options.sender_session_id or ""
+            self.conversations.get_conversation,
+            options.sender_session_id if options and options.sender_session_id else "",
         )
         if sender is None:
             return
