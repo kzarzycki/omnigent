@@ -3050,7 +3050,10 @@ def augment_claude_args(
     hook_settings = apply_claude_settings(
         hook_settings, executor="claude-native", active_harnesses=active_harnesses
     )
-    args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
+    # Claude keeps only the last --settings, so a caller's would be dropped.
+    remaining_args, caller_settings = _extract_caller_settings(claude_args)
+    hook_settings = _merge_settings_objects(caller_settings, hook_settings)
+    args = _merge_disallowed_tools(remaining_args, _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
     if workspace is not None:
         from omnigent.config import harness_telemetry_for
@@ -3166,6 +3169,66 @@ def _arg_value(args: tuple[str, ...], flag: str) -> str | None:
             if candidate and not candidate.startswith("--"):
                 value = candidate
     return value
+
+
+def _merge_settings_objects(base: _JsonObject, overlay: _JsonObject) -> _JsonObject:
+    """Deep-merge ``overlay`` over ``base``; non-object values in ``overlay`` replace."""
+    merged = dict(base)
+    for key, value in overlay.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_settings_objects(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _extract_caller_settings(args: Sequence[str]) -> tuple[list[str], _JsonObject]:
+    """
+    Remove every caller ``--settings`` flag from ``args`` and parse its value.
+
+    The value is a JSON object string or a file path. Later flags override
+    earlier ones. An unreadable or non-object value is logged and skipped.
+
+    :param args: Claude CLI args, e.g. ``("--settings", '{"env":{"X":"1"}}')``.
+    :returns: ``(args without --settings, merged caller settings)``.
+    """
+    remaining: list[str] = []
+    merged: _JsonObject = {}
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--settings" and index + 1 < len(args):
+            value = args[index + 1]
+            index += 2
+        elif arg.startswith("--settings="):
+            value = arg.partition("=")[2]
+            index += 1
+        else:
+            remaining.append(arg)
+            index += 1
+            continue
+        parsed = _parse_caller_settings(value)
+        if parsed is None:
+            _logger.warning("Ignoring a --settings value that is not a JSON object or file.")
+        else:
+            merged = _merge_settings_objects(merged, parsed)
+    return remaining, merged
+
+
+def _parse_caller_settings(value: str) -> _JsonObject | None:
+    """Parse a ``--settings`` value given as inline JSON or a file path."""
+    text = value.strip()
+    if not text.startswith("{"):
+        try:
+            text = Path(value).expanduser().read_text(encoding="utf-8")
+        except OSError:
+            return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _launch_effort_arg(args: tuple[str, ...]) -> str | None:
