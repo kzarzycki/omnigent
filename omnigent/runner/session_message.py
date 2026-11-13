@@ -15,7 +15,6 @@ from omnigent.runner.session_requests import (
 )
 from omnigent.tools.builtins.session_message import peer_session_messaging_enabled
 
-
 # A queued message older than this is dropped instead of landing out of context.
 DEFAULT_MESSAGE_TTL_SECONDS = 3600
 MAX_MESSAGE_TTL_SECONDS = 7 * 24 * 3600
