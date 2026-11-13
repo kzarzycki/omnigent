@@ -98,6 +98,8 @@ def apply_session_limits(session_id: str, resources: SandboxResourcesSpec | None
         needed = ["cpu"] if "CPUWeight" in properties else []
         if any(name.startswith("Memory") for name in properties):
             needed.append("memory")
+        if "TasksMax" in properties:
+            needed.append("pids")
         missing = missing_user_manager_controllers(needed)
         if missing is None:
             raise _unavailable("no user systemd manager is reachable")

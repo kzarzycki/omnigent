@@ -251,6 +251,13 @@ export function InboxPage() {
       queryKey: ["inbox-elicitations", row.id, row.pending_elicitations_count, row.updated_at],
       queryFn: () => getSession(row.id),
       retry: 1,
+      // A list poll bumps `updated_at` and so the key. Show this session's
+      // last snapshot until the new one lands, so the card isn't remounted.
+      placeholderData: () =>
+        queryClient
+          .getQueriesData<Session>({ queryKey: ["inbox-elicitations", row.id] })
+          .map(([, data]) => data)
+          .findLast(Boolean),
       // The count and snapshot can disagree briefly while a native request re-parks.
       refetchInterval: (query: Query<Session>) =>
         query.state.data?.pendingElicitations?.length === 0 ||
@@ -386,10 +393,16 @@ export function InboxPage() {
       isFirstRender.current = false;
       return;
     }
+    // A placeholder is the previous snapshot, not fresh server data; other
+    // sessions' fresh snapshots still reconcile their own verdicts.
+    const placeholderRowIds = new Set(
+      rows.filter((_, i) => snapshotQueries[i]?.isPlaceholderData).map((row) => row.id),
+    );
     setResponded((prev) => {
       if (Object.keys(prev).length === 0) return prev;
       const stale = items
-        .filter(({ elicitation }) => {
+        .filter(({ elicitation, row }) => {
+          if (placeholderRowIds.has(row.id)) return false;
           const verdict = prev[elicitation.elicitationId];
           return (
             verdict &&
@@ -974,13 +987,20 @@ export function InboxPage() {
           </div>
         )}
 
-      <div className="flex flex-col gap-4">
-        {groups.map((group) => (
-          <section key={group.label} aria-label={group.label} className="flex flex-col gap-2">
-            <h2 className="px-3 py-1.5 text-sm font-normal text-muted-foreground">{group.label}</h2>
-            {group.entries.map(renderEntry)}
-          </section>
-        ))}
+      {/* One flat parent: a card that ages into the next recency group keeps its DOM node. */}
+      <div className="flex flex-col gap-2">
+        {groups.flatMap((group, index) => [
+          <h2
+            key={`group:${group.label}`}
+            className={cn(
+              "px-3 py-1.5 text-sm font-normal text-muted-foreground",
+              index > 0 && "mt-2",
+            )}
+          >
+            {group.label}
+          </h2>,
+          ...group.entries.map(renderEntry),
+        ])}
         {assembling && visibleCount > 0 && (
           <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
             <Loader2Icon className="size-3.5 animate-spin" />

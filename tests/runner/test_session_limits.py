@@ -31,17 +31,23 @@ def test_resources_parse_with_and_without_bwrap(parser, backend: str) -> None:
                 "memory_high": "3G",
                 "memory_max": 4294967296,
                 "memory_swap_max": "0",
+                "tasks_max": 4096,
                 "cpu_weight": 50,
             },
         }
     )
     assert spec.resources == SandboxResourcesSpec(
-        memory_high="3G", memory_max="4294967296", memory_swap_max="0", cpu_weight=50
+        memory_high="3G",
+        memory_max="4294967296",
+        memory_swap_max="0",
+        tasks_max="4096",
+        cpu_weight=50,
     )
     assert spec.resources.systemd_properties() == {
         "MemoryHigh": "3G",
         "MemoryMax": "4294967296",
         "MemorySwapMax": "0",
+        "TasksMax": "4096",
         "CPUWeight": "50",
     }
     assert parser(asdict(spec)).resources == spec.resources
@@ -67,6 +73,9 @@ def test_resources_refused_off_linux(parser, backend: str) -> None:
         ({"memory": "4G"}, "does not accept memory"),
         ({"memory_max": "4 GB"}, r"resources\.memory_max"),
         ({"memory_high": True}, r"resources\.memory_high"),
+        ({"tasks_max": 0}, r"resources\.tasks_max"),
+        ({"tasks_max": "many"}, r"resources\.tasks_max"),
+        ({"tasks_max": True}, r"resources\.tasks_max"),
         ({"cpu_weight": 0}, r"resources\.cpu_weight"),
         ({"cpu_weight": "50"}, r"resources\.cpu_weight"),
     ],
@@ -96,6 +105,24 @@ def fresh_runner(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
 def _spec(resources: SandboxResourcesSpec | None) -> SimpleNamespace:
     return SimpleNamespace(os_env=SimpleNamespace(sandbox=SimpleNamespace(resources=resources)))
+
+
+def test_tasks_max_needs_the_pids_controller(
+    fresh_runner: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    needed_seen: list[list[str]] = []
+
+    def missing(needed: list[str]) -> list[str]:
+        needed_seen.append(list(needed))
+        return ["pids"]
+
+    monkeypatch.setattr(session_limits, "missing_user_manager_controllers", missing)
+    with pytest.raises(OmnigentError, match="pids"):
+        session_limits.apply_spec_session_limits(
+            "conv_primary", _spec(SandboxResourcesSpec(tasks_max="512"))
+        )
+    assert needed_seen == [["pids"]]
+    assert fresh_runner == []
 
 
 def test_apply_moves_the_runner_into_a_slice_under_the_host_slice(
