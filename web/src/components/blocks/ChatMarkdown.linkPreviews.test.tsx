@@ -49,7 +49,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 // The chat's own session scopes GitHub previews; none, as outside a session.
-function viewerContext(sessionId: string | null) {
+type ViewerContext = NonNullable<React.ContextType<typeof FileViewerContext>>;
+
+function viewerContext(sessionId: string | null): ViewerContext {
   return {
     openFile: () => {},
     openGithubTab: () => {},
@@ -63,7 +65,7 @@ function viewerContext(sessionId: string | null) {
 const IN_CHAT = viewerContext(CHAT_SESSION_ID);
 const OUTSIDE_A_SESSION = viewerContext(null);
 
-function renderMarkdown(markdown: string, context = IN_CHAT): QueryClient {
+function renderMarkdown(markdown: string, context: ViewerContext = IN_CHAT): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
     <FileViewerContext.Provider value={context}>
