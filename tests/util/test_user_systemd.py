@@ -12,6 +12,7 @@ from omnigent.util.user_systemd import (
     UserSystemdError,
     child_slice_name,
     is_memory_limit,
+    is_tasks_limit,
     move_into_new_slice,
 )
 
@@ -24,6 +25,16 @@ def test_is_memory_limit_accepts_systemd_sizes(value: str) -> None:
 @pytest.mark.parametrize("value", ["8 G", "8GB", "-1", "", "lots", "8g"])
 def test_is_memory_limit_refuses_other_text(value: str) -> None:
     assert not is_memory_limit(value)
+
+
+@pytest.mark.parametrize("value", ["1", "4096", "10%", "infinity"])
+def test_is_tasks_limit_accepts_counts_percentages_and_infinity(value: str) -> None:
+    assert is_tasks_limit(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "10 %", "", "lots", "0%"])
+def test_is_tasks_limit_refuses_other_text(value: str) -> None:
+    assert not is_tasks_limit(value)
 
 
 def test_child_slice_name_nests_one_level() -> None:
@@ -55,6 +66,7 @@ def test_move_into_new_slice_creates_the_scope_and_its_slice_in_one_call(
             "MemoryHigh": "1.5G",
             "MemoryMax": "50%",
             "MemorySwapMax": "infinity",
+            "TasksMax": "512",
             "CPUWeight": "50",
         },
         description="Omnigent session ab12",
@@ -73,7 +85,7 @@ def test_move_into_new_slice_creates_the_scope_and_its_slice_in_one_call(
     assert argv[argv.index("PIDs") : argv.index("PIDs") + 5] == ["PIDs", "au", "2", "4242", "4243"]
     assert aux == [
         "omnigent-sessions-ab12.slice",
-        "6",
+        "7",
         "MemoryHigh",
         "t",
         str(int(1.5 * 1024**3)),
@@ -83,6 +95,9 @@ def test_move_into_new_slice_creates_the_scope_and_its_slice_in_one_call(
         "MemorySwapMax",
         "t",
         str(2**64 - 1),
+        "TasksMax",
+        "t",
+        "512",
         "CPUWeight",
         "t",
         "50",
@@ -191,3 +206,17 @@ def test_scope_oom_policy_supported_from_systemd_253(
         assert user_systemd._scope_oom_policy_supported() is supported
     finally:
         user_systemd._scope_oom_policy_supported.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("value", "encoded"),
+    [
+        ("512", ["TasksMax", "t", "512"]),
+        ("infinity", ["TasksMax", "t", str(2**64 - 1)]),
+        ("10%", ["TasksMaxScale", "u", str(round(0.1 * (2**32 - 1)))]),
+    ],
+)
+def test_tasks_max_is_encoded_as_a_count_a_scale_or_infinity(
+    value: str, encoded: list[str]
+) -> None:
+    assert user_systemd._dbus_property("TasksMax", value) == encoded

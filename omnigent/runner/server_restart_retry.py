@@ -23,6 +23,8 @@ _logger = logging.getLogger(__name__)
 SERVER_RESTART_RETRY_WINDOW_S = 120.0
 _INITIAL_DELAY_S = 0.5
 _MAX_DELAY_S = 5.0
+# Request extension that opts one call out of the window (a caller with its own retry).
+FAIL_FAST_EXTENSION = "omnigent_fail_fast"
 # What a proxy answers while the server behind it is down.
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 # Retrying these after a gateway answer cannot repeat a side effect.
@@ -90,7 +92,11 @@ class ServerRestartRetryClient(httpx.AsyncClient):
                 outcome = await super().send(request, **kwargs)
             except httpx.TransportError as exc:
                 outcome = exc
-            if not _server_unavailable(request, outcome) or self._stop_retrying():
+            if (
+                request.extensions.get(FAIL_FAST_EXTENSION)
+                or not _server_unavailable(request, outcome)
+                or self._stop_retrying()
+            ):
                 return _result(outcome)
             now = self._clock()
             if deadline is None:

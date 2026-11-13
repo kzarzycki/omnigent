@@ -27,6 +27,8 @@ _SIZE_SUFFIXES = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 # Sizes as systemd writes them: bytes with an optional K/M/G/T suffix, a
 # percentage of RAM, or ``infinity``.
 _MEMORY_LIMIT = re.compile(r"(?P<number>\d+(\.\d+)?)(?P<unit>[KMGT%]?)|infinity")
+# Task limits: a positive count, a percentage of the kernel's task limit, or ``infinity``.
+_TASKS_LIMIT = re.compile(r"(?P<number>[1-9]\d*)(?P<percent>%)?|infinity")
 _SLICE_NAME = re.compile(r"[A-Za-z0-9_.:-]+\.slice")
 
 
@@ -41,6 +43,11 @@ class UserSystemdError(RuntimeError):
 def is_memory_limit(value: str) -> bool:
     """Whether *value* is a memory limit systemd accepts, e.g. ``"8G"``."""
     return _MEMORY_LIMIT.fullmatch(value) is not None
+
+
+def is_tasks_limit(value: str) -> bool:
+    """Whether *value* is a ``TasksMax`` systemd accepts, e.g. ``"512"`` or ``"10%"``."""
+    return _TASKS_LIMIT.fullmatch(value) is not None
 
 
 def is_slice_name(value: str) -> bool:
@@ -251,13 +258,21 @@ def _wait_until_in_unit(pid: int, unit_name: str) -> None:
 def _dbus_property(name: str, value: str) -> list[str]:
     """Encode one property assignment as ``busctl`` ``(sv)`` arguments.
 
-    :param name: A memory property (e.g. ``"MemoryMax"``) or ``"CPUWeight"``.
+    :param name: A memory property (e.g. ``"MemoryMax"``), ``"TasksMax"`` or
+        ``"CPUWeight"``.
     :param value: Its value as written in a unit file, e.g. ``"2G"`` or ``"50%"``.
     """
     if name == "CPUWeight":
         return [name, "t", str(int(value))]
     if value == "infinity":
         return [name, "t", str(_UINT64_MAX)]
+    if name == "TasksMax":
+        tasks = _TASKS_LIMIT.fullmatch(value)
+        if tasks is None:
+            raise ValueError(f"{name}={value!r} is not a task limit")
+        if tasks["percent"]:
+            return [f"{name}Scale", "u", str(round(int(tasks["number"]) / 100 * _UINT32_MAX))]
+        return [name, "t", tasks["number"]]
     match = _MEMORY_LIMIT.fullmatch(value)
     if match is None:
         raise ValueError(f"{name}={value!r} is not a memory limit")
