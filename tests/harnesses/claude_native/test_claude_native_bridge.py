@@ -4392,6 +4392,19 @@ def test_augment_claude_args_merges_caller_settings(tmp_path: Path, as_file: boo
     assert settings["hooks"]
 
 
+def test_augment_claude_args_handles_equals_form_and_bad_caller_settings(tmp_path: Path) -> None:
+    """``--settings=<json>`` merges; an unreadable value is dropped, not passed through."""
+    args = augment_claude_args(
+        ("--settings=" + json.dumps({"env": {"X": "1"}}), "--settings", str(tmp_path / "none")),
+        bridge_dir=tmp_path / "bridge",
+        python_executable="/venv/bin/python",
+    )
+
+    assert args.count("--settings") == 1
+    assert not any(arg.startswith("--settings=") for arg in args)
+    assert _load_invocation_settings(args)["env"]["X"] == "1"
+
+
 def test_augment_claude_args_without_caller_settings_is_unchanged(tmp_path: Path) -> None:
     """No caller ``--settings`` leaves the argv with exactly one Omnigent flag."""
     args = augment_claude_args((), bridge_dir=tmp_path, python_executable="/venv/bin/python")
