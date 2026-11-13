@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
+import types
 import logging
 import threading
 from collections.abc import AsyncIterator
@@ -1469,17 +1471,36 @@ _FOLLOWUP = {
 }
 
 
+def _lapse_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Move the delivery clock past a queued message's expiry."""
+    monkeypatch.setattr(
+        "omnigent.server.startup_inputs.time",
+        types.SimpleNamespace(time=lambda: time.time() + 3600),
+    )
+
+
 async def _queue_from_sender(
-    env: _Env, monkeypatch: pytest.MonkeyPatch, *, end_sender: bool = False, **fields: Any
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    end_sender: bool = False,
+    lapse: bool = False,
 ) -> tuple[str, str, list[tuple[str, str]], list[dict[str, Any]]]:
     """Queue a follow-up carrying ``fields`` and return what delivery does with it."""
     sender_id = await _create(env, name="sender-probe")
     target_id = await _create(env, name="target-probe")
     response = await env.client.post(
         f"/v1/sessions/{target_id}/events",
-        json={**_FOLLOWUP, "sender_session_id": sender_id, **fields},
+        json={
+            **_FOLLOWUP,
+            "sender_session_id": sender_id,
+            **({"expires_at": time.time() + 60} if lapse else {}),
+        },
     )
     assert response.status_code == 202, response.text
+    assert response.json().get("queued") is True
+    if lapse:
+        _lapse_clock(monkeypatch)
     if end_sender:
         env.conv_store.set_labels(sender_id, {"omnigent.closed": "true"})
     notices: list[tuple[str, str]] = []
@@ -1508,7 +1529,7 @@ async def test_expired_pending_input_is_dropped_and_reported(
 ) -> None:
     env = startup_env
     sender_id, target_id, notices, forwarded = await _queue_from_sender(
-        env, monkeypatch, expires_at=1
+        env, monkeypatch, lapse=True
     )
     texts = [json.dumps(event) for event in forwarded if event.get("type") == "message"]
     # The saved first input is delivered; only the expired follow-up is gone.
@@ -1536,3 +1557,62 @@ async def test_pending_input_without_sender_fields_is_kept(startup_env: _Env) ->
     items = env.conv_store.list_pending_inputs(session_id)
     kept = await env.app.state.startup_inputs._drop_undeliverable(env.app, session_id, items)
     assert kept == items
+
+
+async def test_expired_message_to_an_ordinary_session_is_not_forwarded(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe", initial_input=None)
+    notices: list[str] = []
+
+    async def record_notice(_target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append(notice)
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        response = await env.client.post(
+            f"/v1/sessions/{target_id}/events",
+            json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": 1},
+        )
+    finally:
+        await runner.aclose()
+    assert response.status_code == 202, response.text
+    assert response.json() == {"queued": False, "dropped": "expired"}
+    assert not [event for event in forwarded if event.get("type") == "message"]
+    assert env.conv_store.list_pending_inputs(target_id) == []
+    [notice] = notices
+    assert target_id in notice and _FOLLOWUP_TEXT in notice
+
+
+async def test_drop_notice_is_kept_in_history_when_the_recipient_has_no_runner(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe")
+    response = await env.client.post(
+        f"/v1/sessions/{target_id}/events",
+        json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": time.time() + 60},
+    )
+    assert response.status_code == 202, response.text
+    _lapse_clock(monkeypatch)
+    # The real wake helper runs; the sender has no runner, so the notice goes to history.
+    _bind(env, target_id)
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        for item in env.conv_store.list_pending_inputs(target_id):
+            await env.app.state.startup_inputs._deliver(env.app, target_id, item)
+    finally:
+        await runner.aclose()
+    history = (await env.client.get(f"/v1/sessions/{sender_id}/items")).json()["data"]
+    texts = [json.dumps(item) for item in history if item["type"] == "message"]
+    assert any("was not delivered (expired)" in text and _FOLLOWUP_TEXT in text for text in texts)

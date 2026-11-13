@@ -1720,6 +1720,27 @@ def register_events_routes(
 
         startup = getattr(request.app.state, "startup_inputs", None)
         if (
+            startup is not None
+            and body.type == "message"
+            and (body.expires_at is not None or body.sender_session_id is not None)
+        ):
+            # Expiry and sender lifetime apply to every message, not only a saved startup one.
+            reason = await startup.drop_reason(body.expires_at, body.sender_session_id)
+            if reason is not None:
+                if body.sender_session_id is not None:
+                    await startup.report_drop(
+                        request.app,
+                        session_id,
+                        body.sender_session_id,
+                        " ".join(
+                            block.get("text", "")
+                            for block in body.data.get("content", [])
+                            if isinstance(block, dict)
+                        ),
+                        reason,
+                    )
+                return {"queued": False, "dropped": reason}
+        if (
             not isinstance(request, (StartupInputContext, _RunnerEventContext))
             and startup is not None
             and (
