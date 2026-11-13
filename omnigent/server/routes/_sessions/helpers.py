@@ -9274,15 +9274,22 @@ def _load_agent_spec_for_session(*args: Any, **kwargs: Any) -> AgentSpec | None:
 
 def _load_agent_spec_for_session_impl(
     conv: Conversation,
-    agent_store: AgentStore,
+    agent_store: AgentStore | None,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> AgentSpec | None:
     # Split from _build_policy_engine_from_spec so the caller can run the
     # cheap guardrails/default-policy skip check between the two and avoid
     # paying for engine construction when no policy could fire. Both halves
     # are blocking DB/IO, so each is run under asyncio.to_thread.
+    # agents_by_id: rows the caller already read; a hit skips the store read.
     if conv.agent_id is None:
         return None
-    agent = agent_store.get(conv.agent_id)
+    if agents_by_id is not None:
+        agent = agents_by_id.get(conv.agent_id)
+    elif agent_store is None:
+        return None
+    else:
+        agent = agent_store.get(conv.agent_id)
     if agent is None:
         return None
     agent_cache = cast(AgentCache, get_agent_cache())
