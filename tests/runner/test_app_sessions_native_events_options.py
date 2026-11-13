@@ -4661,11 +4661,8 @@ async def test_buffered_message_that_lapsed_while_waiting_is_dropped_at_drain() 
 
 
 @pytest.mark.asyncio
-async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check_fails() -> None:
     """A server that can't answer must not let an expired message run."""
-    monkeypatch.setattr("omnigent.runner.app._LIFECYCLE_CHECK_RETRY_S", 0)
     hc = _ScriptedHarnessClient([])
     pm = _FakeProcessManager(hc)
     sdk_spec = _harness_spec("claude-sdk")
