@@ -548,11 +548,14 @@ _EVAL_UNAVAILABLE_DENY_REASON = (
 )
 
 _UNAVAILABLE_FALLBACK_KEY = "policy_unavailable_fallback"
+_STRICT_OR_DENY = ("deny", "strict")
 
 
 def _unavailable_fallback() -> str:
     """
-    Return the user's ``policy_unavailable_fallback`` setting: ``"ask"`` or ``"deny"``.
+    Return the user's ``policy_unavailable_fallback`` setting.
+
+    ``"ask"`` (default), ``"deny"``, or ``"strict"`` (every tool call waits for approval).
 
     Read from the user config on each call, which only happens once a verdict
     could not be obtained. A missing, unreadable or unknown value is ``"ask"``.
@@ -566,7 +569,7 @@ def _unavailable_fallback() -> str:
     except (OSError, yaml.YAMLError):
         return "ask"
     value = cfg.get(_UNAVAILABLE_FALLBACK_KEY) if isinstance(cfg, dict) else None
-    return "deny" if value == "deny" else "ask"
+    return value if value in _STRICT_OR_DENY else "ask"
 
 
 def fail_ask_hook_output(hook_event: str, detail: str | None = None) -> dict[str, object] | None:
@@ -640,7 +643,8 @@ def fail_defer_hook_output(hook_event: str, detail: str | None = None) -> dict[s
     auto-mode classifier decide, as they do when the server answers ALLOW (no
     policy matched): a call they allow runs, any other prompts. A ``"ask"``
     here would override those rules and prompt for every call while the
-    server is down. ``policy_unavailable_fallback: deny`` still denies.
+    server is down. ``policy_unavailable_fallback: deny`` still denies, and
+    ``strict`` prompts for every call.
 
     :param hook_event: Hook event name, e.g. ``"PreToolUse"``.
     :param detail: Optional diagnostic string, forwarded to
@@ -648,7 +652,7 @@ def fail_defer_hook_output(hook_event: str, detail: str | None = None) -> dict[s
     :returns: ``None`` for ``PreToolUse`` under the default fallback; otherwise
         :func:`fail_ask_hook_output`'s output.
     """
-    if hook_event == _PRE_TOOL_USE and _unavailable_fallback() != "deny":
+    if hook_event == _PRE_TOOL_USE and _unavailable_fallback() == "ask":
         return None
     return fail_ask_hook_output(hook_event, detail)
 

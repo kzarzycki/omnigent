@@ -430,6 +430,7 @@ def test_fail_ask_post_tool_use_fails_open() -> None:
         (None, "ask"),
         ("policy_unavailable_fallback: ask\n", "ask"),
         ("policy_unavailable_fallback: deny\n", "deny"),
+        ("policy_unavailable_fallback: strict\n", "ask"),
         ("policy_unavailable_fallback: allow\n", "ask"),
         ("policy_unavailable_fallback: [deny\n", "ask"),
         ("- deny\n", "ask"),
@@ -461,6 +462,8 @@ def test_fail_ask_follows_the_unavailable_fallback_setting(
         (None, None),
         ("policy_unavailable_fallback: ask\n", None),
         ("policy_unavailable_fallback: deny\n", "deny"),
+        ("policy_unavailable_fallback: strict\n", "ask"),
+        ("policy_unavailable_fallback: allow\n", None),
     ],
 )
 def test_fail_defer_leaves_pre_tool_use_to_the_harness(
