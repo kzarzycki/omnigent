@@ -43,10 +43,12 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `gh api`, which works for reads and writes:
   - draft PR: `gh api repos/kzarzycki/omnigent/pulls -f title=… -f head=<branch> -f base=mine -F draft=true -f body=…`
   - comments, labels, issue edits: the `issues/<n>/…` REST routes.
-- **Gate.** `mise trust -q && OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint && mise run check:all`,
+- **Gate.** `mise trust -q && OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint && pnpm install --frozen-lockfile --filter web --filter ./editors/vscode && mise run check:all`,
   after the fetch above and after your first commit: its pre-commit covers
   `merge-base origin/mine..HEAD`, so before a commit it checks no files. The sync takes
-  seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish.
+  seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish. The `pnpm install` gives the JS hooks
+  (`vscode-tsc`, `web-tsc`, ...) their `node_modules`; without it they exit 1 silently on a
+  branch that touches the pnpm lockfile.
 - **Tests.** A tool call stops at 10 minutes. On the VM's 4 CPUs:
   - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
     seconds after setup's warm-up; cold, from 30 s to over 6 minutes, depending on the
