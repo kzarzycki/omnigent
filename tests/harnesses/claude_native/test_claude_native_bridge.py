@@ -7047,7 +7047,10 @@ def test_tmux_injections_are_serialized_per_bridge(
     monkeypatch.setattr(
         claude_native_bridge, "_wait_for_claude_prompt_ready", lambda *_a, **_k: None
     )
-    monkeypatch.setattr(claude_native_bridge, "_paste_and_submit", lambda *_a, **_k: None)
+    submitted = claude_native_bridge._SubmittedPrompt(
+        bridge_dir=bridge_dir, boundary=None, text="", submitted_at=0.0
+    )
+    monkeypatch.setattr(claude_native_bridge, "_paste_and_submit", lambda *_a, **_k: submitted)
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", lambda *_args: None)
     monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: _composer_pane())
     monkeypatch.setattr(claude_native_bridge, "_PASTE_COMMIT_TIMEOUT_S", 0.0)
