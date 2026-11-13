@@ -1360,6 +1360,7 @@ async def test_waking_a_host_worker_sets_its_event(startup_env: _Env) -> None:
         await asyncio.gather(worker, return_exceptions=True)
 
 
+<<<<<<< HEAD
 @pytest.mark.parametrize(
     "failed_stage",
     [
@@ -1460,3 +1461,79 @@ async def test_saved_delivery_identifies_failed_boundary(
             if getattr(r, "event_name", None) == "scheduled_run_prompt_sent"
         ]
     ) == int(reported_stage == "post_delivery")
+=======
+_FOLLOWUP_TEXT = "Follow-up that should not outlive its sender."
+_FOLLOWUP = {
+    "type": "message",
+    "data": {"role": "user", "content": [{"type": "input_text", "text": _FOLLOWUP_TEXT}]},
+}
+
+
+async def _queue_from_sender(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, *, end_sender: bool = False, **fields: Any
+) -> tuple[str, str, list[tuple[str, str]], list[dict[str, Any]]]:
+    """Queue a follow-up carrying ``fields`` and return what delivery does with it."""
+    sender_id = await _create(env, name="sender-probe")
+    target_id = await _create(env, name="target-probe")
+    response = await env.client.post(
+        f"/v1/sessions/{target_id}/events",
+        json={**_FOLLOWUP, "sender_session_id": sender_id, **fields},
+    )
+    assert response.status_code == 202, response.text
+    if end_sender:
+        env.conv_store.set_labels(sender_id, {"omnigent.closed": "true"})
+    notices: list[tuple[str, str]] = []
+
+    async def record_notice(target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append((target, notice))
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    _bind(env, target_id)
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        for item in env.conv_store.list_pending_inputs(target_id):
+            await env.app.state.startup_inputs._deliver(env.app, target_id, item)
+    finally:
+        await runner.aclose()
+    return sender_id, target_id, notices, forwarded
+
+
+async def test_expired_pending_input_is_dropped_and_reported(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    sender_id, target_id, notices, forwarded = await _queue_from_sender(
+        env, monkeypatch, expires_at=1
+    )
+    texts = [json.dumps(event) for event in forwarded if event.get("type") == "message"]
+    # The saved first input is delivered; only the expired follow-up is gone.
+    assert len(texts) == 1 and _TEXT in texts[0]
+    [(notice_target, notice)] = notices
+    assert notice_target == sender_id
+    assert target_id in notice and "expired" in notice and _FOLLOWUP_TEXT in notice
+
+
+async def test_pending_input_from_ended_sender_is_dropped(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    _, target_id, notices, forwarded = await _queue_from_sender(env, monkeypatch, end_sender=True)
+    texts = [json.dumps(event) for event in forwarded if event.get("type") == "message"]
+    assert len(texts) == 1 and _TEXT in texts[0]
+    assert env.conv_store.list_pending_inputs(target_id) == []
+    # A closed sender with no parent has nobody to tell.
+    assert notices == []
+
+
+async def test_pending_input_without_sender_fields_is_kept(startup_env: _Env) -> None:
+    env = startup_env
+    session_id = await _create(env)
+    items = env.conv_store.list_pending_inputs(session_id)
+    kept = await env.app.state.startup_inputs._drop_undeliverable(env.app, session_id, items)
+    assert kept == items
+>>>>>>> 267a7057b (feat(server): expire pending inputs or drop them when their sender ended)

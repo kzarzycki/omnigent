@@ -1426,6 +1426,18 @@ class SessionEventInput(BaseModel):
         tools are fixed at start time.
     :param created_by: Optional internal attribution actor for runner-
         originated events that are triggered by a prior human turn.
+    :param expires_at: Optional unix time in seconds after which a message
+        still waiting in the session's pending inputs is dropped instead of
+        delivered, e.g. ``1767225600``. Ignored when the message is
+        dispatched immediately.
+    :param sender_session_id: Optional id of the session that sent the
+        message. A pending input whose sender has ended (closed, archived,
+        failed or deleted) is dropped instead of delivered. Peer messages
+        (``session_message``) take it from the authenticated sender.
+
+    Each dropped input posts one notice to the sender's parent session, or
+    to the sender itself when it has no parent and is still alive, naming
+    the first 200 characters, the target session and the reason.
     """
 
     type: str
@@ -1436,6 +1448,8 @@ class SessionEventInput(BaseModel):
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     created_by: str | None = None
+    expires_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    sender_session_id: str | None = None
 
     @field_validator("data")
     @classmethod

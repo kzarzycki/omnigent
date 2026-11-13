@@ -1437,7 +1437,15 @@ def register_events_routes(
             )
             from omnigent.server.session_orchestration import orchestration_message
 
-            body = orchestration_message(source.id, body.data.get("message"))
+            expires_at = body.data.get("expires_at")
+            body = orchestration_message(source.id, body.data.get("message")).model_copy(
+                update={
+                    "sender_session_id": source.id,
+                    "expires_at": expires_at
+                    if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool)
+                    else None,
+                }
+            )
         native_shell_authorized = False
         if (
             body.type == "message"
@@ -1729,6 +1737,14 @@ def register_events_routes(
                     conversation_store,
                     permission_store,
                     target_id=session_id,
+                )
+            if body.sender_session_id is not None and not peer_message:
+                await _require_access_and_level(
+                    user_id,
+                    body.sender_session_id,
+                    LEVEL_EDIT,
+                    permission_store,
+                    conversation_store,
                 )
             # Identity is needed for deferred authorization; a saved task stays
             # accepted after later sharing.
