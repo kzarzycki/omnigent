@@ -623,7 +623,7 @@ async def test_a_pending_notice_to_an_unsubscribed_session_is_dropped(
     store.delete_session_subscription(watcher, target)
 
     with patch.object(session_subscriptions.time, "time", lambda: 10**10):
-        assert await session_subscriptions.retry_due_deliveries() == 1
+        # The unsubscribe settled it, so no sweep takes it.
         assert await session_subscriptions.retry_due_deliveries() == 0
     assert poster.posted == []
 
@@ -652,6 +652,87 @@ async def test_a_pending_notice_survives_its_target_being_archived(
             "Read it with sys_session_get_history.]",
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unsubscribe_then_archive", "subscriber_archive_then_restore", "target_archive_then_restore"],
+)
+async def test_only_the_target_archive_keeps_a_pending_notice(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    if case == "unsubscribe_then_archive":
+        store.delete_session_subscription(watcher, target)
+    elif case == "subscriber_archive_then_restore":
+        store.update_conversation(watcher, archived=True)
+        store.delete_session_subscriptions_for(watcher)
+        store.update_conversation(watcher, archived=False)
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+    if case == "target_archive_then_restore":
+        store.update_conversation(target, archived=False)
+
+    kept = case == "target_archive_then_restore"
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == int(kept)
+    assert bool(poster.posted) == kept
+
+
+@pytest.mark.parametrize("side", ["subscriber", "target"])
+async def test_a_pending_notice_is_not_posted_once_either_side_is_deleted(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    assert await store.delete_conversation(watcher if side == "subscriber" else target)
+    if side == "subscriber":
+        store.update_conversation(target, archived=True)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        await session_subscriptions.retry_due_deliveries()
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == []
+
+
+async def test_a_notice_kept_through_the_target_archive_still_checks_read_access(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+    calls: list[tuple[str, int]] = []
+
+    def deny(owner: Any, target_id: str, level: int, *_stores: Any) -> bool:
+        calls.append((target_id, level))
+        return False
+
+    monkeypatch.setattr(session_subscriptions, "_permission_store", object())
+    monkeypatch.setattr(session_subscriptions, "check_session_access", deny)
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert calls == [(target, LEVEL_READ)]
+    assert poster.posted == []
 
 
 async def test_more_than_a_thousand_subscribers_all_hear_a_fan_out(

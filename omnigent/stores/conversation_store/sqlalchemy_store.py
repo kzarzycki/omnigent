@@ -1032,6 +1032,20 @@ _DELIVERY_SETTLED = 1
 _MAX_ATTEMPTS_COUNTED = 32767
 
 
+def _settle_pending_deliveries(session: Session, *conditions: Any) -> None:
+    """Settle, unposted, the workspace's pending subscription notices matching *conditions*."""
+    row = SqlSessionSubscriptionDelivery
+    session.execute(
+        update(row)
+        .where(
+            row.workspace_id == current_workspace_id(),
+            row.state == _DELIVERY_PENDING,
+            *conditions,
+        )
+        .values(state=_DELIVERY_SETTLED, due_at=int(time.time()))
+    )
+
+
 class SqlAlchemyConversationStore(ConversationStore):
     """
     SQLAlchemy-backed implementation of :class:`ConversationStore`.
@@ -5885,7 +5899,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 raise SubscriptionCycleError(bounded=True)
 
     def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
-        """Remove one subscription. See base class."""
+        """Remove one subscription and drop the pair's pending notices. See base class."""
 
         def write(session: Session) -> bool:
             result = session.execute(
@@ -5894,6 +5908,11 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlSessionSubscription.subscriber_id == subscriber_id,
                     SqlSessionSubscription.target_id == target_id,
                 )
+            )
+            _settle_pending_deliveries(
+                session,
+                SqlSessionSubscriptionDelivery.subscriber_id == subscriber_id,
+                SqlSessionSubscriptionDelivery.target_id == target_id,
             )
             return cast(Any, result).rowcount > 0
 
@@ -6004,6 +6023,16 @@ class SqlAlchemyConversationStore(ConversationStore):
                 removed += count
                 if count < _SESSION_SUBSCRIPTION_DELETE_BATCH:
                     break
+
+        # The session's own pending notices go with it; those it owes its subscribers stay.
+        def settle_held(session: Session) -> None:
+            _settle_pending_deliveries(
+                session, SqlSessionSubscriptionDelivery.subscriber_id == conversation_id
+            )
+
+        run_write_transaction(
+            self._session_immediate, "drop_pending_subscription_deliveries", settle_held
+        )
         return removed
 
     def enqueue_subscription_deliveries(
@@ -6034,7 +6063,21 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                 ).all()
             )
-            created = [sid for sid in dict.fromkeys(subscriber_ids) if sid not in recorded]
+            # Removing a subscription drops its pending notices, so only a standing one gets a row.
+            subscribed = set(
+                session.scalars(
+                    select(SqlSessionSubscription.subscriber_id).where(
+                        SqlSessionSubscription.workspace_id == current_workspace_id(),
+                        SqlSessionSubscription.subscriber_id.in_(subscriber_ids),
+                        SqlSessionSubscription.target_id == target_id,
+                    )
+                ).all()
+            )
+            created = [
+                sid
+                for sid in dict.fromkeys(subscriber_ids)
+                if sid in subscribed and sid not in recorded
+            ]
             if supersede_at is not None and created:
                 stale = outcome if superseded_outcome is None else superseded_outcome
                 session.execute(

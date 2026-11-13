@@ -14,9 +14,9 @@ asynchronous. Inserting the row is the dedupe, so a repeated or replayed event
 is a no-op. The row holds only that identity and an outcome code; the notice
 text is built from the live sessions when it is posted. A failed post leaves
 the row pending; a retry sweep (after the failure, at startup and
-periodically) posts it with capped backoff while the subscription stands or
-once its target is archived, and also picks up an attempt a crashed server
-never finished. Delivery is at-least-once: a notice is a wake, so a rare
+periodically) posts it with capped backoff, and also picks up an attempt a
+crashed server never finished. Unsubscribing, or archiving or deleting the
+subscriber, settles its pending rows unposted; archiving the target keeps them. Delivery is at-least-once: a notice is a wake, so a rare
 duplicate costs the reader one history read while a lost one stalls it.
 Settled rows are pruned after a retention window, except a prompt's, which is
 kept while its target may still have it pending.
@@ -558,12 +558,6 @@ async def _deliverable(
     return owner
 
 
-async def _archived(store: ConversationStore, target_id: str) -> bool:
-    """Whether the target was archived: that drops its subscriptions, not its recorded notices."""
-    target = await asyncio.to_thread(store.get_conversation, target_id)
-    return target is not None and target.archived
-
-
 async def _render(store: ConversationStore, target_id: str, outcome: int) -> str | None:
     """The notice text from the live target, or ``None`` once the target is gone."""
     target = await asyncio.to_thread(store.get_conversation, target_id)
@@ -690,11 +684,8 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
                     store.get_session_subscriptions, delivery.subscriber_id, [delivery.target_id]
                 )
             ).get(delivery.target_id)
-            owner = (
-                await _deliverable(store, delivery.subscriber_id, delivery.target_id)
-                if subscription is not None or await _archived(store, delivery.target_id)
-                else _SKIP
-            )
+            # A pending row outlives only its target's archive; the other removals settle it.
+            owner = await _deliverable(store, delivery.subscriber_id, delivery.target_id)
             if owner is _SKIP:
                 await asyncio.to_thread(
                     store.settle_subscription_delivery, *key, settled_at=int(time.time())

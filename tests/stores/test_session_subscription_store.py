@@ -75,9 +75,12 @@ def test_a_delivery_is_recorded_once_per_subscriber_and_event(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     enqueue = conversation_store.enqueue_subscription_deliveries
-    watcher, other, target = f"{1:032x}", f"{3:032x}", f"{2:032x}"
+    watcher, other, target = (conversation_store.create_conversation().id for _ in range(3))
+    conversation_store.add_session_subscription(watcher, target)
 
-    assert enqueue([watcher], target, "p1", 1, due_at=100) == [watcher]
+    # A session that does not watch the target gets no row.
+    assert enqueue([watcher, other], target, "p1", 1, due_at=100) == [watcher]
+    conversation_store.add_session_subscription(other, target)
     assert enqueue([watcher], target, "p2", 1, due_at=100) == [watcher]
     # A replay of the older event is still a duplicate once a newer one landed.
     assert enqueue([watcher], target, "p1", 1, due_at=100) == []
@@ -137,7 +140,8 @@ def test_a_subscription_past_the_cap_is_refused(
 def test_due_deliveries_are_claimed_once_and_only_settled_ones_listed_for_the_prune(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
-    watcher, target = f"{1:032x}", f"{2:032x}"
+    watcher, target = (conversation_store.create_conversation().id for _ in range(2))
+    conversation_store.add_session_subscription(watcher, target)
     conversation_store.enqueue_subscription_deliveries([watcher], target, "due", 1, due_at=10)
     conversation_store.enqueue_subscription_deliveries([watcher], target, "later", 0, due_at=50)
 
@@ -197,6 +201,8 @@ def test_a_superseding_row_settles_only_older_pending_rows_of_its_outcome_and_pa
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
     watcher, other, target = (conversation_store.create_conversation().id for _ in range(3))
+    conversation_store.add_session_subscription(watcher, target)
+    conversation_store.add_session_subscription(other, target)
     enqueue = conversation_store.enqueue_subscription_deliveries
     enqueue([watcher, other], target, "a" * 64, 4, due_at=100, attempts=0)
     enqueue([watcher], target, "p" * 64, 0, due_at=100)
@@ -234,3 +240,26 @@ def test_deleting_either_session_drops_its_subscriptions(
     assert conversation_store.list_session_subscriptions(other) == [target]
     assert conversation_store.delete_session_subscriptions_for(target) == 1
     assert conversation_store.list_session_subscriptions(other) == []
+
+
+def test_removing_a_subscription_drops_only_the_notices_owed_to_its_subscriber(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    watcher, target, other, fan = (conversation_store.create_conversation().id for _ in range(4))
+    for subscriber, watched in ((watcher, target), (watcher, other), (fan, watcher)):
+        conversation_store.add_session_subscription(subscriber, watched)
+    enqueue = conversation_store.enqueue_subscription_deliveries
+    for subscriber, watched in ((watcher, target), (watcher, other), (fan, watcher)):
+        enqueue([subscriber], watched, "e" * 64, 1, due_at=0)
+
+    def pending() -> set[tuple[str, str]]:
+        due = conversation_store.claim_due_subscription_deliveries(
+            now=10**9, lease_until=0, limit=10
+        )
+        return {(d.subscriber_id, d.target_id) for d in due}
+
+    conversation_store.delete_session_subscription(watcher, target)
+    assert pending() == {(watcher, other), (fan, watcher)}
+    # Tearing a session down drops what it was owed, not what its subscribers are owed.
+    conversation_store.delete_session_subscriptions_for(watcher)
+    assert pending() == {(fan, watcher)}

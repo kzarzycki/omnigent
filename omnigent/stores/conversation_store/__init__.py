@@ -2267,7 +2267,7 @@ class ConversationStore(ABC):
     @abstractmethod
     def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
         """
-        Remove one subscription.
+        Remove one subscription and settle, unposted, the pair's pending notices.
 
         :returns: ``True`` when a row was removed.
         """
@@ -2324,7 +2324,9 @@ class ConversationStore(ABC):
     def delete_session_subscriptions_for(self, conversation_id: str) -> int:
         """
         Drop every subscription the session holds or is the target of, in
-        bounded batches with one transaction each.
+        bounded batches with one transaction each, and settle, unposted, the
+        notices still pending to the session. Notices it owes its subscribers
+        stay pending.
 
         :returns: Number of rows removed.
         """
@@ -2345,6 +2347,8 @@ class ConversationStore(ABC):
     ) -> list[str]:
         """
         Record a notice owed to each subscriber, once per event, in one transaction.
+
+        A subscriber that no longer holds a subscription to *target_id* gets no row.
 
         Each new row is pending with *attempts* started; *due_at* is when the
         retry sweep may take it over if the caller never finishes the attempt.
