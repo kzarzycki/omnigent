@@ -177,17 +177,19 @@ async def test_sys_session_create_passes_the_environment_to_the_server(auth_clie
     assert store.get_conversation(result["conversation_id"]).workspace == PINNED_WORKSPACE
 
 
-@pytest.mark.parametrize("source_filed", [False, True])
+@pytest.mark.parametrize("source_project", ["unfiled", "same", "other"])
 async def test_named_project_wins_over_the_source_project(
-    auth_client, db_uri, stack, source_filed
+    auth_client, db_uri, stack, source_project
 ):
     source, pinned_host, store = stack
     project_id = await _project(
         auth_client, "Cloud", {"host_id": pinned_host, "workspace": PINNED_WORKSPACE}
     )
-    if source_filed:
-        other = await _project(auth_client, "Elsewhere")
-        response = await auth_client.patch(f"/v1/sessions/{source['id']}", json={"project_id": other})
+    if source_project != "unfiled":
+        filed_in = project_id if source_project == "same" else await _project(auth_client, "Other")
+        response = await auth_client.patch(
+            f"/v1/sessions/{source['id']}", json={"project_id": filed_in}
+        )
         assert response.status_code == 200, response.text
 
     response = await _orchestrate(auth_client, source, project_id=project_id)
