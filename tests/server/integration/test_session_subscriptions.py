@@ -418,23 +418,45 @@ async def test_subscribing_leaves_the_watched_session_unchanged(
     assert not store.list_child_conversation_ids_by_parent([watcher]).get(watcher)
 
 
+async def _archive(client: httpx.AsyncClient, session_id: str, *, archived: bool = True) -> None:
+    """Archive (or restore) a session and wait for its archive teardown."""
+    with patch.object(sessions_facade, "_ARCHIVE_STOP_UNDO_GRACE_S", 0.0):
+        response = await client.patch(f"/v1/sessions/{session_id}", json={"archived": archived})
+        assert response.status_code == 200, response.text
+        await asyncio.gather(*list(orchestration._detached_stop_tasks), return_exceptions=True)
+
+
 @pytest.mark.parametrize("archived", ["subscriber", "target"])
-async def test_archiving_either_side_drops_the_subscription(
+async def test_archiving_the_subscriber_drops_the_subscription_and_the_target_keeps_it(
     client: httpx.AsyncClient, runner: _Runner, db_uri: str, archived: str
 ) -> None:
     watcher = (await create_test_session(client))["id"]
     worker = (await create_test_session(client, executor=_NATIVE))["id"]
     await _subscribe(client, watcher, worker)
 
-    with patch.object(sessions_facade, "_ARCHIVE_STOP_UNDO_GRACE_S", 0.0):
-        archived_id = watcher if archived == "subscriber" else worker
-        response = await client.patch(f"/v1/sessions/{archived_id}", json={"archived": True})
-        assert response.status_code == 200, response.text
-        await asyncio.gather(*list(orchestration._detached_stop_tasks), return_exceptions=True)
+    await _archive(client, watcher if archived == "subscriber" else worker)
 
     store = SqlAlchemyConversationStore(db_uri)
-    assert store.list_session_subscriptions(watcher) == []
-    assert store.list_session_subscribers(worker) == []
+    kept = archived == "target"
+    assert store.list_session_subscriptions(watcher) == ([worker] if kept else [])
+    assert store.list_session_subscribers(worker) == ([watcher] if kept else [])
+
+
+async def test_a_restored_target_is_heard_again(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    watcher = (await create_test_session(client))["id"]
+    worker = (await create_test_session(client, title="worker", executor=_NATIVE))["id"]
+    await _subscribe(client, watcher, worker)
+
+    await _archive(client, worker)
+    await _archive(client, worker, archived=False)
+    await _status(client, worker, status="idle", turn_completed=True, response_id="resp_1")
+    await _settle()
+
+    assert runner.notices(watcher) == [
+        session_subscriptions.turn_notice("worker", worker, "completed")
+    ]
 
 
 @pytest.mark.parametrize("deleted", ["subscriber", "target"])
@@ -623,9 +645,243 @@ async def test_a_pending_notice_to_an_unsubscribed_session_is_dropped(
     store.delete_session_subscription(watcher, target)
 
     with patch.object(session_subscriptions.time, "time", lambda: 10**10):
-        assert await session_subscriptions.retry_due_deliveries() == 1
+        # The unsubscribe settled it, so no sweep takes it.
         assert await session_subscriptions.retry_due_deliveries() == 0
     assert poster.posted == []
+
+
+async def test_a_pending_notice_survives_its_target_being_archived(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    # What archiving does: flag the target, then drop the subscriptions aimed at it.
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == [
+        (
+            watcher,
+            f"[System: session worker ({target}) ended its turn (completed). "
+            "Read it with sys_session_get_history.]",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unsubscribe_then_archive", "subscriber_archive_then_restore", "target_archive_then_restore"],
+)
+async def test_only_the_target_archive_keeps_a_pending_notice(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    if case == "unsubscribe_then_archive":
+        store.delete_session_subscription(watcher, target)
+    elif case == "subscriber_archive_then_restore":
+        store.update_conversation(watcher, archived=True)
+        store.delete_session_subscriptions_for(watcher)
+        store.update_conversation(watcher, archived=False)
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+    if case == "target_archive_then_restore":
+        store.update_conversation(target, archived=False)
+
+    kept = case == "target_archive_then_restore"
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == int(kept)
+    assert bool(poster.posted) == kept
+
+
+@pytest.mark.parametrize("side", ["subscriber", "target"])
+async def test_a_pending_notice_is_not_posted_once_either_side_is_deleted(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    assert await store.delete_conversation(watcher if side == "subscriber" else target)
+    if side == "subscriber":
+        store.update_conversation(target, archived=True)
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        await session_subscriptions.retry_due_deliveries()
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == []
+
+
+async def test_a_notice_kept_through_the_target_archive_still_checks_read_access(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+
+    await _turn_end(target, "completed", "resp_1")
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+    calls: list[tuple[str, int]] = []
+
+    def deny(owner: Any, target_id: str, level: int, *_stores: Any) -> bool:
+        calls.append((target_id, level))
+        return False
+
+    monkeypatch.setattr(session_subscriptions, "_permission_store", object())
+    monkeypatch.setattr(session_subscriptions, "check_session_access", deny)
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 1
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert calls == [(target, LEVEL_READ)]
+    assert poster.posted == []
+
+
+async def test_a_claimed_notice_is_not_posted_once_its_subscriber_unsubscribes(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    await _turn_end(target, "completed", "resp_1")
+
+    # A sweep claims the failed row, then pauses while the subscriber unsubscribes.
+    lease = 10**10 + 60
+    (delivery,) = store.claim_due_subscription_deliveries(now=10**10, lease_until=lease, limit=10)
+    store.delete_session_subscription(watcher, target)
+    await session_subscriptions._retry(store, delivery, lease_until=lease)
+
+    assert poster.posted == []
+
+
+@pytest.mark.parametrize("other_sweep_settles", [False, True], ids=["reclaimed", "settled"])
+async def test_a_retry_whose_row_another_sweep_took_stops_before_preparing_it(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    other_sweep_settles: bool,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)
+    await _turn_end(target, "completed", "resp_1")
+
+    # A sweep claims the failed row and pauses past its lease; another sweep takes it.
+    lease = 10**10 + 60
+    (delivery,) = store.claim_due_subscription_deliveries(now=10**10, lease_until=lease, limit=10)
+    (taken,) = store.claim_due_subscription_deliveries(now=lease, lease_until=lease + 60, limit=10)
+    if other_sweep_settles:
+        store.settle_subscription_delivery(
+            watcher, target, taken.event_key, settled_at=lease, leased_until=lease + 60
+        )
+    prepared: list[str] = []
+
+    async def deliverable(*_args: Any) -> None:
+        prepared.append("deliverable")
+
+    async def busy(*_args: Any) -> bool:
+        prepared.append("busy")
+        return False
+
+    monkeypatch.setattr(session_subscriptions, "_deliverable", deliverable)
+    monkeypatch.setattr(session_subscriptions, "_busy_or_unknown", busy)
+    await session_subscriptions._retry(store, delivery, lease_until=lease)
+
+    assert prepared == []
+    assert poster.posted == []
+
+
+async def test_an_unsubscribe_while_a_notice_is_prepared_stops_its_post(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    render = session_subscriptions._render
+
+    async def render_then_unsubscribe(*args: Any) -> str | None:
+        store.delete_session_subscription(watcher, target)
+        return await render(*args)
+
+    monkeypatch.setattr(session_subscriptions, "_render", render_then_unsubscribe)
+    await _turn_end(target, "completed", "resp_1")
+
+    with patch.object(session_subscriptions.time, "time", lambda: 10**10):
+        assert await session_subscriptions.retry_due_deliveries() == 0
+    assert poster.posted == []
+
+
+async def test_an_attempt_whose_row_another_claimed_neither_posts_nor_settles_it(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    render = session_subscriptions._render
+    stolen: list[Any] = []
+
+    async def render_after_a_takeover(*args: Any) -> str | None:
+        stolen.extend(
+            store.claim_due_subscription_deliveries(now=10**10, lease_until=10**10, limit=10)
+        )
+        return await render(*args)
+
+    monkeypatch.setattr(session_subscriptions, "_render", render_after_a_takeover)
+    await _turn_end(target, "completed", "resp_1")
+
+    assert len(stolen) == 1
+    assert poster.posted == []
+    # Still pending under the other claim, for that attempt to post.
+    assert _deliveries(store)[session_subscriptions._event_key("turn", "resp_1")][:2] == (
+        0,
+        10**10,
+    )
+
+
+async def test_a_target_archived_while_its_turn_end_is_recorded_still_notifies(
+    outbox: tuple[SqlAlchemyConversationStore, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, watcher, target = outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    page = store.list_session_subscriber_settings
+
+    def archive_after_the_page(*args: Any, **kwargs: Any) -> Any:
+        subscribers = page(*args, **kwargs)
+        # What archiving does: flag the target, then tear down its subscriptions.
+        store.update_conversation(target, archived=True)
+        store.delete_session_subscriptions_for(target)
+        return subscribers
+
+    monkeypatch.setattr(store, "list_session_subscriber_settings", archive_after_the_page)
+    await _turn_end(target, "completed", "resp_1")
+
+    assert poster.posted == [(watcher, _completed(target))]
 
 
 async def test_more_than_a_thousand_subscribers_all_hear_a_fan_out(
@@ -1329,6 +1585,25 @@ async def test_a_held_notice_is_delivered_by_the_sweep_after_a_restart(
     assert await _sweep(10**6) == 0
 
     assert restarted.posted == [(watcher, _completed(target))]
+
+
+async def test_a_held_notice_waits_for_a_restored_target_that_runs_again(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    store.update_conversation(target, archived=True)
+    store.delete_session_subscriptions_for(target)
+    store.update_conversation(target, archived=False)
+    store.set_session_live_status(target, "running")
+
+    assert await _sweep(_QUIET_S) == 1
+    assert poster.posted == []
+    store.set_session_live_status(target, "idle")
+    assert await _sweep(2 * _QUIET_S) == 1
+    assert poster.posted == [(watcher, _completed(target))]
 
 
 async def test_the_subscribe_tool_passes_quiet_seconds(client: httpx.AsyncClient) -> None:

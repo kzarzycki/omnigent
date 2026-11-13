@@ -2588,7 +2588,7 @@ class ConversationStore(ABC):
     @abstractmethod
     def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
         """
-        Remove one subscription.
+        Remove one subscription and settle, unposted, the pair's pending notices.
 
         :returns: ``True`` when a row was removed.
         """
@@ -2642,11 +2642,18 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def delete_session_subscriptions_for(self, conversation_id: str) -> int:
+    def delete_session_subscriptions_for(
+        self, conversation_id: str, *, including_watchers: bool = False
+    ) -> int:
         """
-        Drop every subscription the session holds or is the target of, in
-        bounded batches with one transaction each.
+        Drop the subscriptions the session holds, in bounded batches with one
+        transaction each, and settle, unposted, the notices still pending to it.
 
+        Subscriptions aimed at the session stay, with the notices it owes them,
+        so an archived session's watchers hear it again once it is restored.
+
+        :param including_watchers: Also drop the subscriptions aimed at the
+            session and settle their pending notices, for a deleted session.
         :returns: Number of rows removed.
         """
         ...
@@ -2666,6 +2673,8 @@ class ConversationStore(ABC):
     ) -> list[str]:
         """
         Record a notice owed to each subscriber, once per event, in one transaction.
+
+        A subscriber that no longer holds a subscription to *target_id* gets no row.
 
         Each new row is pending with *attempts* started; *due_at* is when the
         retry sweep may take it over if the caller never finishes the attempt.
@@ -2714,10 +2723,38 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def get_claimed_delivery_subscription(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        leased_until: int | None = None,
+    ) -> SessionSubscription | None:
+        """
+        The pair's subscription, while the delivery is still pending under the claim.
+
+        :param leased_until: The claim's lease; ``None`` accepts any pending row.
+        :returns: ``None`` when the row is settled, another attempt took it, or
+            the subscription is gone.
+        """
+        ...
+
+    @abstractmethod
     def settle_subscription_delivery(
-        self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        settled_at: int,
+        leased_until: int | None = None,
     ) -> None:
-        """Mark a delivery done (posted or dropped); it is kept for dedupe until pruned."""
+        """
+        Mark a delivery done (posted or dropped); it is kept for dedupe until pruned.
+
+        :param leased_until: When set, only a row still under this claim is settled.
+        """
         ...
 
     @abstractmethod
@@ -2729,8 +2766,13 @@ class ConversationStore(ABC):
         *,
         due_at: int,
         attempts: int | None = None,
+        leased_until: int | None = None,
     ) -> None:
-        """Leave a delivery pending until *due_at*, resetting its count to *attempts* if set."""
+        """
+        Leave a delivery pending until *due_at*, resetting its count to *attempts* if set.
+
+        :param leased_until: When set, only a row still under this claim is rescheduled.
+        """
         ...
 
     @abstractmethod

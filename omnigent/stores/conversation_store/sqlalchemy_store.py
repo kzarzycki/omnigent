@@ -1093,6 +1093,27 @@ _DELIVERY_SETTLED = 1
 _MAX_ATTEMPTS_COUNTED = 32767
 
 
+def _settle_pending_deliveries(session: Session, *conditions: Any) -> None:
+    """Settle, unposted, the workspace's pending subscription notices matching *conditions*."""
+    row = SqlSessionSubscriptionDelivery
+    session.execute(
+        update(row)
+        .where(
+            row.workspace_id == current_workspace_id(),
+            row.state == _DELIVERY_PENDING,
+            *conditions,
+        )
+        .values(state=_DELIVERY_SETTLED, due_at=int(time.time()))
+    )
+
+
+def _claim_conditions(leased_until: int | None) -> tuple[Any, ...]:
+    """Match a delivery still under the claim leased until *leased_until*, if one is given."""
+    if leased_until is None:
+        return ()
+    return (SqlSessionSubscriptionDelivery.due_at == leased_until,)
+
+
 class SqlAlchemyConversationStore(ConversationStore):
     """
     SQLAlchemy-backed implementation of :class:`ConversationStore`.
@@ -7138,7 +7159,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 raise SubscriptionCycleError(bounded=True)
 
     def delete_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
-        """Remove one subscription. See base class."""
+        """Remove one subscription and drop the pair's pending notices. See base class."""
 
         def write(session: Session) -> bool:
             result = session.execute(
@@ -7147,6 +7168,11 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlSessionSubscription.subscriber_id == subscriber_id,
                     SqlSessionSubscription.target_id == target_id,
                 )
+            )
+            _settle_pending_deliveries(
+                session,
+                SqlSessionSubscriptionDelivery.subscriber_id == subscriber_id,
+                SqlSessionSubscriptionDelivery.target_id == target_id,
             )
             return cast(Any, result).rowcount > 0
 
@@ -7224,12 +7250,14 @@ class SqlAlchemyConversationStore(ConversationStore):
                 for item in session.execute(query)
             }
 
-    def delete_session_subscriptions_for(self, conversation_id: str) -> int:
-        """Drop subscriptions held by or aimed at a session. See base class."""
+    def delete_session_subscriptions_for(
+        self, conversation_id: str, *, including_watchers: bool = False
+    ) -> int:
+        """Drop the subscriptions a session holds, or also those aimed at it. See base class."""
         held = (SqlSessionSubscription.subscriber_id, SqlSessionSubscription.target_id)
         aimed = (SqlSessionSubscription.target_id, SqlSessionSubscription.subscriber_id)
         removed = 0
-        for fixed, other in (held, aimed):
+        for fixed, other in (held, aimed) if including_watchers else (held,):
             while True:
 
                 def write(session: Session, fixed: Any = fixed, other: Any = other) -> int:
@@ -7257,6 +7285,24 @@ class SqlAlchemyConversationStore(ConversationStore):
                 removed += count
                 if count < _SESSION_SUBSCRIPTION_DELETE_BATCH:
                     break
+
+        delivery = SqlSessionSubscriptionDelivery
+
+        # The notices pending to the session go with it; those it owes stay unless it is deleted.
+        def settle_held(session: Session) -> None:
+            _settle_pending_deliveries(
+                session,
+                or_(
+                    delivery.subscriber_id == conversation_id,
+                    delivery.target_id == conversation_id,
+                )
+                if including_watchers
+                else delivery.subscriber_id == conversation_id,
+            )
+
+        run_write_transaction(
+            self._session_immediate, "drop_pending_subscription_deliveries", settle_held
+        )
         return removed
 
     def enqueue_subscription_deliveries(
@@ -7287,7 +7333,25 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                 ).all()
             )
-            created = [sid for sid in dict.fromkeys(subscriber_ids) if sid not in recorded]
+            # Removing a subscription drops its pending notices, so only a standing one gets a row.
+            # The share lock holds a concurrent removal until this commits, so its settle
+            # sees these rows (READ COMMITTED); SQLite's writer lock already serializes them.
+            subscribed = set(
+                session.scalars(
+                    select(SqlSessionSubscription.subscriber_id)
+                    .where(
+                        SqlSessionSubscription.workspace_id == current_workspace_id(),
+                        SqlSessionSubscription.subscriber_id.in_(subscriber_ids),
+                        SqlSessionSubscription.target_id == target_id,
+                    )
+                    .with_for_update(read=True)
+                ).all()
+            )
+            created = [
+                sid
+                for sid in dict.fromkeys(subscriber_ids)
+                if sid in subscribed and sid not in recorded
+            ]
             if supersede_at is not None and created:
                 stale = outcome if superseded_outcome is None else superseded_outcome
                 session.execute(
@@ -7431,8 +7495,48 @@ class SqlAlchemyConversationStore(ConversationStore):
             due_at=lease_until,
         )
 
+    def get_claimed_delivery_subscription(
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        leased_until: int | None = None,
+    ) -> SessionSubscription | None:
+        """The pair's subscription while the delivery is still claimed. See base class."""
+        row = SqlSessionSubscriptionDelivery
+        subscription = SqlSessionSubscription
+        query = (
+            select(subscription.quiet_seconds)
+            .join(
+                row,
+                (row.workspace_id == subscription.workspace_id)
+                & (row.subscriber_id == subscription.subscriber_id)
+                & (row.target_id == subscription.target_id),
+            )
+            .where(
+                subscription.workspace_id == current_workspace_id(),
+                subscription.subscriber_id == subscriber_id,
+                subscription.target_id == target_id,
+                row.event_key == event_key,
+                row.state == _DELIVERY_PENDING,
+                *_claim_conditions(leased_until),
+            )
+        )
+        with self._session("get_claimed_delivery_subscription") as session:
+            found = session.execute(query).first()
+        if found is None:
+            return None
+        return SessionSubscription(subscriber_id, target_id, found.quiet_seconds)
+
     def settle_subscription_delivery(
-        self, subscriber_id: str, target_id: str, event_key: str, *, settled_at: int
+        self,
+        subscriber_id: str,
+        target_id: str,
+        event_key: str,
+        *,
+        settled_at: int,
+        leased_until: int | None = None,
     ) -> None:
         """Mark a delivery done. See base class."""
         self._update_subscription_delivery(
@@ -7440,6 +7544,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             subscriber_id,
             target_id,
             event_key,
+            *_claim_conditions(leased_until),
             state=_DELIVERY_SETTLED,
             due_at=settled_at,
         )
@@ -7452,13 +7557,19 @@ class SqlAlchemyConversationStore(ConversationStore):
         *,
         due_at: int,
         attempts: int | None = None,
+        leased_until: int | None = None,
     ) -> None:
         """Leave a delivery pending. See base class."""
         values = (
             {"due_at": due_at} if attempts is None else {"due_at": due_at, "attempts": attempts}
         )
         self._update_subscription_delivery(
-            "reschedule_subscription_delivery", subscriber_id, target_id, event_key, **values
+            "reschedule_subscription_delivery",
+            subscriber_id,
+            target_id,
+            event_key,
+            *_claim_conditions(leased_until),
+            **values,
         )
 
     def list_settled_subscription_deliveries(
@@ -7723,6 +7834,6 @@ class SqlAlchemyConversationStore(ConversationStore):
                 lambda session, batch=batch_ids: delete_metadata(session, batch),
             )
         for subtree_id in subtree_ids:
-            self.delete_session_subscriptions_for(subtree_id)
+            self.delete_session_subscriptions_for(subtree_id, including_watchers=True)
 
         return True
