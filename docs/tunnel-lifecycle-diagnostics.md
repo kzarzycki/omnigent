@@ -523,6 +523,13 @@ activity in its parent's transcript. Repeat with a running child whose turn
 this server relayed to confirm that interrupted work still produces
 `runner_disconnected`.
 
+For a full host reboot, kill the host daemon and every runner it started
+while a turn is running, then start the daemon again. The server holds the
+turn while the host is offline. After the host reconnects without the runner
+it waits one more grace (about 90 s), then relaunches a runner on the host and
+resumes the cut turn with no user input; `session_revival` records the
+attempt. `tests/e2e/test_host_reboot_revives_session_e2e.py` covers it.
+
 For handoff handling, reconnect an idle child's runner to a fresh server,
 then drop the runner after its heartbeat-only relay is ready. In a test
 environment, make the disconnect-time conversation lookup fail or return no

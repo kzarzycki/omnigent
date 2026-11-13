@@ -47,12 +47,13 @@ def test_load_session_slice_config_reads_name_and_limits(tmp_path: Path) -> None
                 "memory_swap_max": "1G",
                 "memory_max": 9663676416,
                 "memory_high": "80%",
+                "tasks_max": 4096,
             }
         },
     )
     assert load_session_slice_config(path) == SessionSliceConfig(
         name="agents.slice",
-        properties=("MemoryHigh=80%", "MemoryMax=9663676416", "MemorySwapMax=1G"),
+        properties=("MemoryHigh=80%", "MemoryMax=9663676416", "MemorySwapMax=1G", "TasksMax=4096"),
     )
 
 
@@ -72,6 +73,9 @@ def test_load_session_slice_config_defaults_the_slice_name(tmp_path: Path) -> No
         ({"enabled": True, "name": "sessions.scope"}, r"host\.session_slice\.name"),
         ({"enabled": True, "memory_max": "8 gigs"}, r"host\.session_slice\.memory_max"),
         ({"enabled": True, "memory_high": True}, r"host\.session_slice\.memory_high"),
+        ({"enabled": True, "tasks_max": 0}, r"host\.session_slice\.tasks_max"),
+        ({"enabled": True, "tasks_max": "lots"}, r"host\.session_slice\.tasks_max"),
+        ({"enabled": True, "tasks_max": True}, r"host\.session_slice\.tasks_max"),
     ],
 )
 def test_load_session_slice_config_refuses_bad_values(
@@ -138,6 +142,26 @@ def test_activate_session_slice_on_sets_limits_and_returns_scope_prefix(
     assert prefix[:5] == ("systemd-run", "--user", "--scope", "--quiet", "--collect")
     assert "--slice=omnigent-sessions.slice" in prefix
     assert prefix[-1] == "--"
+
+
+def test_activate_session_slice_sets_tasks_max_and_needs_pids_delegation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``TasksMax`` is set on the slice, and needs the ``pids`` controller delegated."""
+    _pretend_systemd_installed(monkeypatch)
+    config = SessionSliceConfig(
+        name="omnigent-sessions.slice", properties=("MemoryMax=9G", "TasksMax=4096")
+    )
+    calls = _record_systemctl(monkeypatch, subtree_control="cpu memory", cgroup_root=tmp_path)
+    assert activate_session_slice(config) is None
+    assert "memory and pids" in caplog.text
+    assert not any("set-property" in call for call in calls)
+
+    calls = _record_systemctl(
+        monkeypatch, subtree_control="memory pids", cgroup_root=tmp_path / "delegated"
+    )
+    assert activate_session_slice(config) is not None
+    assert calls[-1][-2:] == ["MemoryMax=9G", "TasksMax=4096"]
 
 
 def test_activate_session_slice_survives_a_failed_set_property(
