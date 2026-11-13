@@ -19,10 +19,12 @@ from omnigent.host.frames import (
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_RESOURCES_INTERVAL_S,
     WORKSPACE_MISSING_ERROR_CODE,
     HostHelloFrame,
     HostLaunchRunnerResultFrame,
     HostProbeAccountsFrame,
+    HostResourcesFrame,
     decode_host_frame,
     encode_host_frame,
 )
@@ -357,6 +359,46 @@ async def test_hosts_api_surfaces_version_and_commit(
     for body in (listing.json()["hosts"][0], single.json()):
         assert body["version"] == "0.1.0-test"
         assert body["commit"] == "abc123def"
+
+
+async def test_hosts_api_reports_host_resources_and_marks_them_stale(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """A host's resources report reaches both host endpoints; an old one reads stale.
+
+    A host that never reports (an older build) lists with ``resources`` null.
+    """
+    app, registry, _hs, _cs = host_api_app
+    comm = await _connect_host(app, registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        before = await client.get("/v1/hosts")
+        assert before.status_code == 200
+        assert before.json()["hosts"][0]["resources"] is None
+
+        report = HostResourcesFrame(
+            load_1m=3.5, cpu_count=8, memory_total_mb=15872, memory_available_mb=6144
+        )
+        await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(report)})
+        conn = registry.get(_HOST_ID)
+        assert conn is not None
+        while conn.resources is None:
+            await asyncio.sleep(0.01)
+
+        listing = await client.get("/v1/hosts")
+        single = await client.get(f"/v1/hosts/{_HOST_ID}")
+        for body in (listing.json()["hosts"][0], single.json()):
+            resources = body["resources"]
+            assert resources["load_1m"] == 3.5
+            assert resources["cpu_count"] == 8
+            assert resources["memory_total_mb"] == 15872
+            assert resources["memory_available_mb"] == 6144
+            assert resources["reported_at"] == conn.resources_at
+            assert resources["stale"] is False
+
+        assert conn.resources_at is not None
+        conn.resources_at -= 2 * HOST_RESOURCES_INTERVAL_S + 1
+        stale = await client.get(f"/v1/hosts/{_HOST_ID}")
+    assert stale.json()["resources"]["stale"] is True
 
 
 async def test_hosts_api_configured_harnesses_null_for_older_host(

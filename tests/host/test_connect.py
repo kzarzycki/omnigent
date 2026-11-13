@@ -7793,6 +7793,8 @@ async def test_host_diagnostics_correlate_real_socket_closes_and_reset_on_reconn
 
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
+    # The peer below scripts an exact frame sequence; no resources report in it.
+    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     caplog.set_level(logging.INFO, logger="omnigent.host.connect")
     hellos: list[HostHelloFrame] = []
 

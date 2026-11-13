@@ -62,6 +62,7 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeResultFrame,
+    HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
     HostSkillContentResultFrame,
@@ -867,6 +868,11 @@ async def _receive_loop(
                     await on_host_update(host_id, conn.owner)
                 except Exception:
                     _logger.exception("on_host_update callback failed for %s", host_id)
+            continue
+
+        if isinstance(frame, HostResourcesFrame):
+            conn.resources = frame
+            conn.resources_at = time.time()
             continue
 
         if isinstance(frame, HostLaunchRunnerResultFrame):

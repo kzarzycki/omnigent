@@ -71,6 +71,7 @@ from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
+    HOST_RESOURCES_INTERVAL_S,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
     RUNNER_LOG_TAIL_HEADING,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -150,6 +151,7 @@ from omnigent.host.git_worktree import (
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
+from omnigent.host.resources import sample_host_resources
 from omnigent.host.runner_registry import (
     RUNNER_HOST_REGISTRY_ENV_VAR,
     AdoptedRunnerProc,
@@ -5556,6 +5558,7 @@ class HostProcess:
         self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
+        resources_task = asyncio.create_task(self._resources_loop(ws))
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -5598,9 +5601,10 @@ class HostProcess:
         finally:
             if (diagnostics := self._diagnostics_for(ws)) is not None:
                 diagnostics.freeze()
-            readiness_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await readiness_task
+            for task in (readiness_task, resources_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
             await self._cancel_all_harness_logins()
 
     async def _harness_readiness_loop(
@@ -5656,6 +5660,18 @@ class HostProcess:
                 )
                 published_configured = configured
                 published_gateway = gateway
+
+    async def _resources_loop(self, ws: websockets.asyncio.client.ClientConnection) -> None:
+        """Report load and memory on connect and every interval after."""
+        while True:
+            try:
+                report = await asyncio.to_thread(sample_host_resources)
+            except Exception:
+                _logger.exception("Host resources sample failed")
+                report = None
+            if report is not None:
+                await self._send_text(ws, encode_host_frame(report))
+            await asyncio.sleep(HOST_RESOURCES_INTERVAL_S)
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
