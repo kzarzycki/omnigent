@@ -2,7 +2,7 @@ import { cjk } from "@streamdown/cjk";
 import { createMathPlugin } from "@streamdown/math";
 import { mermaid } from "./mermaidPlugin";
 import { defaultRehypePlugins, type LinkSafetyConfig, type StreamdownProps } from "streamdown";
-import { getBasePath } from "@/lib/basePath";
+import { stripBasePath } from "@/lib/basePath";
 import { lazyCodePlugin } from "./lazyCodePlugin";
 
 type StreamdownRehypePlugins = NonNullable<StreamdownProps["rehypePlugins"]>;
@@ -219,8 +219,7 @@ export function markWorkspaceFileLinks() {
 
 /** The app's own `/c/<id>` session route, with or without the deployment base path. */
 function isAppSessionRoute(href: string): boolean {
-  const base = getBasePath().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^(?:${base})?/c/[^/#]+/?$`).test(href);
+  return /^\/c\/[^/#]+\/?$/.test(stripBasePath(href));
 }
 
 /**

@@ -4,7 +4,7 @@
 // holds for the server and the browser alike.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileViewerContext } from "@/shell/FileViewerContext";
@@ -175,15 +175,22 @@ describe("chat link previews at the fetch layer", () => {
       fetchMock.mockResolvedValue(
         jsonResponse({ id: "conv_9", agent_id: "ag_1", title: "Auth refactor", status: "idle" }),
       );
-      renderMarkdown("[the new chat](/c/conv_9) and [notes](/abs/ws/notes.md)");
+      const openFile = vi.fn();
+      renderMarkdown("[the new chat](/c/conv_9) and [notes](/abs/ws/notes.md)", {
+        ...OUTSIDE_A_SESSION,
+        openFile,
+        isChangedPath: (path: string) => path === "notes.md",
+        workspaceRoot: "/abs/ws",
+      });
 
       const link = screen.getByRole("link", { name: "the new chat" });
       expect(link.getAttribute("href")).toBe("/proxy/6767/c/conv_9");
       expect(link.hasAttribute("data-omnigent-file")).toBe(false);
       await userEvent.hover(link);
       expect(await screen.findByTestId("session-link-preview")).toHaveTextContent("Auth refactor");
-      // A workspace path still goes to the file viewer, not a session read.
-      expect(screen.queryByRole("link", { name: "notes" })).toBeNull();
+      // A workspace path still opens the file viewer rather than navigating.
+      fireEvent.click(screen.getByRole("button", { name: "notes" }));
+      expect(openFile).toHaveBeenCalledWith("notes.md");
     } finally {
       delete window.__OMNIGENT_BASE_PATH__;
     }
