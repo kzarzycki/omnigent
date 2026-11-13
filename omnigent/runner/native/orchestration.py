@@ -9385,6 +9385,7 @@ async def _auto_create_claude_terminal(
         BRIDGE_ID_LABEL_KEY,
         augment_claude_args,
         ensure_claude_workspace_trusted,
+        extract_settings_args,
         prepare_bridge_dir,
         validate_claude_hook_interpreter_compatibility,
     )
@@ -10049,8 +10050,21 @@ async def _auto_create_claude_terminal(
         # Its dead-owner cleanup also reclaims these generated skill links.
         bundle_dir = bridge_dir / "skill-bundle"
         _ensure_orchestrator_skills_in_bundle(bundle_dir, agent_spec)
+    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
+    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
+        resolve_harness_args,
+        resolve_harness_command,
+    )
+
+    _harness_cfg = load_effective_config(workspace=workspace)
+    # Configured --settings must merge into the invocation settings: the flag
+    # would otherwise land before Omnigent's own and lose.
+    configured_args, configured_settings = extract_settings_args(
+        resolve_harness_args("claude-native", (), cfg=_harness_cfg), base_dir=Path(workspace)
+    )
     claude_args = augment_claude_args(
         base_claude_args,
+        config_settings=configured_settings,
         active_harnesses=runner_mcp_disabled_servers_active_harnesses(),
         bridge_dir=bridge_dir,
         workspace=Path(workspace),
@@ -10083,15 +10097,8 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
-    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
-        resolve_harness_args,
-        resolve_harness_command,
-    )
-
-    _harness_cfg = load_effective_config(workspace=workspace)
     launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
-    launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
+    launch_args = [*configured_args, *claude_args]
     # Validate the binary this terminal will actually spawn: ``launch_command``
     # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
     # name resolves against this process's inherited PATH (same lookup tmux's

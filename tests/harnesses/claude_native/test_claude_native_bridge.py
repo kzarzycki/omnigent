@@ -4405,6 +4405,27 @@ def test_augment_claude_args_handles_equals_form_and_bad_caller_settings(tmp_pat
     assert _load_invocation_settings(args)["env"]["X"] == "1"
 
 
+def test_augment_claude_args_resolves_relative_settings_file_from_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative ``--settings`` file is read from the session workspace, not the process cwd."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "caller.json").write_text('{"env": {"X": "1"}}', encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    args = augment_claude_args(
+        ("--settings", "caller.json"),
+        bridge_dir=tmp_path / "bridge",
+        workspace=workspace,
+        python_executable="/venv/bin/python",
+    )
+
+    assert _load_invocation_settings(args)["env"]["X"] == "1"
+
+
 def test_augment_claude_args_without_caller_settings_is_unchanged(tmp_path: Path) -> None:
     """No caller ``--settings`` leaves the argv with exactly one Omnigent flag."""
     args = augment_claude_args((), bridge_dir=tmp_path, python_executable="/venv/bin/python")

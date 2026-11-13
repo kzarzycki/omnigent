@@ -2973,6 +2973,7 @@ def augment_claude_args(
     turn_routing: bool = False,
     active_harnesses: Collection[str] | None = None,
     session_id: str | None = None,
+    config_settings: _JsonObject | None = None,
 ) -> list[str]:
     """
     Return Claude CLI args with Omnigent MCP/hook/skill injection.
@@ -3029,6 +3030,8 @@ def augment_claude_args(
         ``False`` keeps every prompt off the routing round trip.
     :param session_id: The launching session, reported as
         ``omnigent.session.id`` when the server's telemetry setting applies.
+    :param config_settings: Settings parsed from config ``harness.claude-native.args``
+        (see :func:`extract_settings_args`); merged under the caller's ``--settings``.
     :returns: Augmented argument list for the terminal resource.
     """
     hook_settings = build_hook_settings(
@@ -3051,8 +3054,10 @@ def augment_claude_args(
         hook_settings, executor="claude-native", active_harnesses=active_harnesses
     )
     # Claude keeps only the last --settings, so a caller's would be dropped.
-    remaining_args, caller_settings = _extract_caller_settings(claude_args)
-    hook_settings = _merge_settings_objects(caller_settings, hook_settings)
+    remaining_args, caller_settings = extract_settings_args(claude_args, base_dir=workspace)
+    hook_settings = _merge_settings_objects(
+        _merge_settings_objects(dict(config_settings or {}), caller_settings), hook_settings
+    )
     args = _merge_disallowed_tools(remaining_args, _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, (*_OMNIGENT_ALLOWED_TOOLS, *allowed_tools))
     if workspace is not None:
@@ -3183,7 +3188,9 @@ def _merge_settings_objects(base: _JsonObject, overlay: _JsonObject) -> _JsonObj
     return merged
 
 
-def _extract_caller_settings(args: Sequence[str]) -> tuple[list[str], _JsonObject]:
+def extract_settings_args(
+    args: Sequence[str], *, base_dir: Path | None = None
+) -> tuple[list[str], _JsonObject]:
     """
     Remove every caller ``--settings`` flag from ``args`` and parse its value.
 
@@ -3191,6 +3198,8 @@ def _extract_caller_settings(args: Sequence[str]) -> tuple[list[str], _JsonObjec
     earlier ones. An unreadable or non-object value is logged and skipped.
 
     :param args: Claude CLI args, e.g. ``("--settings", '{"env":{"X":"1"}}')``.
+    :param base_dir: Directory a relative settings file path resolves from, i.e.
+        the cwd Claude launches in. ``None`` uses the process cwd.
     :returns: ``(args without --settings, merged caller settings)``.
     """
     remaining: list[str] = []
@@ -3208,7 +3217,7 @@ def _extract_caller_settings(args: Sequence[str]) -> tuple[list[str], _JsonObjec
             remaining.append(arg)
             index += 1
             continue
-        parsed = _parse_caller_settings(value)
+        parsed = _parse_settings_value(value, base_dir)
         if parsed is None:
             _logger.warning("Ignoring a --settings value that is not a JSON object or file.")
         else:
@@ -3216,12 +3225,15 @@ def _extract_caller_settings(args: Sequence[str]) -> tuple[list[str], _JsonObjec
     return remaining, merged
 
 
-def _parse_caller_settings(value: str) -> _JsonObject | None:
+def _parse_settings_value(value: str, base_dir: Path | None) -> _JsonObject | None:
     """Parse a ``--settings`` value given as inline JSON or a file path."""
     text = value.strip()
     if not text.startswith("{"):
+        path = Path(value).expanduser()
         try:
-            text = Path(value).expanduser().read_text(encoding="utf-8")
+            text = (base_dir / path if base_dir is not None else path).read_text(
+                encoding="utf-8"
+            )
         except OSError:
             return None
     try:
