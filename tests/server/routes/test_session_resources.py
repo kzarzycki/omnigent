@@ -40,6 +40,7 @@ from omnigent.server.auth import (
     UnifiedAuthProvider,
 )
 from omnigent.server.host_registry import HostRegistry
+from omnigent.server.managed_hosts import managed_repo_labels
 from omnigent.server.routes.sessions import _ancestor_session_ids, create_sessions_router
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -3408,9 +3409,18 @@ _PREVIEW_PATH = f"/v1/sessions/{_PREVIEW_SESSION}/resources/github/preview"
 _PREVIEW_QUERY = {"owner": "acme", "repo": "app", "kind": "pull", "ref": "42"}
 
 
-def _preview_app(viewer_level: int | None) -> tuple[FastAPI, _FakeRunnerClient]:
-    """An app where ``bob`` holds ``viewer_level`` on the session (no grant when ``None``)."""
+def _preview_app(
+    viewer_level: int | None, linked_repo_url: str | None = None
+) -> tuple[FastAPI, _FakeRunnerClient]:
+    """An app where ``bob`` holds ``viewer_level`` on the session (no grant when ``None``).
+
+    :param linked_repo_url: Repository the session was launched with, if any.
+    """
     conversations = _ConversationStore()
+    if linked_repo_url is not None:
+        conversations._conversations[_PREVIEW_SESSION].labels.update(
+            managed_repo_labels([linked_repo_url])
+        )
     permissions = _StubPermissionStore()
     if viewer_level is not None:
         permissions.add_grant("bob@example.com", _PREVIEW_SESSION, viewer_level)
@@ -3439,13 +3449,62 @@ async def test_github_link_preview_proxies_validated_parts_for_a_reader(
 ) -> None:
     """A viewer with read access gets the runner's preview, asked with the validated parts."""
     del runner_globals_reset
-    application, runner = _preview_app(LEVEL_READ)
+    application, runner = _preview_app(LEVEL_READ, "https://github.com/acme/app")
 
     resp = await _get_preview(application, _PREVIEW_QUERY)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["preview"]["title"] == "Fix"
     assert runner.calls == [("GET", _PREVIEW_PATH)]
+    assert runner.get_params == [_PREVIEW_QUERY]
+
+
+@pytest.mark.asyncio
+async def test_github_link_preview_hides_other_repositories_from_a_reader(
+    runner_globals_reset: None,
+) -> None:
+    """A read-only viewer asking about a repo the session isn't linked to gets no preview."""
+    del runner_globals_reset
+    application, runner = _preview_app(LEVEL_READ, "https://github.com/acme/other.git")
+
+    resp = await _get_preview(application, _PREVIEW_QUERY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"object": "session.github.link_preview", "preview": None}
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "linked_url",
+    ["https://github.com/Acme/App.git", "git@github.com:acme/app.git"],
+)
+async def test_github_link_preview_serves_the_sessions_own_repository_to_a_reader(
+    runner_globals_reset: None, linked_url: str
+) -> None:
+    """A read-only viewer still gets previews for the session's own repository."""
+    del runner_globals_reset
+    application, runner = _preview_app(LEVEL_READ, linked_url)
+
+    resp = await _get_preview(application, _PREVIEW_QUERY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["preview"]["title"] == "Fix"
+    assert runner.get_params == [_PREVIEW_QUERY]
+
+
+@pytest.mark.asyncio
+async def test_github_link_preview_serves_any_repository_to_an_editor(
+    runner_globals_reset: None,
+) -> None:
+    """An editor gets the preview for a repository the session isn't linked to."""
+    del runner_globals_reset
+    application, runner = _preview_app(LEVEL_EDIT, "https://github.com/acme/other")
+
+    resp = await _get_preview(application, _PREVIEW_QUERY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["preview"]["title"] == "Fix"
     assert runner.get_params == [_PREVIEW_QUERY]
 
 
