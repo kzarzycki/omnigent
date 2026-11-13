@@ -664,6 +664,58 @@ to share one policy across `sys_os_*` and terminals, and how to set up network
 egress rules, see the `sandbox:` examples below and the sandbox source under
 `omnigent/inner/`.
 
+### Memory and CPU limits
+
+`sandbox.resources` caps everything one session runs: its harness, tools,
+terminals and their tmux panes. It works with `linux_bwrap` and with
+`type: none`, because the limits sit on a user-systemd slice around the
+session's runner rather than in the sandbox backend:
+
+```yaml
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+    resources:
+      memory_high: 3G      # reclaimed and slowed down above this
+      memory_max: 4G       # OOM-killed above this
+      memory_swap_max: 512M
+      cpu_weight: 50       # share of CPU under contention (1-10000, default 100)
+```
+
+Sizes take systemd's form: bytes, a `K`/`M`/`G`/`T` suffix, a percentage of
+RAM, or `infinity`. Every key is optional. When a session goes past
+`memory_max`, the kernel kills its largest process, usually the tool or build
+using the memory, and the session reports that process's failure.
+
+It needs Linux with a user systemd manager that delegates the `memory` (and,
+for `cpu_weight`, `cpu`) cgroup controller; `systemd-run --user --scope true`
+working is a quick check. `darwin_seatbelt` and `windows_jobobject` refuse
+`resources` when the spec loads, and a runner on a host without such a manager
+fails the session start with an error instead of running unlimited.
+Sub-agents run in their parent's runner and share the parent session's limits.
+A runner carries one set of limits: a session switched onto a runner that
+already enforces different ones is refused, and asks for a new runner.
+
+A host can also put all its sessions in one memory-limited slice, so a spike
+kills sessions rather than the services beside them. Set it in the host's
+`config.yaml`; it is off by default:
+
+```yaml
+host:
+  session_slice:
+    enabled: true
+    name: omnigent-sessions.slice   # the default
+    memory_high: 9G
+    memory_max: 10G
+    memory_swap_max: 1G
+```
+
+The host daemon itself stays outside the slice. A per-session `resources`
+slice nests inside it. A host without a user systemd manager logs a warning
+and launches sessions as before. Restart the host after changing the setting.
+
 ### Secretless credential proxy
 
 `sandbox.credential_proxy` lets sandboxed tools authenticate to external hosts

@@ -871,3 +871,70 @@ async def test_elicitation_forward_failure_is_502_with_a_generic_detail() -> Non
     assert status == 502
     assert body["error"] == "elicitation_failed"
     assert "harness.sock" not in body["detail"]
+
+
+# ── session limits come before any process the route starts ────────────────
+
+
+class _OrderedMcpManager(_FakeMcpManager):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    async def schemas_for(self, spec: AgentSpec) -> McpSchemasResult:
+        self.events.append("discover")
+        return await super().schemas_for(spec)
+
+    async def call_tool(self, spec: AgentSpec, tool_name: str, arguments: Any, *, session_id: str):
+        self.events.append("call")
+        return await super().call_tool(spec, tool_name, arguments, session_id=session_id)
+
+
+def _record_limits(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+    def _apply(session_id: str, spec: AgentSpec) -> None:
+        events.append(f"limits:{session_id}")
+
+    monkeypatch.setattr(mcp_routes, "apply_spec_session_limits", _apply)
+
+
+async def test_tools_list_applies_session_limits_before_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery starts MCP servers, which must start inside the session's limits."""
+    events: list[str] = []
+    _record_limits(monkeypatch, events)
+    h = Harness(mcp_manager=_OrderedMcpManager(events))
+    h.spec_cache[SESSION] = _spec()
+    status, _ = await h.execute({"method": "tools/list"})
+    assert status == 200
+    assert events == [f"limits:{SESSION}", "discover"]
+
+
+async def test_mcp_tool_call_applies_session_limits_before_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _record_limits(monkeypatch, events)
+    h = Harness(mcp_manager=_OrderedMcpManager(events))
+    h.spec_cache[SESSION] = _spec()
+    status, _ = await h.execute(_call("jira__search", arguments={}))
+    assert status == 200
+    assert events == [f"limits:{SESSION}", "call"]
+
+
+async def test_builtin_tool_applies_session_limits_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _record_limits(monkeypatch, events)
+
+    async def _execute_tool(**kwargs: Any) -> str:
+        events.append("dispatch")
+        return "ok"
+
+    monkeypatch.setattr("omnigent.runner.tool_dispatch.execute_tool", _execute_tool)
+    h = Harness()
+    h.spec_cache[SESSION] = _spec()
+    status, _ = await h.execute(_call("sys_os_shell", arguments={"command": "true"}))
+    assert status == 200
+    assert events == [f"limits:{SESSION}", "dispatch"]

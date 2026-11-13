@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import httpx
 from fastapi import FastAPI
 
+from omnigent.runner.session_limits import note_child_session
 from omnigent.runner.subagent_work import (
     _SUBAGENT_TERMINAL_STATUSES,
     SUBAGENT_DISPATCH_ID_LABEL_KEY,
@@ -79,6 +80,9 @@ def build_subagent_recovery(
         name = snapshot.sub_agent_name if snapshot is not None else None
         if name:
             _session_sub_agent_names[conv_id] = name
+        if snapshot is not None and (name or snapshot.parent_session_id not in (None, conv_id)):
+            # A child runs in its parent's runner, under the parent's limits.
+            note_child_session(conv_id)
         return name
 
     async def _ensure_subagent_work_entry(

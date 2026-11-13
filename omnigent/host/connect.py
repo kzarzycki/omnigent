@@ -168,6 +168,12 @@ from omnigent.host.runner_registry import (
     session_leaders,
 )
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
+from omnigent.host.session_slice import (
+    SESSION_SLICE_ENV_VAR,
+    SessionSliceLaunch,
+    activate_session_slice,
+    load_session_slice_config,
+)
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
@@ -1324,6 +1330,7 @@ class HostProcess:
         server_still_ours: Callable[[], bool] | None = None,
         *,
         keep_runners_on_restart: bool = False,
+        session_slice: SessionSliceLaunch | None = None,
     ) -> None:
         """Initialize the host process.
 
@@ -1340,6 +1347,8 @@ class HostProcess:
         :param server_still_ours: For a local-mode host, reports whether the
             local server it started is still the one on ``server_url``; while
             it is ``False`` each attempt is treated as refused instead of dialing.
+        :param session_slice: The active ``host.session_slice`` runners and
+            the zygote start in; ``None`` starts them in the daemon's cgroup.
         """
         self._identity = identity
         self._server_url = server_url.rstrip("/")
@@ -1472,7 +1481,13 @@ class HostProcess:
         self._zygote_enabled = IS_POSIX and not (
             _zygote_optout is not None and not env_truthy(_zygote_optout)
         )
-        self._zygote: ZygoteManager | None = ZygoteManager() if self._zygote_enabled else None
+        self._session_slice = session_slice
+        self._session_launch_prefix = session_slice.command_prefix if session_slice else ()
+        self._zygote: ZygoteManager | None = (
+            ZygoteManager(command_prefix=self._session_launch_prefix)
+            if self._zygote_enabled
+            else None
+        )
         self._zygote_disabled = False
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
@@ -2457,6 +2472,8 @@ class HostProcess:
         """
         if self._runner_registry is not None:
             env[RUNNER_HOST_REGISTRY_ENV_VAR] = str(self._runner_registry.path)
+        if self._session_slice is not None:
+            env[SESSION_SLICE_ENV_VAR] = self._session_slice.name
         proc, log_path = self._spawn_runner_proc_unrecorded(env, session_slug, workspace)
         if self._runner_registry is not None:
             self._runner_registry.add(
@@ -2542,7 +2559,13 @@ class HostProcess:
                     # -P keeps cwd off sys.path: a workspace that is itself an
                     # omnigent checkout would otherwise shadow the installed
                     # package. _entry re-adds it for spec-declared local tools.
-                    [sys.executable, "-P", "-m", "omnigent.runner._entry"],
+                    [
+                        *self._session_launch_prefix,
+                        sys.executable,
+                        "-P",
+                        "-m",
+                        "omnigent.runner._entry",
+                    ],
                     env=env,
                     # A daemon may outlive the checkout it started from.
                     cwd=str(workspace),
@@ -6495,6 +6518,7 @@ def _serve_host_until_exit(
     try:
         identity = load_or_create_host_identity(path)
         keep_runners_on_restart = load_keep_runners_on_restart(path)
+        session_slice = load_session_slice_config(path)
     except ValueError as exc:
         crash_reporting.report_host_exit(
             "identity_error", exit_code=HOST_FATAL_EXIT_CODE, error=str(exc)
@@ -6567,6 +6591,7 @@ def _serve_host_until_exit(
         interactive_shells=interactive_shells,
         server_still_ours=server_still_ours,
         keep_runners_on_restart=keep_runners_on_restart,
+        session_slice=activate_session_slice(session_slice),
     )
     crash_reporting.set_hangup_callback(host.signal_runners_finish_work)
     try:

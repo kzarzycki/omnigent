@@ -2902,6 +2902,17 @@ def create_runner_app(
             _note_session_harness_override(
                 session_id, init_context.envelope.snapshot.harness_override
             )
+        if body.get("sub_agent_name") or (
+            init_context.envelope is not None
+            and (
+                init_context.envelope.sub_agent_name
+                or init_context.envelope.snapshot.parent_session_id
+            )
+        ):
+            from omnigent.runner.session_limits import note_child_session
+
+            # A sub-agent runs in its parent's runner, under the parent's limits.
+            note_child_session(session_id)
 
         spec: AgentSpec | None = None
         spec_entry: _SpecEntry | None = None
@@ -9177,6 +9188,11 @@ async def _resolve_harness_config(
             # spawn-env below advertises the child's bundle — not the
             # parent's, whose skills and tools the child has no claim to.
             if sub_agent_name:
+                from omnigent.runner.session_limits import note_child_session
+
+                # A sub-agent runs in its parent's runner, under the parent's limits.
+                if session_id is not None:
+                    note_child_session(session_id)
                 sub_entry = _native_runtime._resolve_sub_agent_spec_entry(
                     spec_entry, sub_agent_name
                 )
@@ -9349,6 +9365,11 @@ def _build_spawn_env_from_spec(
     from omnigent.sandbox.copy_on_write import validate_copy_on_write_harness
 
     validate_copy_on_write_harness(getattr(spec, "os_env", None), harness)
+    if session_id is not None:
+        from omnigent.runner.session_limits import apply_spec_session_limits
+
+        # Before any spawn, so the harness and its tmux panes start inside the limits.
+        apply_spec_session_limits(session_id, spec)
     effective_spec = spec
     from omnigent.inference_config import load_runtime_inference_config, parse_inference_config
 
