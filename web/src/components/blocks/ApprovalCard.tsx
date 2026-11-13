@@ -81,6 +81,7 @@ import {
 import { AskUserQuestionForm, type AskUserQuestionAnswers } from "./AskUserQuestionForm";
 import { ElicitationMessage } from "./ElicitationMessage";
 import { MOBILE_CHOICE_CLASS, MOBILE_CHOICE_LIST_CLASS } from "./mobileChoiceClasses";
+import { LinkPreviewSessionContext } from "./ChatLinkPreview";
 import {
   type ElicitationAnswers,
   ElicitationSchemaForm,
@@ -1100,31 +1101,33 @@ export function ElicitationCard({
       ? { sessionId: item.targetSessionId, ancestorSessionId: conversationId }
       : null;
   return (
-    <ApprovalCard
-      inChat
-      elicitationId={item.elicitationId}
-      nativeDelivery={item.nativeDelivery}
-      message={item.message}
-      phase={item.phase}
-      policyName={item.policyName}
-      contentPreview={item.contentPreview}
-      requestedSchema={item.requestedSchema}
-      url={item.url}
-      status={item.status}
-      response={item.response}
-      askUserQuestion={item.askUserQuestion}
-      exitPlanMode={item.exitPlanMode}
-      fileEdit={item.fileEdit}
-      codexCommand={item.codexCommand}
-      allowAllEdits={item.allowAllEdits}
-      allowAutoMode={item.allowAutoMode}
-      permissionDirectories={item.permissionDirectories}
-      rememberScope={item.rememberScope}
-      codexPersistModes={item.codexPersistModes}
-      agyPermission={item.agyPermission}
-      onSubmit={onSubmit}
-      requester={requester}
-      keyboardActive={keyboardActive}
-    />
+    <LinkPreviewSessionContext.Provider value={item.targetSessionId ?? undefined}>
+      <ApprovalCard
+        inChat
+        elicitationId={item.elicitationId}
+        nativeDelivery={item.nativeDelivery}
+        message={item.message}
+        phase={item.phase}
+        policyName={item.policyName}
+        contentPreview={item.contentPreview}
+        requestedSchema={item.requestedSchema}
+        url={item.url}
+        status={item.status}
+        response={item.response}
+        askUserQuestion={item.askUserQuestion}
+        exitPlanMode={item.exitPlanMode}
+        fileEdit={item.fileEdit}
+        codexCommand={item.codexCommand}
+        allowAllEdits={item.allowAllEdits}
+        allowAutoMode={item.allowAutoMode}
+        permissionDirectories={item.permissionDirectories}
+        rememberScope={item.rememberScope}
+        codexPersistModes={item.codexPersistModes}
+        agyPermission={item.agyPermission}
+        onSubmit={onSubmit}
+        requester={requester}
+        keyboardActive={keyboardActive}
+      />
+    </LinkPreviewSessionContext.Provider>
   );
 }

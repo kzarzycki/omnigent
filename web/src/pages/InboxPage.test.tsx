@@ -32,6 +32,8 @@ import * as automationInboxHook from "@/hooks/useAutomationInbox";
 import * as commentInboxHook from "@/hooks/useCommentInbox";
 import { resetLocalElicitationResolutionsForTests } from "@/lib/localElicitationResolutions";
 import * as sessionsApi from "@/lib/sessionsApi";
+import type * as githubIntegration from "@/lib/githubIntegration";
+import { fetchGithubLinkPreview } from "@/lib/githubIntegration";
 import {
   type AskUserQuestionDraft,
   askUserQuestionSignature,
@@ -94,6 +96,11 @@ vi.mock("@/lib/sessionsApi", async (importActual) => ({
   approve: vi.fn(),
   fetchSessionItemsPage: vi.fn(),
   postEvent: vi.fn(),
+  getSessionSlim: vi.fn(),
+}));
+vi.mock("@/lib/githubIntegration", async (importActual) => ({
+  ...(await importActual<typeof githubIntegration>()),
+  fetchGithubLinkPreview: vi.fn(),
 }));
 
 function conversation(overrides: Partial<Conversation> = {}): Conversation {
@@ -200,6 +207,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
   resetReadStateForTests();
   resetLocalElicitationResolutionsForTests();
@@ -487,6 +495,58 @@ describe("InboxPage approval items", () => {
       }),
     );
     expect(screen.getByText("Approved · directory access for this session")).toBeInTheDocument();
+  });
+
+  it("previews GitHub and session links in a question card", async () => {
+    // WHY: the Inbox sits outside a chat, so a card's links need the asking
+    // session passed explicitly to read GitHub through its host.
+    // The test setup's observer never fires; a link only previews once seen.
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        callback: IntersectionObserverCallback;
+        constructor(callback: IntersectionObserverCallback) {
+          this.callback = callback;
+        }
+        observe() {
+          this.callback([{ isIntersecting: true } as IntersectionObserverEntry], this as never);
+        }
+        disconnect() {}
+      },
+    );
+    const row = conversation({ id: "sess_asker" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(fetchGithubLinkPreview).mockResolvedValue({
+      preview: { kind: "pull", title: "Fix the parser", state: "open", labels: [], checks: null },
+    });
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
+      title: "Linked session",
+      status: "idle",
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSessionSlim>>);
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("eli_q", "Question", {
+          ask_user_question: {
+            questions: [
+              {
+                question: `Merge https://github.com/acme/repo/pull/7 after ${window.location.origin}/c/sess_linked ?`,
+                options: [{ label: "Yes" }, { label: "No" }],
+                multiSelect: false,
+              },
+            ],
+          },
+        }),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+
+    await waitFor(() =>
+      expect(fetchGithubLinkPreview).toHaveBeenCalledWith(
+        "sess_asker",
+        expect.objectContaining({ owner: "acme", repo: "repo", kind: "pull", ref: "7" }),
+      ),
+    );
+    await waitFor(() => expect(sessionsApi.getSessionSlim).toHaveBeenCalledWith("sess_linked"));
   });
 
   it("rolls back the optimistic verdict when approve() rejects", async () => {

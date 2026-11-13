@@ -26,10 +26,17 @@ import { BlockStream } from "@/lib/blockStream";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
 import { parseEventLines } from "@/lib/sse";
 import { useChatStore } from "@/store/chatStore";
+import * as githubIntegration from "@/lib/githubIntegration";
 import { ApprovalCard, ElicitationCard } from "./ApprovalCard";
+
+vi.mock("@/lib/githubIntegration", async (importActual) => ({
+  ...(await importActual<typeof githubIntegration>()),
+  fetchGithubLinkPreview: vi.fn(),
+}));
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("ApprovalCard — binary approve/reject", () => {
@@ -2735,4 +2742,67 @@ describe("question custom selection and editing", () => {
       });
     },
   );
+});
+
+describe("ElicitationCard — link previews", () => {
+  it("previews a GitHub link in a question through the session that asked", async () => {
+    // WHY: chat links preview through their session's host; a card mirrored
+    // from a sub-agent must read through the sub-agent's host, not the open chat's.
+    vi.mocked(githubIntegration.fetchGithubLinkPreview).mockResolvedValue({
+      preview: { kind: "pull", title: "Fix the parser", state: "open", labels: [], checks: null },
+    });
+    // The test setup's observer never fires; a link only previews once seen.
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        callback: IntersectionObserverCallback;
+        constructor(callback: IntersectionObserverCallback) {
+          this.callback = callback;
+        }
+        observe() {
+          this.callback([{ isIntersecting: true } as IntersectionObserverEntry], this as never);
+        }
+        disconnect() {}
+      },
+    );
+    useChatStore.setState({ conversationId: "conv_parent", blocks: [] });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter>
+          <TooltipProvider>
+            <ElicitationCard
+              item={{
+                kind: "elicitation",
+                itemId: null,
+                elicitationId: "elic_q",
+                targetSessionId: "conv_child",
+                message: "Question",
+                phase: "pre_tool_use",
+                policyName: "claude_native_permission",
+                contentPreview: "",
+                requestedSchema: {},
+                status: "pending",
+                response: null,
+                askUserQuestion: {
+                  questions: [
+                    {
+                      question: "Merge https://github.com/acme/repo/pull/7 ?",
+                      options: [{ label: "Yes" }, { label: "No" }],
+                      multiSelect: false,
+                    },
+                  ],
+                },
+              }}
+            />
+          </TooltipProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: /open/i })).toBeDefined();
+    expect(githubIntegration.fetchGithubLinkPreview).toHaveBeenCalledWith(
+      "conv_child",
+      expect.objectContaining({ owner: "acme", repo: "repo", kind: "pull", ref: "7" }),
+    );
+  });
 });

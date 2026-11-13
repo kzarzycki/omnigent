@@ -3,7 +3,7 @@
 // session host) and sessions on this server. No other link is fetched.
 
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { fetchGithubLinkPreview, type GithubLinkPreview } from "@/lib/githubIntegration";
@@ -12,6 +12,12 @@ import { PullRequestLabelChip } from "@/shell/PullRequestLabels";
 import { PullRequestStatus } from "@/shell/PullRequestStatus";
 import { getSessionSlim } from "@/lib/sessionsApi";
 import { useFileViewerConversationId } from "@/shell/FileViewerContext";
+
+/**
+ * The session whose host reads GitHub links. A question card sets it to the
+ * session that asked, which can differ from the open chat or be absent (Inbox).
+ */
+export const LinkPreviewSessionContext = createContext<string | undefined>(undefined);
 
 // A preview's state and checks change; a minute keeps them close to live.
 const PREVIEW_STALE_MS = 60_000;
@@ -128,8 +134,9 @@ export function ChatLinkPreview({
   const labelRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const seen = useSeen(triggerRef, github !== null || sessionId !== null);
-  // GitHub is read through the chat's session host; outside a session, ask nothing.
-  const chatSessionId = useFileViewerConversationId();
+  // GitHub is read through the asking session's host, else the open chat's; with neither, ask nothing.
+  const fileViewerSessionId = useFileViewerConversationId();
+  const chatSessionId = useContext(LinkPreviewSessionContext) ?? fileViewerSessionId;
   const preview = useGithubPreview(chatSessionId, github, seen);
   const session = useSessionPreview(sessionId, seen);
 
