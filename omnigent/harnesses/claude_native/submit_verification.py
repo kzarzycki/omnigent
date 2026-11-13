@@ -90,6 +90,21 @@ def read_fresh_submit_records(boundary: SubmitBoundary) -> list[JsonObject]:
         return []
 
 
+def has_recorded_prompt(boundary: SubmitBoundary) -> bool:
+    """Whether Claude recorded a prompt since *boundary*: started a turn with it, or queued it.
+
+    Claude writes either record only once its UserPromptSubmit hooks have run.
+    """
+    for entry in read_fresh_submit_records(boundary):
+        if entry.get("sessionId") != boundary.native_session_id or entry.get("isSidechain"):
+            continue
+        if entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue":
+            return True
+        if entry.get("type") == "user" and isinstance(entry.get("promptSource"), str):
+            return True
+    return False
+
+
 def has_matching_hook_refusal(
     boundary: SubmitBoundary,
     submitted_text: str,

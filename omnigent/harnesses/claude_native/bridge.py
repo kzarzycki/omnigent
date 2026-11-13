@@ -77,6 +77,7 @@ from omnigent.harnesses.claude_native.submit_verification import (
     SubmitBoundary,
     capture_submit_boundary,
     has_matching_hook_refusal,
+    has_recorded_prompt,
 )
 from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
@@ -372,6 +373,11 @@ _PASTE_COMMIT_TIMEOUT_S = 5.0
 # at 20s was recorded as a 10s failure). The slow-accept log below now
 # records real recovery times, so tune this from that distribution.
 _SUBMIT_VERIFY_TIMEOUT_S = 20.0
+# How long a submitted prompt holds the pane until Claude records it. Its
+# UserPromptSubmit hooks run first (turn routing alone may take 15s), and a
+# message typed meanwhile is queued drain-only, holding back every later
+# mid-turn message until the turn ends. Past this the delivery still succeeds.
+_SUBMIT_RECORD_TIMEOUT_S = 30.0
 # How long the draft may verifiably sit unaccepted before a warning is
 # logged that the TUI is slow (delivery keeps retrying). Also the point
 # past which a recovery is logged with its elapsed time — the signal
@@ -4625,6 +4631,7 @@ def _paste_and_submit(
         delivery_diagnostics.record_details(verification="unverified")
         # The draft was never observed, so its absence proves nothing —
         # verification would trivially "pass". Submit blind as before.
+        _wait_for_prompt_recorded(submit_boundary)
         return
     # Verify the submit took: a successful Enter clears the input box.
     # If the draft is still sitting there the Enter was swallowed into
@@ -4650,11 +4657,42 @@ def _paste_and_submit(
             "it may already have been delivered."
         ) from exc
     if accepted:
+        _wait_for_prompt_recorded(submit_boundary)
         return
     raise ClaudeMessageNotAccepted(
         f"Claude Code did not accept the submitted message within {_SUBMIT_VERIFY_TIMEOUT_S}s "
         "(the draft is still in the input box). The message was not delivered."
     )
+
+
+def _wait_for_prompt_recorded(boundary: SubmitBoundary | None) -> None:
+    """
+    Hold the pane until Claude records the submitted prompt.
+
+    Until then its UserPromptSubmit hooks hold the prompt, and a message typed
+    in that window is queued drain-only: it, and every message queued after
+    it, waits for the turn to end instead of joining it at a tool boundary.
+    The prompt is already submitted, so a timeout or cancel only stops waiting.
+
+    :param boundary: Transcript boundary captured before the submit Enter;
+        ``None`` when the transcript is unknown, which skips the wait.
+    :returns: None.
+    """
+    if boundary is None:
+        return
+    delivery_diagnostics.set_stage("waiting_for_record")
+    deadline = time.monotonic() + _SUBMIT_RECORD_TIMEOUT_S
+    while not has_recorded_prompt(boundary):
+        cancel_event = _INJECTION_CANCEL_EVENT.get()
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        if time.monotonic() >= deadline:
+            _logger.warning(
+                "claude-native: Claude did not record the submitted prompt within %.0fs",
+                _SUBMIT_RECORD_TIMEOUT_S,
+            )
+            return
+        time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
 
 
 def _verify_submit_accepted(
