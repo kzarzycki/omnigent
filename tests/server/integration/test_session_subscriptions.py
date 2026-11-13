@@ -712,7 +712,7 @@ async def test_a_notice_kept_through_the_target_archive_still_checks_read_access
     outbox: tuple[SqlAlchemyConversationStore, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, watcher, target = outbox
+    store, _watcher, target = outbox
     poster = _Poster(failures=1)
     session_subscriptions.configure(store, None, poster)
     monkeypatch.setattr(session_subscriptions, "_wake_at", lambda _due: None)

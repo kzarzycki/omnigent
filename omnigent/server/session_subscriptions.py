@@ -16,8 +16,9 @@ text is built from the live sessions when it is posted. A failed post leaves
 the row pending; a retry sweep (after the failure, at startup and
 periodically) posts it with capped backoff, and also picks up an attempt a
 crashed server never finished. Unsubscribing, or archiving or deleting the
-subscriber, settles its pending rows unposted; archiving the target keeps them. Delivery is at-least-once: a notice is a wake, so a rare
-duplicate costs the reader one history read while a lost one stalls it.
+subscriber, settles its pending rows unposted; archiving the target keeps them.
+Delivery is at-least-once: a notice is a wake, so a rare duplicate costs the
+reader one history read while a lost one stalls it.
 Settled rows are pruned after a retention window, except a prompt's, which is
 kept while its target may still have it pending.
 
