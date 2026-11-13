@@ -4363,6 +4363,77 @@ def test_augment_claude_args_threads_model_overrides_into_settings(tmp_path: Pat
     assert settings["modelOverrides"] == overrides
 
 
+@pytest.mark.parametrize("as_file", [False, True], ids=["json-string", "file-path"])
+def test_augment_claude_args_merges_caller_settings(tmp_path: Path, as_file: bool) -> None:
+    """A caller's ``--settings`` is merged under Omnigent's and its flag dropped."""
+    caller = {
+        "env": {"X": "1"},
+        "permissions": {"defaultMode": "plan"},
+        "statusLine": {"type": "command", "command": "echo hi"},
+    }
+    value = json.dumps(caller)
+    if as_file:
+        caller_file = tmp_path / "caller.json"
+        caller_file.write_text(value, encoding="utf-8")
+        value = str(caller_file)
+    bridge_dir = tmp_path / "bridge"
+
+    args = augment_claude_args(
+        ("--settings", value, "--permission-mode", "acceptEdits"),
+        bridge_dir=bridge_dir,
+        python_executable="/venv/bin/python",
+    )
+
+    assert args.count("--settings") == 1
+    assert value not in args
+    settings = _load_invocation_settings(args)
+    assert settings["env"]["X"] == "1"
+    assert settings["permissions"]["defaultMode"] == "acceptEdits"
+    assert settings["hooks"]
+
+
+def test_augment_claude_args_handles_equals_form_and_bad_caller_settings(tmp_path: Path) -> None:
+    """``--settings=<json>`` merges; an unreadable value is dropped, not passed through."""
+    args = augment_claude_args(
+        ("--settings=" + json.dumps({"env": {"X": "1"}}), "--settings", str(tmp_path / "none")),
+        bridge_dir=tmp_path / "bridge",
+        python_executable="/venv/bin/python",
+    )
+
+    assert args.count("--settings") == 1
+    assert not any(arg.startswith("--settings=") for arg in args)
+    assert _load_invocation_settings(args)["env"]["X"] == "1"
+
+
+def test_augment_claude_args_resolves_relative_settings_file_from_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative ``--settings`` file is read from the session workspace, not the process cwd."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "caller.json").write_text('{"env": {"X": "1"}}', encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    args = augment_claude_args(
+        ("--settings", "caller.json"),
+        bridge_dir=tmp_path / "bridge",
+        workspace=workspace,
+        python_executable="/venv/bin/python",
+    )
+
+    assert _load_invocation_settings(args)["env"]["X"] == "1"
+
+
+def test_augment_claude_args_without_caller_settings_is_unchanged(tmp_path: Path) -> None:
+    """No caller ``--settings`` leaves the argv with exactly one Omnigent flag."""
+    args = augment_claude_args((), bridge_dir=tmp_path, python_executable="/venv/bin/python")
+
+    assert args.count("--settings") == 1
+    assert "X" not in _load_invocation_settings(args).get("env", {})
+
+
 def test_augment_claude_args_omits_model_overrides_when_unsupplied(tmp_path: Path) -> None:
     """Existing call sites that omit ``model_overrides`` write no such key."""
     settings = _load_invocation_settings(augment_claude_args((), bridge_dir=tmp_path))

@@ -1435,6 +1435,60 @@ async def test_an_agent_that_turns_off_native_questions_launches_claude_without_
         assert args[args.index("--disallowedTools") + 1].split(",") == disallowed
 
 
+async def test_configured_claude_settings_merge_into_the_invocation_settings(
+    bridge_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured ``--settings`` (inline or workspace-relative file) merges into the launch."""
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "cfg.json").write_text('{"env": {"FROM_FILE": "2"}}')
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+
+    # The shared resolver patch below would otherwise reach real Claude model probes.
+    async def no_catalog(_claude_config: object) -> None:
+        return None
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_model_catalog", no_catalog)
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_args",
+        lambda _harness, cli_args, cfg=None: [
+            "--settings",
+            '{"env": {"INLINE": "1"}}',
+            "--settings",
+            "cfg.json",
+            *cli_args,
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="stop after launch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch, session_id="conv_cfg_settings", workspace=workspace, registry=registry
+        )
+
+    args = launched[0]
+    assert args.count("--settings") == 1
+    env = json.loads(Path(args[args.index("--settings") + 1]).read_text())["env"]
+    assert env["INLINE"] == "1"
+    assert env["FROM_FILE"] == "2"
+
+
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
