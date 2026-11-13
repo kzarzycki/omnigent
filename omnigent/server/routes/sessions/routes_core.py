@@ -153,6 +153,7 @@ from omnigent.server.routes._sessions.helpers import (
     _announce_session_added,
     _apply_liveness_to_items,
     _authorize_bundled_parent_and_inherit_runner,
+    _bound_specs,
     _codex_plan_mode_enabled,
     _create_session_worktree,
     _delete_stored_session_bundle_after_failure,
@@ -2103,30 +2104,31 @@ def register_core_routes(
         harnesses_by_id: dict[str, str | None] = {}
         spec_defaults_by_id: dict[str, tuple[str | None, str | None]] = {}
         for conv in conversations:
+            # One spec load per row feeds the harness, model and effort.
             try:
-                harnesses_by_id[conv.id] = _resolve_harness(
-                    conv, agent_cache=agent_cache, agents_by_id=agents
-                )
+                bound_specs = _bound_specs(conv, agent_cache=agent_cache, agents_by_id=agents)
             except Exception as error:
                 # Optional artifact metadata must not hide an otherwise readable session.
+                bound_specs = None
+                _logger.warning(
+                    "Could not load list spec for session %s (%s)",
+                    conv.id,
+                    type(error).__name__,
+                )
+            try:
+                harnesses_by_id[conv.id] = _resolve_harness(
+                    conv, agent_cache=agent_cache, agents_by_id=agents, bound_specs=bound_specs
+                )
+            except Exception as error:
                 harnesses_by_id[conv.id] = None
                 _logger.warning(
                     "Could not resolve list harness for session %s (%s)",
                     conv.id,
                     type(error).__name__,
                 )
-            try:
-                spec_defaults_by_id[conv.id] = _resolve_spec_model_defaults(
-                    conv, harnesses_by_id[conv.id], agent_cache=agent_cache, agents_by_id=agents
-                )
-            except Exception as error:
-                # Optional model metadata must not hide an otherwise readable session.
-                spec_defaults_by_id[conv.id] = (None, None)
-                _logger.warning(
-                    "Could not resolve list model for session %s (%s)",
-                    conv.id,
-                    type(error).__name__,
-                )
+            spec_defaults_by_id[conv.id] = _resolve_spec_model_defaults(
+                harnesses_by_id[conv.id], bound_specs
+            )
         return (
             {agent.id: agent.name for agent in agents.values()},
             harnesses_by_id,
