@@ -1030,8 +1030,9 @@ async def _archive_stop(
     if conv is None or not conv.archived:
         return
     try:
+        # Only those it holds: its watchers keep theirs and hear it again once restored.
         await asyncio.to_thread(conversation_store.delete_session_subscriptions_for, session_id)
-    except Exception:  # noqa: BLE001 — delivery skips archived sessions anyway
+    except Exception:  # noqa: BLE001 — delivery skips an archived subscriber anyway
         _logger.warning(
             "Archive couldn't drop subscriptions of %s",
             session_id,

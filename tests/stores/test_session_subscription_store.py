@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
 
 import pytest
+import sqlalchemy
 
+from omnigent.db.db_models import SqlSessionSubscription
 from omnigent.stores.conversation_store import (
     MAX_SUBSCRIPTIONS_PER_SESSION,
     SessionSubscription,
@@ -66,9 +72,14 @@ def test_cleanup_removes_more_subscriptions_than_one_batch(
         conversation_store.add_session_subscription(f"{index + 1:032x}", session)
         conversation_store.add_session_subscription(session, f"{index + 101:032x}")
 
-    assert conversation_store.delete_session_subscriptions_for(session) == 10
-    assert conversation_store.list_session_subscribers(session) == []
+    # Archiving drops only what the session holds; its watchers keep theirs.
+    assert conversation_store.delete_session_subscriptions_for(session) == 5
     assert conversation_store.list_session_subscriptions(session) == []
+    assert len(conversation_store.list_session_subscribers(session)) == 5
+    assert (
+        conversation_store.delete_session_subscriptions_for(session, including_watchers=True) == 5
+    )
+    assert conversation_store.list_session_subscribers(session) == []
 
 
 def test_a_delivery_is_recorded_once_per_subscriber_and_event(
@@ -238,7 +249,11 @@ def test_deleting_either_session_drops_its_subscriptions(
 
     assert conversation_store.list_session_subscribers(target) == [other]
     assert conversation_store.list_session_subscriptions(other) == [target]
-    assert conversation_store.delete_session_subscriptions_for(target) == 1
+    assert conversation_store.delete_session_subscriptions_for(target) == 0
+    assert conversation_store.list_session_subscriptions(other) == [target]
+    assert (
+        conversation_store.delete_session_subscriptions_for(target, including_watchers=True) == 1
+    )
     assert conversation_store.list_session_subscriptions(other) == []
 
 
@@ -263,3 +278,99 @@ def test_removing_a_subscription_drops_only_the_notices_owed_to_its_subscriber(
     # Tearing a session down drops what it was owed, not what its subscribers are owed.
     conversation_store.delete_session_subscriptions_for(watcher)
     assert pending() == {(fan, watcher)}
+
+
+def test_a_claimed_delivery_reads_its_subscription_only_while_the_claim_and_subscription_stand(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    watcher, target = (conversation_store.create_conversation().id for _ in range(2))
+    conversation_store.add_session_subscription(watcher, target, quiet_seconds=30)
+    conversation_store.enqueue_subscription_deliveries([watcher], target, "e", 1, due_at=10)
+    claimed = conversation_store.get_claimed_delivery_subscription
+    settle = conversation_store.settle_subscription_delivery
+
+    assert claimed(watcher, target, "e", leased_until=10) == SessionSubscription(
+        watcher, target, 30
+    )
+    assert claimed(watcher, target, "e") == SessionSubscription(watcher, target, 30)
+    # Another claim moved the lease: the old claim neither reads nor settles the row.
+    conversation_store.claim_due_subscription_deliveries(now=10, lease_until=20, limit=1)
+    assert claimed(watcher, target, "e", leased_until=10) is None
+    settle(watcher, target, "e", settled_at=15, leased_until=10)
+    assert claimed(watcher, target, "e", leased_until=20) is not None
+    # Without its subscription the row is not deliverable, though still pending.
+    with conversation_store._session_immediate("drop subscription only") as session:
+        session.execute(
+            sqlalchemy.delete(SqlSessionSubscription).where(
+                SqlSessionSubscription.subscriber_id == watcher
+            )
+        )
+    assert claimed(watcher, target, "e", leased_until=20) is None
+    settle(watcher, target, "e", settled_at=25, leased_until=20)
+    assert (
+        conversation_store.claim_due_subscription_deliveries(now=10**9, lease_until=0, limit=1)
+        == []
+    )
+
+
+def test_a_concurrent_unsubscribe_cannot_leave_an_enqueued_notice_pending(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Postgres READ COMMITTED: an unsubscribe between the enqueue's read and its insert."""
+    engine = conversation_store._engine
+    if engine.dialect.name != "postgresql":
+        pytest.skip("interleaves two Postgres connections")
+    watcher, target = (conversation_store.create_conversation().id for _ in range(2))
+    conversation_store.add_session_subscription(watcher, target)
+    inserting = threading.Event()
+    resume = threading.Event()
+    enqueuer: list[int] = []
+
+    def pause_before_the_insert(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        if threading.get_ident() in enqueuer and statement.lstrip().startswith(
+            "INSERT INTO session_subscription_deliveries"
+        ):
+            inserting.set()
+            assert resume.wait(30)
+
+    def enqueue() -> list[str]:
+        enqueuer.append(threading.get_ident())
+        return conversation_store.enqueue_subscription_deliveries(
+            [watcher], target, "e" * 64, 1, due_at=0
+        )
+
+    def unsubscribe() -> bool:
+        return conversation_store.delete_session_subscription(watcher, target)
+
+    def unsubscribe_waits_or_ends(future: Future[bool]) -> None:
+        with engine.connect() as probe:
+            for _ in range(300):
+                if future.done() or probe.scalar(
+                    sqlalchemy.text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE wait_event_type = 'Lock' "
+                        "AND query LIKE 'DELETE FROM session_subscriptions%'"
+                    )
+                ):
+                    return
+                time.sleep(0.05)
+        raise AssertionError("the unsubscribe neither ran nor waited")
+
+    sqlalchemy.event.listen(engine, "before_cursor_execute", pause_before_the_insert)
+    try:
+        with ThreadPoolExecutor(2) as pool:
+            enqueued = pool.submit(enqueue)
+            assert inserting.wait(30)
+            removed = pool.submit(unsubscribe)
+            unsubscribe_waits_or_ends(removed)
+            resume.set()
+            assert removed.result(30) is True
+            assert enqueued.result(30) == [watcher]
+    finally:
+        sqlalchemy.event.remove(engine, "before_cursor_execute", pause_before_the_insert)
+
+    # The unsubscribe settled the row the enqueue committed first, so nothing is left to post.
+    assert (
+        conversation_store.claim_due_subscription_deliveries(now=10**9, lease_until=0, limit=1)
+        == []
+    )

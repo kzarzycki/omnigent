@@ -15,8 +15,10 @@ is a no-op. The row holds only that identity and an outcome code; the notice
 text is built from the live sessions when it is posted. A failed post leaves
 the row pending; a retry sweep (after the failure, at startup and
 periodically) posts it with capped backoff, and also picks up an attempt a
-crashed server never finished. Unsubscribing, or archiving or deleting the
-subscriber, settles its pending rows unposted; archiving the target keeps them.
+crashed server never finished. A row is posted only while its subscription
+stands: unsubscribing, or archiving or deleting either side, removes it and
+settles the pair's rows unposted, except that archiving the target keeps its
+subscriptions, so their rows post and a restored target is heard again.
 Delivery is at-least-once: a notice is a wake, so a rare duplicate costs the
 reader one history read while a lost one stalls it.
 Settled rows are pruned after a retention window, except a prompt's, which is
@@ -524,6 +526,7 @@ async def _claim_and_retry(
     A wait in the posting queue past that lease hands the row to a sweep, so the
     attempt takes it back with a fresh lease, or skips it when it was taken.
     """
+    lease_until = int(time.time()) + _LEASE_S
     with workspace_scope(delivery.workspace_id):
         try:
             claimed = await asyncio.to_thread(
@@ -532,7 +535,7 @@ async def _claim_and_retry(
                 delivery.target_id,
                 delivery.event_key,
                 leased_until=leased_until,
-                lease_until=int(time.time()) + _LEASE_S,
+                lease_until=lease_until,
             )
         except Exception:
             _logger.warning(
@@ -540,7 +543,7 @@ async def _claim_and_retry(
             )
             return
     if claimed:
-        await _retry(store, delivery)
+        await _retry(store, delivery, lease_until=lease_until)
 
 
 async def _deliverable(
@@ -571,6 +574,24 @@ async def _render(store: ConversationStore, target_id: str, outcome: int) -> str
     return turn_notice(target.title, target_id, _TURN_OUTCOMES[outcome])
 
 
+async def _still_claimed(
+    store: ConversationStore, key: tuple[str, str, str], lease_until: int | None
+) -> SessionSubscription | None:
+    """The pair's subscription while this attempt's claim stands; else settle the row if ours."""
+    subscription = await asyncio.to_thread(
+        store.get_claimed_delivery_subscription, *key, leased_until=lease_until
+    )
+    if subscription is None:
+        # A no-op unless the row is still ours, i.e. only its subscription is gone.
+        await asyncio.to_thread(
+            store.settle_subscription_delivery,
+            *key,
+            settled_at=int(time.time()),
+            leased_until=lease_until,
+        )
+    return subscription
+
+
 async def _attempt(
     store: ConversationStore,
     subscriber_id: str,
@@ -579,14 +600,20 @@ async def _attempt(
     outcome: int,
     attempts: int,
     owner: str | None,
+    lease_until: int | None,
 ) -> None:
     """Post one claimed delivery; settle it, or leave it pending for a retry."""
     post = _post_message
+    key = (subscriber_id, target_id, event_key)
     try:
         if post is None:
             raise RuntimeError("subscription delivery is not configured")
         notice = await _render(store, target_id, outcome)
         if notice is not None:
+            if await _still_claimed(store, key, lease_until) is None:
+                return
+            # ponytail: an unsubscribe, or another attempt taking the row, between
+            # that check and this post still lets this one notice through.
             # ponytail: at-least-once. A server that dies, or a settle that
             # fails, after this post leaves the row to be posted again once its
             # lease expires; closing that needs idempotency at message acceptance.
@@ -603,11 +630,7 @@ async def _attempt(
         due = int(time.time()) + min(_RETRY_BASE_S * 2 ** min(attempts - 1, 16), _RETRY_CAP_S)
         try:
             await asyncio.to_thread(
-                store.reschedule_subscription_delivery,
-                subscriber_id,
-                target_id,
-                event_key,
-                due_at=due,
+                store.reschedule_subscription_delivery, *key, due_at=due, leased_until=lease_until
             )
             _wake_at(due)
         except Exception:
@@ -616,10 +639,9 @@ async def _attempt(
     try:
         await asyncio.to_thread(
             store.settle_subscription_delivery,
-            subscriber_id,
-            target_id,
-            event_key,
+            *key,
             settled_at=int(time.time()),
+            leased_until=lease_until,
         )
     except Exception:
         _logger.warning("Could not settle a notice to %s", subscriber_id, exc_info=True)
@@ -676,23 +698,26 @@ async def retry_due_deliveries() -> int:
     return attempted
 
 
-async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> None:
+async def _retry(
+    store: ConversationStore, delivery: SubscriptionDelivery, *, lease_until: int | None = None
+) -> None:
+    """Post a claimed row while its subscription stands; *lease_until* is the claim's lease."""
     with workspace_scope(delivery.workspace_id):
         key = (delivery.subscriber_id, delivery.target_id, delivery.event_key)
         try:
-            subscription = (
-                await asyncio.to_thread(
-                    store.get_session_subscriptions, delivery.subscriber_id, [delivery.target_id]
-                )
-            ).get(delivery.target_id)
-            # A pending row outlives only its target's archive; the other removals settle it.
+            subscription = await _still_claimed(store, key, lease_until)
+            if subscription is None:
+                return
             owner = await _deliverable(store, delivery.subscriber_id, delivery.target_id)
             if owner is _SKIP:
                 await asyncio.to_thread(
-                    store.settle_subscription_delivery, *key, settled_at=int(time.time())
+                    store.settle_subscription_delivery,
+                    *key,
+                    settled_at=int(time.time()),
+                    leased_until=lease_until,
                 )
                 return
-            quiet_seconds = subscription.quiet_seconds if subscription is not None else 0
+            quiet_seconds = subscription.quiet_seconds
             # A held row's first claim is its hold ending; a later one retries a failed post.
             if (
                 delivery.outcome == _HELD_COMPLETED
@@ -702,7 +727,11 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
             ):
                 due = int(time.time()) + quiet_seconds
                 await asyncio.to_thread(
-                    store.reschedule_subscription_delivery, *key, due_at=due, attempts=0
+                    store.reschedule_subscription_delivery,
+                    *key,
+                    due_at=due,
+                    attempts=0,
+                    leased_until=lease_until,
                 )
                 _wake_at(due)
                 return
@@ -711,7 +740,14 @@ async def _retry(store: ConversationStore, delivery: SubscriptionDelivery) -> No
                 "Could not prepare a retried notice to %s", delivery.subscriber_id, exc_info=True
             )
             return
-        await _attempt(store, *key, delivery.outcome, delivery.attempts, cast(str | None, owner))
+        await _attempt(
+            store,
+            *key,
+            delivery.outcome,
+            delivery.attempts,
+            cast(str | None, owner),
+            lease_until,
+        )
 
 
 async def prune_settled_deliveries() -> int:
