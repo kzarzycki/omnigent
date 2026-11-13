@@ -28,6 +28,11 @@ from tests.e2e.test_acp_turn_survives_server_restart_e2e import (
     _transcript,
 )
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="host reboot e2e finds the host's runner processes through /proc",
+)
+
 _TIMEOUT_S = 90.0
 
 
