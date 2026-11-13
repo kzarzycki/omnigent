@@ -4658,3 +4658,52 @@ async def test_buffered_message_that_lapsed_while_waiting_is_dropped_at_drain() 
     assert [check["text"] for check in checks] == ["stale instruction"]
     assert hc.posted_bodies == []
     assert not app.state.session_message_buffers.get(sid)
+
+
+@pytest.mark.asyncio
+async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that can't answer must not let an expired message run."""
+    monkeypatch.setattr("omnigent.runner.app._LIFECYCLE_CHECK_RETRY_S", 0)
+    hc = _ScriptedHarnessClient([])
+    pm = _FakeProcessManager(hc)
+    sdk_spec = _harness_spec("claude-sdk")
+    attempts: list[str] = []
+
+    class _FailingServerClient(NullServerClient):
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            if not url.endswith("/message_lifecycle"):
+                return await super().post(url, **kwargs)
+            attempts.append(url)
+            return httpx.Response(503, json={"error": "unavailable"})
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return sdk_spec
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_FailingServerClient(),  # type: ignore[arg-type]
+    )
+    sid = "b2c3d4e5f60718293a4b5c6d7e8f9012"
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": sid, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        app.state.session_message_buffers[sid] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "stale instruction"}],
+                "expires_at": 1,
+                "conversation_id": sid,
+            },
+        ]
+        await app.state.check_and_start_next_turn(sid)
+    assert len(attempts) == 3
+    assert hc.posted_bodies == []
+    assert not app.state.session_message_buffers.get(sid)
