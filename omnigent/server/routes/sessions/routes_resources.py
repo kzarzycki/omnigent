@@ -3797,8 +3797,14 @@ def register_resources_routes(
                 raise _session_not_found()
         if not valid_preview_parts(owner, repo, kind, ref):
             raise HTTPException(status_code=400, detail="Invalid preview reference")
-        # ``level is None``: permissions are off or access is inherited, so edit rights apply.
-        can_edit = access.level is None or access.level >= LEVEL_EDIT
+        # The canonical check also walks a child session's parent chain, which ``level`` omits.
+        try:
+            await _require_access_and_level(
+                user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+            )
+            can_edit = True
+        except OmnigentError:
+            can_edit = False
         if not can_edit and f"{owner}/{repo}".lower() not in await _session_github_repositories(
             session_id, conv
         ):
