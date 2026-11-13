@@ -623,36 +623,65 @@ describe("InboxPage approval items", () => {
     );
   });
 
-  it("keeps the rendered card while a no-change list poll refetches its snapshot", async () => {
-    // WHY: the list poll bumps `updated_at` on every row, which changes the
-    // snapshot query key. The card must stay the same DOM node while the new
-    // snapshot is in flight, not drop out and remount.
+  it("keeps the card node and scroll position through a no-change poll, loading and settled", async () => {
+    // WHY: the list poll bumps `updated_at`, which changes the snapshot query
+    // key. The card must stay the same DOM node, and the scroller must keep its
+    // position, both while the new snapshot loads and after it settles unchanged.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    const snapshot = {
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
-    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>;
+    vi.mocked(sessionsApi.getSession).mockResolvedValue(snapshot);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const tree = () => (
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            {/* Stand-in for the app shell's scroll container. */}
+            <div data-testid="scroller" style={{ overflowY: "auto", height: 200 }}>
+              <InboxPage />
+            </div>
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>
     );
     const { rerender } = render(tree());
     const card = await screen.findByTestId("approval-card");
+    const scroller = screen.getByTestId("scroller");
+    scroller.scrollTop = 120;
 
-    vi.mocked(sessionsApi.getSession).mockReturnValue(new Promise(() => {}));
+    let settle!: (value: typeof snapshot) => void;
+    vi.mocked(sessionsApi.getSession).mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
     vi.mocked(conversationsHook.useConversations).mockReturnValue(
       conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
     );
     rerender(tree());
     await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
 
+    // Loading: the placeholder keeps the card.
     expect(screen.getByTestId("approval-card")).toBe(card);
+    expect(scroller.scrollTop).toBe(120);
+
+    // Settled with the unchanged snapshot: still the same node.
+    await act(async () => {
+      settle(snapshot);
+    });
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({ queryKey: ["inbox-elicitations", "sess_1", 1, 1_700_000_001] })[0]?.state
+          .status,
+      ).toBe("success"),
+    );
+    expect(screen.getByTestId("approval-card")).toBe(card);
+    expect(screen.getByTestId("scroller")).toBe(scroller);
+    expect(scroller.scrollTop).toBe(120);
   });
 
   it("keeps an answered card answered while a bumped row's snapshot is still loading", async () => {
