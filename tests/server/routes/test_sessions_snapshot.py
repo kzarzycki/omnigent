@@ -256,7 +256,11 @@ async def test_session_snapshot_reads_latest_items_then_returns_chronological() 
 async def test_session_snapshot_uses_child_spec_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Child snapshots expose their selected spec while parents keep the root spec."""
+    """Child snapshots expose their selected spec while parents keep the root spec.
+
+    Each snapshot reads the agent row once; harness resolution reuses that row
+    rather than reading the store again on the event loop.
+    """
     child_spec = AgentSpec(
         spec_version=1,
         name="executor",
@@ -297,11 +301,13 @@ async def test_session_snapshot_uses_child_spec_metadata(
     }
     conv_store = _ConversationStore([], conversations=conversations)
     cache_loads: list[bool] = []
+    agent_reads: list[str] = []
 
     class _AgentStore:
         @staticmethod
         def get(agent_id: str) -> Any:
             assert agent_id == "ag_advisor"
+            agent_reads.append(agent_id)
             return type(
                 "StoredAgent",
                 (),
@@ -346,6 +352,7 @@ async def test_session_snapshot_uses_child_spec_metadata(
     assert child.context_window == 100_000
     assert child.harness == "codex"
     assert cache_loads == [True, True, True, True]
+    assert agent_reads == ["ag_advisor", "ag_advisor"]
 
 
 @pytest.mark.asyncio
@@ -420,6 +427,94 @@ async def test_session_snapshot_does_not_claim_agent_model_for_own_auth_acp(
     assert snapshot.harness == expected_harness
     assert snapshot.llm_model is None
     assert snapshot.context_window is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("spec_harness", "row", "expected_harness"),
+    [
+        pytest.param("codex", "present", "codex", id="codex"),
+        pytest.param("acp", "present", "acp", id="cold-acp-picker"),
+        pytest.param("codex", "missing", None, id="missing-row"),
+        pytest.param("codex", "read-fails", None, id="read-fails"),
+    ],
+)
+async def test_session_snapshot_reads_agent_row_once_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    spec_harness: str,
+    row: str,
+    expected_harness: str | None,
+) -> None:
+    """A session GET reads the agent row once, off the event loop, even when it fails.
+
+    The cold ACP picker and the response's harness reuse the snapshot's row; a
+    failed read resolves like a missing row instead of reading again.
+    """
+    spec = AgentSpec(
+        spec_version=1,
+        name="worker",
+        executor=ExecutorSpec(
+            config={"harness": spec_harness, "acp_agent": {"name": "Test", "command": "fake"}}
+            if spec_harness == "acp"
+            else {"harness": spec_harness}
+        ),
+    )
+    conv = Conversation(
+        id="conv_reads",
+        created_at=1,
+        updated_at=1,
+        root_conversation_id="conv_reads",
+        agent_id="ag_worker",
+    )
+    store = _ConversationStore([], conversations={conv.id: conv})
+    reads_on_event_loop: list[bool] = []
+
+    def _on_event_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    class _AgentStore:
+        @staticmethod
+        def get(agent_id: str) -> Any:
+            reads_on_event_loop.append(_on_event_loop())
+            if row == "read-fails":
+                raise StatementError("agent read failed", None, {}, None)
+            if row == "missing":
+                return None
+            return SimpleNamespace(
+                id=agent_id,
+                name="worker",
+                bundle_location="bundle",
+                session_id=None,
+                operator_authored=False,
+            )
+
+    class _AgentCache:
+        @staticmethod
+        def load(agent_id: str, bundle_location: str, *, expand_env: bool = False) -> Any:
+            return SimpleNamespace(spec=spec)
+
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_agent_cache", lambda: _AgentCache())
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.helpers.get_agent_cache", lambda: _AgentCache()
+    )
+    monkeypatch.setattr("omnigent.runtime._globals._agent_store", _AgentStore())
+    _sessions_mod._model_options_cache.pop(conv.id, None)
+
+    snapshot = await _get_session_snapshot(
+        store,  # type: ignore[arg-type]
+        conv.id,
+        agent_store=_AgentStore(),  # type: ignore[arg-type]
+        agent_cache=_AgentCache(),  # type: ignore[arg-type]
+    )
+
+    assert snapshot.harness == expected_harness
+    assert reads_on_event_loop == [False]
 
 
 @pytest.mark.asyncio
