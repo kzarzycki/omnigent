@@ -393,6 +393,8 @@ export function InboxPage() {
       isFirstRender.current = false;
       return;
     }
+    // A placeholder is the previous snapshot, not fresh server data.
+    if (snapshotQueries.some((q) => q.isPlaceholderData)) return;
     setResponded((prev) => {
       if (Object.keys(prev).length === 0) return prev;
       const stale = items
@@ -981,13 +983,20 @@ export function InboxPage() {
           </div>
         )}
 
-      <div className="flex flex-col gap-4">
-        {groups.map((group) => (
-          <section key={group.label} aria-label={group.label} className="flex flex-col gap-2">
-            <h2 className="px-3 py-1.5 text-sm font-normal text-muted-foreground">{group.label}</h2>
-            {group.entries.map(renderEntry)}
-          </section>
-        ))}
+      {/* One flat parent: a card that ages into the next recency group keeps its DOM node. */}
+      <div className="flex flex-col gap-2">
+        {groups.flatMap((group, index) => [
+          <h2
+            key={`group:${group.label}`}
+            className={cn(
+              "px-3 py-1.5 text-sm font-normal text-muted-foreground",
+              index > 0 && "mt-2",
+            )}
+          >
+            {group.label}
+          </h2>,
+          ...group.entries.map(renderEntry),
+        ])}
         {assembling && visibleCount > 0 && (
           <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
             <Loader2Icon className="size-3.5 animate-spin" />
