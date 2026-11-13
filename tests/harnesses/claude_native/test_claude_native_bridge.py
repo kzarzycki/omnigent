@@ -15808,6 +15808,29 @@ async def test_hook_evaluate_endpoint_skips_the_server_restart_window(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fallback", "decision"),
+    [("deny", "deny"), ("strict", "ask")],
+)
+async def test_hook_evaluate_endpoint_applies_unavailable_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback: str, decision: str
+) -> None:
+    """A call made while the server is down follows ``policy_unavailable_fallback``."""
+    config_home = tmp_path / "config"
+    config_home.mkdir()
+    (config_home / "config.yaml").write_text(f"policy_unavailable_fallback: {fallback}\n")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, _ScriptedPolicyClient(None))
+    try:
+        body = await asyncio.to_thread(
+            _relay_request_raw, bridge_dir, "/hook/claude/evaluate-policy", _PRE_TOOL_USE_PAYLOAD
+        )
+        assert json.loads(body)["hookSpecificOutput"]["permissionDecision"] == decision
+    finally:
+        relay.close()
+
+
+@pytest.mark.asyncio
 async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
