@@ -623,6 +623,181 @@ describe("InboxPage approval items", () => {
     );
   });
 
+  it("keeps the card node and scroll position through a no-change poll, loading and settled", async () => {
+    // WHY: the list poll bumps `updated_at`, which changes the snapshot query
+    // key. The card must stay the same DOM node, and the scroller must keep its
+    // position, both while the new snapshot loads and after it settles unchanged. The
+    // scroller is the page's own (`PageScroll`), so resetting it fails the test.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    const snapshot = {
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>;
+    vi.mocked(sessionsApi.getSession).mockResolvedValue(snapshot);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    const card = await screen.findByTestId("approval-card");
+    // The element that scrolls in the page: `PageScroll`'s overflow container.
+    const scroller = card.closest<HTMLElement>(".overflow-y-auto")!;
+    scroller.scrollTop = 120;
+
+    let settle!: (value: typeof snapshot) => void;
+    vi.mocked(sessionsApi.getSession).mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
+    );
+    rerender(tree());
+    await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
+
+    // Loading: the placeholder keeps the card.
+    expect(screen.getByTestId("approval-card")).toBe(card);
+    expect(scroller.scrollTop).toBe(120);
+
+    // Settled with the unchanged snapshot: still the same node.
+    await act(async () => {
+      settle(snapshot);
+    });
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({ queryKey: ["inbox-elicitations", "sess_1", 1, 1_700_000_001] })[0]?.state
+          .status,
+      ).toBe("success"),
+    );
+    expect(screen.getByTestId("approval-card")).toBe(card);
+    expect(card.closest(".overflow-y-auto")).toBe(scroller);
+    expect(scroller.scrollTop).toBe(120);
+  });
+
+  it("keeps an answered card answered while a bumped row's snapshot is still loading", async () => {
+    // WHY: the placeholder snapshot still lists the prompt as pending; it must
+    // not be read as fresh server data that clears the optimistic verdict.
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded"),
+    );
+
+    vi.mocked(sessionsApi.getSession).mockReturnValue(new Promise(() => {}));
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
+    );
+    rerender(tree());
+    await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded");
+  });
+
+  it("reconciles a re-parked prompt while another session's snapshot is loading", async () => {
+    // WHY: a placeholder in one session must not hold back verdict cleanup for
+    // sessions whose own snapshots are fresh.
+    const rowA = conversation({ id: "sess_a", updated_at: 1_700_000_010 });
+    const rowB = conversation({ id: "sess_b", updated_at: 1_700_000_000 });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([rowA, rowB]));
+    vi.mocked(sessionsApi.getSession).mockImplementation(
+      async (id) =>
+        ({
+          pendingElicitations: [rawElicitation(`eli_${id}`, `Approve ${id}?`)],
+        }) as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>,
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    const [acceptA] = await screen.findAllByRole("button", { name: "Stub Accept" });
+    fireEvent.click(acceptA!);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("approval-card")[0]).toHaveAttribute("data-status", "responded"),
+    );
+
+    // A's snapshot refreshes (still pending: re-parked) while B's stays in flight.
+    vi.mocked(sessionsApi.getSession).mockImplementation((id) =>
+      id === "sess_b"
+        ? new Promise(() => {})
+        : (Promise.resolve({
+            pendingElicitations: [rawElicitation("eli_sess_a", "Approve sess_a?")],
+          }) as unknown as ReturnType<typeof sessionsApi.getSession>),
+    );
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([
+        { ...rowA, updated_at: 1_700_000_011 },
+        { ...rowB, updated_at: 1_700_000_001 },
+      ]),
+    );
+    rerender(tree());
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("approval-card")[0]).toHaveAttribute("data-status", "pending"),
+    );
+  });
+
+  it("keeps a card's DOM node when it ages into the next recency group", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: 1_700_000_000_000 + 60_000 });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={queryClient}>
+        <SidebarDataProvider>
+          <MemoryRouter>
+            <InboxPage />
+          </MemoryRouter>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    const card = await screen.findByTestId("approval-card");
+    const before = screen.getAllByRole("heading", { level: 2 })[0]!.textContent;
+
+    vi.setSystemTime(1_700_000_000_000 + 3 * 3_600_000);
+    rerender(tree());
+
+    expect(screen.getAllByRole("heading", { level: 2 })[0]!.textContent).not.toBe(before);
+    expect(screen.getByTestId("approval-card")).toBe(card);
+  });
+
   it("routes the verdict to the child session when the prompt is mirrored", async () => {
     // WHY: a mirrored child prompt carries target_session_id; the resolve POST
     // must target that session, not the row it surfaced under.
@@ -1517,10 +1692,15 @@ describe("InboxPage recency groups", () => {
     renderPage();
 
     await screen.findByTestId("inbox-item");
-    const regions = screen.getAllByRole("region");
-    expect(regions.map((r) => r.getAttribute("aria-label"))).toEqual(["Just now", "This week"]);
-    expect(within(regions[0]).getByTestId("inbox-unread")).toBeInTheDocument();
-    expect(within(regions[1]).getByTestId("inbox-item")).toHaveAttribute("data-expanded", "true");
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    expect(headings.map((h) => h.textContent)).toEqual(["Just now", "This week"]);
+    const follows = (a: Node, b: Node) =>
+      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING;
+    const unread = screen.getByTestId("inbox-unread");
+    const item = screen.getByTestId("inbox-item");
+    expect(follows(headings[0], unread) && follows(unread, headings[1])).toBeTruthy();
+    expect(follows(headings[1], item)).toBeTruthy();
+    expect(item).toHaveAttribute("data-expanded", "true");
     // The header pill totals every kind; its label spells out the breakdown.
     expect(screen.getByText("1 approval · 1 unread")).toBeInTheDocument();
   });
