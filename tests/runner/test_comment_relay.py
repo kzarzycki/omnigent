@@ -399,6 +399,7 @@ async def test_terminal_launch_with_bridge_inject_advertises_comment_tools(
         "ui_open_file",
         "sys_session_keep",
         "sys_ask_user_question",
+        "sys_read_answer",
         "sys_session_subscribe",
         "sys_session_unsubscribe",
         "sys_session_subscriptions",

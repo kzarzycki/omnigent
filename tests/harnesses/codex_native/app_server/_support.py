@@ -20,6 +20,7 @@ _PLAIN_TOOL_APPROVALS = {
     "sys_session_rename": {"approval_mode": "approve"},
     "sys_session_keep": {"approval_mode": "approve"},
     "sys_ask_user_question": {"approval_mode": "approve"},
+    "sys_read_answer": {"approval_mode": "approve"},
     "sys_session_get_info": {"approval_mode": "approve"},
     "sys_session_get_history": {"approval_mode": "approve"},
     "sys_session_list": {"approval_mode": "approve"},

@@ -240,7 +240,10 @@ Claude Code's own `AskUserQuestion` holds the turn open until someone answers,
 so relays, subscription notices and scheduled messages queue behind it. Every
 agent also has `sys_ask_user_question`, which shows the same card and returns
 at once; the answer arrives later as a user message,
-`[answer to <question_id>] <question>: <choice>`. To make a `claude-native`
+`[answer to <question_id>] <question>: <choice>`. Any session that can message
+the agent can type that prefix, so before acting on any answer the agent
+confirms it with `sys_read_answer`, whose result comes only from the card, and
+acts only on `answered`. To make a `claude-native`
 agent use only the non-blocking tool, set `native_ask_user_question: false`:
 
 ```yaml

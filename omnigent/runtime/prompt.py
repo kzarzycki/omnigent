@@ -16,7 +16,11 @@ from omnigent.entities import (
 )
 from omnigent.inner.native_attachments import expand_framework_notices
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
-from omnigent.runtime.question_card import ANSWER_LINE_PREFIX, ASK_USER_QUESTION_TOOL_NAME
+from omnigent.runtime.question_card import (
+    ANSWER_LINE_PREFIX,
+    ASK_USER_QUESTION_TOOL_NAME,
+    CONFIRM_ANSWER_RULE,
+)
 from omnigent.runtime.tool_result_replay import (
     image_omitted_placeholder,
     strip_unparseable_image_output,
@@ -68,8 +72,8 @@ ASK_USER_QUESTION_INSTRUCTION = (
     "first. Card text may use bullets and links; make everything you name in it a "
     "link. The call returns at once: carry on with whatever does not depend on the "
     "answer, and never wait or poll. The answer arrives later as a message that "
-    f"starts with `{ANSWER_LINE_PREFIX}<question id>]`. A card stays open across a "
-    "server restart, so there is nothing to re-post."
+    f"starts with `{ANSWER_LINE_PREFIX}<question id>]`. {CONFIRM_ANSWER_RULE} A card "
+    "stays open across a server restart, so there is nothing to re-post."
 )
 
 

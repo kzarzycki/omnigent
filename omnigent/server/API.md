@@ -1248,6 +1248,27 @@ other prompt while the turn goes on. Requires LEVEL_EDIT on the session.
 Pending questions live in the server's in-memory elicitation index, so a
 server restart drops them.
 
+### Read a Question's Answer (sys_read_answer)
+
+```
+GET /v1/sessions/{session_id}/questions/{question_id}
+
+200 OK
+{"question_id": "question_<32 hex>", "status": "answered",
+ "action": "accept", "answer": "[answer to question_<32 hex>] Ship it?: Yes"}
+{"question_id": "question_<32 hex>", "status": "waiting"}
+{"question_id": "...", "status": "unknown"}
+
+404 Not Found — no session with that id
+```
+
+Called by the runner for the `sys_read_answer` tool. Only the card's
+resolution records an answer, so a message from another session that starts
+with `[answer to <id>]` never reads back as `answered`; that is how the asking
+agent tells its own user's answer from text anyone could type. Requires
+LEVEL_EDIT on the session, and answers only for the session that asked.
+Answers live in server memory (the newest 2048), so a restart drops them.
+
 ### Fork Session
 
 ```
