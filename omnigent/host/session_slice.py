@@ -1,10 +1,10 @@
-"""Run a host's session processes inside one memory-limited user-systemd slice.
+"""Run a host's session processes inside one resource-limited user-systemd slice.
 
 With ``host.session_slice.enabled`` on, the daemon starts every runner (and
 the zygote that forks runners) through ``systemd-run --user --scope`` in the
 configured slice. Harness processes and tmux servers are runner descendants,
 and tmux places its pane scopes in its server's slice, so a whole session stays
-inside the slice while the daemon itself stays outside it. The slice's memory
+inside the slice while the daemon itself stays outside it. The slice's
 limits are applied as runtime properties of the user manager, so no sudo is
 needed. Hosts without a user manager that delegates the memory controller log
 once and launch as before.
@@ -25,6 +25,7 @@ from omnigent.util.user_systemd import (
     UserSystemdError,
     is_memory_limit,
     is_slice_name,
+    is_tasks_limit,
     missing_user_manager_controllers,
     scope_command_prefix,
     set_slice_properties,
@@ -43,6 +44,7 @@ _MEMORY_PROPERTIES = {
     "memory_max": "MemoryMax",
     "memory_swap_max": "MemorySwapMax",
 }
+_TASKS_MAX_KEY = "tasks_max"
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,16 @@ def load_session_slice_config(path: Path) -> SessionSliceConfig | None:
                 f"a percentage such as '60%', or 'infinity', got {value!r}."
             )
         properties.append(f"{systemd_property}={value}")
+    if _TASKS_MAX_KEY in section:
+        value = section[_TASKS_MAX_KEY]
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str) or not is_tasks_limit(value):
+            raise ValueError(
+                f"host.session_slice.{_TASKS_MAX_KEY} in {path} must be a positive count "
+                f"such as 4096, a percentage such as '10%', or 'infinity', got {value!r}."
+            )
+        properties.append(f"TasksMax={value}")
     return SessionSliceConfig(name=name, properties=tuple(properties))
 
 
@@ -134,11 +146,15 @@ def activate_session_slice(config: SessionSliceConfig | None) -> SessionSliceLau
             config.name,
         )
         return None
-    missing = missing_user_manager_controllers(["memory"])
+    needed = ["memory"]
+    if any(prop.startswith("TasksMax=") for prop in config.properties):
+        needed.append("pids")
+    missing = missing_user_manager_controllers(needed)
     if missing is None or missing:
         _logger.warning(
-            "host.session_slice is on, but no user systemd manager with the memory "
+            "host.session_slice is on, but no user systemd manager with the %s "
             "controller is reachable; session processes run without the %s limits",
+            " and ".join(needed),
             config.name,
         )
         return None
@@ -156,7 +172,7 @@ def activate_session_slice(config: SessionSliceConfig | None) -> SessionSliceLau
     _logger.info(
         "Session processes run in %s (%s)",
         config.name,
-        ", ".join(config.properties) or "no memory limits",
+        ", ".join(config.properties) or "no limits",
     )
     return SessionSliceLaunch(
         name=config.name,
