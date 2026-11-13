@@ -20,6 +20,7 @@ class _RecordingOmnigent:
     """Records resolve_elicitation calls; optionally fails the decline POST."""
 
     def __init__(self, *, fail_resolve: bool = False) -> None:
+        self.snapshot_ids: set[str] = set()
         self.resolve_calls: list[tuple[str, str, bool]] = []
         self._fail_resolve = fail_resolve
 
@@ -34,6 +35,9 @@ class _RecordingOmnigent:
         self.resolve_calls.append((session_id, elicitation_id, accepted))
         if self._fail_resolve:
             raise RuntimeError("resolve POST failed")
+
+    async def pending_elicitation_ids(self, session_id: str) -> set[str] | None:
+        return set(self.snapshot_ids)
 
 
 class _FakeSlack:
@@ -174,3 +178,47 @@ async def test_nonblocking_question_survives_turn_end_until_answered() -> None:
     await resolver
     assert omnigent.resolve_calls == [("conv_1", "question_1", True)]
     assert turn.slack_client.updates[0]["text"] == "Request answered."  # type: ignore[attr-defined]
+
+
+async def test_detached_question_card_finalizes_when_answered_elsewhere() -> None:
+    # Turn over, question answered in the web UI: the snapshot drops it, so the
+    # card loses its buttons and its resolver ends without a Slack click.
+    omnigent = _RecordingOmnigent()
+    omnigent.snapshot_ids = {"question_1"}
+    controller = _controller()
+    controller._detached_poll_seconds = 0.01
+    turn = _turn()
+    state = ElicitationTurnState()
+    request = extract_elicitation_request(
+        {
+            "type": "response.elicitation_request",
+            "elicitation_id": "question_1",
+            "params": {
+                "mode": "form",
+                "policy_name": "sys_ask_user_question",
+                "message": "Ship?",
+                "ask_user_question": {
+                    "questions": [
+                        {"question": "Ship?", "options": [{"label": "Yes"}, {"label": "No"}]}
+                    ]
+                },
+            },
+        },
+        "conv_1",
+    )
+    assert request is not None
+    await controller.start(omnigent, turn, request, state)  # type: ignore[arg-type]
+    await controller.finish_pending(omnigent, turn, state)  # type: ignore[arg-type]
+    assert turn.slack_client.updates == []  # type: ignore[attr-defined]
+
+    omnigent.snapshot_ids = set()
+    resolver = state.pending["question_1"].resolver
+    assert resolver is not None
+    await asyncio.wait_for(resolver, timeout=2)
+    await asyncio.wait_for(asyncio.gather(*controller._resolvers), timeout=2)
+
+    updates = turn.slack_client.updates  # type: ignore[attr-defined]
+    assert len(updates) == 1
+    assert "answered" in updates[0]["text"].lower()
+    assert omnigent.resolve_calls == []
+    assert controller._resolvers == set()

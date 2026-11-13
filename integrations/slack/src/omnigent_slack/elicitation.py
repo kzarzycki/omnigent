@@ -37,6 +37,9 @@ from omnigent_slack.omnigent import ElicitationRequest, OmnigentClient
 if TYPE_CHECKING:
     from omnigent_slack.streaming import SlackClientProtocol
 
+# How often a detached question card checks whether it was answered elsewhere.
+DETACHED_POLL_SECONDS = 5.0
+
 # Posts a plain thread reply (used for the unsupported-elicitation web link).
 PostReply = Callable[["SlackClientProtocol", ThreadKey, str], Awaitable[None]]
 
@@ -97,7 +100,9 @@ class ElicitationController:
         server_url: str,
         post_reply: PostReply,
         logger: logging.Logger,
+        detached_poll_seconds: float = DETACHED_POLL_SECONDS,
     ) -> None:
+        self._detached_poll_seconds = detached_poll_seconds
         self._coordinator = coordinator
         self._server_url = server_url
         self._post_reply = post_reply
@@ -390,6 +395,7 @@ class ElicitationController:
             nonblocking = pending.request.is_nonblocking_question
             if nonblocking and pending.verdict is None and not pending.delivery_failed:
                 pending.detached = True
+                self._watch_detached(omnigent, turn, pending)
                 continue
             pending.finalized = True
             resolver = pending.resolver
@@ -429,6 +435,36 @@ class ElicitationController:
                 outcome.value,
             )
             await self._finalize_card(turn, pending, outcome)
+
+    def _watch_detached(
+        self, omnigent: OmnigentClient, turn: SlackTurn, pending: PendingElicitation
+    ) -> None:
+        task = asyncio.create_task(self._poll_detached(omnigent, turn, pending))
+        self._resolvers.add(task)
+        task.add_done_callback(self._resolvers.discard)
+
+    async def _poll_detached(
+        self, omnigent: OmnigentClient, turn: SlackTurn, pending: PendingElicitation
+    ) -> None:
+        """Finalize a detached card once the server no longer lists its question.
+
+        No event stream reports an answer given elsewhere after the turn ended, so
+        poll the session snapshot. Ends when the card is settled or its resolver is.
+        """
+        request = pending.request
+        while not pending.finalized and not (pending.resolver and pending.resolver.done()):
+            await asyncio.sleep(self._detached_poll_seconds)
+            pending_ids = await omnigent.pending_elicitation_ids(request.session_id)
+            if pending_ids is None or request.elicitation_id in pending_ids:
+                continue
+            # No live waiter means a Slack click is mid-delivery; its resolver finalizes.
+            if pending.finalized or not self._coordinator.resolve_external(
+                request.session_id, request.elicitation_id
+            ):
+                return
+            pending.finalized = True
+            await self._finalize_card(turn, pending, self._outcome(pending))
+            return
 
     async def _decline_abandoned(
         self, omnigent: OmnigentClient, pending: PendingElicitation
