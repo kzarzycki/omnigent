@@ -659,6 +659,13 @@ def _text_of(content: object) -> str:
     return ""
 
 
+def note_ran_model(s: Session, payload: dict) -> None:
+    """Remember the model the cloud's init event reports, so the turn's result can carry it."""
+    model = payload.get("model")
+    if payload.get("type") == "system" and payload.get("subtype") == "init" and model:
+        s.ran_model = str(model)
+
+
 def to_updates(payload: dict) -> tuple[list[dict], bool]:
     """Map one cloud-session event payload to ACP updates; True ends the turn."""
     kind = payload.get("type")
@@ -754,6 +761,8 @@ class Session:
         self.started_model: str | None = None
         # A pick already answered with the adopted-session note.
         self.noted_model: str | None = None
+        # The model the cloud's init event said it runs; sent back as the turn's usage model.
+        self.ran_model: str | None = None
         # The effort the cloud session was created with ("" = default); None if adopted.
         self.started_effort: str | None = None
         self.mcp: dict[str, McpProxy] = {}
@@ -1212,6 +1221,7 @@ def _mirror(acp_id: str, s: Session, after: int) -> str:
             quiet = 0  # a CLI that starts before the turn does takes the message instead
         elif quiet is not None:
             quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
+        note_ran_model(s, payload)
         updates, done = to_updates(payload)
         for upd in updates:
             update(acp_id, upd)
@@ -1233,6 +1243,7 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
     for event in s.events_while_alive():
         payload = (event or {}).get("payload") or {}
         if payload.get("type") in ("env_manager_log", "system"):
+            note_ran_model(s, payload)
             for upd in to_updates(payload)[0]:
                 update(acp_id, upd)
         elif to_updates(payload)[1]:
@@ -1323,7 +1334,11 @@ def handle_prompt(msg: dict) -> None:
     params = msg.get("params") or {}
     try:
         stop = run_turn(params["sessionId"], prompt_text(params.get("prompt") or []))
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"stopReason": stop}})
+        result: dict = {"stopReason": stop}
+        ran_model = SESSIONS[params["sessionId"]].ran_model
+        if ran_model:
+            result["usage"] = {"model": ran_model}
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
@@ -1464,6 +1479,11 @@ def self_check() -> None:
     # A per-session pick wins over the bridge-wide default.
     assert create_cloud_session("hi", str(not_repo), None, "max")
     assert (not_repo / "args").read_text().strip() == "--cloud hi --effort max"
+    ran = Session("/tmp")
+    note_ran_model(ran, {"type": "system", "subtype": "init", "model": "test-model-1"})
+    assert ran.ran_model == "test-model-1"
+    note_ran_model(ran, {"type": "assistant", "model": "ignored"})
+    assert ran.ran_model == "test-model-1"
     init_upd, _ = to_updates({"type": "system", "subtype": "init", "model": "test-model-1"})
     assert "model: test-model-1" in init_upd[0]["content"]["text"], init_upd
     globals()["CLAUDE_CLI"] = real_cli
