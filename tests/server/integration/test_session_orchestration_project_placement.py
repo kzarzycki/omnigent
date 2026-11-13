@@ -114,7 +114,7 @@ async def test_unknown_project_or_environment_never_falls_back_to_the_sender(
 
 
 async def test_project_without_a_host_and_workspace_is_refused(auth_client, stack):
-    source, _, store = stack
+    source, _, _ = stack
     project_id = await _project(auth_client, "Bare", {"environment_id": ENVIRONMENT_ID})
 
     response = await _orchestrate(auth_client, source, project_id=project_id)
