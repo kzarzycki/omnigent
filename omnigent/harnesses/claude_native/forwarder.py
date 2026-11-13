@@ -33,7 +33,6 @@ from omnigent.harnesses.claude_native.bridge import (
     TranscriptReadResult,
     _display_text,
     _transcript_items_from_entry,
-    _transcript_timestamp,
     compute_transcript_cumulative_usage,
     read_active_session_id,
     read_bridge_id,
@@ -55,6 +54,7 @@ from omnigent.harnesses.claude_native.bridge import (
 from omnigent.harnesses.claude_native.diagnostics import ClaudeDebugLogFollower
 from omnigent.harnesses.claude_native.message_display_hook import MESSAGE_DELTAS_FILE
 from omnigent.harnesses.claude_native.status import sync_raw_status_context
+from omnigent.harnesses.claude_native.submit_verification import transcript_timestamp
 from omnigent.inner.hook_scripts.subagent_router import AGENT_TOOL_NAMES
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native._native_post_delivery import (
@@ -6699,7 +6699,7 @@ def _latest_compact_summary_uuid(
                 summaries.append(record)
     if boundary is None:
         raise ValueError("Claude compaction boundary is not available yet")
-    boundary_written_at = _transcript_timestamp(boundary.get("timestamp"))
+    boundary_written_at = transcript_timestamp(boundary.get("timestamp"))
     if not_before is not None and (
         boundary_written_at is None or boundary_written_at < not_before
     ):
