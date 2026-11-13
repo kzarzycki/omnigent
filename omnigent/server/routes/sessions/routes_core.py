@@ -123,7 +123,10 @@ from omnigent.server.routes._errors import (
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._origin import require_trusted_origin
-from omnigent.server.routes._session_create_validation import file_session_by_workspace
+from omnigent.server.routes._session_create_validation import (
+    file_session_by_workspace,
+    resolve_project_placement,
+)
 from omnigent.server.routes._sessions.common import (
     _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
     _CLAUDE_NATIVE_PERMISSION_MODES,
@@ -1178,6 +1181,14 @@ def register_core_routes(
                         code=ErrorCode.INVALID_INPUT,
                     )
 
+        if body.environment_id is not None and (
+            orchestration_source is None or body.host_type != "external"
+        ):
+            raise OmnigentError(
+                "environment_id is only supported when an orchestrating session starts "
+                "a session on an external host",
+                code=ErrorCode.INVALID_INPUT,
+            )
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
         await _check_initial_input(request, body.initial_input)
@@ -1214,9 +1225,19 @@ def register_core_routes(
                     )
                 body.initial_input = orchestration_message(source.id, content[0].get("text"))
             if body.host_type == "external":
-                placement = await asyncio.to_thread(
-                    routing_host_session, source, conversation_store
+                project_placement = await resolve_project_placement(
+                    project_id=body.project_id,
+                    environment_id=body.environment_id,
+                    user_id=user_id,
+                    project_store=project_store,
                 )
+                placement = (
+                    project_placement
+                    if project_placement is not None
+                    else await asyncio.to_thread(routing_host_session, source, conversation_store)
+                )
+                if project_placement is not None:
+                    body.project_id = project_placement.project_id
                 if placement is None or not placement.host_id or not placement.workspace:
                     raise OmnigentError(
                         "Sender needs a connected host and workspace", code=ErrorCode.INVALID_INPUT
@@ -1224,7 +1245,11 @@ def register_core_routes(
                 try:
                     body = type(body).model_validate(
                         {
-                            **body.model_dump(exclude_unset=True),
+                            **{
+                                key: value
+                                for key, value in body.model_dump(exclude_unset=True).items()
+                                if key != "environment_id"
+                            },
                             "host_id": placement.host_id,
                             "workspace": placement.workspace,
                         }
