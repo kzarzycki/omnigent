@@ -8119,6 +8119,11 @@ async def _forward_event_to_runner(
     }
     if agent_revision is not None:
         runner_body["agent_revision"] = agent_revision
+    # The runner rechecks these when it drains the message after a busy turn.
+    if body.expires_at is not None:
+        runner_body["expires_at"] = body.expires_at
+    if body.sender_session_id is not None:
+        runner_body["sender_session_id"] = body.sender_session_id
     # Persist the turn-initiating actor so /policies/evaluate and MCP
     # tools/call can read it back on any server replica.  Skip system-driven
     # forwards (sub-agent results, parent-wake carry created_by=None) — they

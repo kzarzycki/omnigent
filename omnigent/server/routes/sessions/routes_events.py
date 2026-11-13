@@ -304,12 +304,19 @@ from omnigent.server.schemas import (
     ElicitationRequestParams,
     ErrorDetail,
     McpServerStartup,
+    MessageLifecycleCheck,
     SessionEventInput,
 )
 from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
-from omnigent.server.startup_inputs import StartupDispatch, StartupInputContext
+from omnigent.server.startup_inputs import (
+    StartupDispatch,
+    StartupInputContext,
+    message_drop_reason,
+    message_text,
+    report_dropped_message,
+)
 from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
@@ -1159,6 +1166,36 @@ def register_events_routes(
                 in_flight=in_flight if body.type in _IN_FLIGHT_EVENT_TYPES else None,
             )
 
+    @event_router.post(
+        "/sessions/{session_id}/message_lifecycle",
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def check_message_lifecycle(
+        request: Request, session_id: str, body: MessageLifecycleCheck
+    ) -> dict[str, str | None]:
+        """Let the bound runner ask whether a buffered message is still worth delivering."""
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is None:
+            raise _session_not_found()
+        if not _has_bound_runner_authority(request, conv):
+            raise OmnigentError(
+                "Only the session's runner may check message lifecycle", code=ErrorCode.FORBIDDEN
+            )
+        reason = await message_drop_reason(
+            conversation_store, body.expires_at, body.sender_session_id
+        )
+        if reason is not None and body.sender_session_id is not None:
+            await report_dropped_message(
+                request.app,
+                conversation_store,
+                session_id,
+                body.sender_session_id,
+                body.text,
+                reason,
+            )
+        return {"dropped": reason}
+
     router.include_router(event_router)
 
     async def ingest_runner_batch(
@@ -1719,24 +1756,30 @@ def register_events_routes(
             await validate_saved_selection(cast("Request", request), conv, conv.model_override)
 
         startup = getattr(request.app.state, "startup_inputs", None)
-        if (
-            startup is not None
-            and body.type == "message"
-            and (body.expires_at is not None or body.sender_session_id is not None)
+        if body.type == "message" and (
+            body.expires_at is not None or body.sender_session_id is not None
         ):
+            if body.sender_session_id is not None and not peer_message:
+                # A named sender must be one the caller may act for before it can be notified.
+                await _require_access_and_level(
+                    user_id,
+                    body.sender_session_id,
+                    LEVEL_EDIT,
+                    permission_store,
+                    conversation_store,
+                )
             # Expiry and sender lifetime apply to every message, not only a saved startup one.
-            reason = await startup.drop_reason(body.expires_at, body.sender_session_id)
+            reason = await message_drop_reason(
+                conversation_store, body.expires_at, body.sender_session_id
+            )
             if reason is not None:
                 if body.sender_session_id is not None:
-                    await startup.report_drop(
+                    await report_dropped_message(
                         request.app,
+                        conversation_store,
                         session_id,
                         body.sender_session_id,
-                        " ".join(
-                            block.get("text", "")
-                            for block in body.data.get("content", [])
-                            if isinstance(block, dict)
-                        ),
+                        message_text(body.data),
                         reason,
                     )
                 return {"queued": False, "dropped": reason}

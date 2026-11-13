@@ -5050,6 +5050,38 @@ def create_runner_app(
         )
         return False
 
+    async def _drop_undeliverable_buffered(
+        session_id: str, buffered: list[dict[str, Any]]
+    ) -> None:
+        """Remove buffered messages that expired or whose sender ended while they waited."""
+        kept: list[dict[str, Any]] = []
+        for body in buffered:
+            expires_at = body.get("expires_at")
+            sender = body.get("sender_session_id")
+            if expires_at is None and sender is None:
+                kept.append(body)
+                continue
+            try:
+                response = await server_client.post(
+                    f"/v1/sessions/{session_id}/message_lifecycle",
+                    json={
+                        "expires_at": expires_at,
+                        "sender_session_id": sender,
+                        "text": " ".join(
+                            block["text"]
+                            for block in body.get("content", [])
+                            if isinstance(block, dict) and isinstance(block.get("text"), str)
+                        ),
+                    },
+                    timeout=10.0,
+                )
+                dropped = response.json().get("dropped") if response.status_code == 200 else None
+            except (httpx.HTTPError, RuntimeError, ValueError):
+                dropped = None  # Deliver when the check can't be made.
+            if dropped is None:
+                kept.append(body)
+        buffered[:] = kept
+
     async def _check_and_start_next_turn(session_id: str) -> None:
         with scheduled_run_scope(None, session_id=session_id):
             await _drain_next_turn(session_id)
@@ -5069,6 +5101,10 @@ def create_runner_app(
                 return
 
             buf = _session_message_buffers.get(session_id)
+            if buf:
+                await _drop_undeliverable_buffered(session_id, buf)
+                if not buf:
+                    _session_message_buffers.pop(session_id, None)
             if not buf:
                 _rewake_parent_if_inbox_stranded(session_id)
                 return

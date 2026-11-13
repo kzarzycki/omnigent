@@ -1626,3 +1626,64 @@ async def test_drop_notice_is_kept_in_history_when_the_recipient_has_no_runner(
     history = (await env.client.get(f"/v1/sessions/{sender_id}/items")).json()["data"]
     texts = [json.dumps(item) for item in history if item["type"] == "message"]
     assert any("was not delivered (expired)" in text and _FOLLOWUP_TEXT in text for text in texts)
+
+
+async def test_live_lifecycle_fields_reach_the_runner_for_an_ordinary_session(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = await create_test_agent(client)
+    ids = []
+    for _ in range(2):
+        created = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+        assert created.status_code == 201, created.text
+        ids.append(created.json()["id"])
+    sender_id, target_id = ids
+    expires_at = time.time() + 600
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+    try:
+        response = await client.post(
+            f"/v1/sessions/{target_id}/events",
+            json={**_FOLLOWUP, "sender_session_id": sender_id, "expires_at": expires_at},
+        )
+    finally:
+        await runner.aclose()
+    assert response.status_code == 202, response.text
+    [turn] = [event for event in forwarded if event.get("type") == "message"]
+    assert turn["expires_at"] == expires_at and turn["sender_session_id"] == sender_id
+
+
+async def test_unauthorized_sender_cannot_trigger_a_drop_notice(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notices: list[str] = []
+
+    async def record_notice(_target: str, _sender: Any, notice: str, **_: Any) -> bool:
+        notices.append(notice)
+        return True
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._wake_parent_for_blocked_child",
+        record_notice,
+    )
+    sessions: dict[str, str] = {}
+    for user in ("alice@example.com", "bob@example.com"):
+        auth_client.headers["X-Forwarded-Email"] = user
+        agent = await create_test_agent(auth_client, name=f"agent-{user.split('@')[0]}")
+        response = await auth_client.post("/v1/sessions", json={"agent_id": agent["id"]})
+        assert response.status_code == 201, response.text
+        sessions[user] = response.json()["id"]
+    # Alice may post to her own session but has no access to Bob's.
+    auth_client.headers["X-Forwarded-Email"] = "alice@example.com"
+    response = await auth_client.post(
+        f"/v1/sessions/{sessions['alice@example.com']}/events",
+        json={
+            **_FOLLOWUP,
+            "sender_session_id": sessions["bob@example.com"],
+            "expires_at": 1,
+        },
+    )
+    assert response.status_code in (403, 404), response.text
+    assert notices == []

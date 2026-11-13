@@ -147,6 +147,79 @@ def wake_startup_worker(host_id: str) -> None:
             entry[2].set()
 
 
+def message_text(data: dict[str, Any]) -> str:
+    """The text blocks of a message payload, joined."""
+    return " ".join(
+        block["text"]
+        for block in data.get("content", [])
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+
+
+async def message_drop_reason(
+    conversations: ConversationStore, expires_at: float | None, sender_session_id: str | None
+) -> str | None:
+    """Why a message with these lifecycle fields must not be delivered, if it must not."""
+    if expires_at is not None and expires_at <= time.time():
+        return "expired"
+    if sender_session_id is not None:
+        sender = await asyncio.to_thread(conversations.get_conversation, sender_session_id)
+        if sender is None or _session_ended(sender):
+            return "sender ended"
+    return None
+
+
+async def report_dropped_message(
+    app: Any,
+    conversations: ConversationStore,
+    session_id: str,
+    sender_session_id: str,
+    text: str,
+    reason: str,
+) -> None:
+    """Tell the sender's parent (or a live parentless sender) what was dropped."""
+    _logger.info("Dropped message for session %s: %s", session_id, reason)
+    sender = await asyncio.to_thread(conversations.get_conversation, sender_session_id)
+    if sender is None:
+        return
+    target_id = sender.parent_conversation_id or (None if _session_ended(sender) else sender.id)
+    if target_id is None:
+        return
+    notice = (
+        f"[System: A message from session {sender.id} to session {session_id} was not "
+        f"delivered ({reason}). It began: {text[:_DROPPED_PREVIEW_CHARS]!r}]"
+    )
+    from omnigent.server.routes._sessions.orchestration import _wake_parent_for_blocked_child
+
+    try:
+        woke = await _wake_parent_for_blocked_child(
+            target_id,
+            sender,
+            notice,
+            conversation_store=conversations,
+            runner_router=getattr(app.state, "runner_router", None),
+            agent_store=getattr(app.state, "agent_store", None),
+        )
+        if woke:
+            return
+        # No runner to wake: keep the event in the recipient's history instead.
+        await asyncio.to_thread(
+            conversations.append,
+            target_id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id=f"dropped_{uuid4().hex}",
+                    data=MessageData(
+                        role="user", content=[{"type": "input_text", "text": notice}]
+                    ),
+                )
+            ],
+        )
+    except Exception:
+        _logger.exception("Unable to report dropped message for session %s", session_id)
+
+
 class ManagedStartupInputs:
     """Recover pending conversation items on the replica connected to their host."""
 
@@ -624,16 +697,7 @@ class ManagedStartupInputs:
     async def drop_reason(
         self, expires_at: float | None, sender_session_id: str | None
     ) -> str | None:
-        """Why a message with these lifecycle fields must not be delivered, if it must not."""
-        if expires_at is not None and expires_at <= time.time():
-            return "expired"
-        if sender_session_id is not None:
-            sender = await asyncio.to_thread(
-                self.conversations.get_conversation, sender_session_id
-            )
-            if sender is None or _session_ended(sender):
-                return "sender ended"
-        return None
+        return await message_drop_reason(self.conversations, expires_at, sender_session_id)
 
     async def _notify_dropped(
         self, app: Any, session_id: str, item: ConversationItem, reason: str
@@ -644,60 +708,16 @@ class ManagedStartupInputs:
                 app,
                 session_id,
                 options.sender_session_id,
-                " ".join(
-                    block["text"]
-                    for block in input_content(item)
-                    if isinstance(block, dict) and isinstance(block.get("text"), str)
-                ),
+                message_text({"content": input_content(item)}),
                 reason,
             )
 
     async def report_drop(
         self, app: Any, session_id: str, sender_session_id: str, text: str, reason: str
     ) -> None:
-        """Tell the sender's parent (or a live parentless sender) what was dropped."""
-        _logger.info("Dropped message for session %s: %s", session_id, reason)
-        sender = await asyncio.to_thread(self.conversations.get_conversation, sender_session_id)
-        if sender is None:
-            return
-        target_id = sender.parent_conversation_id or (
-            None if _session_ended(sender) else sender.id
+        await report_dropped_message(
+            app, self.conversations, session_id, sender_session_id, text, reason
         )
-        if target_id is None:
-            return
-        notice = (
-            f"[System: A message from session {sender.id} to session {session_id} was not "
-            f"delivered ({reason}). It began: {text[:_DROPPED_PREVIEW_CHARS]!r}]"
-        )
-        from omnigent.server.routes._sessions.orchestration import _wake_parent_for_blocked_child
-
-        try:
-            woke = await _wake_parent_for_blocked_child(
-                target_id,
-                sender,
-                notice,
-                conversation_store=self.conversations,
-                runner_router=getattr(app.state, "runner_router", None),
-                agent_store=getattr(app.state, "agent_store", None),
-            )
-            if woke:
-                return
-            # No runner to wake: keep the event in the recipient's history instead.
-            await asyncio.to_thread(
-                self.conversations.append,
-                target_id,
-                [
-                    NewConversationItem(
-                        type="message",
-                        response_id=f"dropped_{uuid4().hex}",
-                        data=MessageData(
-                            role="user", content=[{"type": "input_text", "text": notice}]
-                        ),
-                    )
-                ],
-            )
-        except Exception:
-            _logger.exception("Unable to report dropped message for session %s", session_id)
 
     async def retry(self, session_id: str) -> bool:
         changed = False

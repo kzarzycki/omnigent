@@ -4612,3 +4612,49 @@ async def test_events_compact_on_claude_sdk_buffered_compact_failed_fallback() -
         f"swallowed); got {len(in_progress)} from types {[e.get('type') for e in events]}"
     )
     assert completed == [], "no completed should appear when nothing compacted"
+
+
+@pytest.mark.asyncio
+async def test_buffered_message_that_lapsed_while_waiting_is_dropped_at_drain() -> None:
+    """A message with an expiry or sender is rechecked with the server when its turn comes."""
+    hc = _ScriptedHarnessClient([])
+    pm = _FakeProcessManager(hc)
+    sdk_spec = _harness_spec("claude-sdk")
+    checks: list[dict[str, Any]] = []
+
+    class _LifecycleServerClient(NullServerClient):
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            if not url.endswith("/message_lifecycle"):
+                return await super().post(url, **kwargs)
+            checks.append(kwargs["json"])
+            return httpx.Response(200, json={"dropped": "expired"})
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return sdk_spec
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_LifecycleServerClient(),  # type: ignore[arg-type]
+    )
+    sid = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": sid, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        app.state.session_message_buffers[sid] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "stale instruction"}],
+                "expires_at": 1,
+                "conversation_id": sid,
+            },
+        ]
+        await app.state.check_and_start_next_turn(sid)
+    assert [check["text"] for check in checks] == ["stale instruction"]
+    assert hc.posted_bodies == []
+    assert not app.state.session_message_buffers.get(sid)

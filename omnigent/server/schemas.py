@@ -1458,6 +1458,14 @@ class SessionEventInput(BaseModel):
         return data
 
 
+class MessageLifecycleCheck(BaseModel):
+    """A runner's question about a buffered message's expiry and sender."""
+
+    expires_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    sender_session_id: str | None = None
+    text: str = ""
+
+
 class SessionStartupInput(SessionEventInput):
     """A first user input the server accepts durably before provisioning a host."""
 
