@@ -182,7 +182,7 @@ def scenario_archived(cwd: str) -> None:
     client = Client(cwd)
     client.prompt("Remember the codeword OSPREY. Reply only: noted")
     cloud_id = client.cloud_url.rsplit("/", 1)[1]
-    bridge.call_api(f"/v1/code/sessions/{cloud_id}/archive", {})
+    bridge.archive(cloud_id)
     print(f"\n-- archived {cloud_id}, as the claude.ai sidebar does --")
     client.prompt("What was the codeword? One word.")
     client.close()
