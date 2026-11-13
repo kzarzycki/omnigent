@@ -176,7 +176,7 @@ commit with its own key, so every machine's `omnigent-update` refuses to install
 the head and the nightly sync refuses to take it. Land a PR on a landing host
 with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
 land <pr> --wait`, run from a checkout of the PR's head (its worktree): it reads
-`docs/agents/loop.md` there, whose `land` setting makes it squash the PR into one
+`docs/agents/gatekeeper.md` there, whose `land` setting makes it squash the PR into one
 commit signed with this checkout's key, check it against `allowed_signers`, and
 fast-forward `mine` to it. The fork runs no GitHub Actions (`loop.ci: false`), so
 first record `mise run check:all` passing on the head with `approvals.py
