@@ -4655,13 +4655,26 @@ async def test_buffered_message_that_lapsed_while_waiting_is_dropped_at_drain() 
             },
         ]
         await app.state.check_and_start_next_turn(sid)
+        await _let_scheduled_turn_run(app, sid)
     assert [check["text"] for check in checks] == ["stale instruction"]
     assert hc.posted_bodies == []
     assert not app.state.session_message_buffers.get(sid)
 
 
+async def _let_scheduled_turn_run(app: Any, sid: str) -> None:
+    """Give a turn the drain scheduled the chance to reach the harness."""
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if sid not in app.state.active_turns:
+            break
+    await asyncio.sleep(0.1)
+
+
 @pytest.mark.asyncio
-async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check_fails() -> None:
+@pytest.mark.parametrize("failure", ["http_503", "http_error", "runtime_error", "bad_json"])
+async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check_fails(
+    failure: str,
+) -> None:
     """A server that can't answer must not let an expired message run."""
     hc = _ScriptedHarnessClient([])
     pm = _FakeProcessManager(hc)
@@ -4673,6 +4686,12 @@ async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check
             if not url.endswith("/message_lifecycle"):
                 return await super().post(url, **kwargs)
             attempts.append(url)
+            if failure == "http_error":
+                raise httpx.ConnectError("unreachable")
+            if failure == "runtime_error":
+                raise RuntimeError("client closed")
+            if failure == "bad_json":
+                return httpx.Response(200, content=b"not json")
             return httpx.Response(503, json={"error": "unavailable"})
 
     async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
@@ -4701,6 +4720,7 @@ async def test_expired_buffered_message_is_dropped_even_when_the_lifecycle_check
             },
         ]
         await app.state.check_and_start_next_turn(sid)
+        await _let_scheduled_turn_run(app, sid)
     assert len(attempts) == 3
     assert hc.posted_bodies == []
     assert not app.state.session_message_buffers.get(sid)
