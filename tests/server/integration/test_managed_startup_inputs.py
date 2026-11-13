@@ -1360,7 +1360,6 @@ async def test_waking_a_host_worker_sets_its_event(startup_env: _Env) -> None:
         await asyncio.gather(worker, return_exceptions=True)
 
 
-<<<<<<< HEAD
 @pytest.mark.parametrize(
     "failed_stage",
     [
@@ -1461,7 +1460,8 @@ async def test_saved_delivery_identifies_failed_boundary(
             if getattr(r, "event_name", None) == "scheduled_run_prompt_sent"
         ]
     ) == int(reported_stage == "post_delivery")
-=======
+
+
 _FOLLOWUP_TEXT = "Follow-up that should not outlive its sender."
 _FOLLOWUP = {
     "type": "message",
@@ -1536,4 +1536,3 @@ async def test_pending_input_without_sender_fields_is_kept(startup_env: _Env) ->
     items = env.conv_store.list_pending_inputs(session_id)
     kept = await env.app.state.startup_inputs._drop_undeliverable(env.app, session_id, items)
     assert kept == items
->>>>>>> 267a7057b (feat(server): expire pending inputs or drop them when their sender ended)
