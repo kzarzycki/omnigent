@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
@@ -121,6 +121,7 @@ def _build_usage_report(
     user_id: str | None,
     *,
     include_page_details: bool = False,
+    days: int | None = None,
 ) -> UsageReport:
     """
     Build the usage report: a daily-rollup cost summary plus session detail.
@@ -145,6 +146,10 @@ def _build_usage_report(
         to the reserved local owner the daily rollup and grants are keyed by.
     :param include_page_details: Populate the timeline and display metadata
         used only by the release-gated web Usage page.
+    :param days: Restrict the per-session detail to sessions active within the
+        last *days* UTC calendar days (today included); ``None`` lists every
+        session. The listing is newest-activity-first, so paging stops at the
+        first session older than the window instead of reading every tree.
     :returns: The populated :class:`UsageReport`.
     """
     # The daily rollup and session-permission grants key spend by the resolved
@@ -159,9 +164,17 @@ def _build_usage_report(
     cost_30d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=29))
     total = conversation_store.sum_daily_cost(rollup_user, _EPOCH_DAY)
 
+    cutoff_epoch: int | None = None
+    if days is not None:
+        window_start = _day_offset(today, days=days - 1)
+        cutoff_epoch = int(
+            datetime.strptime(window_start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+        )
+
     sessions: list[SessionUsage] = []
     after: str | None = None
-    while True:
+    window_exhausted = False
+    while not window_exhausted:
         page = conversation_store.list_conversations(
             limit=200,
             after=after,
@@ -172,6 +185,9 @@ def _build_usage_report(
             sort_by="updated_at",
         )
         for conv in page.data:
+            if cutoff_epoch is not None and conv.updated_at < cutoff_epoch:
+                window_exhausted = True
+                break
             if conv.agent_id is None:
                 continue
             # The list page already holds each row, so pass its root to skip
@@ -251,7 +267,15 @@ def create_usage_router(
     router = APIRouter()
 
     @router.get("/usage", response_model=UsageReport)
-    async def get_usage(request: Request) -> UsageReport:
+    async def get_usage(
+        request: Request,
+        days: int | None = Query(
+            default=None,
+            ge=1,
+            le=3650,
+            description="Only list sessions active in the last N UTC days.",
+        ),
+    ) -> UsageReport:
         """
         Aggregate the calling user's LLM spend across their sessions.
 
@@ -266,6 +290,7 @@ def create_usage_router(
             conversation_store,
             user_id,
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
+            days=days,
         )
 
     return router

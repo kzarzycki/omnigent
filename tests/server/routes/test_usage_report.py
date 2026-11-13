@@ -260,3 +260,71 @@ def test_sum_daily_cost_range(db_uri: str) -> None:
     assert store.sum_daily_cost("alice", "0000-00-00") == 7.0  # all-time
     assert store.sum_daily_cost("alice", "2026-08-01") == 0.0  # nothing in range
     assert store.sum_daily_cost("nobody", "0000-00-00") == 0.0
+
+
+def _count_statements(store: SqlAlchemyConversationStore) -> list[str]:
+    from sqlalchemy import event
+
+    statements: list[str] = []
+    event.listen(
+        store._engine,
+        "before_cursor_execute",
+        lambda _c, _cur, statement, *_a: statements.append(statement),
+    )
+    return statements
+
+
+def test_usage_report_two_day_window_reads_only_recent_trees(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2-day window on a busy fixture costs queries per recent session, not per session ever."""
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_784_678_400 + 3_600  # 2026-07-22T01:00:00Z
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+    recent_ids = []
+    # 300 sessions spread over 60 days (5 per day), each with a sub-agent.
+    for index in range(300):
+        ts = now - (index // 5) * _DAY - (index % 5) * 60
+        conv_id = _add_session(
+            store,
+            monkeypatch,
+            ts=ts,
+            cost=1.0,
+            by_model={"m": {"total_cost_usd": 1.0}},
+            title=f"s{index}",
+        )
+        store.create_conversation(
+            kind="sub_agent", parent_conversation_id=conv_id, agent_id=_AGENT_ID
+        )
+        if index < 10:
+            recent_ids.append(conv_id)
+
+    statements = _count_statements(store)
+    report = _build_usage_report(store, None, days=2)
+
+    # Today (index 0-4) and yesterday (5-9) only.
+    assert {s.id for s in report.sessions} == set(recent_ids)
+    # Bounded by the window (10 sessions x a few reads), far below the ~2000
+    # statements the all-time walk needs; each costs a network round trip.
+    assert len(statements) < 150
+
+
+def test_usage_endpoint_days_param(db_uri: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from omnigent.server.routes.usage import create_usage_router
+
+    store = SqlAlchemyConversationStore(db_uri)
+    now = 1_784_678_400 + 3_600
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
+    new_id = _add_session(store, monkeypatch, ts=now, cost=1.0, by_model={}, title="new")
+    _add_session(store, monkeypatch, ts=now - 5 * _DAY, cost=2.0, by_model={}, title="old")
+    app = FastAPI()
+    app.include_router(create_usage_router(store), prefix="/v1")
+    client = TestClient(app)
+
+    assert [s["id"] for s in client.get("/v1/usage?days=2").json()["sessions"]] == [new_id]
+    assert len(client.get("/v1/usage").json()["sessions"]) == 2
+    assert client.get("/v1/usage?days=0").status_code == 422
