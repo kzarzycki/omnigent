@@ -578,6 +578,7 @@ class SandboxResourcesSpec:
     memory_high: str | None = None
     memory_max: str | None = None
     memory_swap_max: str | None = None
+    tasks_max: str | None = None
     cpu_weight: int | None = None
 
     def systemd_properties(self) -> dict[str, str]:
@@ -586,6 +587,7 @@ class SandboxResourcesSpec:
             "MemoryHigh": self.memory_high,
             "MemoryMax": self.memory_max,
             "MemorySwapMax": self.memory_swap_max,
+            "TasksMax": self.tasks_max,
             "CPUWeight": str(self.cpu_weight) if self.cpu_weight is not None else None,
         }
         return {name: value for name, value in properties.items() if value is not None}
@@ -605,17 +607,17 @@ def parse_sandbox_resources(raw: object, sandbox_type: str) -> SandboxResourcesS
     :returns: The limits, or ``None`` when the block is absent.
     :raises ValueError: If the block is malformed or the platform cannot apply it.
     """
-    from omnigent.util.user_systemd import is_memory_limit
+    from omnigent.util.user_systemd import is_memory_limit, is_tasks_limit
 
     if raw is None:
         return None
     if not isinstance(raw, dict):
         raise ValueError("os_env.sandbox.resources must be a mapping")
-    unknown = set(raw) - {*_SANDBOX_RESOURCE_MEMORY_KEYS, "cpu_weight"}
+    unknown = set(raw) - {*_SANDBOX_RESOURCE_MEMORY_KEYS, "tasks_max", "cpu_weight"}
     if unknown:
         raise ValueError(
             f"os_env.sandbox.resources does not accept {', '.join(sorted(map(str, unknown)))}; "
-            "use memory_high, memory_max, memory_swap_max or cpu_weight"
+            "use memory_high, memory_max, memory_swap_max, tasks_max or cpu_weight"
         )
     if sandbox_type not in ("linux_bwrap", "none"):
         raise ValueError(
@@ -636,6 +638,14 @@ def parse_sandbox_resources(raw: object, sandbox_type: str) -> SandboxResourcesS
                 f"a percentage such as '25%', or 'infinity', got {value!r}"
             )
         memory[key] = value
+    tasks_max = raw.get("tasks_max")
+    if isinstance(tasks_max, int) and not isinstance(tasks_max, bool):
+        tasks_max = str(tasks_max)
+    if tasks_max is not None and (not isinstance(tasks_max, str) or not is_tasks_limit(tasks_max)):
+        raise ValueError(
+            f"os_env.sandbox.resources.tasks_max must be a positive count such as 4096, "
+            f"a percentage such as '10%', or 'infinity', got {raw['tasks_max']!r}"
+        )
     cpu_weight = raw.get("cpu_weight")
     if cpu_weight is not None and (
         isinstance(cpu_weight, bool)
@@ -646,7 +656,7 @@ def parse_sandbox_resources(raw: object, sandbox_type: str) -> SandboxResourcesS
             f"os_env.sandbox.resources.cpu_weight must be an integer from 1 to 10000, "
             f"got {cpu_weight!r}"
         )
-    return SandboxResourcesSpec(cpu_weight=cpu_weight, **memory)
+    return SandboxResourcesSpec(tasks_max=tasks_max, cpu_weight=cpu_weight, **memory)
 
 
 @dataclass
