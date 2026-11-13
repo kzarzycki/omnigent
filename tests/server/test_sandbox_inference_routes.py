@@ -503,6 +503,23 @@ async def test_configured_discovery_takes_precedence_over_the_provider_hook(
     target.default_model_options.assert_not_called()
 
 
+async def test_sandbox_preview_hides_a_blocked_model(env: _Env, monkeypatch: pytest.MonkeyPatch):
+    """The sandbox new-session picker drops a model the server blocks and keeps the rest."""
+    from omnigent.server import model_block_list
+
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list({"blocked_models": ["gpt-5.5-mini"]}),
+    )
+    _discoverable_gateway(env, monkeypatch, [])
+    response = await env.client.get(
+        "/v1/sandbox-providers/agent_sandbox/harnesses/codex-native/model-options"
+    )
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["models"]] == ["gpt-5.5"]
+
+
 async def test_malformed_providers_leave_the_unbound_preview_unconfigured(
     env: _Env, monkeypatch: pytest.MonkeyPatch
 ):

@@ -54,6 +54,39 @@ def test_catalog_rows_render_for_every_native_picker(
         expect(rows.nth(1)).to_contain_text("Alternate")
 
 
+@pytest.mark.parametrize(
+    ("blocked", "offered"),
+    [
+        ([], ["low", "medium", "high", "xhigh", "max"]),
+        (["max"], ["low", "medium", "high", "xhigh"]),
+    ],
+    ids=["unset", "max-blocked"],
+)
+def test_effort_picker_leaves_out_blocked_levels(
+    page: Page,
+    chat_session_contract: ChatSessionContract,
+    blocked: list[str],
+    offered: list[str],
+) -> None:
+    """The in-session effort picker drops the levels ``/v1/info`` reports as blocked."""
+    chat = chat_session_contract
+    chat.blocked_efforts = blocked
+    chat.set_catalog(
+        harness="claude-native",
+        models=[model_option("primary", display_name="Primary", is_default=True)],
+        selected_model="primary",
+    )
+    chat.update_session(labels={"omnigent.wrapper": "claude-code-native-ui"})
+    page.goto(chat.url)
+    _open_models(page)
+
+    levels = page.locator("[data-effort-level]")
+    expect(levels).to_have_count(len(offered))
+    assert [levels.nth(i).get_attribute("data-effort-level") for i in range(len(offered))] == (
+        offered
+    )
+
+
 def test_reported_model_highlights_only_an_exact_catalog_match(
     page: Page,
     chat_session_contract: ChatSessionContract,

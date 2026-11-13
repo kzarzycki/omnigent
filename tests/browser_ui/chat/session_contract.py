@@ -274,6 +274,7 @@ class ChatSessionContract:
         default_factory=lambda: {"queued": True, "item_id": "browser-queued-item"}
     )
     reject_uploads: bool = True
+    blocked_efforts: list[str] = field(default_factory=list)
     _stream_generation: int = 0
 
     @property
@@ -418,7 +419,8 @@ def install_chat_session_routes(handle: ChatSessionContract) -> None:
 
     contract.json(
         "/v1/info",
-        {
+        lambda _request: {
+            "blocked_efforts": handle.blocked_efforts,
             "accounts_enabled": False,
             "single_user": True,
             "login_url": None,

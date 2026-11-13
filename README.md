@@ -484,6 +484,37 @@ Defaults are per agent, so a Claude default and a Codex default coexist. You
 can also switch models in the middle of a session with the `/model` command.
 
 <details>
+<summary>Block models and effort levels</summary>
+
+A server operator can take models and reasoning-effort levels off every
+harness's list:
+
+```yaml
+# ~/.omnigent/config.yaml, or the YAML passed to `omnigent server --config`
+blocked_models: [claude-opus-4-1, gpt-5.2]
+blocked_efforts: [xhigh, max, ultra]
+```
+
+Both lists are empty by default. Entries are exact ids, compared without
+regard to case; a model entry also blocks its context-window variants
+(`claude-opus-4-1[1m]`). Block each spelling a harness accepts, such as a
+picker alias (`opus`) and the full model id.
+
+Blocked entries are left out of the web UI's model and effort pickers. A
+session start or a model/effort switch that names one (through the API,
+`sys_session_create`, a scheduled task or a sub-agent) is refused with an
+error naming the entry and the setting. So is a start that names no model when
+the agent's or the harness's default model is blocked: set another default.
+While `blocked_models` is set, a start that names no model is also refused when
+Omnigent cannot learn the default (the host is offline or does not answer, the
+harness has no model catalog, or a sandbox has no configured default); choose a
+model for it. A
+session already running on an entry that is blocked later keeps running; the
+block applies to its next start or switch. Restart the server after a change.
+
+</details>
+
+<details>
 <summary>Gateway base URLs (OpenRouter, Ollama)</summary>
 
 When you add a **Gateway** credential, `omnigent setup` asks for a base URL

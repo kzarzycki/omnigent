@@ -64,7 +64,11 @@ import {
 } from "@/hooks/useSandboxModelOptions";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
-import type { ServerInfo } from "@/lib/capabilities";
+import {
+  FALLBACK_SERVER_INFO,
+  setCachedServerInfoForTests,
+  type ServerInfo,
+} from "@/lib/capabilities";
 import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
 import {
@@ -11842,6 +11846,19 @@ describe("managed sandbox inference models", () => {
       expect(body.inference_configuration_revision).toBeUndefined();
     },
   );
+
+  it.each([
+    ["nothing blocked", [], true],
+    ["opus blocked", ["opus"], false],
+  ])("the sandbox's built-in model list honors the block list (%s)", (_name, blocked, shown) => {
+    setCachedServerInfoForTests({ ...FALLBACK_SERVER_INFO, blocked_models: blocked });
+    onTestFinished(() => setCachedServerInfoForTests(null));
+    preview();
+    renderLanding({ managed_sandboxes_enabled: true, sandbox_provider: "modal" });
+    openAgentModels("a1");
+    expect(screen.queryByTestId("new-chat-landing-agent-model-opus") !== null).toBe(shown);
+    expect(screen.getByTestId("new-chat-landing-agent-model-sonnet")).toBeInTheDocument();
+  });
 
   it("does not preview inference for an ordinary host on an opted-in server", () => {
     preview(catalog, new Error("Gateway unavailable"));

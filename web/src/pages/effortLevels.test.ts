@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeModelOption } from "@/lib/types";
 
 import {
@@ -359,6 +359,31 @@ describe("effortLevelsForConv with a declared effort family", () => {
       "high",
       "xhigh",
       "max",
+    ]);
+  });
+});
+
+describe("effortLevelsForConv with blocked efforts", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("drops the levels the server blocks from the in-session picker", async () => {
+    vi.resetModules();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ blocked_efforts: ["max"] }) })),
+    );
+    const { resolveServerInfo } = await import("@/lib/capabilities");
+    await resolveServerInfo();
+    const { effortLevelsForConv: levels } = await import("./ChatPage");
+
+    expect(levels({ labels: { "omnigent.wrapper": "claude-code-native-ui" } })).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
     ]);
   });
 });
