@@ -275,4 +275,45 @@ describe("chat link preview on touch and keyboard", () => {
     await user.keyboard(" ");
     await screen.findByTestId("github-link-preview");
   });
+
+  it("keeps the card closed while the label only has keyboard focus, until Enter", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(PULL_PREVIEW));
+    renderMarkdown("See https://github.com/acme/app/pull/42");
+    const label = await screen.findByRole("button", { name: "Pull request status: Open" });
+    const user = userEvent.setup();
+
+    label.focus();
+    expect(label).toHaveFocus();
+    // Past the hover card's open delay, so a focus-driven open would have landed.
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    expect(screen.queryByTestId("github-link-preview")).toBeNull();
+
+    await user.keyboard("{Enter}");
+    await screen.findByTestId("github-link-preview");
+  });
+
+  it("reports the card's open state on the label through aria-expanded", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(PULL_PREVIEW));
+    renderMarkdown("See https://github.com/acme/app/pull/42");
+    const label = await screen.findByRole("button", { name: "Pull request status: Open" });
+    expect(label).toHaveAttribute("aria-expanded", "false");
+
+    await tap(label);
+    await screen.findByTestId("github-link-preview");
+    expect(label).toHaveAttribute("aria-expanded", "true");
+    await tap(label);
+    await waitFor(() => expect(screen.queryByTestId("github-link-preview")).toBeNull());
+    expect(label).toHaveAttribute("aria-expanded", "false");
+
+    const user = userEvent.setup();
+    label.focus();
+    await user.keyboard("{Enter}");
+    await screen.findByTestId("github-link-preview");
+    expect(label).toHaveAttribute("aria-expanded", "true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("github-link-preview")).toBeNull());
+    expect(label).toHaveAttribute("aria-expanded", "false");
+  });
 });
