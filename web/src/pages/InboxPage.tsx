@@ -58,6 +58,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { ApprovalCard, type SubmitApprovalFn } from "@/components/blocks/ApprovalCard";
+import { LinkPreviewSessionContext } from "@/components/blocks/ChatLinkPreview";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
 import { PageScroll } from "@/components/PageScroll";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -385,42 +386,44 @@ export function InboxPage() {
           onToggle={onToggle}
         >
           <SessionLine title={title} detail={agentLabel !== title ? agentLabel : undefined} />
-          <ApprovalCard
-            elicitationId={elicitationId}
-            message={item.elicitation.message}
-            phase={item.elicitation.phase}
-            policyName={item.elicitation.policyName}
-            contentPreview={item.elicitation.contentPreview}
-            requestedSchema={item.elicitation.requestedSchema}
-            url={item.elicitation.url}
-            nativeDelivery={
-              verdict && item.elicitation.nativeDelivery
-                ? {
-                    ...item.elicitation.nativeDelivery,
-                    state: "sending",
-                    action: verdict.action,
-                  }
-                : item.elicitation.nativeDelivery
-            }
-            status={verdict && !item.elicitation.nativeDelivery ? "responded" : "pending"}
-            response={verdict ?? null}
-            askUserQuestion={item.elicitation.askUserQuestion}
-            exitPlanMode={item.elicitation.exitPlanMode}
-            codexCommand={item.elicitation.codexCommand}
-            allowAllEdits={item.elicitation.allowAllEdits}
-            allowAutoMode={item.elicitation.allowAutoMode}
-            permissionDirectories={item.elicitation.permissionDirectories}
-            rememberScope={item.elicitation.rememberScope}
-            codexPersistModes={item.elicitation.codexPersistModes}
-            agyPermission={item.elicitation.agyPermission}
-            onSubmit={makeSubmit(item)}
-            requester={
-              item.resolveSessionId !== item.row.id
-                ? { sessionId: item.resolveSessionId, ancestorSessionId: item.row.id }
-                : null
-            }
-            className="border-0 bg-transparent p-0"
-          />
+          <LinkPreviewSessionContext.Provider value={item.resolveSessionId}>
+            <ApprovalCard
+              elicitationId={elicitationId}
+              message={item.elicitation.message}
+              phase={item.elicitation.phase}
+              policyName={item.elicitation.policyName}
+              contentPreview={item.elicitation.contentPreview}
+              requestedSchema={item.elicitation.requestedSchema}
+              url={item.elicitation.url}
+              nativeDelivery={
+                verdict && item.elicitation.nativeDelivery
+                  ? {
+                      ...item.elicitation.nativeDelivery,
+                      state: "sending",
+                      action: verdict.action,
+                    }
+                  : item.elicitation.nativeDelivery
+              }
+              status={verdict && !item.elicitation.nativeDelivery ? "responded" : "pending"}
+              response={verdict ?? null}
+              askUserQuestion={item.elicitation.askUserQuestion}
+              exitPlanMode={item.elicitation.exitPlanMode}
+              codexCommand={item.elicitation.codexCommand}
+              allowAllEdits={item.elicitation.allowAllEdits}
+              allowAutoMode={item.elicitation.allowAutoMode}
+              permissionDirectories={item.elicitation.permissionDirectories}
+              rememberScope={item.elicitation.rememberScope}
+              codexPersistModes={item.elicitation.codexPersistModes}
+              agyPermission={item.elicitation.agyPermission}
+              onSubmit={makeSubmit(item)}
+              requester={
+                item.resolveSessionId !== item.row.id
+                  ? { sessionId: item.resolveSessionId, ancestorSessionId: item.row.id }
+                  : null
+              }
+              className="border-0 bg-transparent p-0"
+            />
+          </LinkPreviewSessionContext.Provider>
           <InboxActions>
             <Button asChild variant="outline" size="xs" className={OUTLINE_ACTION}>
               <Link to={`/c/${item.row.id}`} componentId="inbox.approval.open_session">

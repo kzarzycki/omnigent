@@ -70,6 +70,7 @@ import {
 } from "@/components/chat/conversationScope";
 import { AskUserQuestionForm, type AskUserQuestionAnswers } from "./AskUserQuestionForm";
 import { ElicitationMessage } from "./ElicitationMessage";
+import { LinkPreviewSessionContext } from "./ChatLinkPreview";
 import {
   type ElicitationAnswers,
   ElicitationSchemaForm,
@@ -972,28 +973,30 @@ export function ElicitationCard({
       ? { sessionId: item.targetSessionId, ancestorSessionId: conversationId }
       : null;
   return (
-    <ApprovalCard
-      elicitationId={item.elicitationId}
-      nativeDelivery={item.nativeDelivery}
-      message={item.message}
-      phase={item.phase}
-      policyName={item.policyName}
-      contentPreview={item.contentPreview}
-      requestedSchema={item.requestedSchema}
-      url={item.url}
-      status={item.status}
-      response={item.response}
-      askUserQuestion={item.askUserQuestion}
-      exitPlanMode={item.exitPlanMode}
-      codexCommand={item.codexCommand}
-      allowAllEdits={item.allowAllEdits}
-      allowAutoMode={item.allowAutoMode}
-      permissionDirectories={item.permissionDirectories}
-      rememberScope={item.rememberScope}
-      codexPersistModes={item.codexPersistModes}
-      agyPermission={item.agyPermission}
-      onSubmit={onSubmit}
-      requester={requester}
-    />
+    <LinkPreviewSessionContext.Provider value={item.targetSessionId ?? undefined}>
+      <ApprovalCard
+        elicitationId={item.elicitationId}
+        nativeDelivery={item.nativeDelivery}
+        message={item.message}
+        phase={item.phase}
+        policyName={item.policyName}
+        contentPreview={item.contentPreview}
+        requestedSchema={item.requestedSchema}
+        url={item.url}
+        status={item.status}
+        response={item.response}
+        askUserQuestion={item.askUserQuestion}
+        exitPlanMode={item.exitPlanMode}
+        codexCommand={item.codexCommand}
+        allowAllEdits={item.allowAllEdits}
+        allowAutoMode={item.allowAutoMode}
+        permissionDirectories={item.permissionDirectories}
+        rememberScope={item.rememberScope}
+        codexPersistModes={item.codexPersistModes}
+        agyPermission={item.agyPermission}
+        onSubmit={onSubmit}
+        requester={requester}
+      />
+    </LinkPreviewSessionContext.Provider>
   );
 }
