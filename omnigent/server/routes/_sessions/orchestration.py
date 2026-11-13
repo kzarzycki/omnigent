@@ -13647,7 +13647,7 @@ async def _fetch_model_options(
         # serves the deployment's curated provider ``models:`` shortlist
         # resolved from the spec instead of a runner-owned catalog.
         if _resolve_harness_impl_is_acp(conv, agent_store, agents_by_id):
-            return await _load_acp_model_options(session_id, conv, agent_store)
+            return await _load_acp_model_options(session_id, conv, agent_store, agents_by_id)
         return []
     cached = _model_options_cache.get(session_id)
     if runner_client is None:
@@ -13854,6 +13854,7 @@ async def _load_acp_model_options(
     session_id: str,
     conv: Conversation,
     agent_store: AgentStore | None,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve the curated picker options for a generic ACP session.
 
@@ -13869,6 +13870,8 @@ async def _load_acp_model_options(
     :param conv: Conversation row the options are resolved for.
     :param agent_store: Store for the bound-agent spec load; ``None`` falls
         back to the runtime global store.
+    :param agents_by_id: Agent rows the caller already read; when given, the
+        spec load reuses them instead of reading the store.
     :returns: Option dicts (``id`` / ``displayName`` / ``isDefault``), or
         ``[]`` when nothing was curated.
     """
@@ -13879,9 +13882,9 @@ async def _load_acp_model_options(
         from omnigent.runtime._globals import _agent_store
 
         agent_store = _agent_store
-    if agent_store is None:
+    if agent_store is None and agents_by_id is None:
         return []
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
+    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store, agents_by_id)
     if spec is None:
         return []
     from omnigent.models.model_catalog import _acp_launch_model, acp_curated_models
@@ -14285,7 +14288,10 @@ async def _get_session_snapshot(
                             model_override=conv.model_override,
                         )
         except Exception:  # noqa: BLE001
-            pass
+            # A failed row read resolves like a missing row: nothing later in
+            # this GET reads the store again on the event loop.
+            if agents_by_id is None:
+                agents_by_id = {}
     # The harness's own report is the display authority: when a session has
     # a verbatim ``reported_model``, it supersedes the spec-derived value on
     # the wire's ``llm_model`` field (the web renders and highlights only
