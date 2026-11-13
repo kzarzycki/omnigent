@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import time
-import types
 import logging
 import threading
+import time
+import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -1608,6 +1608,16 @@ async def test_drop_notice_is_kept_in_history_when_the_recipient_has_no_runner(
     _bind(env, target_id)
     forwarded: list[dict[str, Any]] = []
     runner = _stub_runner(monkeypatch, forwarded)
+    stubbed_lookup = routes_core._get_runner_client
+
+    async def lookup_without_sender_runner(session_id: str, *args: Any, **kwargs: Any) -> Any:
+        if session_id == sender_id:
+            return None
+        return await stubbed_lookup(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._get_runner_client", lookup_without_sender_runner
+    )
     try:
         for item in env.conv_store.list_pending_inputs(target_id):
             await env.app.state.startup_inputs._deliver(env.app, target_id, item)
