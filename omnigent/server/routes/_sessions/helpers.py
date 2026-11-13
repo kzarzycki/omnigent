@@ -95,6 +95,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_wrapper_label,
 )
 from omnigent.native.session_todos import validate_session_todos
+from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
     token_bound_runner_id,
@@ -2135,6 +2136,44 @@ def _resolve_harness_impl(
         OmnigentError,
     ):
         return None
+
+
+def _resolve_spec_model_defaults(
+    conv: Conversation,
+    harness: str | None,
+    *,
+    agent_cache: AgentCache | None,
+    agents_by_id: Mapping[str, Agent],
+) -> tuple[str | None, str | None]:
+    """
+    Read the bound spec's model and reasoning effort for a session list row.
+
+    Mirrors the snapshot: a self-authenticated harness (own-auth ACP) picks its
+    own model, so the spec's pin is not claimed for it.
+
+    :param conv: The session's conversation row.
+    :param harness: The session's resolved harness, e.g. ``"codex-native"``.
+    :param agent_cache: Cache used to load the bound agent's spec.
+    :param agents_by_id: Preloaded agent rows, avoiding per-session store reads.
+    :returns: ``(model, reasoning_effort)``; each ``None`` when the spec pins none
+        or cannot be loaded.
+    """
+    agent = agents_by_id.get(conv.agent_id) if conv.agent_id is not None else None
+    if agent is None or agent_cache is None or agent.bundle_location is None:
+        return None, None
+    try:
+        loaded = agent_cache.load(
+            agent.id, agent.bundle_location, expand_env=agent.operator_authored
+        )
+        spec = loaded.spec
+        if conv.sub_agent_name:
+            from omnigent.runtime.workflow import _find_spec_by_name
+
+            spec = _find_spec_by_name(spec, conv.sub_agent_name) or spec
+        owns_model = harness is not None and harness_owns_its_credential(harness)
+        return (None if owns_model else spec.executor.model), spec.executor.reasoning_effort
+    except (KeyError, AttributeError, ValueError, OSError, RuntimeError, OmnigentError):
+        return None, None
 
 
 def _validated_harness_override(value: str | None, agent: Agent) -> str | None:
@@ -12901,6 +12940,7 @@ __all__ = [
     "_resolve_harness",
     "_resolve_llm_model",
     "_resolve_skill_meta_text_via_runner",
+    "_resolve_spec_model_defaults",
     "_resolve_subagent_spec",
     "_resource_event_item_from_sse",
     "_routing_decision_item_from_sse",
