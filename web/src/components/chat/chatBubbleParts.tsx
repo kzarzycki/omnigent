@@ -16,6 +16,7 @@ import {
 } from "react";
 import {
   ArrowUpIcon,
+  BanIcon,
   CheckIcon,
   CopyIcon,
   CornerDownRightIcon,
@@ -983,6 +984,8 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   // the content is a pure system marker, swap in a muted centered indicator.
   // Another session's message is never one: it keeps its sender attribution.
   if (!origin && images.length === 0 && fileChips.length === 0) {
+    // The prompt above already shows this interrupt as its cancelled state.
+    if (bubble.foldedIntoCancelledPrompt) return null;
     const parsed = parseSystemMessage(text);
     if (parsed) return <SystemMessageView message={parsed} revealed={revealed} />;
   }
@@ -997,6 +1000,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
       data-role="user"
       data-user-message-id={bubble.itemId}
       data-message-id={bubble.itemId}
+      data-cancelled={bubble.cancelled ? "true" : undefined}
       className={cn("max-w-[640px]", bubble.pending && "animate-user-message-enter")}
       onClick={toggleActions}
     >
@@ -1074,7 +1078,10 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             {(text || fileChips.length > 0) && (
               <MessageContent
                 data-testid="user-message-content"
-                className={flashing ? "animate-message-highlight" : undefined}
+                className={cn(
+                  flashing && "animate-message-highlight",
+                  bubble.cancelled && "opacity-60",
+                )}
                 // Another contributor's bubble takes their avatar color at low
                 // alpha instead of the default bg-muted.
                 style={
@@ -1156,6 +1163,15 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
           >
             <Loader2Icon size={12} className="animate-spin" aria-hidden />
             Still sending…
+          </div>
+        )}
+        {bubble.cancelled && (
+          <div
+            className="flex items-center gap-1 pt-1 text-[11px] leading-4 text-muted-foreground"
+            data-testid="message-cancelled"
+          >
+            <BanIcon size={12} aria-hidden />
+            Cancelled before the agent replied
           </div>
         )}
         {visibilityToggle}
