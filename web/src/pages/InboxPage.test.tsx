@@ -626,7 +626,8 @@ describe("InboxPage approval items", () => {
   it("keeps the card node and scroll position through a no-change poll, loading and settled", async () => {
     // WHY: the list poll bumps `updated_at`, which changes the snapshot query
     // key. The card must stay the same DOM node, and the scroller must keep its
-    // position, both while the new snapshot loads and after it settles unchanged.
+    // position, both while the new snapshot loads and after it settles unchanged. The
+    // scroller is the page's own (`PageScroll`), so resetting it fails the test.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
     const snapshot = {
@@ -638,17 +639,15 @@ describe("InboxPage approval items", () => {
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            {/* Stand-in for the app shell's scroll container. */}
-            <div data-testid="scroller" style={{ overflowY: "auto", height: 200 }}>
-              <InboxPage />
-            </div>
+            <InboxPage />
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>
     );
     const { rerender } = render(tree());
     const card = await screen.findByTestId("approval-card");
-    const scroller = screen.getByTestId("scroller");
+    // The element that scrolls in the page: `PageScroll`'s overflow container.
+    const scroller = card.closest<HTMLElement>(".overflow-y-auto")!;
     scroller.scrollTop = 120;
 
     let settle!: (value: typeof snapshot) => void;
@@ -680,7 +679,7 @@ describe("InboxPage approval items", () => {
       ).toBe("success"),
     );
     expect(screen.getByTestId("approval-card")).toBe(card);
-    expect(screen.getByTestId("scroller")).toBe(scroller);
+    expect(card.closest(".overflow-y-auto")).toBe(scroller);
     expect(scroller.scrollTop).toBe(120);
   });
 
