@@ -1440,7 +1440,7 @@ async def test_configured_claude_settings_merge_into_the_invocation_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config ``harness.claude-native.args`` ``--settings`` (inline or workspace-relative) merges."""
+    """Configured ``--settings`` (inline or workspace-relative file) merges into the launch."""
     from unittest.mock import Mock
 
     from omnigent.runner.resource_registry import SessionResourceRegistry

@@ -3231,9 +3231,7 @@ def _parse_settings_value(value: str, base_dir: Path | None) -> _JsonObject | No
     if not text.startswith("{"):
         path = Path(value).expanduser()
         try:
-            text = (base_dir / path if base_dir is not None else path).read_text(
-                encoding="utf-8"
-            )
+            text = (base_dir / path if base_dir is not None else path).read_text(encoding="utf-8")
         except OSError:
             return None
     try:
