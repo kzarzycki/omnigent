@@ -1119,6 +1119,20 @@ class OmnigentClient:
             ),
         )
 
+    async def pending_elicitation_ids(self, session_id: str) -> set[str] | None:
+        """Ids of the session's unanswered elicitations, or ``None`` if unreadable.
+
+        Lets a card whose turn stream has closed notice it was answered elsewhere.
+        """
+        snapshot = await self._get_json(f"/v1/sessions/{session_id}")
+        if snapshot is None:
+            return None
+        return {
+            e["elicitation_id"]
+            for e in self._parse_pending(snapshot)
+            if isinstance(e.get("elicitation_id"), str)
+        }
+
     async def get_session_info(self, session_id: str) -> SessionInfo:
         """Read the session's harness + agent name from the snapshot.
 

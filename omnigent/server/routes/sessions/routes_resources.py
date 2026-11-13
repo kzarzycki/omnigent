@@ -188,6 +188,11 @@ class _RunnerStreamResponse(StreamingResponse):
 # budget for all of its ``gh`` calls, so a slow edit that GitHub applied is not
 # reported as failed.
 _PR_EDIT_PROXY_TIMEOUT_S = 20.0
+# A GitHub clone URL (https or scp-style), capturing ``owner/repo``.
+_GITHUB_REMOTE = re.compile(
+    r"(?:https?://(?:www\.)?github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+    re.IGNORECASE,
+)
 # Runner wait for a PR attachment upload, above the runner's 110-second budget for it.
 _PR_ATTACHMENT_PROXY_TIMEOUT_S = 120.0
 # The largest PR attachment, a video; the runner checks each type's limit. Both
@@ -3727,6 +3732,35 @@ def register_resources_routes(
             runner_path=f"/v1/sessions/{session_id}/resources/github/commits",
         )
 
+    async def _session_github_repositories(session_id: str, conv: Conversation) -> set[str]:
+        """Lowercased ``owner/repo`` names of the GitHub repositories the session is linked to.
+
+        Collects the repositories the session was launched with and those of its linked PRs.
+        """
+        from omnigent.server.managed_hosts import (
+            parse_repo_workspace,
+            read_managed_repo_workspaces,
+        )
+
+        names: set[str] = set()
+        for workspace in read_managed_repo_workspaces(conv.labels):
+            try:
+                url = parse_repo_workspace(workspace).url
+            except ValueError:
+                continue
+            match = _GITHUB_REMOTE.fullmatch(url)
+            if match:
+                names.add(match.group(1).lower())
+        if pull_request_store is not None:
+            try:
+                stored = await asyncio.to_thread(pull_request_store.read, session_id)
+            except Exception:  # Storage trouble only narrows previews to plain links.
+                stored = None
+            for entry in stored.entries if stored is not None else []:
+                if entry.host.lower() == "github.com":
+                    names.add(entry.repository.lower())
+        return names
+
     @router.get(
         "/sessions/{session_id}/resources/github/preview",
         response_model=None,
@@ -3752,9 +3786,29 @@ def register_resources_routes(
         """
         from omnigent.runner.github_resource import valid_preview_parts
 
-        conv = await _validate_session(session_id, request, LEVEL_READ)
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        conv = access.conversation
+        if conv is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
         if not valid_preview_parts(owner, repo, kind, ref):
             raise HTTPException(status_code=400, detail="Invalid preview reference")
+        # The canonical check also walks a child session's parent chain, which ``level`` omits.
+        try:
+            await _require_access_and_level(
+                user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+            )
+            can_edit = True
+        except OmnigentError:
+            can_edit = False
+        if not can_edit and f"{owner}/{repo}".lower() not in await _session_github_repositories(
+            session_id, conv
+        ):
+            return {"object": "session.github.link_preview", "preview": None}
         return await _proxy_get_to_runner(
             session_id,
             f"/v1/sessions/{session_id}/resources/github/preview",
