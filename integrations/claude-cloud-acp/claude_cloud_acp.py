@@ -209,15 +209,17 @@ def _headers() -> dict[str, str]:
     }
 
 
-def call_api(path: str, body: dict | None = None) -> dict:
-    """GET *path*, or POST *body* to it, on the sessions API; return the JSON reply."""
+def call_api(path: str, body: dict | None = None, method: str | None = None) -> dict:
+    """GET *path*, or POST (or *method*) *body* to it, on the sessions API; return the reply."""
     req = urllib.request.Request(
         f"{API_BASE}{path}",
         data=None if body is None else json.dumps(body).encode(),
         headers=_headers(),
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
+        raw = resp.read()
+    return json.loads(raw) if raw.strip() else {}
 
 
 def post_event(session_id: str, payload: dict) -> int:
@@ -264,6 +266,20 @@ def interrupt(session_id: str) -> None:
             "request": {"subtype": "interrupt"},
         },
     )
+
+
+def archive(session_id: str) -> None:
+    """Archive the cloud session; a later message unarchives it (:func:`post_active`)."""
+    try:
+        call_api(f"/v1/code/sessions/{session_id}/archive", {})
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:  # already archived, as the CLI's own archive call reads it
+            raise
+
+
+def set_title(session_id: str, title: str) -> None:
+    """Name the cloud session in the claude.ai list, the call the CLI's rename makes."""
+    call_api(f"/v1/code/sessions/{session_id}", {"title": title}, method="PUT")
 
 
 def fetch_events(session_id: str, cursor: str | None) -> tuple[list[dict], str | None]:
@@ -2233,8 +2249,128 @@ def self_check() -> None:
     # Reconnects after the last seen, waiting longer each time until a line arrives.
     assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7", "7"], urls
     assert naps == [1, 2], naps
+    globals()["time"] = real_time
+    check_archive_and_title()
     print("self-check ok")
 
 
+def check_archive_and_title() -> None:
+    """``--archive`` and ``--title`` make the CLI's own calls, on the session a target names."""
+    calls: list[tuple[str, dict | None, str | None]] = []
+    already: set[str] = set()
+
+    def fake_api(path: str, body: dict | None = None, method: str | None = None) -> dict:
+        calls.append((path, body, method))
+        if path.endswith("/archive") and path in already:
+            raise urllib.error.HTTPError(path, 409, "Conflict", {}, None)  # type: ignore[arg-type]
+        already.add(path)
+        return {}
+
+    real_api, globals()["call_api"] = call_api, fake_api
+    real_out = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    try:
+        transcript = io.StringIO(
+            f"user: go\nassistant: {MARKER}session_0123456789ab\n\n"
+            f"user: again\nassistant: {MARKER}session_ABCDEFGHIJKL\n\nwork\n"
+        )
+        url = "https://claude.ai/code/cse_0123456789ab"
+        assert command(["--archive", "-", url], transcript) == 0
+        assert command(["--archive", "session_ABCDEFGHIJKL"], io.StringIO()) == 0  # archived
+        assert command(["--title", "175-worker", url], io.StringIO()) == 0
+        assert calls == [
+            ("/v1/code/sessions/session_ABCDEFGHIJKL/archive", {}, None),  # the last marker
+            ("/v1/code/sessions/cse_0123456789ab/archive", {}, None),
+            ("/v1/code/sessions/session_ABCDEFGHIJKL/archive", {}, None),
+            ("/v1/code/sessions/cse_0123456789ab", {"title": "175-worker"}, "PUT"),
+        ], calls
+        assert sys.stdout.getvalue().count("archived ") == 3, sys.stdout.getvalue()
+        calls.clear()
+        # A target that names no session archives nothing, not even the ones before it.
+        assert command(["--archive", url, "-"], io.StringIO("user: hi\n")) == 1
+        assert command(["--archive", "not-a-session"], io.StringIO()) == 1
+        assert calls == [] and "names no cloud session" in sys.stderr.getvalue()
+
+        def refused(path: str, *_: object, **__: object) -> dict:
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+        globals()["call_api"] = refused
+        assert command(["--archive", url], io.StringIO()) == 1
+        assert command(["--title", "t", url], io.StringIO()) == 1
+        # Run as a script, either flag reaches the command, before any login is read.
+        for flag in ("--archive", "--title"):
+            args = [flag, "x", "-"] if flag == "--title" else [flag, "not-a-session"]
+            ran = subprocess.run(
+                [sys.executable, __file__, *args], input="", capture_output=True, text=True
+            )
+            assert ran.returncode == 1 and "claude_cloud_acp.py:" in ran.stderr, ran
+    finally:
+        globals()["call_api"] = real_api
+        sys.stdout, sys.stderr = real_out
+    # The API answers an archive or a rename with an empty body or with JSON.
+    sent: list[urllib.request.Request] = []
+    replies = [b"", b'{"title": "t"}']
+
+    def fake_urlopen(
+        req: urllib.request.Request, **_: object
+    ) -> contextlib.AbstractContextManager:
+        sent.append(req)
+        return contextlib.nullcontext(io.BytesIO(replies.pop(0)))
+
+    real_urlopen, urllib.request.urlopen = urllib.request.urlopen, fake_urlopen
+    try:
+        assert call_api("/v1/code/sessions/s/archive", {}) == {}
+        assert call_api("/v1/code/sessions/s", {"title": "t"}, method="PUT") == {"title": "t"}
+    finally:
+        urllib.request.urlopen = real_urlopen
+    assert [r.get_method() for r in sent] == ["POST", "PUT"], sent
+
+
+def cloud_session_of(target: str, stdin: io.TextIOBase) -> str:
+    """The cloud session *target* names: its id, its claude.ai URL, or ``-`` for text on
+    *stdin* with the bridge's ``cloud session:`` line (an Omnigent session's transcript),
+    whose last such line counts, as on a resume."""
+    if target == "-":
+        ids = MARKER_RE.findall(stdin.read())
+        if not ids:
+            raise ValueError(f"no '{MARKER}<id>' line on stdin")
+        return ids[-1]
+    if match := SESSION_ID_RE.search(target):
+        return match.group(1)
+    raise ValueError(f"{target!r} names no cloud session")
+
+
+def command(argv: list[str], stdin: io.TextIOBase = sys.stdin) -> int:
+    """``--archive TARGET...`` or ``--title TITLE TARGET``: what ends or names an Omnigent session
+    calls on its cloud session, since the bridge cannot tell a deleted session from a cancel."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="claude_cloud_acp.py")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--archive", nargs="+", metavar="TARGET")
+    action.add_argument("--title", nargs=2, metavar=("TITLE", "TARGET"))
+    args = parser.parse_args(argv)
+    try:
+        if args.title:
+            title, target = args.title
+            cloud_id = cloud_session_of(target, stdin)
+            set_title(cloud_id, title)
+            print(f"titled {cloud_id}")
+            return 0
+        cloud_ids = [cloud_session_of(target, stdin) for target in args.archive]
+        for cloud_id in cloud_ids:
+            archive(cloud_id)
+            print(f"archived {cloud_id}")
+    except (ValueError, OSError, http.client.HTTPException, RuntimeError) as exc:
+        print(f"claude_cloud_acp.py: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    self_check() if "--self-check" in sys.argv else serve()
+    if "--self-check" in sys.argv:
+        self_check()
+    elif {"--archive", "--title"} & set(sys.argv):
+        sys.exit(command(sys.argv[1:]))
+    else:
+        serve()
