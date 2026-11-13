@@ -9,9 +9,23 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 run() {  # run <bin dir>: setup.sh with only that dir on PATH, so installed tools can't count
   sed -e "s#/tmp/omnigent-dev-init.log#$tmp/init.log#" -e '/^export PATH=/d' \
     -e "s#/home/user#$tmp/user#g" -e 's#^warm_up_seconds=.*#warm_up_seconds=1#' "$here/setup.sh" > "$tmp/setup.sh"
-  for tool in id head timeout sleep grep; do ln -sf "$(command -v "$tool")" "$1/"; done
+  for tool in id head sleep grep; do ln -sf "$(command -v "$tool")" "$1/"; done
+  if command -v timeout >/dev/null; then ln -sf "$(command -v timeout)" "$1/"; else stand_in_timeout "$1/timeout"; fi
   rm -f "$tmp/init.log"
   HOME="$tmp/home" PATH="$1" "$BASH" "$tmp/setup.sh" >/dev/null 2>&1
+}
+# macOS has no GNU timeout: a stand-in for `timeout [-k N] SECS CMD...` that exits 124 on expiry.
+stand_in_timeout() {
+  cat > "$1" <<'PERL'
+#!/usr/bin/perl
+if ($ARGV[0] eq '-k') { shift; shift }
+my $secs = shift;
+my $pid = fork;
+if (!$pid) { exec @ARGV or exit 127 }
+$SIG{ALRM} = sub { kill 'KILL', $pid; waitpid $pid, 0; exit 124 };
+alarm $secs; waitpid $pid, 0; exit($? >> 8);
+PERL
+  chmod +x "$1"
 }
 fake() { printf '#!/bin/bash\n%s\n' "$2" > "$1"; chmod +x "$1"; }
 mkdir -p "$tmp/fail" "$tmp/ok" "$tmp/home" "$tmp/user/omnigent"
