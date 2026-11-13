@@ -30,6 +30,7 @@ from omnigent.tools.builtins import (
     SysCallAsyncTool,
     SysCancelAsyncTool,
     SysListModelsTool,
+    SysReadAnswerTool,
     SysReadInboxTool,
     SysScheduledTaskCreateTool,
     SysScheduledTaskDeleteTool,
@@ -521,6 +522,7 @@ class ToolManager:
         self._tools[UiOpenFileTool.name()] = UiOpenFileTool()
         for tool in (
             SysAskUserQuestionTool(),
+            SysReadAnswerTool(),
             SysSessionKeepTool(),
             SysSessionSubscribeTool(),
             SysSessionUnsubscribeTool(),

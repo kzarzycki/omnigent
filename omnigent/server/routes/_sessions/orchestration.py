@@ -139,6 +139,7 @@ from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.scheduled_context import scheduled_run_scope
 from omnigent.server import (
     open_questions,
+    question_answers,
     session_live_state,
     session_revival,
     session_subscriptions,
@@ -2596,6 +2597,24 @@ def _question_answer_text(question_id: str, questions: list[Any], data: dict[str
     return "\n".join(lines)
 
 
+def _own_pending_question(question_id: str, session_id: str) -> dict[str, Any] | None:
+    """
+    Return the open ``sys_ask_user_question`` card *session_id* itself posted.
+
+    Ancestors hold a mirror of a child's card under the same id, marked with the
+    child's ``target_session_id``; a mirror is not the ancestor's own question.
+
+    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+    :param session_id: Session that may have asked, e.g. ``"conv_abc123"``.
+    :returns: The card's event payload, or ``None`` when this session has no open card.
+    """
+    entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
+    if entry is None:
+        return None
+    target = (entry[1].get("params") or {}).get("target_session_id")
+    return entry[1] if target in (None, session_id) else None
+
+
 # Questions whose answer is being posted, so a concurrent second verdict posts nothing.
 # custom-lint: disable-next=workspace-scoped-cache -- ids are globally unique and short-lived
 _answering_questions: set[str] = set()
@@ -2611,6 +2630,9 @@ async def _answer_question(
     """
     Deliver a ``sys_ask_user_question`` verdict as one user message, then clear its card.
 
+    The answer is also recorded for ``sys_read_answer``, which is how the session
+    tells it from a message another session typed with the same prefix.
+
     The answer is posted first, so a session that cannot take it keeps the card
     open for another try. Nothing is parked and no runner holds the question,
     so there is no Future to set and nothing to forward.
@@ -2622,22 +2644,33 @@ async def _answer_question(
     :param post_answer: Posts text into the session as the answering user's message.
     :raises OmnigentError: When this server cannot post the answer.
     """
-    entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
-    if entry is None and conversation_store is not None:
+    card = _own_pending_question(question_id, session_id)
+    if card is None and conversation_store is not None:
         # Asked before a server restart: the card is only in the store.
         await open_questions.restore_session(conversation_store, session_id)
-        entry = pending_elicitations.lookup(question_id, conversation_id=session_id)
-    if entry is None or question_id in _answering_questions:
+        card = _own_pending_question(question_id, session_id)
+    if card is None or question_id in _answering_questions:
         return
     if post_answer is None:
         raise OmnigentError(
             "This server cannot deliver question answers.", code=ErrorCode.INTERNAL_ERROR
         )
-    ask = entry[1].get("params", {}).get("ask_user_question") or {}
+    ask = card.get("params", {}).get("ask_user_question") or {}
     text = _question_answer_text(question_id, ask.get("questions") or [], data)
     _answering_questions.add(question_id)
     try:
-        await post_answer(text)
+        # Recorded first: the session may call sys_read_answer as soon as the message lands.
+        question_answers.record(
+            question_id,
+            question_answers.QuestionAnswer(
+                session_id=session_id, action=str(data.get("action")), answer=text
+            ),
+        )
+        try:
+            await post_answer(text)
+        except BaseException:
+            question_answers.forget(question_id)
+            raise
         if conversation_store is not None:
             await open_questions.forget(
                 conversation_store,

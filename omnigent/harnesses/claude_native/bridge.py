@@ -2928,6 +2928,7 @@ _OMNIGENT_DISALLOWED_TOOLS: tuple[str, ...] = ()
 _OMNIGENT_ALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__omnigent__sys_session_keep",
     "mcp__omnigent__sys_ask_user_question",
+    "mcp__omnigent__sys_read_answer",
 )
 
 

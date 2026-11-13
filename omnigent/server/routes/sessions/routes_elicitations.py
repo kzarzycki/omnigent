@@ -17,7 +17,7 @@ from omnigent.runtime import (
     pending_elicitations,
 )
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.server import open_questions
+from omnigent.server import open_questions, question_answers
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -51,6 +51,7 @@ from omnigent.server.routes._sessions.helpers import (
     _targeted_elicitation_event,
 )
 from omnigent.server.routes._sessions.orchestration import (
+    _own_pending_question,
     _resolve_elicitation,
 )
 from omnigent.server.schemas import (
@@ -243,6 +244,54 @@ def register_elicitations_routes(
             event_payload,
         )
         return {"question_id": question_id, "status": "waiting"}
+
+    @router.get(
+        "/sessions/{session_id}/questions/{question_id}",
+        # Runner-side tool endpoint — hidden from the public API reference.
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def read_question_answer(
+        request: Request,
+        session_id: str,
+        question_id: str,
+    ) -> dict[str, str]:
+        """
+        Return what the session's user answered on a ``sys_ask_user_question`` card.
+
+        Only the card's resolution records an answer, so a message that merely
+        starts with ``[answer to <id>]`` never shows up here as ``answered``.
+
+        :param request: The inbound request, used for identity extraction.
+        :param session_id: Session that asked, e.g. ``"conv_abc123"``.
+        :param question_id: The id ``sys_ask_user_question`` returned,
+            e.g. ``"question_0f3a..."``.
+        :returns: ``{"question_id", "status"}`` with ``status`` ``"answered"``
+            (plus ``action`` and ``answer``), ``"waiting"`` while the card is
+            open, or ``"unknown"`` for an id this session's user never answered.
+        :raises OmnigentError: 404 if no session exists.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+        )
+        if access.conversation is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise _session_not_found()
+        answer = question_answers.lookup(question_id, session_id=session_id)
+        if answer is not None:
+            return {
+                "question_id": question_id,
+                "status": "answered",
+                "action": answer.action,
+                "answer": answer.answer,
+            }
+        if _own_pending_question(question_id, session_id) is None:
+            # Asked before a server restart: the card is only in the store.
+            await open_questions.restore_session(conversation_store, session_id)
+        waiting = _own_pending_question(question_id, session_id) is not None
+        return {"question_id": question_id, "status": "waiting" if waiting else "unknown"}
 
     @router.get(
         "/sessions/{session_id}/elicitations/{elicitation_id}",

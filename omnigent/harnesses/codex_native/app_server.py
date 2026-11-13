@@ -325,6 +325,7 @@ _FRAMEWORK_APPROVED_TOOLS: tuple[str, ...] = (
     "sys_session_rename",
     "sys_session_keep",
     "sys_ask_user_question",
+    "sys_read_answer",
     "sys_session_get_info",
     "sys_session_get_history",
     "sys_session_list",
