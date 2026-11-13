@@ -827,6 +827,7 @@ def open_server_client(
     transport: httpx.AsyncBaseTransport | None = None,
     host_id: str | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    retry_server_restart: bool = False,
 ) -> httpx.AsyncClient:
     """Open an :class:`httpx.AsyncClient` to an Omnigent server, keyed for routing.
 
@@ -865,6 +866,10 @@ def open_server_client(
         :func:`databricks_request_headers` (which emits it as the slice-key only
         on a host-sharded mount and otherwise falls back to the runner's own
         host_id). Pass it unconditionally when known.
+    :param retry_server_restart: Return a
+        :class:`~omnigent.runner.server_restart_retry.ServerRestartRetryClient`,
+        which retries through a server restart for a bounded window. Not combined
+        with *event_dispatcher*.
     :returns: A configured :class:`httpx.AsyncClient`.
     """
     import httpx
@@ -894,7 +899,12 @@ def open_server_client(
             trust_env=not is_loopback_url(server_url),
             **kwargs,
         )
-    return httpx.AsyncClient(
+    client_class: type[httpx.AsyncClient] = httpx.AsyncClient
+    if retry_server_restart:
+        from omnigent.runner.server_restart_retry import ServerRestartRetryClient
+
+        client_class = ServerRestartRetryClient
+    return client_class(
         base_url=server_url,
         headers=pinned,
         auth=auth,

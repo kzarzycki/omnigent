@@ -141,6 +141,10 @@ read-only, such as `Read` and `Grep`, never ask.
   says so in a thought, and catches up from the stream when the network is
   back. A stream the API refuses (an expired login) does count, and the error
   names the reason.
+- **Server restarts:** the bridge runs under the host's runner, not the server,
+  so a server restart leaves a running turn running and its output reaches the
+  session once the runner reconnects. A host restart keeps it only with
+  `host.keep_runners_on_restart: true`.
 - **A turn Omnigent gives up on:** Omnigent sends `session/cancel` when a turn
   fails or times out on its side, which would interrupt the cloud session.
   `cancel_on_abandon: false` in the agent's config turns that off, so only

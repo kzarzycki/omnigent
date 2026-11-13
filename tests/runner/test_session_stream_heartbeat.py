@@ -23,6 +23,11 @@ async def _tunneled_stream_events(live_response_id: str | None) -> list[dict[str
     if live_response_id is not None:
         app.state.live_response_id["s1"] = live_response_id
     app.state.publish_event("s1", {"type": "response.output_text.delta", "delta": "hi"})
+    return await _subscribe(app)
+
+
+async def _subscribe(app: Any) -> list[dict[str, Any]]:
+    """Subscribe to ``s1``'s stream until its queue is drained; return the events."""
     app.state.session_event_queues["s1"].put_nowait(None)
     sent: list[str] = []
 
@@ -50,3 +55,29 @@ async def test_a_subscriber_between_turns_gets_a_bare_first_heartbeat() -> None:
     events = await _tunneled_stream_events(None)
 
     assert events[0] == {"type": "session.heartbeat"}
+
+
+_TOOL_OUTPUT_DONE = {
+    "type": "response.output_item.done",
+    "item": {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+}
+
+
+@pytest.mark.parametrize(("live_response_id", "replayed"), [("resp_1", True), (None, False)])
+@pytest.mark.asyncio
+async def test_a_resubscriber_gets_the_live_turns_finished_items_again(
+    live_response_id: str | None, replayed: bool
+) -> None:
+    """A relay that took an item off the queue may have died before storing it."""
+    app = create_runner_app(server_client=NullServerClient())  # type: ignore[arg-type]
+    app.state.live_response_id["s1"] = "resp_1"
+    app.state.publish_event("s1", {"type": "response.in_progress"})
+    app.state.publish_event("s1", _TOOL_OUTPUT_DONE)
+    first = await _subscribe(app)
+    if live_response_id is None:
+        app.state.live_response_id.pop("s1")
+
+    second = await _subscribe(app)
+
+    assert _TOOL_OUTPUT_DONE in first
+    assert (_TOOL_OUTPUT_DONE in second) is replayed

@@ -9,6 +9,7 @@ GET /v1/agents/{id}/contents for out-of-process use).
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import dataclasses
 import functools
@@ -483,6 +484,8 @@ _TURN_OUTCOME_CONFIRMING_NATIVE_AGENTS = frozenset({"claude", "pi"})
 
 # Not in the retryable-harness-error allowlist — desync is terminal, not transient.
 _RUNNER_TURN_CONTEXT_DESYNC_CODE = "runner_turn_context_desync"
+# Recent forwarded-message ids kept per session for the reconnect catch-up scan.
+_RECEIVED_ITEM_IDS_KEPT = 64
 # Delays before each stranded-wake re-attempt round after a tunnel reconnect.
 # The reconnect callback fires BEFORE the new tunnel connection is established,
 # and the server 503s an injected parent event while the parent's runner is
@@ -1427,6 +1430,10 @@ def create_runner_app(
     _resp_to_conv: dict[str, str] = {}  # harness response_id → conversation_id
     _live_response_id: dict[str, str] = {}
     _turn_occurrences: dict[str, ScheduledRunLogContext | None] = {}
+    # The live turn's finished output items. A relay that reconnects mid-turn gets
+    # them again, since its predecessor may have taken a frame off the queue and
+    # died before storing it; the server stores each item once by its stable id.
+    _turn_done_events: dict[str, list[_JsonObject]] = {}
     app.state.live_response_id = _live_response_id
     _session_start_cache: dict[str, float] = {}  # session_id → registered start time
     _session_spec_cache: dict[str, _SpecEntry | None] = {}  # session_id → session AgentSpec
@@ -1663,6 +1670,9 @@ def create_runner_app(
 
     _session_histories = _session_histories_ref
     _last_server_item_id: dict[str, str] = {}
+    # Server item ids of messages the server handed this runner, newest last, so a
+    # reconnect's catch-up scan doesn't run a message a second time.
+    _received_item_ids: dict[str, collections.deque[str]] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
     _text_segments: dict[str, _TextSegment] = {}
@@ -1785,9 +1795,17 @@ def create_runner_app(
             _session_event_queues[session_id] = queue
         segment = _text_segments.setdefault(session_id, _TextSegment())
         segment_event = _text_segment_event(segment, event_body)
-        if segment_event is not None:
-            queue.put_nowait(segment_event)
-        queue.put_nowait(event_body)
+        if event_body.get("type") == "response.in_progress":
+            _turn_done_events.pop(session_id, None)
+        for queued in (segment_event, event_body):
+            if queued is None:
+                continue
+            queue.put_nowait(queued)
+            if (
+                queued.get("type") == "response.output_item.done"
+                and session_id in _live_response_id
+            ):
+                _turn_done_events.setdefault(session_id, []).append(queued)
         if event_body.get("type") == "session.status":
             _status_value = event_body.get("status")
             if isinstance(_status_value, str):
@@ -3695,6 +3713,10 @@ def create_runner_app(
             else:
                 first_heartbeat = {"type": "session.heartbeat", "response_id": live_response_id}
                 yield f"data: {json.dumps(first_heartbeat)}\n\n".encode()
+                for done in list(_turn_done_events.get(session_id, ())):
+                    if done.get("text_segment") and _text_segment_disposition() != "send":
+                        continue
+                    yield f"data: {json.dumps(done)}\n\n".encode()
             while True:
                 try:
                     event = await asyncio.wait_for(
@@ -3942,8 +3964,10 @@ def create_runner_app(
             _binding.relay.close()
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
+        _received_item_ids.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
         _text_segments.pop(session_id, None)
+        _turn_done_events.pop(session_id, None)
         _session_inboxes.pop(session_id, None)
         _subagent_recovery_done.discard(session_id)
         _subagent_recovery_locks.pop(session_id, None)
@@ -4371,6 +4395,7 @@ def create_runner_app(
         """
         _live_response_id.pop(conv_id, None)
         _turn_occurrences.pop(conv_id, None)
+        _turn_done_events.pop(conv_id, None)
         if process_manager is not None:
             process_manager.clear_in_flight(conv_id)
 
@@ -7548,6 +7573,11 @@ def create_runner_app(
                 )
             message_body = _TurnMessage(body, current_scheduled_run())
             message_body["conversation_id"] = conversation_id
+            _received_item_id = message_body.get("persisted_item_id")
+            if isinstance(_received_item_id, str) and _received_item_id:
+                _received_item_ids.setdefault(
+                    conversation_id, collections.deque(maxlen=_RECEIVED_ITEM_IDS_KEPT)
+                ).append(_received_item_id)
 
             if _is_native_harness(conversation_id):
                 resource_registry.note_session_turn_started(conversation_id)
@@ -8868,6 +8898,13 @@ def create_runner_app(
                         _last_server_item_id[session_id] = last_id
                     if not page.get("has_more", False):
                         break
+                # The server handed this runner everything up to the last message
+                # it forwarded; only what was stored after that is new here.
+                received = set(_received_item_ids.get(session_id, ()))
+                for index in range(len(all_new) - 1, -1, -1):
+                    if all_new[index].get("id") in received:
+                        all_new = all_new[index + 1 :]
+                        break
                 if not all_new:
                     continue
                 new_items = _convert_raw_items_to_input(all_new)
@@ -9120,7 +9157,9 @@ def create_runner_app_from_env() -> FastAPI:
         raise RuntimeError("RUNNER_SERVER_URL is required for the runner subprocess factory")
     from omnigent_client._http import is_loopback_url
 
-    server_client = httpx.AsyncClient(
+    from omnigent.runner.server_restart_retry import ServerRestartRetryClient
+
+    server_client = ServerRestartRetryClient(
         base_url=server_url,
         timeout=httpx.Timeout(5.0, read=None),
         # A proxy cannot reach a loopback server, so local targets bypass it.

@@ -381,6 +381,48 @@ async def test_catch_up_turn_hides_browser_tools_without_renderer_evidence() -> 
 
 
 @pytest.mark.asyncio
+async def test_catch_up_skips_a_message_the_server_already_forwarded() -> None:
+    """A reconnect after a server restart must not run a forwarded message again.
+
+    The runner ran the message while the server was down, so the server has not
+    stored the reply yet; the message is still the newest stored item.
+    """
+    from omnigent.runner.app import _session_histories_ref
+
+    server_client = _CatchUpServerClient()
+    app, _pm, harness = _build_sdk_app(server_client)
+
+    async with _runner_client(app) as client:
+        init_resp = await client.post(
+            "/v1/sessions",
+            json=_session_init_payload(suppress_recovery_turn=True),
+        )
+        assert init_resp.status_code == 201, init_resp.text
+        forward_resp = await client.post(
+            f"/v1/sessions/{SESSION_ID}/events",
+            params={"stream": "true"},
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": AGENT_ID,
+                "content": [{"type": "input_text", "text": "hello"}],
+                "persisted_item_id": _PENDING_USER_MESSAGE["id"],
+            },
+        )
+        assert forward_resp.status_code == 200, forward_resp.text
+        _ = forward_resp.text
+
+        server_client.expose_item = True
+        try:
+            await app.state.catch_up_scan()
+            await asyncio.sleep(0.1)
+        finally:
+            _session_histories_ref.pop(SESSION_ID, None)
+
+    assert len(harness.posted_bodies) == 1, "catch-up ran the forwarded message again"
+
+
+@pytest.mark.asyncio
 async def test_suppressed_reinitialization_preserves_active_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
