@@ -139,6 +139,9 @@ and steers messages while the agent is busy.
   sends once the host reconnects; no failed turn is recorded.
 - `browser-pointer-queue`: desktop Design-mode instructions follow the same queue
   and always-steer preference, keeping their element screenshots.
+- `cancelled-prompt`: a prompt stopped before the agent produced any output
+  renders muted with "Cancelled before the agent replied" in place of a separate
+  Interrupted marker. A prompt that got output keeps the marker.
 - `pi-compact`: `/compact` follows the normal queue/Always steer preference.
   Send now interrupts the turn and compacts. During compaction, queued messages
   wait in the web queue; immediate sends are retained by the Pi integration.
@@ -624,6 +627,10 @@ Other connection providers alone do not enable the managed MCP picker.
   `web/src/hooks/useReleaseHostHeldSends.test.tsx`. Manually: stop a native
   session's host, send, and expect a "Waiting for host" queue row with no
   failed turn; restart the host and expect the message to be sent once.
+- **`cancelled-prompt`:** component tests in `web/src/lib/renderItems.test.ts`
+  and `web/src/pages/ChatPage.userBubble.test.tsx`. Manually: in a Claude native
+  session send a long task and press Stop before any reply; expect the prompt
+  muted with the cancelled note, live and after reload.
 - **`browser-pointer-queue`, desktop:** manually hold an agent turn open, then
   send a normal composer follow-up and two pointer instructions (Send and Enter).
   With Always steer off, all three stay queued and the popup says "Queued for

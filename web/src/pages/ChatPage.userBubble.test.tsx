@@ -322,6 +322,27 @@ describe("UserBubble awaiting-agent marker", () => {
   });
 });
 
+describe("UserBubble cancelled prompt", () => {
+  it("mutes a cancelled prompt and says it got no reply", () => {
+    renderBubble(userBubble("write an essay", { cancelled: true }));
+    expect(screen.getByTestId("message-bubble")).toHaveAttribute("data-cancelled", "true");
+    expect(screen.getByTestId("message-cancelled")).toHaveTextContent(
+      "Cancelled before the agent replied",
+    );
+  });
+
+  it("hides the interrupt record folded into the cancelled prompt", () => {
+    renderBubble(userBubble("[Request interrupted by user]", { foldedIntoCancelledPrompt: true }));
+    expect(screen.queryByTestId("system-message")).toBeNull();
+  });
+
+  it("shows nothing extra on a delivered prompt", () => {
+    renderBubble(userBubble("write an essay"));
+    expect(screen.getByTestId("message-bubble")).not.toHaveAttribute("data-cancelled");
+    expect(screen.queryByTestId("message-cancelled")).toBeNull();
+  });
+});
+
 describe("UserBubble copy button", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
