@@ -90,18 +90,65 @@ def read_fresh_submit_records(boundary: SubmitBoundary) -> list[JsonObject]:
         return []
 
 
-def has_recorded_prompt(boundary: SubmitBoundary) -> bool:
-    """Whether Claude recorded a prompt since *boundary*: started a turn with it, or queued it.
+def _prompt_key(text: str) -> str:
+    """Reduce prompt text to what survives the bracketed paste: LF line ends, no control bytes."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(char for char in text if char in "\n\t" or ord(char) >= 0x20).strip()
 
-    Claude writes either record only once its UserPromptSubmit hooks have run.
+
+def _record_texts(entry: JsonObject) -> list[str]:
+    """Return the prompt texts an enqueue or user record carries (string or text blocks)."""
+    if entry.get("type") == "queue-operation":
+        content = entry.get("content")
+    else:
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+    return []
+
+
+def _command_record_text(submitted_key: str) -> str | None:
+    """Return the ``<command-name>`` marker Claude records for a slash command, else ``None``."""
+    words = submitted_key[1:].split(maxsplit=1) if submitted_key.startswith("/") else []
+    return f"<command-name>/{words[0]}</command-name>" if words else None
+
+
+def has_recorded_prompt(
+    boundary: SubmitBoundary,
+    submitted_text: str,
+    *,
+    normalize_prompt: Callable[[str], str],
+) -> bool:
+    """Whether Claude recorded *submitted_text* since *boundary*: started a turn with it, or queued it.
+
+    Claude writes either record only once its UserPromptSubmit hooks have run. The
+    text must match, so a late record of an earlier prompt or one the person typed
+    does not count; a slash command matches its ``<command-name>`` record.
     """
+    submitted_key = _prompt_key(submitted_text)
+    command_marker = _command_record_text(submitted_key)
     for entry in read_fresh_submit_records(boundary):
         if entry.get("sessionId") != boundary.native_session_id or entry.get("isSidechain"):
             continue
-        if entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue":
-            return True
-        if entry.get("type") == "user" and isinstance(entry.get("promptSource"), str):
-            return True
+        is_enqueue = entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue"
+        is_prompt = entry.get("type") == "user" and isinstance(entry.get("promptSource"), str)
+        if not (is_enqueue or is_prompt):
+            continue
+        for text in _record_texts(entry):
+            recorded_key = _prompt_key(normalize_prompt(text))
+            if recorded_key == submitted_key:
+                return True
+            if command_marker is not None and command_marker in recorded_key:
+                return True
     return False
 
 

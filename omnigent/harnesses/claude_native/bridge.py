@@ -125,6 +125,7 @@ _INFLIGHT_REQUESTS_LOCK = threading.Lock()
 _INFLIGHT_REQUESTS: dict[str | int, HTTPConnection | None] = {}
 _CANCELLED_REQUESTS: set[str | int] = set()
 _INJECTION_LOCKS: dict[str, threading.Lock] = {}
+_MESSAGE_LOCKS: dict[str, threading.Lock] = {}
 _INJECTION_LOCK_POLL_INTERVAL_S = 0.1
 _InjectionFunction = TypeVar("_InjectionFunction", bound=Callable[..., Any])
 
@@ -142,9 +143,24 @@ def _bridge_injection_lock(bridge_dir: Path) -> threading.Lock:
 
 def _bridge_injection_file_lock(bridge_dir: Path) -> FileLock:
     """Coordinate pane writes between the runner and harness processes."""
+    return _bridge_file_lock(bridge_dir, "injection")
+
+
+def _bridge_message_lock(bridge_dir: Path) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(os.fspath(bridge_dir)))
+    with _INJECTION_LOCKS_GUARD:
+        return _MESSAGE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _bridge_message_file_lock(bridge_dir: Path) -> FileLock:
+    """Order user messages across processes; taken outside the pane's injection lock."""
+    return _bridge_file_lock(bridge_dir, "message")
+
+
+def _bridge_file_lock(bridge_dir: Path, purpose: str) -> FileLock:
     lock_dir = bridge_dir.parent / ".locks"
     lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return FileLock(str(lock_dir / f"{bridge_dir.name}.injection.lock"), mode=0o600)
+    return FileLock(str(lock_dir / f"{bridge_dir.name}.{purpose}.lock"), mode=0o600)
 
 
 @contextlib.contextmanager
@@ -373,10 +389,9 @@ _PASTE_COMMIT_TIMEOUT_S = 5.0
 # at 20s was recorded as a 10s failure). The slow-accept log below now
 # records real recovery times, so tune this from that distribution.
 _SUBMIT_VERIFY_TIMEOUT_S = 20.0
-# How long a submitted prompt holds the pane until Claude records it. Its
-# UserPromptSubmit hooks run first (turn routing alone may take 15s), and a
-# message typed meanwhile is queued drain-only, holding back every later
-# mid-turn message until the turn ends. Past this the delivery still succeeds.
+# How long the next message waits for Claude to record a submitted one: a message
+# typed during its UserPromptSubmit hooks (routing alone may take 15s) is queued
+# drain-only. Past this the delivery still succeeds.
 _SUBMIT_RECORD_TIMEOUT_S = 30.0
 # How long the draft may verifiably sit unaccepted before a warning is
 # logged that the TUI is slow (delivery keeps retrying). Also the point
@@ -4359,7 +4374,6 @@ def write_tmux_target(
 @delivery_diagnostics.trace_delivery(
     session_id_reader=read_active_session_id, cancelled_error=ClaudeInjectionCancelled
 )
-@_serialize_bridge_injection
 def inject_user_message(
     bridge_dir: Path,
     *,
@@ -4411,6 +4425,9 @@ def inject_user_message(
     silently swallowed. A recognized skill prints no rejection and runs
     exactly as before.
 
+    After the submit, the pane is free for controls, but the next message
+    waits until Claude records this one (see :func:`_wait_for_prompt_recorded`).
+
     :param bridge_dir: Bridge directory path.
     :param content: User text from the Omnigent web UI. Must be non-empty.
     :param timeout_s: Seconds to wait for each readiness gate
@@ -4426,6 +4443,31 @@ def inject_user_message(
         after repeated submit Enters (message not delivered).
     :raises ClaudeTerminalDialog: If the input box stays in shell mode or the
         prompt-history search after the reclaim; nothing was typed.
+    """
+    with (
+        _cancellable_injection_lock(_bridge_message_lock(bridge_dir)),
+        _cancellable_injection_lock(_bridge_message_file_lock(bridge_dir)),
+    ):
+        submitted = _deliver_user_message(bridge_dir, content=content, timeout_s=timeout_s)
+        _wait_for_prompt_recorded(submitted)
+
+
+@dataclass(frozen=True)
+class _SubmittedPrompt:
+    """A submitted message: the transcript boundary before its Enter, and the text pasted."""
+
+    boundary: SubmitBoundary
+    text: str
+
+
+@_serialize_bridge_injection
+def _deliver_user_message(
+    bridge_dir: Path, *, content: str, timeout_s: float
+) -> _SubmittedPrompt | None:
+    """
+    Type and submit *content* under the pane's injection lock (see :func:`inject_user_message`).
+
+    :returns: The submitted prompt to wait on, or ``None`` when the transcript is unknown.
     """
     delivery_diagnostics.set_stage("waiting_for_tmux")
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
@@ -4477,9 +4519,11 @@ def inject_user_message(
         rejection_baseline = _count_unknown_command_rejections(
             _capture_pane(socket_path, tmux_target), rejection_needle
         )
-    _paste_and_submit(bridge_dir, socket_path, tmux_target, text=injected_text, needle=needle)
+    submitted = _paste_and_submit(
+        bridge_dir, socket_path, tmux_target, text=injected_text, needle=needle
+    )
     if rejection_needle is None:
-        return
+        return submitted
     if not _unknown_command_rejection_appeared(
         socket_path,
         tmux_target,
@@ -4488,7 +4532,7 @@ def inject_user_message(
     ):
         # No rejection: Claude Code accepted the command (a real skill or
         # custom command) and the turn is underway.
-        return
+        return submitted
     # Claude Code dropped the message. Re-deliver it escaped so the text
     # reaches the model as a regular user message instead of vanishing.
     _logger.info(
@@ -4496,7 +4540,7 @@ def inject_user_message(
         "re-delivering the message escaped as plain text",
         unknown_name,
     )
-    _paste_and_submit(
+    return _paste_and_submit(
         bridge_dir,
         socket_path,
         tmux_target,
@@ -4512,7 +4556,7 @@ def _paste_and_submit(
     *,
     text: str,
     needle: str,
-) -> None:
+) -> _SubmittedPrompt | None:
     r"""
     Deliver *text* into Claude's input box as one paste plus a verified Enter.
 
@@ -4528,7 +4572,7 @@ def _paste_and_submit(
     :param text: Exact text to paste (already escaped as needed).
     :param needle: Draft marker from :func:`_submit_needle`; empty skips
         draft-visibility verification (blind submit).
-    :returns: None.
+    :returns: The submitted prompt, or ``None`` when the transcript is unknown.
     :raises ClaudeUserPromptPending: If a question or permission prompt is
         pending before the submit Enter; the message was not sent.
     :raises ClaudeComposerNotCleared: If a draft left in the input box could
@@ -4627,12 +4671,16 @@ def _paste_and_submit(
     )
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
+    submitted = (
+        _SubmittedPrompt(boundary=submit_boundary, text=text)
+        if submit_boundary is not None
+        else None
+    )
     if not draft_seen:
         delivery_diagnostics.record_details(verification="unverified")
         # The draft was never observed, so its absence proves nothing —
         # verification would trivially "pass". Submit blind as before.
-        _wait_for_prompt_recorded(submit_boundary)
-        return
+        return submitted
     # Verify the submit took: a successful Enter clears the input box.
     # If the draft is still sitting there the Enter was swallowed into
     # the paste burst as a newline — re-send it (the retry lands well
@@ -4657,32 +4705,35 @@ def _paste_and_submit(
             "it may already have been delivered."
         ) from exc
     if accepted:
-        _wait_for_prompt_recorded(submit_boundary)
-        return
+        return submitted
     raise ClaudeMessageNotAccepted(
         f"Claude Code did not accept the submitted message within {_SUBMIT_VERIFY_TIMEOUT_S}s "
         "(the draft is still in the input box). The message was not delivered."
     )
 
 
-def _wait_for_prompt_recorded(boundary: SubmitBoundary | None) -> None:
+def _wait_for_prompt_recorded(submitted: _SubmittedPrompt | None) -> None:
     """
-    Hold the pane until Claude records the submitted prompt.
+    Hold back the next message until Claude records the submitted prompt.
 
     Until then its UserPromptSubmit hooks hold the prompt, and a message typed
     in that window is queued drain-only: it, and every message queued after
     it, waits for the turn to end instead of joining it at a tool boundary.
+    The caller holds the message lock, not the pane's injection lock, so model,
+    effort and permission-mode controls are not delayed by this wait.
     The prompt is already submitted, so a timeout or cancel only stops waiting.
 
-    :param boundary: Transcript boundary captured before the submit Enter;
-        ``None`` when the transcript is unknown, which skips the wait.
+    :param submitted: The submitted prompt; ``None`` when the transcript is
+        unknown, which skips the wait.
     :returns: None.
     """
-    if boundary is None:
+    if submitted is None:
         return
     delivery_diagnostics.set_stage("waiting_for_record")
     deadline = time.monotonic() + _SUBMIT_RECORD_TIMEOUT_S
-    while not has_recorded_prompt(boundary):
+    while not has_recorded_prompt(
+        submitted.boundary, submitted.text, normalize_prompt=_unwrap_pasted_content_markers
+    ):
         cancel_event = _INJECTION_CANCEL_EVENT.get()
         if cancel_event is not None and cancel_event.is_set():
             return
