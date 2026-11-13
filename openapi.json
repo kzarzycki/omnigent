@@ -21564,6 +21564,84 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/resources/github/preview": {
+      "get": {
+        "description": "Preview a GitHub PR, issue, commit or Actions run for a chat link.\n\nRead through the session host's `gh` login, like the PR panel. Takes\nvalidated parts, never a URL; `preview` is null when the host can't\nread the object. An offline host answers like the other GitHub reads.\n\n**Returns:** `{\"object\": \"session.github.link_preview\", \"preview\": ...}`.",
+        "operationId": "get_session_github_link_preview_v1_sessions__session_id__resources_github_preview_get",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "title": "Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session Github Link Preview",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/resources/github/prs": {
       "post": {
         "description": "Link a pull request the session's host can read, or unlink one.\n\nBoth need the runner or host online: linking verifies the PR with its\nprovider account, and the server records an unlink once the host accepts\nit. `DELETE /pull-requests` unlinks while they are offline.\n\n**Returns:** The refreshed `session.github.info` object.",

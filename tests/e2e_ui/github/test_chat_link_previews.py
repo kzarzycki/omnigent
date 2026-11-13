@@ -2,8 +2,8 @@
 
 A deterministic assistant message (``external_assistant_message``, no LLM run)
 carries a GitHub PR link, links to other hosts, and links to an open and a
-refused session on this server. GitHub's preview route is intercepted, as the
-other GitHub UI tests intercept provider responses; session previews go through
+refused session on this server. The session-scoped GitHub preview route is
+intercepted, as the other GitHub UI tests intercept provider responses; session previews go through
 the real server's permission-checked session read.
 """
 
@@ -18,7 +18,6 @@ from playwright.sync_api import Page, Request, Route, expect
 _AGENT_NAME = "hello_world"
 
 _PR_PREVIEW = {
-    "connected": True,
     "preview": {
         "kind": "pull",
         "title": "Fix rendering on narrow screens",
@@ -71,11 +70,11 @@ def test_chat_link_previews_fetch_only_from_this_server(
         route.fulfill(json=_PR_PREVIEW)
 
     page.on("request", record)
-    page.route(re.compile(r"/v1/connections/github/repos/[^/]+/[^/]+/previews/"), github_preview)
+    page.route(re.compile(r"/v1/sessions/[^/]+/resources/github/preview"), github_preview)
     page.goto(f"{base_url}/c/{session_id}")
 
     expect(page.get_by_label("Pull request status: Merged")).to_be_visible(timeout=30_000)
-    assert previews == ["/v1/connections/github/repos/acme/app/previews/pull/42"]
+    assert previews == [f"/v1/sessions/{session_id}/resources/github/preview"]
     expect(
         page.get_by_role("link", name="attacker.example/collect?d=secret-token")
     ).to_be_visible()
