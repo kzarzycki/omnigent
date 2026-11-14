@@ -96,8 +96,9 @@ the `upstream` and `origin` remotes and the `mine` branch.
 
 ## What sync-fork.sh does
 
-`bash "$DIR/sync-fork.sh" [TARGET [PR_BODY_FILE]]`; `TARGET` defaults to the newest
-upstream mainline commit at least 3 days old. `SYNC_BASE` names the branch the PR
+`bash "$DIR/sync-fork.sh" TARGET PR_BODY_FILE`; `TARGET` is the audited commit and
+`PR_BODY_FILE` must hold the audit summary and a `VERDICT: PASS` line: without them
+the run exits 2 before changing anything. `SYNC_BASE` names the branch the PR
 targets (default `mine`; a scratch branch for a dry run). In order:
 
 1. Auto-stash the working tree if dirty (untracked included).

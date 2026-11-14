@@ -1,36 +1,13 @@
 #!/usr/bin/env bash
 # Sync this fork with upstream through a merge PR; `mine` is never rewritten.
+# Merges the audited TARGET (--no-ff) into sync/<12 chars of TARGET> from
+# origin/mine, pushes it and opens a PR against mine with `gh api`. SKILL.md has
+# the flow, the HOLD rules and conflict handling.
 #
-#   main  = pristine mirror of upstream/main (fast-forward only)
-#   mine  = main + the fork's patches; moves only by PRs landed on it
-#
-# The audited TARGET is merged (--no-ff) into a branch sync/<first 12 chars of
-# TARGET> started from origin/mine, the branch is pushed and a PR against mine
-# is opened through `gh api` (REST: GraphQL fails behind the cloud proxy). The PR
-# lands as a merge commit, never a squash, so upstream's history stays in mine and
-# `git diff main...mine` lists only what the fork carries on top of upstream.
-# Deploying the result is not done here: each machine runs omnigent-update
-# (dotagents) from an Omnigent scheduled task.
-#
-# A dirty working tree is auto-stashed before the sync and restored after, so
-# in-progress edits survive. Runs against the git checkout of the current
-# directory, and refuses to touch it unless it has the remotes and the branch
-# below: started anywhere else, it exits 2 before changing anything.
-#
-# TARGET defaults to the newest upstream mainline commit at least 3 days old: a
-# compromised upstream change usually surfaces within days, so a short lag keeps
-# most of them off every machine. The sync skill passes the exact commit it audited.
-#
-# An open sync/* PR against the base stops the run (exit 1,
-# `VERDICT: HOLD sync PR #N not landed yet`), so two syncs never stack. A merge
-# conflict stops it too, mid-merge: resolve, `git commit`, and rerun: the rerun
-# sees the finished merge on the sync branch and goes on to push and open the PR.
-#
-# Usage, from the fork checkout:
-#   bash <this directory>/sync-fork.sh [TARGET [PR_BODY_FILE]]
-# PR_BODY_FILE holds the audit summary and the VERDICT line for the PR body.
-# Environment: SYNC_BASE (branch the PR targets, default mine; a scratch branch
-# for a dry run) and SYNC_REPO (owner/name for gh api, default read from origin).
+# Usage, from the fork checkout: bash sync-fork.sh TARGET PR_BODY_FILE
+# PR_BODY_FILE holds the audit summary and a `VERDICT: PASS` line, else exit 2.
+# Environment: SYNC_BASE (PR base branch, default mine; a scratch branch for a
+# dry run), SYNC_REPO (owner/name for gh api, default read from origin).
 set -euo pipefail
 
 UPSTREAM=upstream      # remote -> omnigent-ai/omnigent
@@ -46,6 +23,9 @@ for remote in "$UPSTREAM" "$FORK"; do
 done
 { git rev-parse -q --verify "refs/heads/$PATCHED" || git rev-parse -q --verify "refs/remotes/$FORK/$PATCHED"; } >/dev/null \
   || { echo "!! no '$PATCHED' branch in $PWD — run this from the omnigent fork checkout" >&2; exit 2; }
+BODY_FILE=${2:-}
+grep -qx 'VERDICT: PASS' "$BODY_FILE" 2>/dev/null \
+  || { echo "!! PR_BODY_FILE (second argument) must be a file with the audit summary and a 'VERDICT: PASS' line" >&2; exit 2; }
 [ ! -f "$(git rev-parse --git-path MERGE_HEAD)" ] \
   || { echo "!! a merge is in progress: resolve it, 'git commit', then rerun" >&2; exit 1; }
 
@@ -80,8 +60,7 @@ echo "==> fetching $UPSTREAM and $FORK"
 git fetch "$UPSTREAM"
 git fetch "$FORK" "$PATCHED"
 
-TARGET=$(git rev-parse --verify "${1:-$(git rev-list -1 --first-parent --before='3 days ago' "$UPSTREAM/$MIRROR")}^{commit}")
-BODY_FILE=${2:-}
+TARGET=$(git rev-parse --verify "${1:?TARGET required}^{commit}")
 SYNC_BRANCH="sync/${TARGET:0:12}"
 REPO=${SYNC_REPO:-$(git remote get-url "$FORK" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')}
 
@@ -115,15 +94,8 @@ fi
 echo "==> pushing $SYNC_BRANCH"
 git push "$FORK" "$SYNC_BRANCH"
 
-body=$(mktemp)
-if [ -n "$BODY_FILE" ]; then
-  cat "$BODY_FILE" > "$body"
-else
-  { echo "Audit summary not supplied."; echo; git log --oneline "$FORK/$PATCHED..$TARGET" | head -n 50; } > "$body"
-fi
 echo "==> opening a PR against $PATCHED"
 gh api "repos/$REPO/pulls" -f title="Sync upstream ${TARGET:0:12} into $PATCHED" \
-  -f head="$SYNC_BRANCH" -f base="$PATCHED" -F body=@"$body" --jq .html_url
-rm -f "$body"
+  -f head="$SYNC_BRANCH" -f base="$PATCHED" -F body=@"$BODY_FILE" --jq .html_url
 
 echo "==> done. $SYNC_BRANCH pushed; land the PR as a merge commit, never a squash."
