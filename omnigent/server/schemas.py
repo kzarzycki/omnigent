@@ -1745,6 +1745,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     # main's ordering. Concrete public models narrow the wire type below.
     agent_id: Any
     project_id: str | None = None
+    environment_id: str | None = None
     initial_items: list[SessionEventInput] = Field(default_factory=list)
     initial_input: SessionStartupInput | None = None
     mcp_registry_services: list[McpRegistryServiceId] = Field(default_factory=list, max_length=40)

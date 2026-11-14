@@ -979,6 +979,20 @@ class SysSessionCreateTool(Tool):
                                 "when nested agents are enabled."
                             ),
                         },
+                        "project_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional, placement='same_host': start on the host and "
+                                "workspace this project pins, instead of this session's."
+                            ),
+                        },
+                        "environment_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional, placement='same_host': like project_id, naming "
+                                "the project by its config's environment_id."
+                            ),
+                        },
                         "sandbox_provider": {
                             "type": "string",
                             "description": "Optional provider for placement='managed'.",
