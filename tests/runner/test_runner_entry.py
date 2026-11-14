@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import asyncio
 import hashlib
 import importlib
@@ -4313,8 +4314,20 @@ async def test_runner_applies_session_permission_mode_header_to_acp_env(tmp_path
             for _ in range(3)
         ]
 
-    modes = [result.spec.executor.config.get("permission_mode") for result in results]
+    modes = [result.spec.executor.config.get("acp_session_permission_mode") for result in results]
     assert modes == ["bypassPermissions", None, None]
+    # Other harnesses' builders read ``permission_mode`` and must never see the session's mode.
+    assert all("permission_mode" not in result.spec.executor.config for result in results)
+    from omnigent.runtime.workflow import _build_claude_sdk_spawn_env
+
+    sdk_spec = results[0].spec
+    sdk_spec = dataclasses.replace(
+        sdk_spec,
+        executor=dataclasses.replace(
+            sdk_spec.executor, config={**sdk_spec.executor.config, "harness": "claude-sdk"}
+        ),
+    )
+    assert "bypassPermissions" not in _build_claude_sdk_spawn_env(sdk_spec).values()
     assert (
         _build_acp_spawn_env(results[0].spec)["HARNESS_ACP_PERMISSION_MODE"] == "bypassPermissions"
     )

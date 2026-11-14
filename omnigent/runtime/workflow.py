@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     # import annotations`` is in effect).
     from omnigent.inner.datamodel import OSEnvSpec
 
+from omnigent.acp_permission_mode import acp_permission_mode_from_config
 from omnigent.cli_invocation import cli_invocation
 from omnigent.entities import (
     NON_CONTENT_ITEM_TYPES,
@@ -1788,9 +1789,9 @@ def _build_acp_cli_spawn_env(
     # Permission stance for approval cards. Absent leaves the harness wrap on its
     # ``auto`` default (prompt); ``bypassPermissions`` skips the card for a call no
     # policy had an opinion on, so a headless ACP worker doesn't park on a prompt.
-    permission_mode = spec.executor.config.get("permission_mode")
+    permission_mode = acp_permission_mode_from_config(spec.executor.config)
     if permission_mode is not None:
-        env["HARNESS_ACP_PERMISSION_MODE"] = str(permission_mode)
+        env["HARNESS_ACP_PERMISSION_MODE"] = permission_mode
 
     # Managed-connect support for jcode: point it at a session-private JCODE_HOME
     # (with a config.toml pinning the gateway provider) + a fresh broker bearer. A
@@ -2009,9 +2010,9 @@ def _build_acp_spawn_env(
     # Permission stance for approval cards. Absent leaves the harness wrap on its
     # ``auto`` default (prompt); ``bypassPermissions`` skips the card for a call no
     # policy had an opinion on, so a headless ACP worker doesn't park on a prompt.
-    permission_mode = spec.executor.config.get("permission_mode")
+    permission_mode = acp_permission_mode_from_config(spec.executor.config)
     if permission_mode is not None:
-        env["HARNESS_ACP_PERMISSION_MODE"] = str(permission_mode)
+        env["HARNESS_ACP_PERMISSION_MODE"] = permission_mode
     return env
 
 

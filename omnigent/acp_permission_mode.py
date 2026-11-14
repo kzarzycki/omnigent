@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 from omnigent.spec.types import AgentSpec
@@ -31,10 +32,18 @@ def validate_acp_permission_mode(mode: str) -> str:
     return mode
 
 
-def with_acp_permission_mode(spec: AgentSpec, mode: str) -> AgentSpec:
-    """Return *spec* with ``executor.config.permission_mode`` set to *mode*.
+# Spec config key for the session's mode. Distinct from ``permission_mode`` (which
+# other harness builders also read) so only the ACP builders ever see it.
+SESSION_PERMISSION_MODE_CONFIG_KEY = "acp_session_permission_mode"
 
-    The ACP spawn-env builders read it as ``HARNESS_ACP_PERMISSION_MODE``.
-    """
-    config = {**spec.executor.config, "permission_mode": mode}
+
+def acp_permission_mode_from_config(config: Mapping[str, object]) -> str | None:
+    """Return the mode for ``HARNESS_ACP_PERMISSION_MODE``: the session's, else the spec's."""
+    mode = config.get(SESSION_PERMISSION_MODE_CONFIG_KEY, config.get("permission_mode"))
+    return None if mode is None else str(mode)
+
+
+def with_acp_permission_mode(spec: AgentSpec, mode: str) -> AgentSpec:
+    """Return *spec* carrying the session's ACP permission mode *mode*."""
+    config = {**spec.executor.config, SESSION_PERMISSION_MODE_CONFIG_KEY: mode}
     return replace(spec, executor=replace(spec.executor, config=config))
