@@ -2185,7 +2185,9 @@ for line in sys.stdin:
     msg = json.loads(line)
     mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+        caps = {"omnigentIdleExit": {"status": 75}} if sys.argv[4] == "declared" else {}
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": 1, "agentCapabilities": caps}})
     elif method == "session/new":
         send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session_id}})
     elif method == "session/prompt":
@@ -2200,12 +2202,16 @@ for line in sys.stdin:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "resent"), [(75, True), (1, False)])
+@pytest.mark.parametrize(
+    ("capability", "status", "resent"),
+    [("declared", 75, True), ("declared", 1, False), ("undeclared", 75, False)],
+)
 async def test_prompt_met_by_idle_exit_is_resent_once(
-    tmp_path: Path, status: int, resent: bool
+    tmp_path: Path, capability: str, status: int, resent: bool
 ) -> None:
-    """A prompt that reaches an agent as it leaves idle (status 75) is sent to the next
-    process and answered; any other exit before an answer still fails the turn."""
+    """A prompt that reaches an agent as it leaves idle is sent to the next process and
+    answered, only for an agent that declared that exit status; any other exit before an
+    answer still fails the turn, so a generic agent's side effects are never repeated."""
     agent_path = tmp_path / "idle_leaving_acp_agent.py"
     agent_path.write_text(_IDLE_LEAVING_ACP_AGENT)
     prompt_log = tmp_path / "prompts.jsonl"
@@ -2218,6 +2224,7 @@ async def test_prompt_met_by_idle_exit_is_resent_once(
                     str(prompt_log),
                     str(tmp_path / "left"),
                     str(status),
+                    capability,
                 ]
             ),
             name="Leaver",

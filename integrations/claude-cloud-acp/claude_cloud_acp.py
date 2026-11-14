@@ -1473,6 +1473,7 @@ def serve() -> None:
                         "agentCapabilities": {
                             "loadSession": False,
                             "promptCapabilities": {"image": False},
+                            "omnigentIdleExit": {"status": IDLE_EXIT_STATUS},
                         },
                         "authMethods": [],
                     },
@@ -1609,6 +1610,24 @@ def check_lifetime() -> None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(child_pid, signal.SIGKILL)
         assert status == IDLE_EXIT_STATUS, status
+        # The bridge declares its idle exit, which is what lets Omnigent resend a prompt.
+        hello = subprocess.Popen(
+            [sys.executable, __file__],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        try:
+            hello.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n"
+            )
+            hello.stdin.flush()
+            caps = json.loads(hello.stdout.readline())["result"]["agentCapabilities"]
+            assert caps["omnigentIdleExit"] == {"status": IDLE_EXIT_STATUS}, caps
+        finally:
+            hello.kill()
+            hello.wait()
         # A runner that dies leaves the bridge with a new parent: it exits though stdin stays open.
         lead = subprocess.Popen(
             [
