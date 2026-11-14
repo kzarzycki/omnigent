@@ -3620,12 +3620,16 @@ async def _execute_session_create(
         reasoning_effort=args.get("reasoning_effort"),
     )
     headers: dict[str, str] = {}
+    pinned = {key: args[key] for key in ("project_id", "environment_id") if args.get(key)}
+    if pinned and placement != "same_host":
+        return json.dumps({"error": "project_id and environment_id require placement='same_host'"})
     if placement != "child":
         from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 
         body.pop("parent_session_id")
         # The server derives the same host/workspace from this bound source.
         headers[ORCHESTRATION_SOURCE_HEADER] = conversation_id
+        body.update(pinned)
         if placement == "managed":
             body["host_type"] = "managed"
             body.update(selection)
