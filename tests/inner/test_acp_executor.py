@@ -719,6 +719,15 @@ def test_usage_with_active_model_tags_the_model() -> None:
     }
 
 
+def test_usage_keeps_the_model_an_agent_reports_with_its_result() -> None:
+    """An agent that knows the model it ran (claude-cloud) wins over the session/new model."""
+    ex = AcpExecutor(AcpAgentConfig(command="x"))
+    ex._active_model = "from-session-new"
+    assert ex._usage_with_active_model({"usage": {"model": "ran-model-1"}}) == {
+        "model": "ran-model-1"
+    }
+
+
 def test_usage_with_active_model_skips_stamp_when_model_unknown() -> None:
     """No active model → no ``model`` key (attribution simply stays absent)."""
     ex = AcpExecutor(AcpAgentConfig(command="x"))
