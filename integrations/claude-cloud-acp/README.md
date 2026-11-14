@@ -93,7 +93,10 @@ Omnigent first:
 The bridge forwards each `can_use_tool` request as `session/request_permission`.
 Omnigent evaluates the agent's `tool_call` policies against the native tool
 name (`Bash`, `Write`; the built-in policies already match them), then shows an
-approval card unless the agent runs with `permission_mode: bypassPermissions`.
+approval card unless the session runs in `bypassPermissions`: set it per session
+with `permission_mode` on the session create request (`POST /v1/sessions`), or
+for every session with `permission_mode: bypassPermissions` in the agent spec's
+`executor.config`. Policy runs first in both, so a policy deny still denies.
 A card left unanswered for 30 minutes denies the call. Tools the CLI treats as
 read-only, such as `Read` and `Grep`, never ask.
 
@@ -101,9 +104,13 @@ read-only, such as `Read` and `Grep`, never ask.
 
 - **Policy:** the cloud CLI runs the VM's built-in tools (Bash, edits) without
   asking the client unless the repo's committed `.claude/settings.json` lists
-  them under `permissions.ask`; setting the permission mode from the client
-  does not change that. With those rules, each call goes to Omnigent's TOOL_CALL
-  policy and approval card (see [Policy](#policy)). The CLI does not apply SDK hooks
+  them under `permissions.ask`, or the CLI's own sensitive-file check fires (an
+  edit to a dotfile config such as `.pre-commit-config.yaml`); that check asks
+  whatever the rules say. With those rules, each call goes to Omnigent's TOOL_CALL
+  policy and approval card (see [Policy](#policy)). `claude --cloud` accepts
+  `--permission-mode`, but the VM still starts in `default` and its sensitive-file
+  safety check still asks, so the bridge passes no mode. Under `bypassPermissions`,
+  Omnigent answers that request (policy first), which is what removes those cards. The CLI does not apply SDK hooks
   (`initialize` answers `hooks_applied: false`), and user-level `~/.claude`
   settings do not reach the VM.
 - **Undocumented API:** the events endpoints are not part of the documented

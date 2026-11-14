@@ -1333,6 +1333,40 @@ async def test_bypass_permissions_skips_the_card() -> None:
     ex._elicitation_choice_handler.assert_not_awaited()
 
 
+# The request the claude-cloud bridge forwards for the cloud CLI's sensitive-file safety check.
+_SENSITIVE_FILE_EDIT_REQUEST = {
+    "sessionId": "acp-1",
+    "toolCall": {
+        "toolCallId": "toolu_1",
+        "title": "Edit",
+        "rawInput": {"file_path": "/repo/.pre-commit-config.yaml", "new_string": "# probe"},
+    },
+    "options": [
+        {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+        {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_sensitive_file_edit_request_is_allowed_under_bypass_and_a_card_under_auto() -> None:
+    """A policy-silent sensitive-dotfile edit: no card under bypass, a card under auto.
+
+    **What breaks if this fails**: a claude-cloud session created with
+    ``bypassPermissions`` still parks on a card for the VM's safety check, or a
+    default session stops asking.
+    """
+    bypass = _bypass_executor()
+    bypass._elicitation_handler = AsyncMock(return_value=True)
+    assert await bypass._decide_permission(_SENSITIVE_FILE_EDIT_REQUEST) == (True, None)
+    bypass._elicitation_handler.assert_not_awaited()
+
+    auto = AcpExecutor(AcpAgentConfig(command="x"))
+    auto._elicitation_handler = AsyncMock(return_value=True)
+    assert await auto._decide_permission(_SENSITIVE_FILE_EDIT_REQUEST) == (True, None)
+    auto._elicitation_handler.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_bypass_permissions_still_denies_on_policy_deny() -> None:
     """Policy runs in every mode, so a DENY still blocks under bypass.

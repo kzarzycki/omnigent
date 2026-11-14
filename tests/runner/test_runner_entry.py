@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import importlib
 import io
@@ -4275,3 +4276,58 @@ async def test_runner_selection_changes_without_rewriting_cached_bundle(tmp_path
     ]
     assert len({result.workdir for result in results}) == 1
     assert "registry" not in (results[0].workdir / "config.yaml").read_text()
+
+
+async def test_runner_applies_session_permission_mode_header_to_acp_env(tmp_path):
+    from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_HEADER
+    from omnigent.runtime.workflow import _build_acp_spawn_env
+    from tests.server.helpers import build_agent_bundle
+
+    bundle = build_agent_bundle(
+        "acp-agent", executor={"type": "omnigent", "config": {"harness": "acp"}}, include_llm=False
+    )
+    # A mode the runner does not know (newer server) is ignored, as is no header.
+    header_sets = [
+        {ACP_PERMISSION_MODE_HEADER: "bypassPermissions"},
+        {ACP_PERMISSION_MODE_HEADER: "x"},
+        {},
+    ]
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            content=bundle,
+            headers={
+                "X-Agent-Version": "1",
+                "X-Agent-Session-Scoped": "true",
+                **header_sets.pop(0),
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server.test"
+    ) as client:
+        results = [
+            await _resolve_agent_spec_from_server(
+                client, _AgentSpecCache(tmp_path), "ag_acp", session_id="session"
+            )
+            for _ in range(3)
+        ]
+
+    modes = [result.spec.executor.config.get("acp_session_permission_mode") for result in results]
+    assert modes == ["bypassPermissions", None, None]
+    # Other harnesses' builders read ``permission_mode`` and must never see the session's mode.
+    assert all("permission_mode" not in result.spec.executor.config for result in results)
+    from omnigent.runtime.workflow import _build_claude_sdk_spawn_env
+
+    sdk_spec = results[0].spec
+    sdk_spec = dataclasses.replace(
+        sdk_spec,
+        executor=dataclasses.replace(
+            sdk_spec.executor, config={**sdk_spec.executor.config, "harness": "claude-sdk"}
+        ),
+    )
+    assert "bypassPermissions" not in _build_claude_sdk_spawn_env(sdk_spec).values()
+    assert (
+        _build_acp_spawn_env(results[0].spec)["HARNESS_ACP_PERMISSION_MODE"] == "bypassPermissions"
+    )
