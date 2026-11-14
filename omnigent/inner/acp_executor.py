@@ -98,6 +98,10 @@ logger = logging.getLogger(__name__)
 
 ACP_CANCEL_GRACE_SECONDS = 1.0
 _ACP_TERMINATION_TIMEOUT_SECONDS = 5.0
+# An agent that leaves while idle (the claude-cloud bridge) declares so in its
+# ``initialize`` capabilities: ``{"omnigentIdleExit": {"status": N}}``. A prompt such an
+# agent left unanswered, when it exited with N, never ran and goes to the next process.
+_IDLE_EXIT_CAPABILITY = "omnigentIdleExit"
 _ACP_CLEANUP_HEADROOM_SECONDS = 1.0
 ACP_REAP_TIMEOUT_SECONDS = (
     ACP_CANCEL_GRACE_SECONDS + _ACP_TERMINATION_TIMEOUT_SECONDS + _ACP_CLEANUP_HEADROOM_SECONDS
@@ -515,6 +519,8 @@ class AcpExecutor(Executor):
             raise ValueError("AcpAgentConfig.command is empty")
 
         self._proc: asyncio.subprocess.Process | None = None
+        self._resent_after_idle_exit = False
+        self._idle_exit_status: int | None = None
         self._queue: asyncio.Queue[_AcpJsonObject] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -600,6 +606,7 @@ class AcpExecutor(Executor):
         # subprocess died. ``_initialized`` is a one-way latch.
         self._initialized = False
         self._image_supported = False
+        self._idle_exit_status = None
         self._authenticated = False
         self._auth_advertisement = {}
         if self._proc is not None:
@@ -902,6 +909,13 @@ class AcpExecutor(Executor):
             else {}
         )
         self._image_supported = bool(prompt_caps.get("image"))
+        idle_exit = (
+            result.get("agentCapabilities", {}).get(_IDLE_EXIT_CAPABILITY)
+            if isinstance(result, dict)
+            else None
+        )
+        status = idle_exit.get("status") if isinstance(idle_exit, dict) else None
+        self._idle_exit_status = status if isinstance(status, int) else None
         # Stash the advertised auth methods but do NOT authenticate here:
         # sending an unsolicited ``authenticate`` would change the handshake
         # for every agent that advertises methods informationally (or is
@@ -1568,6 +1582,14 @@ class AcpExecutor(Executor):
         candidates = {c for c in (name, raw_tool, meta_tool) if c}
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
+    async def _exited_idle(self) -> bool:
+        """Whether the agent declared an idle exit and ended with its status."""
+        if self._proc is None or self._idle_exit_status is None:
+            return False
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._proc.wait(), timeout=_ACP_TERMINATION_TIMEOUT_SECONDS)
+        return self._proc.returncode == self._idle_exit_status
+
     def _reset_session_state(self) -> None:
         """Forget state that is only valid for the current ACP session."""
         self._session_id = None
@@ -2080,6 +2102,22 @@ class AcpExecutor(Executor):
                 try:
                     response = fut.result()
                 except Exception as exc:
+                    if (
+                        isinstance(exc, EOFError)
+                        and not accumulated_text
+                        and not self._resent_after_idle_exit
+                        and await self._exited_idle()
+                    ):
+                        # The agent left idle as this prompt arrived: it never ran; send it again.
+                        self._resent_after_idle_exit = True
+                        try:
+                            async for event in self.run_turn(
+                                messages, tools, system_prompt, config
+                            ):
+                                yield event
+                        finally:
+                            self._resent_after_idle_exit = False
+                        return
                     logger.exception("ACP process response retrieval failed")
                     self._reset_session_state()
                     yield ExecutorError(message=f"ACP process error: {exc}", retryable=True)

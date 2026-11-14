@@ -67,6 +67,11 @@ on macOS, or `~/.claude/.credentials.json`.
    The bridge never answers the trust prompt and fails with that instruction
    instead.
 
+An idle bridge exits after `CLAUDE_CLOUD_IDLE_EXIT_S` seconds (default 60, `0` keeps
+it), taking its MCP server child with it, and a bridge whose runner is gone exits
+at once. The next message starts a new bridge, which re-attaches the same cloud
+session from the replayed transcript's `cloud session:` line.
+
 Offline check of the event mapping: `python3 claude_cloud_acp.py --self-check`.
 
 Live scenarios, each starting real cloud sessions: `python3 e2e.py
