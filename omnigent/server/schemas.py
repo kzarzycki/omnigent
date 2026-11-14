@@ -1689,6 +1689,11 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         harness (native CLIs read it as ``--model`` at terminal launch;
         SDK harnesses via the spawn env). Validated server-side against
         a conservative model-id charset. ``None`` = harness default.
+    :param permission_mode: Optional per-session ACP permission mode,
+        ``"auto"`` (approval cards) or ``"bypassPermissions"`` (no card for a
+        request no TOOL_CALL policy decided; a policy deny still denies). Reaches
+        the session's ``HARNESS_ACP_PERMISSION_MODE``; ignored by non-ACP agents.
+        ``None`` keeps the agent spec's mode.
     :param reasoning_effort: Optional per-session reasoning-effort
         override to persist at create time, e.g. ``"high"``. Set by the
         web UI's new-chat model/effort picker (claude-native today) so
@@ -1760,6 +1765,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     terminal_launch_args: list[str] | None = None
     model_override: str | None = None
     reasoning_effort: str | None = None
+    permission_mode: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     harness_override: str | None = None

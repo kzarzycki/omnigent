@@ -635,7 +635,8 @@ def answer_control(s: Session, payload: dict) -> None:
     elif subtype == "can_use_tool":
         tool, tool_input = request.get("tool_name", ""), request.get("input") or {}
         # Omnigent applies its own policy when its relay runs an MCP tool. The
-        # VM's built-ins ask here only under the repo's `permissions.ask` rules.
+        # VM's built-ins ask here under the repo's `permissions.ask` rules and its
+        # own sensitive-file check; approve() applies policy, then the session's mode.
         allowed = any(tool.startswith(f"mcp__{name}__") for name in s.mcp) or approve(
             s, tool, tool_input, request.get("tool_use_id") or request_id
         )

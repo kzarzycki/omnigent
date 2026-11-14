@@ -11087,6 +11087,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
         raise OmnigentError(
             "Sandbox profile labels are server-owned", code=ErrorCode.INVALID_INPUT
         )
+    from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_LABEL_KEY
+
+    if ACP_PERMISSION_MODE_LABEL_KEY in labels:
+        raise OmnigentError(
+            "The ACP permission mode is set with permission_mode at session creation",
+            code=ErrorCode.INVALID_INPUT,
+        )
     from omnigent.mcp_selection import MCP_SELECTION_PREFIX
 
     if any(key.startswith(MCP_SELECTION_PREFIX) for key in labels):

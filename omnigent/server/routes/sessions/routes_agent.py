@@ -16,6 +16,10 @@ from fastapi import (
 )
 from fastapi.responses import Response
 
+from omnigent.acp_permission_mode import (
+    ACP_PERMISSION_MODE_HEADER,
+    ACP_PERMISSION_MODE_LABEL_KEY,
+)
 from omnigent.automations_availability import AUTOMATIONS_HEADER
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCode, OmnigentError
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
@@ -288,6 +292,9 @@ def register_agent_routes(
         automations_available = getattr(request.app.state, "automations_available", None)
         if automations_available is not None:
             selection_headers[AUTOMATIONS_HEADER] = "1" if automations_available() else "0"
+        session_permission_mode = conv.labels.get(ACP_PERMISSION_MODE_LABEL_KEY)
+        if session_permission_mode:
+            selection_headers[ACP_PERMISSION_MODE_HEADER] = session_permission_mode
         return Response(
             content=bundle_bytes,
             media_type="application/gzip",

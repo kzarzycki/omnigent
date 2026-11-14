@@ -27,6 +27,10 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from omnigent.acp_permission_mode import (
+    ACP_PERMISSION_MODE_LABEL_KEY,
+    validate_acp_permission_mode,
+)
 from omnigent.cli_invocation import cli_invocation
 from omnigent.db.utils import generate_agent_id, generate_task_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
@@ -13097,6 +13101,13 @@ async def _create_session_from_existing_agent(
 
     native_agent = native_coding_agent_for_agent_name(agent.name)
     initial_labels = dict(body.labels) if body.labels else {}
+    if body.permission_mode is not None:
+        try:
+            initial_labels[ACP_PERMISSION_MODE_LABEL_KEY] = validate_acp_permission_mode(
+                body.permission_mode
+            )
+        except ValueError as exc:
+            raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
     client_surface = resolve_client_surface(
         request.headers,
         parent_labels=_parent_for_routing.labels if _parent_for_routing is not None else None,
