@@ -2460,7 +2460,15 @@ def register_core_routes(
         # from list rows. Skipping it here removes the session-connectivity
         # and hosts-table queries from every GET /v1/sessions.
         result = PaginatedList(
-            data=[item.model_dump(exclude_none=True) for item in items],
+            data=[
+                {
+                    **item.model_dump(exclude_none=True),
+                    # Explicit null: "nothing recorded" stays distinct from a missing key.
+                    "input_tokens": item.input_tokens,
+                    "output_tokens": item.output_tokens,
+                }
+                for item in items
+            ],
             first_id=page.first_id,
             last_id=page.last_id,
             has_more=page.has_more,
