@@ -20,8 +20,9 @@ _STATES = {"idle", "working", "done", "blocked", "error", "clear"}
 _KINDS = {"permission", "question", "auth"}
 _VALUE = re.compile(r"[A-Za-z0-9_.,+/=-]*")
 _SEGMENT = re.compile(r"[A-Za-z0-9_.+-]{1,32}")
-STATE_FILE_NAME = "program-status.json"
 _REPLY = b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\"
+# A child that stops reading its input cannot queue query replies without bound.
+_UNSENT_INPUT_LIMIT = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -268,9 +269,9 @@ def relay(path: Path, app: str, command: list[str]) -> int:
             os._exit(exit_code)
     status: ProgramStatus | None = None
     stopping_at: float | None = None
-    exited = False
     exit_status: int | None = None
     stdin_open = True
+    unsent_input = bytearray()
 
     def save() -> None:
         temporary = path.with_suffix(".tmp")
@@ -313,32 +314,12 @@ def relay(path: Path, app: str, command: list[str]) -> int:
             save()
 
     def reply() -> None:
-        _write_all(master, _REPLY)
+        if len(unsent_input) < _UNSENT_INPUT_LIMIT:
+            unsent_input.extend(_REPLY)
 
     def resize(_signum: int, _frame: object) -> None:
         with contextlib.suppress(OSError):
             fcntl.ioctl(master, termios.TIOCSWINSZ, fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
-
-    def child_exited() -> bool:
-        nonlocal exited, exit_status
-        if exited:
-            return True
-        if hasattr(os, "waitid"):
-            # WNOWAIT leaves the child unreaped, so its PID keeps pinning its process group.
-            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-            exited = os.waitid(os.P_PID, pid, flags) is not None
-        else:
-            # ponytail: macOS lacks os.waitid before Python 3.13, so the child is reaped
-            # before the group kill; sequential macOS PIDs make reuse within the stop
-            # window unreachable in practice. Drop with Python 3.12 support.
-            child, result = os.waitpid(pid, os.WNOHANG)
-            if child:
-                exited, exit_status = True, result
-        return exited
-
-    def wait_until(deadline: float) -> None:
-        while not child_exited() and time.monotonic() < deadline:
-            time.sleep(0.01)
 
     def stop(signum: int, _frame: object) -> None:
         nonlocal stopping_at
@@ -349,6 +330,7 @@ def relay(path: Path, app: str, command: list[str]) -> int:
 
     parser = ProgramStatusParser(on_report=record, on_query=reply, on_reset=reset)
     try:
+        os.set_blocking(master, False)
         tty.setraw(0)
         signal.signal(signal.SIGWINCH, resize)
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
@@ -357,7 +339,9 @@ def relay(path: Path, app: str, command: list[str]) -> int:
         while True:
             if stopping_at is not None and time.monotonic() - stopping_at > 2:
                 break
-            readable, _, _ = select.select([0, master] if stdin_open else [master], [], [], 0.2)
+            # Queue input the child has not read instead of blocking on it.
+            readers = [0, master] if stdin_open and not unsent_input else [master]
+            readable, _, _ = select.select(readers, [master] if unsent_input else [], [], 0.2)
             if master in readable:
                 try:
                     data = os.read(master, 65536)
@@ -379,33 +363,38 @@ def relay(path: Path, app: str, command: list[str]) -> int:
                     stdin_open = False
                     stop(signal.SIGHUP, None)
                 else:
-                    _write_all(master, data)
-            if not exited and child_exited():
-                # Drain buffered output, bounding descendants holding the slave open.
-                stopping_at = time.monotonic()
+                    unsent_input.extend(data)
+            if unsent_input:
+                with contextlib.suppress(BlockingIOError):
+                    del unsent_input[: os.write(master, unsent_input)]
+            if exit_status is None:
+                child, result = os.waitpid(pid, os.WNOHANG)
+                if child:
+                    exit_status = result
+                    # Drain buffered output, bounding descendants holding the slave open.
+                    stopping_at = time.monotonic()
         _write_all(1, parser.finish())
     finally:
         # PTY EOF can precede waitpid readiness; allow the child's real exit to arrive.
-        wait_until((stopping_at if stopping_at is not None else time.monotonic()) + 2)
-        # Before reaping, so the group cannot be a reused one: a descendant ignoring
-        # SIGHUP would otherwise keep the inner PTY after the child exits.
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pid, signal.SIGKILL)
-        if not exited:
+        deadline = (stopping_at if stopping_at is not None else time.monotonic()) + 2
+        while exit_status is None and time.monotonic() < deadline:
+            child, result = os.waitpid(pid, os.WNOHANG)
+            if child:
+                exit_status = result
+            else:
+                time.sleep(0.01)
+        if exit_status is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-        # Close before the final wait: on macOS a child exiting with unread PTY
-        # output cannot finish until the master closes, and a blocking wait deadlocks.
+            _, exit_status = os.waitpid(pid, 0)
         os.close(master)
-        wait_until(time.monotonic() + 2)
-        if exited and exit_status is None:
-            exit_status = os.waitpid(pid, 0)[1]
         with contextlib.suppress(OSError, termios.error):
             termios.tcsetattr(0, termios.TCSANOW, original)
         with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-    # A child still unreaped after SIGKILL is left to init rather than holding this PTY.
-    return -signal.SIGKILL if exit_status is None else os.waitstatus_to_exitcode(exit_status)
+    return os.waitstatus_to_exitcode(exit_status)
 
 
 def main() -> None:

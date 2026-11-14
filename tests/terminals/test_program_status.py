@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
+import select
+import signal
 import subprocess
 import sys
 import time
+import tty
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from omnigent.terminals.program_status import ProgramStatus, ProgramStatusParser, parse_report
+from omnigent.terminals.program_status import (
+    _REPLY,
+    _UNSENT_INPUT_LIMIT,
+    ProgramStatus,
+    ProgramStatusParser,
+    parse_report,
+)
 
 
 @pytest.mark.parametrize("ending", [b"\x07", b"\x1b\\"])
@@ -190,259 +201,200 @@ def test_relay_process_failure_cleanup(tmp_path: Path, failure: str) -> None:
         os.close(slave)
 
 
-# macOS before Python 3.13 has no os.waitid; a wrapper models that elsewhere.
-_WITHOUT_WAITID = "if hasattr(os, 'waitid'): del os.waitid\n"
-_WAITID_CASES = [
-    pytest.param(True, marks=pytest.mark.skipif(not hasattr(os, "waitid"), reason="no os.waitid")),
-    False,
-]
+@contextlib.contextmanager
+def _start_relay(
+    state_file: Path, command: list[str], stdin: int
+) -> Iterator[subprocess.Popen[bytes]]:
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from omnigent.terminals.program_status import main; main()",
+            "--state-file",
+            str(state_file),
+            "--app",
+            "claude-code",
+            "--",
+            *command,
+        ],
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as process:
+        try:
+            yield process
+        finally:
+            # A failed assertion must not leave Popen's exit waiting on a stuck relay.
+            if process.poll() is None:
+                process.kill()
 
 
-def test_relay_exits_on_sigterm_when_child_exit_waits_for_master_close(tmp_path: Path) -> None:
-    """A stop must not deadlock on a child whose exit waits for the PTY master to close."""
+def _wait_for_file(path: Path, process: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists() and time.monotonic() < deadline:
+        assert process.poll() is None
+        time.sleep(0.01)
+    assert path.exists(), "child never became ready"
+
+
+def _write_until_stalled(master: int, data: bytes) -> int:
+    """Write until the relay stops draining its input for 0.5 s; return the bytes written."""
+    written = 0
+    stalled_since = time.monotonic()
+    fill_deadline = stalled_since + 10
+    while written < len(data) and time.monotonic() - stalled_since < 0.5:
+        assert time.monotonic() < fill_deadline, "relay kept accepting input"
+        try:
+            written += os.write(master, data[written : written + 4096])
+            stalled_since = time.monotonic()
+        except BlockingIOError:
+            time.sleep(0.05)
+    return written
+
+
+@pytest.mark.parametrize("child_on_stop", ["ignores", "exits"])
+def test_stop_signal_releases_relay_blocked_on_unread_input(
+    tmp_path: Path, child_on_stop: str
+) -> None:
+    """A raw-mode child that stops reading input cannot keep the relay and its PTY alive."""
+    state_file = tmp_path / "status.json"
     ready = tmp_path / "ready"
-    # Model macOS: a child exiting with unread PTY output is not reapable until the master closes.
-    wrapper = (
-        "import os,pty,time\n"
-        "from omnigent.terminals.program_status import main\n"
-        "real_fork, real_close = pty.fork, os.close\n"
-        "real_waitpid, real_waitid = os.waitpid, getattr(os, 'waitid', None)\n"
-        "masters = []\n"
-        "def fork():\n"
-        " pid, fd = real_fork()\n"
-        " if pid: masters.append(fd)\n"
-        " return pid, fd\n"
-        "def close(fd):\n"
-        " if fd in masters: masters.remove(fd)\n"
-        " real_close(fd)\n"
-        "def waitpid(pid, flags):\n"
-        " while masters:\n"
-        "  if flags & os.WNOHANG: return 0, 0\n"
-        "  time.sleep(0.01)\n"
-        " return real_waitpid(pid, flags)\n"
-        "def waitid(idtype, pid, flags):\n"
-        " if masters: return None\n"
-        " return real_waitid(idtype, pid, flags)\n"
-        "pty.fork, os.close, os.waitpid = fork, close, waitpid\n"
-        "if real_waitid: os.waitid = waitid\n"
-        "main()\n"
-    )
-    child = (
-        "import os,signal,time; from pathlib import Path; "
-        "[signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGHUP)]; "
+    ignore = ""
+    if child_on_stop == "ignores":
+        ignore = "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    command = [
+        sys.executable,
+        "-c",
+        "import os,signal,time,tty; from pathlib import Path; "
+        f"{ignore}tty.setraw(0); "
         f"ready = Path({str(ready)!r}); pending = ready.with_suffix('.tmp'); "
-        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)"
-    )
+        "pending.write_text(str(os.getpid())); pending.replace(ready); "
+        "time.sleep(30)",
+    ]
     master, slave = os.openpty()
+    tty.setraw(slave)
+    os.set_blocking(master, False)
     try:
-        with subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                wrapper,
-                "--state-file",
-                str(tmp_path / "status.json"),
-                "--app",
-                "claude-code",
-                "--",
-                sys.executable,
-                "-c",
-                child,
-            ],
-            stdin=slave,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ) as process:
+        with _start_relay(state_file, command, slave) as process:
+            _wait_for_file(ready, process)
+            child = int(ready.read_text())
+            flood = b"x" * (1 << 20)
+            assert _write_until_stalled(master, flood) < len(flood), "input never backed up"
+            process.send_signal(signal.SIGTERM)
             try:
-                deadline = time.monotonic() + 5
-                while not ready.exists() and time.monotonic() < deadline:
-                    assert process.poll() is None
-                    time.sleep(0.01)
-                assert ready.exists(), "child never became ready"
-                process.terminate()
-                process.wait(timeout=10)
-                with pytest.raises(ProcessLookupError):
-                    os.kill(int(ready.read_text()), 0)
-            finally:
-                if process.poll() is None:
-                    process.kill()
+                output, _ = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(child, signal.SIGKILL)
+                pytest.fail("relay stayed blocked after SIGTERM")
+            assert b"Traceback" not in output, output
+            # The relay mirrors the reaped child's status: SIGKILL after the grace period.
+            expected = signal.SIGKILL if child_on_stop == "ignores" else signal.SIGTERM
+            assert process.returncode == -expected, output
+            with pytest.raises(ProcessLookupError):
+                os.kill(child, 0)
+            assert not state_file.exists()
     finally:
         os.close(master)
         os.close(slave)
 
 
-@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
-def test_relay_stop_kills_descendants_after_child_exits(tmp_path: Path, has_waitid: bool) -> None:
-    """A descendant ignoring SIGHUP and SIGTERM must not outlive the stopped relay.
-
-    With ``os.waitid`` the group kill comes before the child is reaped, while its PID
-    cannot be reused; without it (macOS before Python 3.13) the relay still works.
-    """
+def test_backed_up_input_reaches_the_child_intact(tmp_path: Path) -> None:
+    """Input and a query reply queued while the child is not reading arrive once, in order."""
     ready = tmp_path / "ready"
-    errors = tmp_path / "relay-errors"
-    wrapper = (
-        "import os\n"
-        "from omnigent.terminals.program_status import main\n"
-        "real_killpg = os.killpg\n"
-        + ("" if has_waitid else _WITHOUT_WAITID)
-        + "def killpg(pgid, sig):\n"
-        " flags = os.WEXITED | os.WNOHANG | os.WNOWAIT\n"
-        " try: hasattr(os, 'waitid') and os.waitid(os.P_PID, pgid, flags)\n"
-        " except ChildProcessError: os.write(2, b'killpg-after-reap\\n')\n"
-        " real_killpg(pgid, sig)\n"
-        "os.killpg = killpg\n"
-        "main()\n"
-    )
-    descendant = (
-        "import os,signal,time; from pathlib import Path; "
-        "[signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGHUP)]; "
-        f"ready = Path({str(ready)!r}); pending = ready.with_suffix('.tmp'); "
-        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)"
-    )
-    child = (
-        f"import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
-        "time.sleep(60)"
+    resume = tmp_path / "resume"
+    received = tmp_path / "received"
+    payload = bytes(range(256)) * 1024
+    child_script = (
+        "import os, time, tty\n"
+        "from pathlib import Path\n"
+        "tty.setraw(0)\n"
+        f"Path({str(ready)!r}).touch()\n"
+        f"while not Path({str(resume)!r}).exists():\n"
+        "    time.sleep(0.01)\n"
+        "os.write(1, b'\\x1b]7501;?\\x1b\\\\')\n"
+        "data = b''\n"
+        f"while len(data) < {len(payload) + len(_REPLY)}:\n"
+        "    data += os.read(0, 65536)\n"
+        f"Path({str(received)!r}).write_bytes(data)\n"
     )
     master, slave = os.openpty()
-    descendant_pid = None
+    tty.setraw(slave)
+    os.set_blocking(master, False)
     try:
-        with (
-            errors.open("wb") as stderr,
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    wrapper,
-                    "--state-file",
-                    str(tmp_path / "status.json"),
-                    "--app",
-                    "claude-code",
-                    "--",
-                    sys.executable,
-                    "-c",
-                    child,
-                ],
-                stdin=slave,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr,
-            ) as process,
-        ):
-            try:
-                deadline = time.monotonic() + 5
-                while not ready.exists() and time.monotonic() < deadline:
-                    assert process.poll() is None
-                    time.sleep(0.01)
-                assert ready.exists(), "descendant never became ready"
-                descendant_pid = int(ready.read_text())
-                process.terminate()
-                process.wait(timeout=10)
-                deadline = time.monotonic() + 5
-                while _alive(descendant_pid) and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                assert not _alive(descendant_pid)
-                assert b"killpg-after-reap" not in errors.read_bytes()
-                assert b"Traceback" not in errors.read_bytes()
-            finally:
-                if process.poll() is None:
-                    process.kill()
-    finally:
-        if descendant_pid is not None and _alive(descendant_pid):
-            os.kill(descendant_pid, 9)
-        os.close(master)
-        os.close(slave)
-
-
-def _alive(pid: int) -> bool:
-    """Whether *pid* runs and is not a zombie awaiting its reaper."""
-    import psutil
-
-    try:
-        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
-    except psutil.NoSuchProcess:
-        return False
-
-
-@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
-def test_relay_keeps_child_exit_status(tmp_path: Path, has_waitid: bool) -> None:
-    """The child's own exit status passes through, with or without ``os.waitid``."""
-    wrapper = (
-        "import os\n"
-        + ("" if has_waitid else _WITHOUT_WAITID)
-        + "from omnigent.terminals.program_status import main\n"
-        "main()\n"
-    )
-    master, slave = os.openpty()
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                wrapper,
-                "--state-file",
-                str(tmp_path / "status.json"),
-                "--app",
-                "claude-code",
-                "--",
-                "sh",
-                "-c",
-                "exit 7",
-            ],
-            stdin=slave,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-        assert result.returncode == 7, result.stdout + result.stderr
-        assert b"Traceback" not in result.stderr
-    finally:
-        os.close(master)
-        os.close(slave)
-
-
-@pytest.mark.parametrize("has_waitid", _WAITID_CASES)
-def test_relay_forwards_input_to_a_running_child(tmp_path: Path, has_waitid: bool) -> None:
-    """Checking for the child's exit never blocks input forwarding while it runs."""
-    import select
-
-    wrapper = (
-        "import os\n"
-        + ("" if has_waitid else _WITHOUT_WAITID)
-        + "from omnigent.terminals.program_status import main\n"
-        "main()\n"
-    )
-    master, slave = os.openpty()
-    try:
-        with subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                wrapper,
-                "--state-file",
-                str(tmp_path / "status.json"),
-                "--app",
-                "claude-code",
-                "--",
-                "sh",
-                "-c",
-                'echo READY; read line; [ "$line" = ping ] && exit 5; exit 1',
-            ],
-            stdin=slave,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+        with _start_relay(
+            tmp_path / "status.json", [sys.executable, "-c", child_script], slave
         ) as process:
-            try:
-                assert process.stdout is not None
-                output = b""
-                deadline = time.monotonic() + 5
-                while b"READY" not in output and time.monotonic() < deadline:
-                    if select.select([process.stdout], [], [], 0.1)[0]:
-                        output += os.read(process.stdout.fileno(), 4096)
-                assert b"READY" in output, output
-                os.write(master, b"ping\r")
-                assert process.wait(timeout=10) == 5
-            finally:
-                if process.poll() is None:
-                    process.kill()
+            _wait_for_file(ready, process)
+            written = _write_until_stalled(master, payload)
+            assert written < len(payload), "input never backed up"
+            # The child queries while the relay still holds unsent input, then reads it all.
+            resume.touch()
+            deadline = time.monotonic() + 10
+            while written < len(payload):
+                assert time.monotonic() < deadline, "relay stopped forwarding input"
+                try:
+                    written += os.write(master, payload[written:])
+                except BlockingIOError:
+                    time.sleep(0.01)
+            output, _ = process.communicate(timeout=10)
+            assert process.returncode == 0, output
+        data = received.read_bytes()
+        assert data.count(_REPLY) == 1
+        assert data.replace(_REPLY, b"") == payload
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_query_replies_stop_queueing_at_the_limit_and_resume(tmp_path: Path) -> None:
+    """Replies to a child that is not reading stop queueing at the limit, then resume."""
+    resume = tmp_path / "resume"
+    backlog = tmp_path / "backlog"
+    after = tmp_path / "after"
+    queries = 2 * _UNSENT_INPUT_LIMIT // len(_REPLY)
+    child_script = (
+        "import os, select, time, tty\n"
+        "from pathlib import Path\n"
+        "tty.setraw(0)\n"
+        f"flood = b'\\x1b]7501;?\\x1b\\\\' * {queries} + b'flooded'\n"
+        "while flood:\n"
+        "    flood = flood[os.write(1, flood) :]\n"
+        f"while not Path({str(resume)!r}).exists():\n"
+        "    time.sleep(0.01)\n"
+        "data = b''\n"
+        "while select.select([0], [], [], 1)[0]:\n"
+        "    data += os.read(0, 65536)\n"
+        f"Path({str(backlog)!r}).write_bytes(data)\n"
+        "os.write(1, b'\\x1b]7501;?\\x1b\\\\')\n"
+        "data = b''\n"
+        f"while len(data) < {len(_REPLY)}:\n"
+        f"    data += os.read(0, {len(_REPLY)} - len(data))\n"
+        f"Path({str(after)!r}).write_bytes(data)\n"
+    )
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    try:
+        with _start_relay(
+            tmp_path / "status.json", [sys.executable, "-c", child_script], slave
+        ) as process:
+            assert process.stdout is not None
+            # The relay forwards this marker only after handling every earlier query.
+            output = b""
+            deadline = time.monotonic() + 10
+            while b"flooded" not in output:
+                assert time.monotonic() < deadline, output
+                if select.select([process.stdout], [], [], 0.1)[0]:
+                    output += os.read(process.stdout.fileno(), 65536)
+            resume.touch()
+            rest, _ = process.communicate(timeout=15)
+            assert process.returncode == 0, output + rest
+        drained = backlog.read_bytes()
+        replies = len(drained) // len(_REPLY)
+        assert drained == _REPLY * replies
+        assert _UNSENT_INPUT_LIMIT // len(_REPLY) <= replies < queries
+        assert after.read_bytes() == _REPLY
     finally:
         os.close(master)
         os.close(slave)

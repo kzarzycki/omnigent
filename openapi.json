@@ -16,6 +16,10 @@
             "description": "Plain-text snapshot of the selected range, used to re-anchor the comment after file edits. `None` if not provided.",
             "title": "Anchor Content"
           },
+          "anchor_metadata": {
+            "title": "Anchor Metadata",
+            "type": "null"
+          },
           "body": {
             "description": "The comment text.",
             "title": "Body",
@@ -3958,6 +3962,20 @@
             ],
             "description": "Optional git worktree options. In create mode the server creates a worktree for a new branch off `workspace` on the host and binds the runner to it (the fork-resume path; mirrors `POST /v1/sessions`). In bind mode (`existing_worktree=True`) `workspace` already IS a worktree \u2014 no worktree is created; `branch_name` is recorded as the session's `git_branch` for display and opt-in cleanup. `None` binds `workspace` directly. `host_id` is always present (it is in the path), so no host check is needed here."
           },
+          "session_env_handoff_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opaque, non-secret ID of the launching CLI's local forwarded-environment file, relayed to the host so only this launch's runner consumes it. `None` when nothing is forwarded.",
+            "title": "Session Env Handoff Id"
+          },
           "session_id": {
             "description": "Session to bind the new runner to, e.g. `\"conv_abc123\"`.",
             "title": "Session Id",
@@ -4391,7 +4409,7 @@
             "title": "Enabled"
           },
           "harness": {
-            "description": "Harness family that loads it: `claude`, `codex`, or `cursor`.",
+            "description": "Harness family that loads it: `claude`, `codex`, `cursor`, or `pi`.",
             "title": "Harness",
             "type": "string"
           },
@@ -6708,6 +6726,11 @@
             "title": "Session Fork Workspaces",
             "type": "boolean"
           },
+          "session_list_scoped_archives": {
+            "default": true,
+            "title": "Session List Scoped Archives",
+            "type": "boolean"
+          },
           "session_pull_requests": {
             "default": false,
             "title": "Session Pull Requests",
@@ -6716,6 +6739,11 @@
           "session_search_scope": {
             "default": true,
             "title": "Session Search Scope",
+            "type": "boolean"
+          },
+          "session_title_instructions": {
+            "default": false,
+            "title": "Session Title Instructions",
             "type": "boolean"
           },
           "sharing_mode": {
@@ -11463,6 +11491,56 @@
           "title"
         ],
         "title": "SessionTitleEvent",
+        "type": "object"
+      },
+      "SessionTitleInstructionsRequest": {
+        "additionalProperties": false,
+        "description": "Replace the caller's title instructions; null or blank clears them.\n\nThe stripped value may hold at most 4,000 characters. The raw bound only\ncaps request size before stripping.",
+        "properties": {
+          "instructions": {
+            "anyOf": [
+              {
+                "maxLength": 16000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions"
+          }
+        },
+        "required": [
+          "instructions"
+        ],
+        "title": "SessionTitleInstructionsRequest",
+        "type": "object"
+      },
+      "SessionTitleInstructionsResponse": {
+        "description": "The caller's saved title instructions and the limit the server enforces.",
+        "properties": {
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions"
+          },
+          "max_chars": {
+            "format": "int64",
+            "title": "Max Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instructions",
+          "max_chars"
+        ],
+        "title": "SessionTitleInstructionsResponse",
         "type": "object"
       },
       "SessionTodosEvent": {
@@ -17218,7 +17296,7 @@
             }
           },
           {
-            "description": "Ownership/archive filter for the sidebar tabs. `\"mine\"` returns only sessions the caller owns (owner-level grant). `\"shared\"` returns only sessions accessible but not owned. `\"archived\"` returns only archived sessions; with `project`, only owned sessions are returned so first-class project names resolve within the caller's projects. `\"all\"` (default) returns all accessible non-archived sessions, matching the legacy behaviour.",
+            "description": "Ownership/archive filter for the sidebar tabs. `\"mine\"` returns only sessions the caller owns (owner-level grant). `\"shared\"` returns only sessions accessible but not owned. `\"archived\"` returns only archived sessions; with `project`, only owned sessions are returned so first-class project names resolve within the caller's projects. `\"all\"` (default) returns all accessible non-archived sessions, matching the legacy behaviour. `include_archived` adds archived rows to `\"mine\"`, `\"shared\"` and `\"all\"`.",
             "in": "query",
             "name": "visibility",
             "required": false,
@@ -18469,7 +18547,7 @@
     },
     "/v1/sessions/{session_id}/comments/send": {
       "post": {
-        "description": "Mark comments as addressed and format them into an agent message.\n\nFetches each requested comment, marks it `addressed`,\nand formats the full set into a grouped, sorted message string\nsuitable for pasting into the chat composer.\n\nRequires `LEVEL_EDIT` on the session in multi-user mode because\nit transitions comment status from `draft` to `addressed`.\n\n**Parameters**\n\n- `body` \u2014 List of comment IDs to send, with an optional custom instruction prefix.\n\n**Returns:** `{\"formatted_message\": str, \"sent_comment_ids\": list[str]}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401/403/404 if the user lacks edit permission, or 404 if any requested comment is not found or does not belong to this session.",
+        "description": "Mark Files comments addressed and format them into an agent message.\n\nFetches each requested comment, marks it `addressed`,\nand formats the full set into a grouped, sorted message string\nsuitable for pasting into the chat composer.\n\nRequires `LEVEL_EDIT` on the session in multi-user mode because\nit transitions comment status from `draft` to `addressed`.\n\n**Parameters**\n\n- `body` \u2014 List of comment IDs to send, with an optional custom instruction prefix.\n\n**Returns:** `{\"formatted_message\": str, \"sent_comment_ids\": list[str]}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401/403/404 if the user lacks edit permission, or 404 if any requested comment is not found or does not belong to this session; 400 if a requested comment belongs to a PR review.",
         "operationId": "send_to_agent_v1_sessions__session_id__comments_send_post",
         "parameters": [
           {
@@ -22826,6 +22904,68 @@
         "summary": "Fork Session",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/v1/settings/session-title-instructions": {
+      "get": {
+        "description": "Read the caller's own title instructions.",
+        "operationId": "get_session_title_instructions_v1_settings_session_title_instructions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTitleInstructionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Session Title Instructions",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Save or clear the caller's title instructions.",
+        "operationId": "save_session_title_instructions_v1_settings_session_title_instructions_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionTitleInstructionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTitleInstructionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Session Title Instructions",
+        "tags": [
+          "settings"
         ]
       }
     },
