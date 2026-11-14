@@ -1261,7 +1261,8 @@ conflated with a generic session event. Any value other than
 
 A verdict for a `question_…` id (a `sys_ask_user_question` card) instead
 posts one user message into the session, one line per question:
-`[answer to <id>] <question>: <choice>`, multi-select choices joined with
+`[answer to <id>] <label>: <choice>`, where the label is the question's
+`header` or else its first 80 characters (never the full text), multi-select choices joined with
 `, `, and `(dismissed without an answer)` for a decline. The message takes
 the normal input path, so an idle session wakes and a busy one reads it at
 its next turn end. A second verdict for the same id posts nothing.
@@ -1298,7 +1299,7 @@ GET /v1/sessions/{session_id}/questions/{question_id}
 
 200 OK
 {"question_id": "question_<32 hex>", "status": "answered",
- "action": "accept", "answer": "[answer to question_<32 hex>] Ship it?: Yes"}
+ "action": "accept", "choices": {"Release": "Yes"}}
 {"question_id": "question_<32 hex>", "status": "waiting"}
 {"question_id": "...", "status": "unknown"}
 

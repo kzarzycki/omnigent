@@ -464,7 +464,7 @@ def test_ask_user_question_guidance_names_tool_and_answer_prefix() -> None:
     assert "call sys_ask_user_question " in ASK_USER_QUESTION_INSTRUCTION
     assert "starts with `[answer to <question id>]`" in ASK_USER_QUESTION_INSTRUCTION
     assert SysAskUserQuestionTool.name() == "sys_ask_user_question"
-    answer = _question_answer_text("question_1", [{"question": "Q?"}], {"action": "accept"})
+    answer = _question_answer_text("question_1", {"Q?": "A"})
     assert answer.startswith("[answer to question_1]")
 
 
