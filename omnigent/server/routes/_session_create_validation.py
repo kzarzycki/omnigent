@@ -117,6 +117,70 @@ async def resolve_project_session_create(
     return ProjectCreateResolution(body=resolved, project_id=project_id)
 
 
+@dataclass(frozen=True)
+class ProjectPlacement:
+    """Host and workspace an orchestrated create takes from a named project."""
+
+    project_id: str
+    host_id: str
+    workspace: str
+
+
+async def resolve_project_placement(
+    *,
+    project_id: str | None,
+    environment_id: str | None,
+    user_id: str | None,
+    project_store: ProjectStore | None,
+) -> ProjectPlacement | None:
+    """Resolve the host and workspace a named project or environment pins.
+
+    ``environment_id`` finds the caller's project whose config carries that
+    ``environment_id``. Returns ``None`` when neither is named. A named project
+    that is unknown, ambiguous or lacks a ``host_id`` and ``workspace`` fails
+    rather than falling back to the sender's placement.
+    """
+    if project_id is None and environment_id is None:
+        return None
+    if project_id is not None and environment_id is not None:
+        raise OmnigentError(
+            "Set project_id or environment_id, not both", code=ErrorCode.INVALID_INPUT
+        )
+    if project_store is None:
+        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+    if project_id is not None:
+        project = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+    else:
+        matches = [
+            candidate
+            for candidate in await asyncio.to_thread(project_store.list, user_id=user_id)
+            if candidate.config.get("environment_id") == environment_id
+        ]
+        if len(matches) > 1:
+            raise OmnigentError(
+                f"Environment {environment_id!r} is named by more than one project",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        project = matches[0] if matches else None
+        if project is None:
+            raise OmnigentError("Environment not found", code=ErrorCode.NOT_FOUND)
+    if project is None:
+        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+    host_id = project.config.get("host_id")
+    workspace = project.config.get("workspace")
+    if (
+        not isinstance(host_id, str)
+        or not host_id
+        or not isinstance(workspace, str)
+        or not workspace
+    ):
+        raise OmnigentError(
+            "Project has no host_id and workspace to start the session in",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return ProjectPlacement(project_id=project.id, host_id=host_id, workspace=workspace)
+
+
 def project_for_workspace(projects: list[Any], host_id: str, workspace: str) -> str | None:
     """The project whose workspace root holds *workspace* on *host_id*.
 
