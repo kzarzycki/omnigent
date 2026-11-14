@@ -74,6 +74,10 @@ CUT_OFF_GRACE_S = 30
 # which re-attaches the same cloud session from the replayed transcript.
 IDLE_EXIT_S = float(os.environ.get("CLAUDE_CLOUD_IDLE_EXIT_S", "60"))
 LIFETIME_POLL_S = 1.0
+# SIGTERM always ends the bridge within this long, even when a cloud POST or a lock holds it
+# up; its MCP children get CHILD_GRACE_S to leave on SIGTERM before they are killed.
+LEAVE_BOUND_S = float(os.environ.get("CLAUDE_CLOUD_LEAVE_BOUND_S", "3"))
+CHILD_GRACE_S = 1.0
 # Exit status of an idle bridge: Omnigent resends a prompt that ended with it unanswered.
 IDLE_EXIT_STATUS = 75
 # What the bridge posts to a session whose turn its sandbox cut off.
@@ -1425,17 +1429,40 @@ def watch_lifetime(parent_pid: int) -> None:
             os._exit(IDLE_EXIT_STATUS if reason.startswith("idle") else 0)
 
 
+def end_children() -> None:
+    """End the MCP server children: SIGTERM, then SIGKILL for one that ignores it."""
+    procs = [
+        proxy.proc
+        for session in list(SESSIONS.values())
+        for proxy in list(session.mcp.values())
+        if proxy.proc is not None and proxy.proc.poll() is None
+    ]
+    for proc in procs:
+        proc.terminate()
+    deadline = time.monotonic() + CHILD_GRACE_S
+    for proc in procs:
+        try:
+            proc.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def leave() -> None:
-    """Hand a cancel on its way to the cloud session, and end the MCP server children."""
-    for session in SESSIONS.values():
+    """End the children, then hand a cancel on its way to the cloud session.
+
+    A cancel POST or the lock around it can hold this up, so a timer ends the
+    process after :data:`LEAVE_BOUND_S` whatever is stuck.
+    """
+    if LEAVE_BOUND_S > 0:
+        timer = threading.Timer(LEAVE_BOUND_S, os._exit, args=(0,))
+        timer.daemon = True
+        timer.start()
+    end_children()
+    for session in list(SESSIONS.values()):
         if session.cancelled.is_set():
             session.cancel()
         elif session.running:
             log(f"leaving {session.cloud_id} running")
-    for session in SESSIONS.values():
-        for proxy in session.mcp.values():
-            if proxy.proc is not None and proxy.proc.poll() is None:
-                proxy.proc.terminate()
     log("stopping")
 
 
@@ -1659,7 +1686,63 @@ def check_lifetime() -> None:
         IDLE_EXIT_S = saved_idle
 
 
+def check_sigterm() -> None:
+    """SIGTERM ends a bridge within a bound while a cancel's POST hangs, children and all."""
+    host = (
+        "import runpy, sys, threading, time, os\n"
+        "g = runpy.run_path(sys.argv[1])['serve'].__globals__\n"
+        "g['interrupt'] = lambda cloud_id: time.sleep(60)\n"  # a POST that never answers
+        "stubborn = ('import signal, time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'"
+        " + sys.argv[2])\n"
+        "spec = {'name': 'echo', 'command': sys.executable, 'args': ['-c', stubborn]}\n"
+        "proxy = g['McpProxy'](spec)\n"
+        "proxy._start()\n"
+        "s = g['SESSIONS']['acp-x'] = g['Session']('/', 'acp-x')\n"
+        "s.cloud_id, s.running, s.mcp = 'session_x', True, {'echo': proxy}\n"
+        "s.cancelled.set()\n"
+        "threading.Thread(target=s.cancel, daemon=True).start()\n"  # the turn loop's retry
+        "time.sleep(0.3)\n"
+        "print(proxy.proc.pid, flush=True)\n"
+        "g['serve']()\n"
+    )
+    lingering = ECHO_MCP + "\nwhile True:\n    time.sleep(1)\n"
+    env = {**os.environ, "CLAUDE_CLOUD_IDLE_EXIT_S": "0", "HOME": tempfile.mkdtemp()}
+    bridge = subprocess.Popen(
+        [sys.executable, "-c", host, __file__, lingering],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    child_pid = int(bridge.stdout.readline())
+    try:
+        bridge.send_signal(signal.SIGTERM)
+        try:
+            bridge.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            bridge.kill()
+            raise AssertionError("SIGTERM did not end the bridge within 5 s") from None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("a SIGTERM-proof MCP server child outlived the bridge")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
+
+
 def self_check() -> None:
+    global LEAVE_BOUND_S
+    LEAVE_BOUND_S = (
+        0.0  # stop() runs in-process here; the bounded exit is checked in check_sigterm
+    )
     globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
     real_stream_events = stream_events
     os.environ.pop("CLAUDE_CLOUD_TOKEN", None)  # the token cases read the stubbed login
@@ -2506,6 +2589,7 @@ def self_check() -> None:
     assert naps == [1, 2], naps
     globals()["time"] = real_time
     check_lifetime()
+    check_sigterm()
     check_archive_and_title()
     print("self-check ok")
 
