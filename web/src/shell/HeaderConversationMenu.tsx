@@ -17,7 +17,6 @@ import {
   GitBranchIcon,
   GitForkIcon,
   InfoIcon,
-  LocateFixedIcon,
   MailIcon,
   PencilIcon,
   PinIcon,
@@ -90,8 +89,7 @@ import { useNavigate } from "@/lib/routing";
 import { USER_SESSION_TITLE_MAX_CHARS } from "@/lib/sessionTitles";
 import { showArchiveUndoToast } from "./archiveUndoToast";
 import { unpinWithUndo } from "./unpinUndoToast";
-import { requestRevealSessionInSidebar } from "./sidebarReveal";
-import { useArchiveWorktreePrompt } from "./ArchiveWorktreeDialog";
+import { useArchivePrompt } from "./ArchivePrompt";
 import { cn } from "@/lib/utils";
 import { MOBILE_GLASS_SURFACE } from "./mobileGlass";
 import { conversationDisplayLabel } from "./sidebarNav";
@@ -149,7 +147,7 @@ export function HeaderConversationMenu({
   const rename = useRenameConversation();
   const moveToProject = useMoveToProject();
   const archive = useArchiveConversation();
-  const archiveWorktreePrompt = useArchiveWorktreePrompt();
+  const archivePrompt = useArchivePrompt();
   const deleteConversation = useStopAndDeleteConversation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -283,7 +281,7 @@ export function HeaderConversationMenu({
       archive.mutate({ id: conversation.id, archived: false });
       return;
     }
-    archiveWorktreePrompt.requestArchive([conversation], (deleteWorktreeIds) =>
+    archivePrompt.requestArchive([conversation], (deleteWorktreeIds) =>
       archiveNow(deleteWorktreeIds.has(conversation.id)),
     );
   };
@@ -427,14 +425,6 @@ export function HeaderConversationMenu({
           Create automation
         </DropdownMenuItem>
       )}
-      <DropdownMenuItem
-        data-testid="header-reveal-in-sidebar"
-        className={itemClass}
-        onSelect={() => requestRevealSessionInSidebar(conversation.id)}
-      >
-        <LocateFixedIcon className="size-3.5" />
-        Show in sidebar
-      </DropdownMenuItem>
       {/* Move to project is also reachable on desktop via the breadcrumb's
           folder tag (HeaderProjectTag); on mobile the native shells hide the
           breadcrumb, so this menu is the sole entry point. */}
@@ -565,7 +555,7 @@ export function HeaderConversationMenu({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {archiveWorktreePrompt.dialog}
+      {archivePrompt.dialog}
       {automationOpen && (
         <CreateAutomationFromSessionDialog
           conversation={conversation}

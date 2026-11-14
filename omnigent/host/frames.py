@@ -92,8 +92,6 @@ CAP_HARNESS_LOGIN = "harness_login"
 CAP_MCP_REGISTRY = "mcp_registry"
 # The host bounds a whole worktree create by ``HostCreateWorktreeFrame.timeout_s``:
 CAP_WORKTREE_CREATE_BUDGET = "worktree_create_budget"
-# The host applies ``HostLaunchRunnerFrame.harness_telemetry`` to the runner:
-CAP_HARNESS_TELEMETRY = "harness_telemetry"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
@@ -112,7 +110,6 @@ HOST_CAPABILITIES: list[str] = [
     CAP_WORKTREE_CREATE_BUDGET,
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
-    CAP_HARNESS_TELEMETRY,
 ]
 
 # Server capabilities, advertised on the tunnel's WebSocket upgrade response (the
@@ -223,7 +220,6 @@ class HostFrameKind(str, Enum):
     HELLO = "host.hello"
     CONNECTION_ERROR = "host.connection_error"
     HARNESS_READINESS = "host.harness_readiness"
-    RESOURCES = "host.resources"
     LAUNCH_RUNNER = "host.launch_runner"
     LAUNCH_RUNNER_RESULT = "host.launch_runner_result"
     STOP_RUNNER = "host.stop_runner"
@@ -324,8 +320,6 @@ class HostHelloFrame:
         supported" without a version check.
     :param connection_id: Host-minted identifier for this socket, shared with
         server diagnostics. Absent from older hosts.
-    :param commit: Short git commit of a source install, e.g. ``"3609fea2a"``.
-        ``None`` for an installed wheel or an older host.
     """
 
     version: str
@@ -340,7 +334,6 @@ class HostHelloFrame:
     installation_id: str | None = None
     capabilities: list[str] = field(default_factory=list)
     connection_id: str | None = None
-    commit: str | None = None
 
 
 @dataclass
@@ -376,29 +369,6 @@ class HostHarnessReadinessFrame:
     gateway_inference: dict[str, bool] | None = None
 
 
-# How often a host reports its resources. The server marks a report older than
-# two intervals stale, so one late frame doesn't hide the numbers.
-HOST_RESOURCES_INTERVAL_S = 60.0
-
-
-@dataclass
-class HostResourcesFrame:
-    """Host's periodic load and memory report, for placing sessions.
-
-    :param load_1m: 1-minute load average, e.g. ``3.42``.
-    :param cpu_count: Logical CPUs, e.g. ``8``.
-    :param memory_total_mb: Physical memory in MB, e.g. ``15872``.
-    :param memory_available_mb: Memory a new process can get without
-        swapping, in MB: ``MemAvailable`` on Linux, free plus inactive
-        pages on macOS.
-    """
-
-    load_1m: float
-    cpu_count: int
-    memory_total_mb: int
-    memory_available_mb: int
-
-
 @dataclass
 class HostLaunchRunnerFrame:
     """Server → host: spawn a new runner process.
@@ -427,10 +397,9 @@ class HostLaunchRunnerFrame:
         falls back to stopping every runner launched for ``session_id``; an
         empty tuple stops none, e.g. after /clear moved the old runner to
         another session.
-    :param harness_telemetry: The server's harness telemetry decision for the
-        session (:func:`omnigent.server.harness_telemetry.harness_telemetry_launch`),
-        e.g. ``{"enabled": False}``. ``None`` (no setting, or an older server)
-        leaves the host's own telemetry settings in charge.
+    :param session_env_handoff_id: Opaque ID of the launching CLI's local
+        forwarded-environment handoff, e.g. ``"3qA0x_7Kp2..."``. ``None`` when
+        no CLI handed values to this launch, as for a server-driven restart.
     """
 
     request_id: str
@@ -442,7 +411,7 @@ class HostLaunchRunnerFrame:
     superseded_runner_ids: tuple[str, ...] | None = None
     scheduled_run: ScheduledRunLogContext | None = None
     mcp_disabled_servers_active_harnesses: list[str] | None = None
-    harness_telemetry: dict[str, Any] | None = None
+    session_env_handoff_id: str | None = None
 
 
 @dataclass
@@ -486,16 +455,10 @@ class HostStopRunnerFrame:
         e.g. ``"req_def456"``.
     :param runner_id: Runner to stop, e.g.
         ``"runner_token_abc123..."``.
-    :param reason: Why the server stops it, for the host's log:
-        ``"archive"``, ``"stop"`` or ``"superseded"``. ``None`` from an
-        older server.
-    :param session_id: Session whose action stopped the runner.
     """
 
     request_id: str
     runner_id: str
-    reason: str | None = None
-    session_id: str | None = None
 
 
 @dataclass
@@ -1591,7 +1554,6 @@ HostFrame = (
     HostHelloFrame
     | HostConnectionErrorFrame
     | HostHarnessReadinessFrame
-    | HostResourcesFrame
     | HostLaunchRunnerFrame
     | HostLaunchRunnerResultFrame
     | HostStopRunnerFrame
@@ -1739,7 +1701,6 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "installation_id": frame.installation_id,
                 "capabilities": list(frame.capabilities),
                 "connection_id": frame.connection_id,
-                "commit": frame.commit,
             }
         )
     if isinstance(frame, HostConnectionErrorFrame):
@@ -1760,16 +1721,6 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "gateway_inference": frame.gateway_inference,
             }
         )
-    if isinstance(frame, HostResourcesFrame):
-        return _encode_payload(
-            {
-                "kind": HostFrameKind.RESOURCES.value,
-                "load_1m": frame.load_1m,
-                "cpu_count": frame.cpu_count,
-                "memory_total_mb": frame.memory_total_mb,
-                "memory_available_mb": frame.memory_available_mb,
-            }
-        )
     if isinstance(frame, HostLaunchRunnerFrame):
         payload: dict[str, Any] = {
             "kind": HostFrameKind.LAUNCH_RUNNER.value,
@@ -1779,6 +1730,7 @@ def encode_host_frame(frame: HostFrame) -> str:
             "session_id": frame.session_id,
             "harness": frame.harness,
             "inference_config": frame.inference_config,
+            "session_env_handoff_id": frame.session_env_handoff_id,
         }
         if frame.mcp_disabled_servers_active_harnesses is not None:
             payload["mcp_disabled_servers_active_harnesses"] = (
@@ -1788,8 +1740,6 @@ def encode_host_frame(frame: HostFrame) -> str:
             payload["scheduled_run"] = frame.scheduled_run.model_dump()
         if frame.superseded_runner_ids is not None:
             payload["superseded_runner_ids"] = list(frame.superseded_runner_ids)
-        if frame.harness_telemetry is not None:
-            payload["harness_telemetry"] = frame.harness_telemetry
         return _encode_payload(payload)
     if isinstance(frame, HostLaunchRunnerResultFrame):
         return _encode_payload(
@@ -1804,17 +1754,13 @@ def encode_host_frame(frame: HostFrame) -> str:
             }
         )
     if isinstance(frame, HostStopRunnerFrame):
-        stop_payload: _JsonObject = {
-            "kind": HostFrameKind.STOP_RUNNER.value,
-            "request_id": frame.request_id,
-            "runner_id": frame.runner_id,
-        }
-        # Sent only when set, so a frame without them matches an older server's.
-        if frame.reason is not None:
-            stop_payload["reason"] = frame.reason
-        if frame.session_id is not None:
-            stop_payload["session_id"] = frame.session_id
-        return _encode_payload(stop_payload)
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.STOP_RUNNER.value,
+                "request_id": frame.request_id,
+                "runner_id": frame.runner_id,
+            }
+        )
     if isinstance(frame, HostStopRunnerResultFrame):
         return _encode_payload(
             {
@@ -2632,8 +2578,6 @@ def _decode_known_host_frame(
             )
         case HostFrameKind.HARNESS_READINESS:
             return _decode_harness_readiness(msg)
-        case HostFrameKind.RESOURCES:
-            return _decode_resources(msg)
         case HostFrameKind.LAUNCH_RUNNER:
             return _decode_launch_runner(msg)
         case HostFrameKind.LAUNCH_RUNNER_RESULT:
@@ -2881,7 +2825,6 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         installation_id=_optional_nullable_str(msg, "installation_id"),
         capabilities=_optional_str_list(msg, "capabilities"),
         connection_id=_optional_nullable_str(msg, "connection_id"),
-        commit=_optional_nullable_str(msg, "commit"),
     )
 
 
@@ -2904,19 +2847,6 @@ def _decode_harness_readiness(msg: _JsonObject) -> HostHarnessReadinessFrame:
     )
 
 
-def _decode_resources(msg: _JsonObject) -> HostResourcesFrame:
-    """Decode a host resources report; every field is required."""
-    load = msg.get("load_1m")
-    if isinstance(load, bool) or not isinstance(load, int | float):
-        raise ValueError("resources frame requires a numeric load_1m")
-    return HostResourcesFrame(
-        load_1m=float(load),
-        cpu_count=_required_int(msg, "cpu_count"),
-        memory_total_mb=_required_int(msg, "memory_total_mb"),
-        memory_available_mb=_required_int(msg, "memory_available_mb"),
-    )
-
-
 def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
     """Decode a launch-runner frame.
 
@@ -2926,9 +2856,6 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
     inference_config = msg.get("inference_config")
     if inference_config is not None and not isinstance(inference_config, dict):
         raise ValueError("inference_config must be an object or null")
-    harness_telemetry = msg.get("harness_telemetry")
-    if harness_telemetry is not None and not isinstance(harness_telemetry, dict):
-        raise ValueError("harness_telemetry must be an object or null")
     return HostLaunchRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         binding_token=_required_str(msg, "binding_token"),
@@ -2948,7 +2875,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
             if "superseded_runner_ids" in msg
             else None
         ),
-        harness_telemetry=harness_telemetry,
+        session_env_handoff_id=_optional_nullable_str(msg, "session_env_handoff_id"),
     )
 
 
@@ -2979,8 +2906,6 @@ def _decode_stop_runner(msg: _JsonObject) -> HostStopRunnerFrame:
     return HostStopRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
-        reason=_optional_nullable_str(msg, "reason"),
-        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 

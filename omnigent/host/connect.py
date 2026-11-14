@@ -72,7 +72,6 @@ from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
-    HOST_RESOURCES_INTERVAL_S,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
     RUNNER_LOG_TAIL_HEADING,
     SERVER_CAPABILITIES_HEADER,
@@ -157,23 +156,8 @@ from omnigent.host.git_worktree import (
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
-from omnigent.host.resources import sample_host_resources
-from omnigent.host.runner_registry import (
-    RUNNER_HOST_REGISTRY_ENV_VAR,
-    AdoptedRunnerProc,
-    RegisteredRunner,
-    RunnerRegistry,
-    end_runner_sessions,
-    runner_registry_path,
-    session_leaders,
-)
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
-from omnigent.host.session_slice import (
-    SESSION_SLICE_ENV_VAR,
-    SessionSliceLaunch,
-    activate_session_slice,
-    load_session_slice_config,
-)
+from omnigent.host.session_env import consume_session_env_handoff
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
@@ -228,6 +212,7 @@ from omnigent.runner.identity import (
     RUNNER_LAUNCH_HARNESS_ENV_VAR,
     RUNNER_MCP_DISABLED_SERVERS_ACTIVE_HARNESSES_ENV_VAR,
     RUNNER_PARENT_PID_ENV_VAR,
+    RUNNER_SESSION_ENV_NAMES_ENV_VAR,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_WORKSPACE_ENV_VAR,
@@ -254,7 +239,6 @@ from omnigent.runtime.websocket_metrics import (
     websocket_close_reason,
 )
 from omnigent.scheduled_context import current_scheduled_run, scheduled_run_scope
-from omnigent.update_check import source_install_commit
 from omnigent.util.env_credentials import env_names_with_omnigent_prefix
 from omnigent.util.suspend_watch import watch_for_resume
 from omnigent.util.tls import client_ssl_context
@@ -989,6 +973,7 @@ def _build_runner_env(
     host_owns_global_cleanup: bool = False,
     harness_tmp_parent: Path | None = None,
     inference_config: dict[str, object] | None = None,
+    session_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """
     Build the environment for a spawned runner subprocess.
@@ -1022,6 +1007,8 @@ def _build_runner_env(
         machine-global cleanup that standalone runners perform synchronously.
     :param harness_tmp_parent: Absolute harness socket root shared with the
         host janitor. ``None`` preserves the standalone runner default.
+    :param session_env: Variables the launching CLI forwarded for this
+        session only. They bypass the allowlist but not the runner wiring.
     :returns: The runner subprocess environment.
     """
     extra_names = {
@@ -1060,6 +1047,9 @@ def _build_runner_env(
     # Runners start in the session workspace, so resolve a relative override here.
     if auth_status_file := env.get("OMNIGENT_MCP_AUTH_STATUS_FILE"):
         env["OMNIGENT_MCP_AUTH_STATUS_FILE"] = str(Path(auth_status_file).expanduser().absolute())
+    if session_env:
+        env.update(session_env)
+        env[RUNNER_SESSION_ENV_NAMES_ENV_VAR] = ",".join(sorted(session_env))
     env["RUNNER_SERVER_URL"] = server_url
     env[RUNNER_ID_ENV_VAR] = runner_id
     env[RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR] = binding_token
@@ -1094,23 +1084,17 @@ def _build_runner_env(
     return env
 
 
-def _write_runner_session_config(
-    session_id: str, config: dict[str, object], kind: str = "session-inference"
-) -> Path:
-    """Materialize an immutable per-session revision, owner-only, without changing host settings.
-
-    :param kind: Data-dir subdirectory, e.g. ``"session-telemetry"`` for the
-        server's harness telemetry decision, whose headers carry a token.
-    """
+def _write_runner_inference_config(session_id: str, inference_config: dict[str, object]) -> Path:
+    """Materialize an immutable inference revision without changing host settings."""
     import hashlib
     import tempfile
 
     from omnigent.process_logging import data_dir
 
-    payload = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(inference_config, sort_keys=True, separators=(",", ":"))
     session_key = hashlib.sha256(session_id.encode()).hexdigest()
     revision = hashlib.sha256(payload.encode()).hexdigest()
-    directory = data_dir() / kind / session_key
+    directory = data_dir() / "session-inference" / session_key
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = directory / f"{revision}.json"
     fd, temp_name = tempfile.mkstemp(prefix=".config-", dir=directory)
@@ -1249,7 +1233,7 @@ class _RunnerHandle:
         alive, used to reject a reused PID before signalling a forked runner.
     """
 
-    proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc
+    proc: subprocess.Popen[bytes] | ZygoteRunnerProc
     log_path: Path
     session_id: str | None = None
     connect_marker: Path | None = None
@@ -1328,9 +1312,6 @@ class HostProcess:
         lifecycle_lock: DaemonLifecycleLock | None = None,
         interactive_shells: list[str] | None = None,
         server_still_ours: Callable[[], bool] | None = None,
-        *,
-        keep_runners_on_restart: bool = False,
-        session_slice: SessionSliceLaunch | None = None,
     ) -> None:
         """Initialize the host process.
 
@@ -1340,15 +1321,10 @@ class HostProcess:
             to its registry record. When present, the daemon holds the lock
             and self-terminates once the record is deleted or reassigned.
         :param interactive_shells: Optional shell inventory override for tests.
-        :param keep_runners_on_restart: ``host.keep_runners_on_restart``: a
-            ``SIGTERM`` releases the runners to the next daemon instead of
-            ending them.
             By default the host discovers its installed shells once at startup.
         :param server_still_ours: For a local-mode host, reports whether the
             local server it started is still the one on ``server_url``; while
             it is ``False`` each attempt is treated as refused instead of dialing.
-        :param session_slice: The active ``host.session_slice`` runners and
-            the zygote start in; ``None`` starts them in the daemon's cgroup.
         """
         self._identity = identity
         self._server_url = server_url.rstrip("/")
@@ -1481,13 +1457,7 @@ class HostProcess:
         self._zygote_enabled = IS_POSIX and not (
             _zygote_optout is not None and not env_truthy(_zygote_optout)
         )
-        self._session_slice = session_slice
-        self._session_launch_prefix = session_slice.command_prefix if session_slice else ()
-        self._zygote: ZygoteManager | None = (
-            ZygoteManager(command_prefix=self._session_launch_prefix)
-            if self._zygote_enabled
-            else None
-        )
+        self._zygote: ZygoteManager | None = ZygoteManager() if self._zygote_enabled else None
         self._zygote_disabled = False
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
@@ -1529,13 +1499,6 @@ class HostProcess:
         # _lifecycle_lost and aborts the live tunnel so run() breaks out of its
         # serve and tears down cleanly instead of lingering as a stale daemon.
         self._lifecycle_lock = lifecycle_lock
-        self._keep_runners_on_restart = keep_runners_on_restart
-        # Runners on disk, so the next daemon for this target can adopt them.
-        self._runner_registry = (
-            RunnerRegistry(runner_registry_path(lifecycle_lock.target))
-            if lifecycle_lock is not None
-            else None
-        )
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._lifecycle_lost = asyncio.Event()
 
@@ -2215,6 +2178,13 @@ class HostProcess:
             self._current_auth_token,
             initialize=False,
         )
+        session_env = (
+            await asyncio.to_thread(
+                consume_session_env_handoff, frame.session_id, frame.session_env_handoff_id
+            )
+            if frame.session_id
+            else {}
+        )
         env = _build_runner_env(
             os.environ,
             server_url=self._server_url,
@@ -2230,11 +2200,12 @@ class HostProcess:
             host_owns_global_cleanup=self._maintenance_janitor is not None,
             harness_tmp_parent=self._harness_tmp_parent,
             inference_config=frame.inference_config,
+            session_env=session_env,
         )
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(
-                    _write_runner_session_config,
+                    _write_runner_inference_config,
                     frame.session_id or runner_id,
                     frame.inference_config,
                 )
@@ -2243,21 +2214,6 @@ class HostProcess:
                     frame, f"Cannot install session inference config: {exc}"
                 )
             env["OMNIGENT_INFERENCE_CONFIG"] = str(inference_path)
-        if frame.harness_telemetry is not None:
-            from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
-
-            try:
-                telemetry_path = await asyncio.to_thread(
-                    _write_runner_session_config,
-                    frame.session_id or runner_id,
-                    frame.harness_telemetry,
-                    "session-telemetry",
-                )
-            except OSError as exc:
-                return self._launch_failed(
-                    frame, f"Cannot install session telemetry config: {exc}"
-                )
-            env[HARNESS_TELEMETRY_ENV_VAR] = str(telemetry_path)
         # The runner serves one primary session (plus any co-located subagents);
         # pass it so runner-level log records can be attributed to that session.
         if frame.session_id:
@@ -2291,13 +2247,7 @@ class HostProcess:
         # the spawn land and then tear that runner down.
         with self._host_subprocess_op():
             spawn = asyncio.ensure_future(
-                asyncio.to_thread(
-                    self._spawn_runner_proc,
-                    env,
-                    _session_slug,
-                    workspace,
-                    session_id=frame.session_id or None,
-                )
+                asyncio.to_thread(self._spawn_runner_proc, env, _session_slug, workspace)
             )
             try:
                 proc, log_path = await asyncio.shield(spawn)
@@ -2355,7 +2305,7 @@ class HostProcess:
         else:
             superseded = []
         for rid, handle in superseded:
-            self._forget_runner(rid)
+            self._runners.pop(rid, None)
             handle.stop_requested = True
             self._spawn_superseded_stop(rid, handle, frame.session_id or "")
         self._runners[runner_id] = _RunnerHandle(
@@ -2438,54 +2388,7 @@ class HostProcess:
             return None
         return zygote
 
-    def _forget_runner(self, runner_id: str) -> _RunnerHandle | None:
-        """Drop a runner from the tracked set and from the on-disk registry."""
-        if self._runner_registry is not None:
-            self._runner_registry.remove(runner_id)
-        return self._runners.pop(runner_id, None)
-
-    def _adopt_runner(self, entry: RegisteredRunner) -> None:
-        """Track a runner the previous daemon for this target left running."""
-        _logger.info("Adopting runner %s (pid %d)", entry.runner_id, entry.pid)
-        self._runners[entry.runner_id] = _RunnerHandle(
-            proc=AdoptedRunnerProc(entry),
-            log_path=Path(entry.log_path),
-            session_id=entry.session_id,
-            connect_marker=Path(entry.connect_marker) if entry.connect_marker else None,
-        )
-        watcher = asyncio.create_task(self._watch_runner(entry.runner_id))
-        self._watcher_tasks.add(watcher)
-        watcher.add_done_callback(self._watcher_tasks.discard)
-
     def _spawn_runner_proc(
-        self,
-        env: dict[str, str],
-        session_slug: str,
-        workspace: Path,
-        *,
-        session_id: str | None = None,
-    ) -> tuple[subprocess.Popen[bytes] | ZygoteRunnerProc, Path]:
-        """Open the session log, spawn the runner and record it in the registry.
-
-        The record is written here, on the spawning thread, so a runner started
-        while the daemon is being stopped is still listed for the next daemon.
-        """
-        if self._runner_registry is not None:
-            env[RUNNER_HOST_REGISTRY_ENV_VAR] = str(self._runner_registry.path)
-        if self._session_slice is not None:
-            env[SESSION_SLICE_ENV_VAR] = self._session_slice.name
-        proc, log_path = self._spawn_runner_proc_unrecorded(env, session_slug, workspace)
-        if self._runner_registry is not None:
-            self._runner_registry.add(
-                env[RUNNER_ID_ENV_VAR],
-                proc.pid,
-                session_id=session_id,
-                log_path=log_path,
-                connect_marker=_connect_marker_path(log_path),
-            )
-        return proc, log_path
-
-    def _spawn_runner_proc_unrecorded(
         self,
         env: dict[str, str],
         session_slug: str,
@@ -2495,14 +2398,15 @@ class HostProcess:
 
         Runs on a worker thread (blocking log open + first-launch zygote import).
         When the zygote is enabled it forks the runner there — sharing the import
-        graph copy-on-write. The runner's orphan watchdog keeps watching this
-        daemon (``RUNNER_PARENT_PID``), not the zygote. A zygote start failure, or a
+        graph copy-on-write — and rewrites ``RUNNER_PARENT_PID`` to the zygote's
+        pid so the runner's orphan watchdog (which compares ``os.getppid()``)
+        stays correct across the extra process hop. A zygote start failure, or a
         channel failure while the zygote is still alive, disables it for the
         daemon's life; a zygote that died is reaped so the next launch respawns
         a fresh one. Either way this launch falls back to a direct Popen.
 
         :param env: Runner environment from :func:`_build_runner_env` (its
-            ``RUNNER_PARENT_PID`` is the daemon pid on both paths).
+            ``RUNNER_PARENT_PID`` is the daemon pid; overridden on the zygote path).
         :param session_slug: Sanitized session id fragment for the log filename.
         :param workspace: Existing session workspace to use as the runner's cwd.
         :returns: ``(process_handle, log_path)`` — the handle quacks like Popen.
@@ -2517,10 +2421,11 @@ class HostProcess:
             zygote = self._ensure_zygote_started()
             if zygote is not None:
                 try:
-                    # RUNNER_PARENT_PID stays this daemon's pid: a forked
-                    # runner watches the host, not the zygote that forked it,
-                    # so a dead zygote leaves every runner serving.
-                    proc = zygote.fork_runner(env, str(log_path), str(workspace))
+                    # The runner's OS parent will be the zygote, so its
+                    # getppid()-based orphan check must watch the zygote pid.
+                    zygote_env = dict(env)
+                    zygote_env[RUNNER_PARENT_PID_ENV_VAR] = str(zygote.pid)
+                    proc = zygote.fork_runner(zygote_env, str(log_path), str(workspace))
                     _logger.info(
                         "Forked runner via zygote (zygote pid=%s, runner pid=%s)",
                         zygote.pid,
@@ -2529,8 +2434,10 @@ class HostProcess:
                     return proc, log_path
                 except ZygoteUnavailable as exc:
                     if zygote.is_running():
-                        # Alive but its control channel failed: it is
-                        # wedged, so disable it for future launches. The
+                        # Alive but its control channel failed. Do NOT stop
+                        # it: healthy runners already forked from it would
+                        # see their parent die and self-terminate via the
+                        # orphan watchdog. Disable for future launches; the
                         # still-running zygote is reaped on daemon shutdown
                         # (see run()'s finally).
                         _logger.warning(
@@ -2540,11 +2447,12 @@ class HostProcess:
                         )
                         self._zygote_disabled = True
                     else:
-                        # The zygote process died; its runners keep serving
-                        # (they watch this daemon, not the zygote). Reap it
-                        # and let the next launch's start() respawn a fresh
-                        # one instead of losing copy-on-write forking for
-                        # the rest of the daemon's life.
+                        # The zygote process died — its forked runners are
+                        # already self-terminating via their own orphan
+                        # watchdogs, so nothing depends on this instance.
+                        # Reap it and let the next launch's start() respawn
+                        # a fresh one instead of losing copy-on-write
+                        # forking for the rest of the daemon's life.
                         _logger.warning(
                             "Runner zygote died (%s); falling back to "
                             "direct spawn and respawning the zygote on "
@@ -2559,13 +2467,7 @@ class HostProcess:
                     # -P keeps cwd off sys.path: a workspace that is itself an
                     # omnigent checkout would otherwise shadow the installed
                     # package. _entry re-adds it for spec-declared local tools.
-                    [
-                        *self._session_launch_prefix,
-                        sys.executable,
-                        "-P",
-                        "-m",
-                        "omnigent.runner._entry",
-                    ],
+                    [sys.executable, "-P", "-m", "omnigent.runner._entry"],
                     env=env,
                     # A daemon may outlive the checkout it started from.
                     cwd=str(workspace),
@@ -2580,9 +2482,7 @@ class HostProcess:
                     stdout=log_fh,
                     stderr=log_fh,
                     # Own session: a hangup of the daemon's terminal reaches only
-                    # the daemon, which asks its runners to finish in-flight work,
-                    # and a service manager that stops the daemon's process group
-                    # does not take the runner with it.
+                    # the daemon, which asks its runners to finish in-flight work.
                     **_proc.spawn_kwargs(),
                     **logging_kwargs,
                 )
@@ -2614,8 +2514,6 @@ class HostProcess:
             "Launch cancelled after runner spawn (pid=%s); terminating the orphan",
             proc.pid,
         )
-        if self._runner_registry is not None:
-            self._runner_registry.remove_pid(proc.pid)
         try:
             await self._stop_runner_and_trigger(proc, "runner_spawn_abandoned")
             if isinstance(proc, ZygoteRunnerProc):
@@ -2650,7 +2548,7 @@ class HostProcess:
         :param frame: The stop request frame.
         :returns: The claimed handle, or ``None`` for an unknown runner.
         """
-        handle = self._forget_runner(frame.runner_id)
+        handle = self._runners.pop(frame.runner_id, None)
         if handle is not None:
             handle.stop_requested = True
         return handle
@@ -2681,12 +2579,7 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
-        _logger.info(
-            "Stopped runner %s (reason: %s, session %s)",
-            frame.runner_id,
-            frame.reason or "unknown",
-            frame.session_id or "unknown",
-        )
+        _logger.info("Stopped runner %s", frame.runner_id)
         _print_host_status(
             f"  ↓ Runner stopped: {frame.runner_id}",
             runner_id=frame.runner_id,
@@ -2738,7 +2631,7 @@ class HostProcess:
 
     async def _stop_runner_and_trigger(
         self,
-        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc,
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc,
         reason: str,
     ) -> None:
         """Finish runner termination before triggering host maintenance."""
@@ -2754,9 +2647,7 @@ class HostProcess:
                 self._trigger_maintenance(reason)
 
     @staticmethod
-    def _stop_runner_proc(
-        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | AdoptedRunnerProc,
-    ) -> None:
+    def _stop_runner_proc(proc: subprocess.Popen[bytes] | ZygoteRunnerProc) -> None:
         """Terminate a runner: SIGTERM, brief wait, then SIGKILL. Blocking.
 
         Runs on a worker thread (see :meth:`_handle_stop`). Forked runners
@@ -2877,7 +2768,7 @@ class HostProcess:
             # _handle_stop (or _cleanup_runners) removed it first —
             # an intentional termination, not a crash to report.
             return
-        self._forget_runner(runner_id)
+        self._runners.pop(runner_id)
         self._trigger_maintenance("runner_exited")
         had_connected = None
         if handle.connect_marker is not None:
@@ -4459,7 +4350,7 @@ class HostProcess:
         if harness != "claude-native":
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
-                status="unsupported",
+                status="failed",
                 error=f"model options are unsupported for harness {frame.harness!r}",
             )
         probed = await self._probed_claude_model_options()
@@ -5142,16 +5033,6 @@ class HostProcess:
         # classify a still-shutting-down runner as live and miss it forever.
         if self._lifecycle_lock is not None:
             self._lifecycle_lock.acquire()
-            if self._runner_registry is not None:
-                for entry in self._runner_registry.claim():
-                    self._adopt_runner(entry)
-                from omnigent.host.crash_reporting import set_runner_release_hook
-
-                # Unreleased, the runners end themselves and their sessions
-                # once this daemon is gone.
-                set_runner_release_hook(
-                    self._runner_registry.release if self._keep_runners_on_restart else None
-                )
             self._lifecycle_task = asyncio.create_task(
                 self._lifecycle_monitor_loop(), name="host-lifecycle-monitor"
             )
@@ -5460,11 +5341,6 @@ class HostProcess:
 
         :returns: None.
         """
-        # The service manager no longer sweeps what the runners leave in their
-        # sessions (tool calls, background jobs), so this shutdown does.
-        # A runner that exited a moment ago may have left jobs too, so it counts.
-        leaders = session_leaders({handle.proc.pid for handle in self._runners.values()})
-        seen_at = time.time()
         for runner_id, handle in self._runners.items():
             if handle.proc.poll() is None:
                 _logger.info("Terminating runner %s on shutdown", runner_id)
@@ -5474,10 +5350,7 @@ class HostProcess:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
-        end_runner_sessions(leaders, started_before=seen_at)
         self._runners.clear()
-        if self._runner_registry is not None:
-            self._runner_registry.clear()
 
     async def _connect_and_serve(self) -> None:
         """Single connection attempt: connect, hello, serve.
@@ -5836,7 +5709,6 @@ class HostProcess:
             installation_id=_tel_install_id,
             capabilities=list(HOST_CAPABILITIES),
             connection_id=connection_id,
-            commit=await asyncio.to_thread(source_install_commit),
         )
         try:
             encoded_hello = self._encode_frame(hello)
@@ -5850,7 +5722,6 @@ class HostProcess:
         self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
-        resources_task = asyncio.create_task(self._resources_loop(ws))
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -5893,10 +5764,9 @@ class HostProcess:
         finally:
             if (diagnostics := self._diagnostics_for(ws)) is not None:
                 diagnostics.freeze()
-            for task in (readiness_task, resources_task):
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            readiness_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await readiness_task
             await self._cancel_all_harness_logins()
 
     async def _harness_readiness_loop(
@@ -5952,18 +5822,6 @@ class HostProcess:
                 )
                 published_configured = configured
                 published_gateway = gateway
-
-    async def _resources_loop(self, ws: websockets.asyncio.client.ClientConnection) -> None:
-        """Report load and memory on connect and every interval after."""
-        while True:
-            try:
-                report = await asyncio.to_thread(sample_host_resources)
-            except Exception:
-                _logger.exception("Host resources sample failed")
-                report = None
-            if report is not None:
-                await self._send_text(ws, encode_host_frame(report))
-            await asyncio.sleep(HOST_RESOURCES_INTERVAL_S)
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
@@ -6507,18 +6365,12 @@ def _serve_host_until_exit(
 
     telemetry.init("omni-host")
 
-    from omnigent.host.identity import (
-        export_configured_slice_key,
-        host_config_path,
-        load_keep_runners_on_restart,
-    )
+    from omnigent.host.identity import export_configured_slice_key, host_config_path
 
     path = host_config_path(config_path)
     export_configured_slice_key(path)
     try:
         identity = load_or_create_host_identity(path)
-        keep_runners_on_restart = load_keep_runners_on_restart(path)
-        session_slice = load_session_slice_config(path)
     except ValueError as exc:
         crash_reporting.report_host_exit(
             "identity_error", exit_code=HOST_FATAL_EXIT_CODE, error=str(exc)
@@ -6590,8 +6442,6 @@ def _serve_host_until_exit(
         lifecycle_lock=lifecycle_lock,
         interactive_shells=interactive_shells,
         server_still_ours=server_still_ours,
-        keep_runners_on_restart=keep_runners_on_restart,
-        session_slice=activate_session_slice(session_slice),
     )
     crash_reporting.set_hangup_callback(host.signal_runners_finish_work)
     try:

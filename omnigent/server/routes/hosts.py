@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
-import os
 import secrets
 import time
 import weakref
@@ -31,7 +29,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from packaging.version import InvalidVersion, Version
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from omnigent.db.utils import now_epoch
 from omnigent.debug_logging import (
@@ -48,14 +46,12 @@ from omnigent.host.frames import (
     CAP_HARNESS_LOGIN,
     CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
-    HOST_RESOURCES_INTERVAL_S,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
     HostHarnessLoginCancelFrame,
     HostHarnessLoginFrame,
     HostHarnessLogoutFrame,
-    HostHelloFrame,
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
@@ -81,7 +77,6 @@ from omnigent.server.feature_flags import (
     harness_install_enabled,
     resolve_feature_flags,
 )
-from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import (
     HarnessLoginState,
     HostConnection,
@@ -89,7 +84,6 @@ from omnigent.server.host_registry import (
     HostRegistry,
     update_harness_accounts,
 )
-from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
@@ -97,7 +91,6 @@ from omnigent.server.routes._host_launch import (
     resolve_host_launch,
     resolve_launch_timeout_s,
 )
-from omnigent.server.routes._session_create_validation import file_session_by_workspace
 from omnigent.server.routes._workspace_validation import (
     _is_windows_absolute_path,
     restore_host_filesystem_url_path,
@@ -194,60 +187,6 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
         return None
     padded = (*release, 0, 0, 0)[:3]
     return (padded[0], padded[1], padded[2])
-
-
-# Deploy settings for the host update banner: the commit hosts should run (the
-# server image has no git, so only the deploy knows it) and the command that
-# updates a host. A fork's builds all share one version, so only the commit says
-# a host is behind, and only the deploy knows its team's updater.
-_DEPLOY_COMMIT_ENV = "OMNIGENT_DEPLOY_COMMIT"
-_DEPLOY_UPDATE_COMMAND_ENV = "OMNIGENT_DEPLOY_UPDATE_COMMAND"
-# Shortest commit prefix trusted to name one commit (git's own default abbreviation).
-_MIN_COMMIT_PREFIX = 7
-
-
-def _same_commit(left: str, right: str) -> bool:
-    """Whether two commit ids, either possibly abbreviated, name the same commit."""
-    left, right = left.lower(), right.lower()
-    if min(len(left), len(right)) < _MIN_COMMIT_PREFIX:
-        return False
-    return left.startswith(right) or right.startswith(left)
-
-
-def _host_update(hello: HostHelloFrame | None) -> dict[str, str | None] | None:
-    """Describe the update a connected host needs, or ``None`` when it needs none.
-
-    A host on another commit than ``OMNIGENT_DEPLOY_COMMIT`` is outdated, and so
-    is one that reports no commit: it predates the build that reports one.
-    ``None`` for a host not connected here, or when the deploy sets no commit.
-
-    :param hello: The host's connect hello, ``None`` when not connected here.
-    :returns: ``{"current": ..., "target": ..., "command": ...}`` — the short
-        commit the host runs and should run, and the deploy's update command
-        (``None`` when it sets none) — or ``None``.
-    """
-    target_commit = (os.environ.get(_DEPLOY_COMMIT_ENV) or "").strip()
-    if hello is None or not target_commit:
-        return None
-    if hello.commit and _same_commit(hello.commit, target_commit):
-        return None
-    current = hello.commit[:9] if hello.commit else f"{hello.version} (unknown commit)"
-    command = (os.environ.get(_DEPLOY_UPDATE_COMMAND_ENV) or "").strip() or None
-    return {"current": current, "target": target_commit[:9], "command": command}
-
-
-def _host_resources(conn: HostConnection | None, now: float) -> dict[str, Any] | None:
-    """The host's latest load/memory report, or ``None`` if it sent none here.
-
-    ``stale`` is true once the report is older than two report intervals.
-    """
-    if conn is None or conn.resources is None or conn.resources_at is None:
-        return None
-    return {
-        **dataclasses.asdict(conn.resources),
-        "reported_at": conn.resources_at,
-        "stale": now - conn.resources_at > 2 * HOST_RESOURCES_INTERVAL_S,
-    }
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -800,11 +739,17 @@ class LaunchRunnerRequest(BaseModel):
         as the session's ``git_branch`` for display and opt-in cleanup.
         ``None`` binds ``workspace`` directly. ``host_id`` is always
         present (it is in the path), so no host check is needed here.
+    :param session_env_handoff_id: Opaque, non-secret ID of the launching
+        CLI's local forwarded-environment file, relayed to the host so only
+        this launch's runner consumes it. ``None`` when nothing is forwarded.
     """
 
     session_id: str
     workspace: str
     git: SessionGitOptions | None = None
+    session_env_handoff_id: str | None = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
+    )
 
 
 async def _resolve_agent_spec_cwd(
@@ -932,20 +877,6 @@ def create_hosts_router(
             update_harness_accounts(conn, result_accounts)
         return conn.hello.configured_harnesses, conn.hello.harness_accounts
 
-    def _reported_build(host_id: str) -> dict[str, Any]:
-        """Version, commit, update target and resources from the live connection.
-
-        Each is ``None`` when the host is not connected to this replica.
-        """
-        conn = host_registry.get(host_id)
-        hello = conn.hello if conn is not None else None
-        return {
-            "version": hello.version if hello else None,
-            "commit": hello.commit if hello else None,
-            "update": _host_update(hello),
-            "resources": _host_resources(conn, time.time()),
-        }
-
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
         """List all hosts owned by the authenticated user.
@@ -956,10 +887,8 @@ def create_hosts_router(
         :param request: The incoming request (for auth).
         :returns: ``{"hosts": [...]}`` with host details — ``host_id``,
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
-            ``configured_harnesses``, ``gateway_inference`` (``None`` when
-            no connected host has reported it to this replica), and
-            ``version`` / ``commit`` / ``update`` (see :func:`_host_update`),
-            and ``resources`` (see :func:`_host_resources`).
+            ``configured_harnesses``, and ``gateway_inference`` (``None`` when
+            no connected host has reported it to this replica).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user
@@ -1004,7 +933,6 @@ def create_hosts_router(
                 # gateway-backed".
                 "gateway_inference": host_registry.gateway_inference(host.host_id),
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
-                **_reported_build(host.host_id),
             }
             if (
                 harness_setup_enabled
@@ -1066,7 +994,6 @@ def create_hosts_router(
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
-            **_reported_build(host.host_id),
             "runners": [],
         }
         if (
@@ -1115,8 +1042,7 @@ def create_hosts_router(
 
         :raises HTTPException: 404 when the host is unknown, 403 when not the
             owner, 409 when offline or the host daemon is too old to list model
-            options, 501 when the harness has no host catalog, 502 on host-side
-            failure, 504 on timeout.
+            options, 502 on host-side failure, 504 on timeout.
         """
         user_id = require_user(request, auth_provider)
         host = await asyncio.to_thread(host_store.get_host, host_id)
@@ -1136,24 +1062,21 @@ def create_hosts_router(
         )
         if result.get("status") != "ok":
             raise HTTPException(
-                # A harness with no host catalog is a permanent answer, not a gateway fault:
-                # 501 keeps clients from retrying it as they do a 502.
-                status_code=501 if result.get("status") == "unsupported" else 502,
+                status_code=502,
                 detail=str(result.get("error") or "host model-options lookup failed"),
             )
         models = result.get("models")
         routable = result.get("routable_models")
         error = result.get("error")
-        block_list = current_model_block_list()
         return HostModelOptionsResponse(
-            models=block_list.filter_model_options(
+            models=(
                 [model for model in models if isinstance(model, dict)]
                 if isinstance(models, list)
                 else []
             ),
             # Every id the harness's endpoint routes: the picker names one
             # row per model, while a launch takes an exact id.
-            routable_models=block_list.filter_model_ids(
+            routable_models=(
                 [m for m in routable if isinstance(m, str)] if isinstance(routable, list) else []
             ),
             error=error if isinstance(error, str) and error else None,
@@ -1365,9 +1288,6 @@ def create_hosts_router(
             finally:
                 await _rollback_worktree()
 
-        harness_telemetry = await asyncio.to_thread(
-            harness_telemetry_launch, target.conv, conn.hello.capabilities, conversation_store
-        )
         binding_token = secrets.token_urlsafe(32)
         runner_id = token_bound_runner_id(binding_token)
 
@@ -1582,7 +1502,7 @@ def create_hosts_router(
                     if profile_binding is not None and profile_binding.runner_id is not None
                     else ()
                 ),
-                harness_telemetry=harness_telemetry,
+                session_env_handoff_id=body.session_env_handoff_id,
             )
         )
         try:
@@ -1647,11 +1567,6 @@ def create_hosts_router(
         # path); the middleware promotes a bag session_id to the audit row's
         # session_id column. Host is an attribute.
         add_audit_attrs(session_id=body.session_id, host_id=host_id, runner_id=runner_id)
-        if target.conv.host_id is None:
-            # First launch: the workspace is known only now (a session created
-            # with no host, then launched), so file it by its workspace. After
-            # the host's ack, so a refused launch files nothing.
-            await file_session_by_workspace(conversation_store, body.session_id, user_id)
         return {
             "runner_id": runner_id,
             "status": "launching",

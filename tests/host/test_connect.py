@@ -10,7 +10,6 @@ import logging
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -22,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import click
+import httpx
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
@@ -29,7 +29,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from omnigent import debug_logging
-from omnigent.host import HOST_FATAL_EXIT_CODE, crash_reporting, runner_registry
+from omnigent.host import HOST_FATAL_EXIT_CODE, daemon_launch
 from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
@@ -104,18 +104,8 @@ from omnigent.host.frames import (
 from omnigent.host.git_worktree import CreatedWorktree
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
-from omnigent.host.runner_registry import (
-    RUNNER_HOST_REGISTRY_ENV_VAR,
-    RegisteredRunner,
-    RegistryOwner,
-    RegistrySnapshot,
-    RunnerRegistry,
-    process_start_stamp,
-    read_registry,
-    runner_registry_path,
-)
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
-from omnigent.native.owner_claim import current_boot_id
+from omnigent.host.session_env import session_env_handoff
 from omnigent.onboarding.harness_install import READINESS_CLI_PROBE_TIMEOUT_S
 from omnigent.onboarding.harness_login import CodexDeviceLogin
 from omnigent.runner.identity import (
@@ -878,7 +868,7 @@ async def test_handle_model_options_rejects_unsupported_harness() -> None:
 
     assert result == HostModelOptionsResultFrame(
         request_id="req_models",
-        status="unsupported",
+        status="failed",
         error="model options are unsupported for harness 'cursor-native'",
     )
 
@@ -1226,6 +1216,101 @@ async def test_handle_launch_refuses_when_workspace_mkdir_denied(
     _cleanup_host(host)
 
 
+_FORWARDS_SESSION_ENV = pytest.mark.skipif(
+    sys.platform == "win32", reason="Session env forwarding is disabled on Windows"
+)
+
+
+def _relayed_launch_frame(body: dict[str, str], request_id: str) -> HostLaunchRunnerFrame:
+    """Return the launch frame a host receives for a CLI's ``POST /v1/hosts/{id}/runners``."""
+    frame = decode_host_frame(
+        encode_host_frame(
+            HostLaunchRunnerFrame(
+                request_id=request_id,
+                binding_token=f"token_{request_id}",
+                workspace=body["workspace"],
+                session_id=body["session_id"],
+                session_env_handoff_id=body.get("session_env_handoff_id"),
+            )
+        )
+    )
+    assert isinstance(frame, HostLaunchRunnerFrame)
+    return frame
+
+
+@_FORWARDS_SESSION_ENV
+async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the launching CLI's session runner gets its named variables, never the server."""
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    forwarded_names = ("ARCATERM_CAPABILITY", "MACTERM_SOCKET", "ARCATERM_PROJECTS_ROOT")
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", " , ".join(forwarded_names))
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-1")
+    monkeypatch.setenv("MACTERM_SOCKET", "/tmp/macterm-pane-1.sock")
+    monkeypatch.delenv("ARCATERM_PROJECTS_ROOT", raising=False)
+    launch_requests: list[bytes] = []
+    spawned_envs: dict[str, dict[str, str]] = {}
+    original_popen = subprocess.Popen
+
+    async def _server(request: httpx.Request) -> httpx.Response:
+        launch_requests.append(request.content)
+        body = json.loads(request.content)
+        for name in ("OMNIGENT_SESSION_ENV_PASSTHROUGH", *forwarded_names):
+            monkeypatch.delenv(name, raising=False)
+        session_id = body["session_id"]
+
+        def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+            spawned_envs[session_id] = dict(kwargs["env"])  # type: ignore[call-overload]
+            return original_popen(
+                ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+
+        frame = _relayed_launch_frame(body, f"req_{session_id}")
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await host._handle_launch(frame)
+        assert result.status == "launched", result.error
+        return httpx.Response(200, json={"runner_id": result.runner_id})
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_server), base_url="https://server.example"
+        ) as client:
+            for session_id in ("conv_arcaterm", "conv_plain"):
+                await daemon_launch.launch_or_reuse_daemon_runner(
+                    client,
+                    host_id="host_test_connect",
+                    session_id=session_id,
+                    workspace=str(workspace),
+                    fresh=True,
+                )
+    finally:
+        _cleanup_host(host)
+
+    assert "did not receive" not in capsys.readouterr().err
+    assert not any(b"capability-for-pane-1" in content for content in launch_requests)
+    arcaterm_body, plain_body = (json.loads(content) for content in launch_requests)
+    assert arcaterm_body.pop("session_env_handoff_id")
+    assert arcaterm_body == {"session_id": "conv_arcaterm", "workspace": str(workspace)}
+    assert plain_body == {"session_id": "conv_plain", "workspace": str(workspace)}
+    arcaterm_env = spawned_envs["conv_arcaterm"]
+    assert arcaterm_env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert arcaterm_env["MACTERM_SOCKET"] == "/tmp/macterm-pane-1.sock"
+    assert "ARCATERM_PROJECTS_ROOT" not in arcaterm_env
+    assert (
+        arcaterm_env["OMNIGENT_RUNNER_SESSION_ENV_NAMES"] == "ARCATERM_CAPABILITY,MACTERM_SOCKET"
+    )
+    plain_env = spawned_envs["conv_plain"]
+    assert not {"ARCATERM_CAPABILITY", "MACTERM_SOCKET"} & plain_env.keys()
+    assert "OMNIGENT_RUNNER_SESSION_ENV_NAMES" not in plain_env
+
+
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
 async def test_handle_launch_fails_for_bad_workspace(
     tmp_path: Path,
@@ -1316,7 +1401,7 @@ async def test_handle_launch_attributes_spawn_failure_to_host(
 
     host = _make_host_process()
 
-    def _disk_full(*_args: object, **_kwargs: object) -> tuple[subprocess.Popen[bytes], Path]:
+    def _disk_full(*_args: object) -> tuple[subprocess.Popen[bytes], Path]:
         raise OSError(errno.ENOSPC, "No space left on device", str(tmp_path / "runner.log"))
 
     monkeypatch.setattr(host, "_current_auth_token", lambda **_kwargs: None)
@@ -1688,55 +1773,6 @@ async def test_handle_launch_configured_harness_proceeds_to_spawn(
         _cleanup_host(host)
         if host._capability_init_task is not None:
             await _cancel(host._capability_init_task)
-
-
-@pytest.mark.parametrize(
-    "harness_telemetry", [None, {"enabled": True, "headers": {"x-ingest-token": "made-up"}}]
-)
-async def test_handle_launch_installs_the_servers_telemetry_decision_owner_only(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    harness_telemetry: dict | None,
-) -> None:
-    """The decision's headers carry a token, so the runner reads it from a private file."""
-    from omnigent.config import HARNESS_TELEMETRY_ENV_VAR
-    from omnigent.process_logging import DATA_DIR_ENV_VAR
-
-    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path / "data"))
-    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: True)
-    host = _make_host_process()
-    workspace = tmp_path / "project"
-    workspace.mkdir()
-    spawned_env: dict[str, str] = {}
-    original_popen = subprocess.Popen
-
-    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        spawned_env.update(kwargs["env"])  # type: ignore[arg-type]
-        return original_popen(
-            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-    frame = HostLaunchRunnerFrame(
-        request_id="req_telemetry",
-        binding_token="token_telemetry",
-        workspace=str(workspace),
-        session_id="conv_telemetry",
-        harness="claude-native",
-        harness_telemetry=harness_telemetry,
-    )
-    try:
-        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
-            result = await asyncio.wait_for(host._handle_launch(frame), timeout=2.0)
-        assert result.status == "launched", result.error
-        if harness_telemetry is None:
-            assert HARNESS_TELEMETRY_ENV_VAR not in spawned_env  # an older server: as today
-        else:
-            path = Path(spawned_env[HARNESS_TELEMETRY_ENV_VAR])
-            assert json.loads(path.read_text()) == harness_telemetry
-            assert path.stat().st_mode & 0o777 == 0o600
-            assert path.parent.stat().st_mode & 0o777 == 0o700
-    finally:
-        _cleanup_host(host)
 
 
 async def test_handle_launch_without_harness_skips_check(
@@ -2599,7 +2635,6 @@ async def test_watch_runner_silent_on_intentional_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_closed: bool,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A host.stop_runner termination is NOT reported as a crash.
 
@@ -2647,19 +2682,12 @@ async def test_watch_runner_silent_on_intentional_stop(
     with (
         patch("omnigent.host.connect.print", side_effect=BrokenPipeError(), create=True)
         if console_closed
-        else contextlib.nullcontext(),
-        caplog.at_level(logging.INFO, logger="omnigent.host.connect"),
+        else contextlib.nullcontext()
     ):
         stop_result = await host._handle_stop(
-            HostStopRunnerFrame(
-                request_id="req_stop_2",
-                runner_id=runner_id,
-                reason="archive",
-                session_id="conv_stop",
-            )
+            HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
         )
     assert stop_result.status == "stopped"
-    assert f"Stopped runner {runner_id} (reason: archive, session conv_stop)" in caplog.text
 
     # Let the watcher observe the (intentional) death and finish.
     await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)
@@ -4447,385 +4475,6 @@ def test_cleanup_runners_terminates_all(tmp_path: Path) -> None:
     assert host._runners == {}
 
 
-def _registered(
-    runner_id: str,
-    proc: subprocess.Popen[bytes],
-    log_path: Path,
-    *,
-    stamp_offset_s: float = 0.0,
-    connect_marker: Path | None = None,
-) -> RegisteredRunner:
-    """Describe *proc* as a registry entry; an offset models a recycled pid."""
-    stamp = process_start_stamp(proc.pid)
-    assert stamp is not None
-    return RegisteredRunner(
-        runner_id=runner_id,
-        pid=proc.pid,
-        started_at=stamp + stamp_offset_s,
-        session_id="session-adopted",
-        log_path=str(log_path),
-        connect_marker=str(connect_marker) if connect_marker is not None else None,
-    )
-
-
-def _write_released_by_dead_daemon(path: Path, *runners: RegisteredRunner) -> None:
-    """Write *path* as the registry of a daemon that released it and exited."""
-    previous_daemon = subprocess.Popen(["sleep", "60"])
-    stamp = process_start_stamp(previous_daemon.pid)
-    assert stamp is not None
-    previous_daemon.kill()
-    previous_daemon.wait()
-    owner = RegistryOwner(
-        pid=previous_daemon.pid,
-        started_at=stamp,
-        released=True,
-        boot_id=current_boot_id(),
-    )
-    runner_registry._write_registry(
-        path, RegistrySnapshot(owner, {entry.runner_id: entry for entry in runners})
-    )
-
-
-def _adopt_released(host: HostProcess, path: Path, entry: RegisteredRunner) -> None:
-    """Adopt *entry* the way a starting daemon does, from a released registry."""
-    _write_released_by_dead_daemon(path, entry)
-    host._runner_registry = RunnerRegistry(path)
-    for claimed in host._runner_registry.claim():
-        host._adopt_runner(claimed)
-
-
-def _registered_ids(path: Path) -> list[str]:
-    snapshot = read_registry(path)
-    assert snapshot is not None
-    return list(snapshot.runners)
-
-
-class _StubLifecycleLock:
-    """A daemon lifecycle lock that is always held."""
-
-    target = "test-target"
-
-    def acquire(self) -> bool:
-        return True
-
-    def still_owner(self) -> bool:
-        return True
-
-    def release(self) -> None:
-        pass
-
-
-@pytest.mark.parametrize("same_process", [True, False], ids=["adopted", "recycled-pid"])
-async def test_run_adopts_the_runners_a_released_daemon_left(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_process: bool
-) -> None:
-    """A restarted daemon lists its predecessor's live runner in hello.
-
-    A pid whose start stamp does not match is another process: it is neither
-    adopted nor signalled when this daemon stops.
-    """
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr("omnigent.host.crash_reporting._runner_release_hook", None)
-    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
-    _patch_connect(monkeypatch, _ConnectSpy([None, asyncio.CancelledError()]))
-    hellos: list[HostHelloFrame] = []
-    real_hello = HostHelloFrame
-
-    def _record_hello(**kwargs: object) -> HostHelloFrame:
-        hellos.append(real_hello(**kwargs))
-        return hellos[-1]
-
-    monkeypatch.setattr("omnigent.host.connect.HostHelloFrame", _record_hello)
-    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    try:
-        path = runner_registry_path(_StubLifecycleLock.target)
-        entry = _registered(
-            "runner_adopted",
-            runner,
-            tmp_path / "runner.log",
-            stamp_offset_s=0.0 if same_process else -60.0,
-        )
-        _write_released_by_dead_daemon(path, entry)
-        host = HostProcess(
-            HostIdentity(host_id="host_test_connect", name="test-laptop"),
-            "https://omnigent.example.com",
-            lifecycle_lock=_StubLifecycleLock(),  # type: ignore[arg-type]
-            keep_runners_on_restart=True,
-        )
-
-        await host.run()
-
-        assert [hello.runners for hello in hellos] == [["runner_adopted"] if same_process else []]
-        # A service manager's SIGTERM would release this daemon's registry.
-        assert crash_reporting._runner_release_hook == host._runner_registry.release
-        # The daemon stopped on its own, so it ended what it adopted.
-        assert (runner.poll() is not None) is same_process
-        snapshot = read_registry(path)
-        assert snapshot is not None
-        assert snapshot.runners == {}
-    finally:
-        if runner.poll() is None:
-            runner.kill()
-        runner.wait()
-
-
-_SHUTDOWN_CHILD = """
-import asyncio, os, subprocess, sys
-from pathlib import Path
-from omnigent.host import crash_reporting
-from omnigent.host.connect import HostConnectError, HostProcess, _RunnerHandle
-from omnigent.host.identity import HostIdentity
-from omnigent.host.maintenance import HostMaintenanceJanitor
-
-
-class Lock:
-    target = "test-target"
-
-    def acquire(self):
-        return True
-
-    def still_owner(self):
-        return True
-
-    def release(self):
-        pass
-
-
-def no_janitor(**_kwargs):
-    raise RuntimeError("no janitor in this test")
-
-
-HostMaintenanceJanitor.for_host = staticmethod(no_janitor)
-idle = [sys.executable, "-c", "import time; time.sleep(120)"]
-runner = subprocess.Popen(
-    [
-        sys.executable,
-        "-c",
-        "import subprocess, sys, time\\n"
-        f"job = subprocess.Popen({idle!r})\\n"
-        f"harness = subprocess.Popen({idle!r}, start_new_session=True)\\n"
-        "print(job.pid, harness.pid, flush=True)\\n"
-        "time.sleep(120)\\n",
-    ],
-    stdout=subprocess.PIPE,
-    start_new_session=True,
-)
-print(runner.pid, runner.stdout.readline().decode().strip(), flush=True)
-crash_reporting.install_host_crash_hooks()
-crash_reporting.install_host_signal_handlers()
-host = HostProcess(
-    HostIdentity(host_id="host_test_connect", name="test-laptop"),
-    "https://omnigent.example.com",
-    lifecycle_lock=Lock(),
-    keep_runners_on_restart=os.environ["KEEP_RUNNERS_ON_RESTART"] == "1",
-)
-host._zygote_disabled = True
-host._ensure_model_options_prewarm = lambda: None
-host._start_capability_discovery = lambda: None
-host._runners["runner-1"] = _RunnerHandle(
-    proc=runner, log_path=Path(os.environ["OMNIGENT_DATA_DIR"]) / "runner.log"
-)
-
-
-async def serve():
-    print("serving", flush=True)
-    await asyncio.to_thread(sys.stdin.readline)
-    raise HostConnectError("the test ends the daemon")
-
-
-host._connect_and_serve = serve
-try:
-    asyncio.run(host.run())
-except HostConnectError:
-    pass
-"""
-
-
-@pytest.mark.parametrize(
-    ("ending", "keep_runners_on_restart"),
-    [("exception", True), ("sigterm", True), ("sigterm", False)],
-    ids=["exception", "sigterm-key-on", "sigterm-key-off"],
-)
-def test_daemon_shutdown_ends_runner_sessions_unless_it_released_them(
-    tmp_path: Path, ending: str, keep_runners_on_restart: bool
-) -> None:
-    """A daemon that stops on its own ends what its runners left; a SIGTERM leaves them.
-
-    The runner stand-in leaves a job in its session and a harness leading a
-    session of its own. An exception out of ``run()`` takes the daemon's own
-    shutdown, which must end both; with ``host.keep_runners_on_restart`` a
-    service manager's SIGTERM releases the runners to a successor, so nothing
-    of theirs may be swept. With the key off the SIGTERM leaves the registry
-    unreleased, which ends real runners (``tests/e2e/test_host_e2e.py``).
-    """
-    host = subprocess.Popen(
-        [sys.executable, "-c", _SHUTDOWN_CHILD],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={
-            **os.environ,
-            "OMNIGENT_DATA_DIR": str(tmp_path),
-            "KEEP_RUNNERS_ON_RESTART": "1" if keep_runners_on_restart else "0",
-        },
-    )
-    started: list[int] = []
-    try:
-        assert host.stdout is not None and host.stdin is not None
-        started = [int(pid) for pid in host.stdout.readline().split()]
-        runner_pid, job_pid, harness_pid = started
-        assert host.stdout.readline().strip() == "serving"
-
-        if ending == "sigterm":
-            host.send_signal(signal.SIGTERM)
-        else:
-            host.stdin.write("\n")
-            host.stdin.flush()
-        code = host.wait(timeout=30)
-
-        left = {pid: process_start_stamp(pid) is not None for pid in started}
-        registry = read_registry(runner_registry_path("test-target", base_dir=tmp_path))
-        assert registry is not None
-        assert registry.owner.released is (ending == "sigterm" and keep_runners_on_restart)
-        if ending == "sigterm":
-            assert code == -signal.SIGTERM
-            assert left == {runner_pid: True, job_pid: True, harness_pid: True}
-        else:
-            assert code == 0, host.stderr.read() if host.stderr else ""
-            assert left == {runner_pid: False, job_pid: False, harness_pid: False}
-    finally:
-        if host.poll() is None:
-            host.kill()
-            host.wait()
-        for pid in started:
-            with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGKILL)
-            # An earlier run() test can make this process a subreaper: reap what it adopted.
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(pid, 0)
-
-
-async def test_adopted_runner_answers_status_and_stops(tmp_path: Path) -> None:
-    """An adopted runner reads ``alive`` and ``host.stop_runner`` ends it."""
-    host = _make_host_process()
-    registry_path = tmp_path / "target.runners"
-    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    try:
-        _adopt_released(
-            host, registry_path, _registered("runner_adopted", runner, tmp_path / "runner.log")
-        )
-        assert _registered_ids(registry_path) == ["runner_adopted"]
-
-        status = await host._handle_runner_status(
-            HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_adopted")
-        )
-        assert status.status == "alive"
-
-        result = await host._handle_stop(
-            HostStopRunnerFrame(request_id="req_stop", runner_id="runner_adopted")
-        )
-        assert result.status == "stopped"
-        assert runner.poll() is not None
-        assert "runner_adopted" not in host._runners
-        assert _registered_ids(registry_path) == []
-    finally:
-        if runner.poll() is None:
-            runner.kill()
-        runner.wait()
-        _cleanup_host(host)
-
-
-@pytest.mark.parametrize(
-    ("log_text", "reported"),
-    [("runner exiting: idle\n", False), ("Traceback: boom\n", True)],
-    ids=["orderly-exit", "crash"],
-)
-async def test_adopted_runner_exit_is_reported_only_when_its_log_shows_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, log_text: str, reported: bool
-) -> None:
-    """The daemon is not an adopted runner's parent, so its log carries the outcome."""
-    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
-    host = _make_host_process()
-    host._maintenance_janitor = SimpleNamespace(trigger=lambda _reason: None)  # type: ignore[assignment]
-    registry_path = tmp_path / "target.runners"
-    tunnel = _FakeTunnel()
-    host._ws = tunnel  # type: ignore[assignment] — duck-typed send
-    log_path = tmp_path / "runner.log"
-    log_path.write_text(log_text)
-    marker = tmp_path / "runner.connected"
-    marker.touch()
-    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    try:
-        _adopt_released(
-            host,
-            registry_path,
-            _registered("runner_adopted", runner, log_path, connect_marker=marker),
-        )
-        runner.kill()
-        runner.wait()
-
-        await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)
-
-        reports = [decode_host_frame(frame) for frame in tunnel.sent]
-        assert [type(frame) for frame in reports] == ([HostRunnerExitedFrame] if reported else [])
-        assert "runner_adopted" not in host._runners
-        assert _registered_ids(registry_path) == []
-    finally:
-        _cleanup_host(host)
-
-
-async def test_spawned_runner_is_registered_until_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A spawn lands in the registry with the path in the runner's env."""
-    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
-    host = _make_host_process()
-    host._auth_token_factory = lambda: "host-bootstrap-bearer"
-    host._auth_token_factory_resolved = True
-    registry_path = tmp_path / "target.runners"
-    host._runner_registry = RunnerRegistry(registry_path)
-    workspace = tmp_path / "project"
-    workspace.mkdir()
-    spawn_kwargs: list[dict[str, object]] = []
-    original_popen = subprocess.Popen
-
-    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        spawn_kwargs.append(kwargs)
-        return original_popen(["sleep", "60"], stdout=kwargs["stdout"], stderr=kwargs["stderr"])
-
-    frame = HostLaunchRunnerFrame(
-        request_id="req_registered",
-        binding_token="tok_registered",
-        workspace=str(workspace),
-        session_id="session_registered",
-    )
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
-        result = await host._handle_launch(frame)
-    assert result.status == "launched", result.error
-    runner_id = token_bound_runner_id("tok_registered")
-    proc = host._runners[runner_id].proc
-
-    (kwargs,) = spawn_kwargs
-    env = kwargs["env"]
-    assert isinstance(env, dict)
-    assert env[RUNNER_HOST_REGISTRY_ENV_VAR] == str(registry_path)
-    # Its own session: stopping the daemon's process group spares it.
-    assert kwargs["start_new_session"] is True
-    snapshot = read_registry(registry_path)
-    assert snapshot is not None
-    entry = snapshot.runners[runner_id]
-    assert (entry.pid, entry.session_id) == (proc.pid, "session_registered")
-    assert entry.started_at == process_start_stamp(proc.pid)
-
-    _cleanup_host(host)
-
-    assert proc.poll() is not None
-    snapshot = read_registry(registry_path)
-    assert snapshot is not None
-    assert snapshot.runners == {}
-
-
 def test_reap_orphans_reaps_orphaned_children(tmp_path: Path) -> None:
     """Regression for #1782: orphaned children are reaped, not leaked.
 
@@ -5601,6 +5250,27 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
     assert env["MY_GATEWAY_URL"] == "https://llm.internal.example.com"
     # Anything unnamed stays behind the allowlist.
     assert "UNLISTED_SECRET" not in env
+
+
+def test_build_runner_env_session_env_bypasses_allowlist_and_overrides_daemon_values() -> None:
+    """Forwarded values bypass the allowlist and replace the daemon's own copies."""
+    env = _build_runner_env(
+        {"PATH": "/usr/bin", "SSH_AUTH_SOCK": "/tmp/daemon-agent.sock"},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+        session_env={
+            "SSH_AUTH_SOCK": "/tmp/pane-agent.sock",
+            "ARCATERM_CAPABILITY": "capability-for-pane-1",
+        },
+    )
+
+    assert env["SSH_AUTH_SOCK"] == "/tmp/pane-agent.sock"
+    assert env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert env["RUNNER_SERVER_URL"] == "http://server"
+    assert env["OMNIGENT_RUNNER_SESSION_ENV_NAMES"] == "ARCATERM_CAPABILITY,SSH_AUTH_SOCK"
 
 
 def test_dispatch_trace_context_reaches_runner_but_not_daemon(
@@ -8219,8 +7889,6 @@ async def test_host_diagnostics_correlate_real_socket_closes_and_reset_on_reconn
 
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", dict)
-    # The peer below scripts an exact frame sequence; no resources report in it.
-    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     caplog.set_level(logging.INFO, logger="omnigent.host.connect")
     hellos: list[HostHelloFrame] = []
 
@@ -8517,36 +8185,6 @@ async def test_run_host_process_invalid_host_id_exits_actionably(
     assert "not-a-uuid" in err
 
 
-@pytest.mark.parametrize("value", ["yes please", 1, "true", None])
-def test_run_host_process_refuses_an_invalid_keep_runners_on_restart(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    value: object,
-) -> None:
-    """A non-boolean ``host.keep_runners_on_restart`` stops the start, naming the key."""
-    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / ".omnigent"))
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "host:\n"
-        "  host_id: 0123456789abcdef0123456789abcdef\n"
-        "  name: test-host\n"
-        f"  keep_runners_on_restart: {json.dumps(value)}\n"
-    )
-    spy = _ConnectSpy([asyncio.CancelledError()])
-    _patch_connect(monkeypatch, spy)
-
-    with pytest.raises(SystemExit) as excinfo:
-        run_host_process(server_url="https://srv.example.com", config_path=config)
-
-    assert excinfo.value.code == HOST_FATAL_EXIT_CODE
-    err = capsys.readouterr().err
-    assert "Could not start host" in err
-    assert "host.keep_runners_on_restart" in err
-    assert spy.calls == []
-
-
 def test_run_host_process_mirrors_structured_logs_on_foreground_tty(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -8765,7 +8403,6 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     host._maintenance_janitor = SimpleNamespace(trigger=maintenance_reasons.append)  # type: ignore[assignment]
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
-    host._runner_registry = RunnerRegistry(tmp_path / "target.runners")
     workspace = tmp_path / "project"
     workspace.mkdir()
 
@@ -8820,10 +8457,6 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     while time.monotonic() < deadline and spawned[0].poll() is None:
         await asyncio.sleep(0.05)
     assert spawned[0].poll() is not None, "abandoned runner was leaked, still alive"
-    # Nor left for the next daemon to adopt.
-    snapshot = read_registry(host._runner_registry.path)
-    assert snapshot is not None
-    assert snapshot.runners == {}
     while time.monotonic() < deadline and not maintenance_reasons:
         await asyncio.sleep(0.01)
     assert maintenance_reasons == ["runner_spawn_abandoned"]
@@ -8853,9 +8486,7 @@ async def test_initial_runner_poll_keeps_loop_responsive_and_cancellation_safe(
         return real_poll()
 
     monkeypatch.setattr(proc, "poll", gated_poll)
-    monkeypatch.setattr(
-        host, "_spawn_runner_proc", lambda *_, **__: (proc, tmp_path / "runner.log")
-    )
+    monkeypatch.setattr(host, "_spawn_runner_proc", lambda *_: (proc, tmp_path / "runner.log"))
     frame = HostLaunchRunnerFrame(
         request_id="req_initial_poll",
         binding_token="token_initial_poll",
@@ -9802,7 +9433,7 @@ async def test_runner_status_waits_for_pending_launch(
             _pause()
         return True
 
-    def _spawn(*_args: object, **_kwargs: object) -> tuple[subprocess.Popen[bytes], Path]:
+    def _spawn(*_args: object) -> tuple[subprocess.Popen[bytes], Path]:
         if stage == "spawn":
             _pause()
         return proc, tmp_path / "runner.log"
@@ -10071,9 +9702,7 @@ async def test_initial_runner_poll_failure_does_not_refuse_a_spawned_launch(
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
     proc = Mock(poll=Mock(side_effect=OSError("poll unavailable")))
-    monkeypatch.setattr(
-        host, "_spawn_runner_proc", lambda *_, **__: (proc, tmp_path / "runner.log")
-    )
+    monkeypatch.setattr(host, "_spawn_runner_proc", lambda *_: (proc, tmp_path / "runner.log"))
     frame = HostLaunchRunnerFrame(
         request_id="req_poll_error",
         binding_token="token_poll_error",
@@ -10290,8 +9919,6 @@ async def test_filesystem_frame_keeps_host_control_responsive(
             finished.set()
 
     monkeypatch.setattr(host, f"_handle_{operation}", blocked_filesystem)
-    # The tunnel below reads frames in order; no resources report in it.
-    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     serving = asyncio.create_task(host._serve_frames(ws))  # type: ignore[arg-type]
     replacement = _CollectingWs()
     try:
@@ -10702,6 +10329,7 @@ async def test_fatal_upgrade_error_bodyless_4xx_falls_back_to_generic() -> None:
     assert "the server rejected the host tunnel request" in str(err)
 
 
+@_FORWARDS_SESSION_ENV
 async def test_handle_launch_supersedes_previous_runner_for_same_session(
     tmp_path: Path,
 ) -> None:
@@ -10709,7 +10337,9 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
 
     The server rotates the binding token on every relaunch, so without
     this the host accumulates one live runner per attempt — each with a
-    transcript forwarder tailing the same session (the #5182 leak).
+    transcript forwarder tailing the same session (the #5182 leak). A
+    server-driven relaunch also starts without the first launch's forwarded
+    variables.
     """
     host = _make_host_process()
     maintenance_reasons: list[str] = []
@@ -10720,21 +10350,29 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
     workspace.mkdir()
 
     original_popen = subprocess.Popen
+    spawned_envs: list[dict[str, str]] = []
 
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        spawned_envs.append(dict(kwargs["env"]))  # type: ignore[call-overload]
         return original_popen(
             ["sleep", "30"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+    with (
+        patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen),
+        session_env_handoff(
+            "conv_super", {"ARCATERM_CAPABILITY": "capability-for-pane-1"}
+        ) as handoff_id,
+    ):
         first = await host._handle_launch(
             HostLaunchRunnerFrame(
                 request_id="req_a",
                 binding_token="tok_a",
                 workspace=str(workspace),
                 session_id="conv_super",
+                session_env_handoff_id=handoff_id,
             )
         )
         first_handle = host._runners[first.runner_id]
@@ -10764,6 +10402,11 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
         await asyncio.sleep(0.01)
     assert maintenance_reasons == ["runner_superseded"]
     assert second.runner_id in host._runners
+    first_env, replacement_env = spawned_envs
+    assert first_env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert (
+        not {"ARCATERM_CAPABILITY", "OMNIGENT_RUNNER_SESSION_ENV_NAMES"} & replacement_env.keys()
+    )
     _cleanup_host(host)
 
 

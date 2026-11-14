@@ -149,6 +149,7 @@ from omnigent.server.routes.sessions import (
 from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
+from omnigent.server.routes.user_settings import create_user_settings_router
 from omnigent.server.runner_session_init import (
     TRANSIENT_REJECTION_STATUSES,
     RunnerSessionInitializer,
@@ -192,6 +193,10 @@ from omnigent.stores.preference_store import PreferenceStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 from omnigent.stores.scheduled_task_store.dispatch import ScheduledTaskDispatchStore
+from omnigent.stores.user_settings_store import (
+    open_user_settings_store,
+    session_owner_title_instructions,
+)
 from omnigent.util.event_loop_watchdog import monitor_event_loop
 from omnigent.util.uuid import normalize_uuid
 
@@ -302,6 +307,9 @@ class ServerInfoResponse(BaseModel):
     archive_worktree_cleanup: bool = True
     # GET /v1/sessions accepts ``search_scope``; older servers ignore it.
     session_search_scope: bool = True
+    # GET /v1/sessions applies ``include_archived`` to ``visibility=mine`` and
+    # ``shared``; older servers drop archived rows there.
+    session_list_scoped_archives: bool = True
     # Scheduled tasks accept ``session_mode`` and ``session_id``; older servers
     # reject them.
     scheduled_task_session_modes: bool = True
@@ -344,6 +352,9 @@ class ServerInfoResponse(BaseModel):
     # GET/DELETE /v1/sessions/{id}/pull-requests and SessionListItem.pull_request;
     # absent on older servers, which clients treat as unsupported.
     session_pull_requests: bool = False
+    # GET/PUT /v1/settings/session-title-instructions; absent on older servers,
+    # which clients treat as unsupported.
+    session_title_instructions: bool = False
     # Absent on older servers, which clients treat as the default extensions.
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
     # Scheduled tasks accept ``project_id``; older servers reject it.
@@ -2013,10 +2024,18 @@ def create_app(
         agent_store=agent_store,
         agent_cache=agent_cache,
     )
+    user_settings_store = open_user_settings_store(conversation_store)
     background_title_coordinator = BackgroundSessionTitleCoordinator(
         conversation_store,
         RunnerBackgroundTitleGenerator(runner_router),
         additional_instructions=title_instructions,
+        user_instructions=(
+            None
+            if user_settings_store is None
+            else session_owner_title_instructions(
+                user_settings_store, conversation_store, single_user=auth_provider is None
+            )
+        ),
     )
     pull_request_refresher = session_pull_requests.PullRequestRefresher()
     session_recap_coordinator = (
@@ -3806,6 +3825,7 @@ def create_app(
                 "scheduled_task_worktrees": True,
                 "archive_worktree_cleanup": True,
                 "session_search_scope": True,
+                "session_list_scoped_archives": True,
                 "sibling_sessions": frontend_features[Feature.SIBLING_SESSIONS.value],
                 "request_managed_sandbox_host_id": True,
                 "session_fork_workspaces": True,
@@ -3818,6 +3838,7 @@ def create_app(
                 "session_claude_sdk_clear": True,
                 "session_pull_requests": session_pull_requests.open_store(conversation_store)
                 is not None,
+                "session_title_instructions": user_settings_store is not None,
                 "filesystem_attachments": {
                     "extensions": sorted(filesystem_attachment_policy.extensions),
                     "all_types": filesystem_attachment_policy.all_types,
@@ -4171,6 +4192,13 @@ def create_app(
             ),
             prefix="/v1",
             tags=["projects"],
+        )
+
+    if user_settings_store is not None:
+        app.include_router(
+            create_user_settings_router(user_settings_store, auth_provider),
+            prefix="/v1",
+            tags=["settings"],
         )
 
     if preference_store is not None:
