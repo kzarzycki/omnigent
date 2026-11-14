@@ -107,9 +107,10 @@ read-only, such as `Read` and `Grep`, never ask.
   them under `permissions.ask`, or the CLI's own sensitive-file check fires (an
   edit to a dotfile config such as `.pre-commit-config.yaml`); that check asks
   whatever the rules say. With those rules, each call goes to Omnigent's TOOL_CALL
-  policy and approval card (see [Policy](#policy)). The bridge starts the CLI
-  without a permission mode (the VM reports `default`), so the Omnigent-side
-  `permission_mode` is what removes those cards. The CLI does not apply SDK hooks
+  policy and approval card (see [Policy](#policy)). `claude --cloud` accepts
+  `--permission-mode`, but the VM still starts in `default` and its sensitive-file
+  safety check still asks, so the bridge passes no mode. Under `bypassPermissions`,
+  Omnigent answers that request (policy first), which is what removes those cards. The CLI does not apply SDK hooks
   (`initialize` answers `hooks_applied: false`), and user-level `~/.claude`
   settings do not reach the VM.
 - **Undocumented API:** the events endpoints are not part of the documented
