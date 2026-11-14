@@ -1573,7 +1573,7 @@ class AcpExecutor(Executor):
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
     async def _exited_idle(self) -> bool:
-        """Whether the agent process ended with :data:`_IDLE_EXIT_STATUS`, as an idle agent does."""
+        """Whether the agent process ended with the idle-exit status."""
         if self._proc is None:
             return False
         with contextlib.suppress(TimeoutError):
@@ -2098,10 +2098,12 @@ class AcpExecutor(Executor):
                         and not self._resent_after_idle_exit
                         and await self._exited_idle()
                     ):
-                        # The agent left idle as this prompt arrived: it never ran, so send it again.
+                        # The agent left idle as this prompt arrived: it never ran; send it again.
                         self._resent_after_idle_exit = True
                         try:
-                            async for event in self.run_turn(messages, tools, system_prompt, config):
+                            async for event in self.run_turn(
+                                messages, tools, system_prompt, config
+                            ):
                                 yield event
                         finally:
                             self._resent_after_idle_exit = False

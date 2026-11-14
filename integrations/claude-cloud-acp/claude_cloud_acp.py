@@ -1545,24 +1545,28 @@ def check_lifetime() -> None:
     try:
         IDLE_EXIT_S = 60.0
         parent = os.getppid()
-        touch()
-        start = _last_activity
-        assert lifetime_over(parent, start + 59) is None
-        assert lifetime_over(parent, start + 60) == "idle for 60s"
+        start = time.monotonic()
+
+        def at(offset: float, pid: int = parent) -> str | None:
+            # Earlier checks leave threads that touch(); pin the activity time.
+            globals()["_last_activity"] = start
+            return lifetime_over(pid, start + offset)
+
+        assert at(59) is None
+        assert at(60) == "idle for 60s"
         working = SESSIONS["acp-working"] = Session("/", "acp-working")
         working.running = True
-        assert lifetime_over(parent, start + 3600) is None  # a turn keeps it
+        assert at(3600) is None  # a turn keeps it
         working.running = False
-        assert lifetime_over(parent, start + 3600) is not None
-        assert lifetime_over(parent + 1, start) == "its runner exited"
+        assert at(3600) is not None
+        assert at(0, parent + 1) == "its runner exited"
         IDLE_EXIT_S = 0.0
-        assert lifetime_over(parent, start + 3600) is None  # 0 keeps an idle bridge
+        assert at(3600) is None  # 0 keeps an idle bridge
         # A prompt taken before the decision keeps the bridge; none is taken after it.
         IDLE_EXIT_S = 60.0
-        assert accept_prompt() and lifetime_over(parent, start + 3600) is None
+        assert accept_prompt() and at(3600) is None
         prompt_done()
-        _last = _last_activity
-        assert lifetime_over(parent, _last + 60) == "idle for 60s"
+        assert at(60) == "idle for 60s"
         globals()["_leaving"] = True
         assert not accept_prompt() and _prompts_accepted == 0
         globals()["_leaving"] = False

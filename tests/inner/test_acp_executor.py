@@ -2212,7 +2212,13 @@ async def test_prompt_met_by_idle_exit_is_resent_once(
     ex = AcpExecutor(
         AcpAgentConfig(
             command=shlex.join(
-                [sys.executable, str(agent_path), str(prompt_log), str(tmp_path / "left"), str(status)]
+                [
+                    sys.executable,
+                    str(agent_path),
+                    str(prompt_log),
+                    str(tmp_path / "left"),
+                    str(status),
+                ]
             ),
             name="Leaver",
         )
