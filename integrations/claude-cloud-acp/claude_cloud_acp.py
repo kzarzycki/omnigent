@@ -1486,6 +1486,16 @@ def serve() -> None:
     threading.Thread(
         target=watch_lifetime, args=(os.getppid(),), name="lifetime", daemon=True
     ).start()
+    reader = threading.Thread(target=read_requests, name="stdin", daemon=True)
+    reader.start()
+    # The main thread stays in Python code: a SIGTERM the kernel hands to another thread
+    # only runs its handler here, and a main thread blocked reading stdin never would.
+    while reader.is_alive():
+        reader.join(0.2)
+    stop()  # stdin closed: Omnigent is tearing the bridge down
+
+
+def read_requests() -> None:
     for line in sys.stdin:
         touch()
         if not line.strip():
@@ -1545,7 +1555,6 @@ def serve() -> None:
                     "error": {"code": -32601, "message": f"method not supported: {method}"},
                 }
             )
-    stop()  # stdin closed: Omnigent is tearing the bridge down
 
 
 # A stdio MCP server with one ``echo`` tool, for the self-check and ``e2e.py mcp``.
@@ -1719,6 +1728,8 @@ def check_sigterm() -> None:
         "s.cancelled.set()\n"
         "threading.Thread(target=s.cancel, daemon=True).start()\n"  # the turn loop's retry
         "time.sleep(0.3)\n"
+        "import signal\n"  # the kernel handed SIGTERM to another thread: main never sees it
+        "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n"
         "g['serve']()\n"
     )
     lingering = ECHO_MCP + "\nwhile True:\n    time.sleep(1)\n"
