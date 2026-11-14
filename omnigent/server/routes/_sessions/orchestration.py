@@ -371,6 +371,7 @@ from omnigent.server.routes._sessions.helpers import (
     _query_host_runner_status,
     _read_state_entry,
     _record_daily_cost,
+    _recorded_token_count,
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
     _relay_item_stable_id,
@@ -1412,6 +1413,8 @@ def _build_session_list_item(
         project_id=conv.project_id,
         pull_request=pull_request,
         pull_requests_synced=pull_requests_synced,
+        input_tokens=_recorded_token_count(conv.session_usage or {}, "input_tokens"),
+        output_tokens=_recorded_token_count(conv.session_usage or {}, "output_tokens"),
     )
 
 
@@ -1649,6 +1652,9 @@ def _build_session_response(
         share_workspace_files=conv.share_workspace_files,
         context_window=context_window,
         last_total_tokens=last_total_tokens,
+        # The session's own counters, not the subtree total shown below.
+        input_tokens=_recorded_token_count(conv.session_usage or {}, "input_tokens"),
+        output_tokens=_recorded_token_count(conv.session_usage or {}, "output_tokens"),
         # Seed the client's cost indicator on resume. Uses the SUBTREE
         # total (this session + its sub-agents) when the caller computed
         # it, so a parent's badge reflects its sub-agents' spend; falls
