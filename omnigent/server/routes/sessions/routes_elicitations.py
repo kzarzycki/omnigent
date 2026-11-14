@@ -267,7 +267,7 @@ def register_elicitations_routes(
         :param question_id: The id ``sys_ask_user_question`` returned,
             e.g. ``"question_0f3a..."``.
         :returns: ``{"question_id", "status"}`` with ``status`` ``"answered"``
-            (plus ``action`` and ``answer``), ``"waiting"`` while the card is
+            (plus ``action`` and ``choices``, label to choice), ``"waiting"`` while the card is
             open, or ``"unknown"`` for an id this session's user never answered.
         :raises OmnigentError: 404 if no session exists.
         """
@@ -285,7 +285,7 @@ def register_elicitations_routes(
                 "question_id": question_id,
                 "status": "answered",
                 "action": answer.action,
-                "answer": answer.answer,
+                "choices": answer.choices,
             }
         if _own_pending_question(question_id, session_id) is None:
             # Asked before a server restart: the card is only in the store.
