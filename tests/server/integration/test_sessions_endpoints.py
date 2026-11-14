@@ -13953,3 +13953,47 @@ async def test_external_error_item_model_unavailable_card_live_and_after_reload(
         assert shown["message"] == item_data["message"]
         for field, value in card.items():
             assert shown.get(field) == value, (field, shown)
+
+
+# ── Per-session token counts on GET /v1/sessions[/{id}] ───────────
+
+
+async def test_session_endpoints_return_recorded_token_counts(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A session's own recorded tokens appear on get and list, tied to ``/v1/usage``."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"], title="priced")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_session_usage(
+        session["id"], {"input_tokens": 1200, "output_tokens": 350, "total_cost_usd": 0.5}
+    )
+
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    rows = (await client.get("/v1/sessions")).json()["data"]
+    listed = next(row for row in rows if row["id"] == session["id"])
+    for body in (snapshot, listed):
+        assert body["input_tokens"] == 1200
+        assert body["output_tokens"] == 350
+        assert "busy_seconds" not in body  # the server records no turn timing
+
+    # /v1/usage reads the same stored usage (cost only), so the figures tie out.
+    report = (await client.get("/v1/usage")).json()
+    attributed = next(row for row in report["sessions"] if row["id"] == session["id"])
+    assert attributed["cost_usd"] == snapshot["total_cost_usd"] == 0.5
+
+
+async def test_session_endpoints_return_null_tokens_without_recorded_usage(
+    client: httpx.AsyncClient,
+) -> None:
+    """No recorded usage means ``null`` on both endpoints, never 0 or a missing key."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"], title="unused")
+
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    rows = (await client.get("/v1/sessions")).json()["data"]
+    listed = next(row for row in rows if row["id"] == session["id"])
+    for body in (snapshot, listed):
+        assert body["input_tokens"] is None
+        assert body["output_tokens"] is None
