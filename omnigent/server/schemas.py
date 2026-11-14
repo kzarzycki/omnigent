@@ -3218,12 +3218,6 @@ class SessionListItem(BaseModel):
         "host offline" for the open-session view; not used by the
         sidebar.
     :param reasoning_effort: Per-session reasoning-effort hint.
-    :param llm_model: The model the session is on: the harness's own report
-        when it has one, else the session's model override, else the bound
-        spec's model (not claimed for self-authenticated harnesses).
-        ``None`` when none is known.
-    :param effective_reasoning_effort: ``reasoning_effort`` when set, else the
-        bound spec's default effort; ``None`` when neither exists.
     :param permission_level: The requesting user's numeric
         permission level on this session: ``1`` = read, ``2`` =
         edit, ``3`` = manage. ``None`` when permissions are
@@ -3332,8 +3326,6 @@ class SessionListItem(BaseModel):
     runner_online: bool | None = None
     host_online: bool | None = None
     reasoning_effort: str | None = None
-    llm_model: str | None = None
-    effective_reasoning_effort: str | None = None
     permission_level: int | None = None
     owner: str | None = None
     external_session_id: str | None = None
