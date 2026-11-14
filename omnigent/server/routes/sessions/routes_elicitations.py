@@ -255,7 +255,7 @@ def register_elicitations_routes(
         request: Request,
         session_id: str,
         question_id: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """
         Return what the session's user answered on a ``sys_ask_user_question`` card.
 
