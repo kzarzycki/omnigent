@@ -2413,6 +2413,24 @@ def _priced_cost_for_display(usage: dict[str, Any]) -> float | None:
         return None
 
 
+def _recorded_token_count(usage: dict[str, Any], key: str) -> int | None:
+    """
+    Read one token counter a session itself recorded, or ``None`` when absent.
+
+    :param usage: A conversation's own ``session_usage`` dict, e.g.
+        ``{"input_tokens": 1200}``.
+    :param key: Counter name, e.g. ``"input_tokens"``.
+    :returns: The count, or ``None`` when never recorded or malformed.
+    """
+    value = usage.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _model_usage_bucket(usage: dict[str, Any], model: str) -> dict[str, float]:
     """
     Get-or-create the per-model usage sub-bucket inside ``usage["by_model"]``.

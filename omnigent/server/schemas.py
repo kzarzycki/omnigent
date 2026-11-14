@@ -2404,6 +2404,10 @@ class SessionResponse(BaseModel):
         ``None`` when no task has completed yet. Lets clients seed
         their context-ring on conversation resume without waiting for
         the next ``response.completed`` SSE event.
+    :param input_tokens: Input tokens this session itself recorded, e.g.
+        ``12000`` (sub-agents excluded). ``None`` when none were recorded.
+    :param output_tokens: Output tokens this session itself recorded, e.g.
+        ``350`` (sub-agents excluded). ``None`` when none were recorded.
     :param total_cost_usd: Cumulative LLM spend for this session in
         USD, e.g. ``0.42``. ``None`` when the session is **unpriced**
         — no turn has been priced yet (the model is absent from the
@@ -2565,6 +2569,8 @@ class SessionResponse(BaseModel):
     share_workspace_files: bool = False
     context_window: int | None = None
     last_total_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     total_cost_usd: float | None = None
     usage_by_model: dict[str, ModelUsage] | None = None
     usage_included: bool = True
@@ -3305,6 +3311,10 @@ class SessionListItem(BaseModel):
     :param pull_requests_synced: Whether the server has imported the session's
         PRs from its host, so a missing ``pull_request`` means "none" rather than
         "not known yet". ``None`` on servers without PR storage.
+    :param input_tokens: Input tokens this session itself recorded, e.g.
+        ``12000`` (sub-agents excluded). ``None`` when none were recorded.
+    :param output_tokens: Output tokens this session itself recorded, e.g.
+        ``350`` (sub-agents excluded). ``None`` when none were recorded.
     """
 
     family: SessionFamily | None = None
@@ -3346,6 +3356,8 @@ class SessionListItem(BaseModel):
     project_id: str | None = None
     pull_request: SessionPullRequestSummary | None = None
     pull_requests_synced: bool | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class SessionPageBoundary(BaseModel):
