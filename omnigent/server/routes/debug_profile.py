@@ -16,6 +16,7 @@ from omnigent.util.stack_sampler import sample_stacks
 
 MAX_PROFILE_SECONDS = 60
 DEFAULT_PROFILE_SECONDS = 30
+_SAMPLER_STOP_TIMEOUT_S = 5.0
 
 
 async def _wait_for_disconnect(request: Request) -> None:
@@ -61,15 +62,25 @@ def create_debug_profile_router(
             raise OmnigentError("A profile is already running", code=ErrorCode.CONFLICT)
         async with running:
             stop = threading.Event()
-            worker = asyncio.ensure_future(asyncio.to_thread(sample_stacks, seconds, stop=stop))
+            finished = threading.Event()
+
+            def run_sampler() -> str:
+                try:
+                    return sample_stacks(seconds, stop=stop)
+                finally:
+                    finished.set()
+
+            worker = asyncio.ensure_future(asyncio.to_thread(run_sampler))
             disconnect = asyncio.ensure_future(_wait_for_disconnect(request))
             try:
                 await asyncio.wait({worker, disconnect}, return_when=asyncio.FIRST_COMPLETED)
                 return PlainTextResponse(worker.result() if worker.done() else "")
             finally:
                 # Cancellation or disconnect: end the sampler before the lock is released.
+                # A blocking wait, since an awaited one can itself be cancelled repeatedly
+                # by a cancel scope; the sampler checks the stop event every round (~10 ms).
                 stop.set()
                 disconnect.cancel()
-                await asyncio.wait({worker})
+                finished.wait(_SAMPLER_STOP_TIMEOUT_S)
 
     return router

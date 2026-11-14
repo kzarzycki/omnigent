@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import anyio
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -167,6 +168,25 @@ async def test_cancelled_request_ends_its_sampler_before_the_next_profile_starts
     await poll_until_async(lambda: _live_samplers() == 0, timeout_s=2)
     second = await auth_client.get("/v1/debug/profile?seconds=1", headers=headers)
     assert second.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_cancel_scope_around_the_request_ends_its_sampler_before_the_lock_frees(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    headers = _admin_headers(db_uri)
+
+    async def profile() -> None:
+        await auth_client.get("/v1/debug/profile?seconds=30", headers=headers)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(profile)
+        await poll_until_async(lambda: _live_samplers() == 1)
+        group.cancel_scope.cancel()
+
+    assert _live_samplers() == 0
+    again = await auth_client.get("/v1/debug/profile?seconds=1", headers=headers)
+    assert again.status_code == 200
 
 
 @pytest.mark.asyncio
