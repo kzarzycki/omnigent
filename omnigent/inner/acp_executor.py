@@ -1533,6 +1533,9 @@ class AcpExecutor(Executor):
             value = usage.get(acp_key)
             if isinstance(value, int) and not isinstance(value, bool):
                 out[omni_key] = value
+        # An agent that knows the model it ran (claude-cloud) reports it with the usage.
+        if isinstance(usage.get("model"), str) and usage["model"]:
+            out["model"] = usage["model"]
         return out or None
 
     def _usage_with_active_model(self, result: _AcpJsonObject) -> dict[str, Any] | None:

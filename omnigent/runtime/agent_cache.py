@@ -7,6 +7,7 @@ import errno
 import logging
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,6 +33,14 @@ def _cleanup_staging_dir(path: Path) -> None:
         pass  # Successful publication moved this staging directory into the cache.
     except OSError as exc:
         _logger.warning("Could not clean agent cache staging directory %s: %s", path, exc)
+
+
+def _is_symlink(path: Path) -> bool:
+    """Return whether *path* is a symlink; a missing path is not one."""
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _published_location(workdir: Path) -> str | None:
@@ -80,7 +89,8 @@ class AgentCache:
         """
         self._artifact_store = artifact_store
         self._cache_dir = cache_dir
-        self._specs: dict[str, tuple[str, AgentSpec]] = {}  # agent_id → (location, spec)
+        # agent_id → (location, spec, workdir); the workdir was path-checked when stored.
+        self._specs: dict[str, tuple[str, AgentSpec, Path]] = {}
 
     def _cache_path(self, agent_id: str) -> Path:
         """Return a direct child of the cache root for an agent id."""
@@ -134,16 +144,19 @@ class AgentCache:
         :returns: A LoadedAgent with the parsed spec and the
             on-disk working directory.
         """
-        workdir = self._cache_path(agent_id)
-
         # Tier 1: in-memory spec. The cached spec was parsed with the
         # *expand_env* value of whichever caller populated it first.
         # That is consistent across callers because *expand_env* is
         # derived from the agent's immutable provenance, which never
         # changes for a given ``agent_id``.
+        # A hit re-checks only that the entry's directory is not a symlink: the full
+        # path resolution costs a syscall per component, and session lists load one
+        # spec per row.
         cached = self._specs.get(agent_id)
-        if cached is not None and cached[0] == bundle_location:
-            return LoadedAgent(spec=cached[1], workdir=workdir)
+        if cached is not None and cached[0] == bundle_location and not _is_symlink(cached[2]):
+            return LoadedAgent(spec=cached[1], workdir=cached[2])
+
+        workdir = self._cache_path(agent_id)
 
         # Tier 2: rebuild stale, missing, or corrupt extracted specs from the stored bundle.
         if workdir.is_dir():
@@ -154,7 +167,7 @@ class AgentCache:
             except Exception:
                 return self._recover_disk_entry(agent_id, bundle_location, expand_env=expand_env)
             else:
-                self._specs[agent_id] = (bundle_location, spec)
+                self._specs[agent_id] = (bundle_location, spec, workdir)
                 return LoadedAgent(spec=spec, workdir=workdir)
 
         # Cache miss — validate privately before publishing the disk entry.
@@ -186,7 +199,7 @@ class AgentCache:
                     ),
                 )
             else:
-                self._specs[agent_id] = (bundle_location, spec)
+                self._specs[agent_id] = (bundle_location, spec, workdir)
                 return LoadedAgent(spec=spec, workdir=workdir)
 
             try:
@@ -283,7 +296,7 @@ class AgentCache:
                     published or not (backup_dir / "previous").exists()
                 ):
                     _cleanup_staging_dir(backup_dir)
-        self._specs[agent_id] = (bundle_location, spec)
+        self._specs[agent_id] = (bundle_location, spec, workdir)
         return LoadedAgent(spec=spec, workdir=workdir)
 
     def evict(self, agent_id: str) -> None:
@@ -372,5 +385,5 @@ class AgentCache:
                     expand_env=expand_env,
                     prune_invalid_sub_agents=True,
                 )
-        self._specs[agent_id] = (bundle_location, spec)
+        self._specs[agent_id] = (bundle_location, spec, workdir)
         return LoadedAgent(spec=spec, workdir=workdir)
