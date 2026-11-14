@@ -1559,6 +1559,11 @@ def _load_agent_spec_bundle(
     spec_cache_root: Path, resp: httpx.Response, agent_id: str, session_id: str
 ) -> ResolvedSpec:
     """Hash, load and publish a validated bundle while its cache lock is held."""
+    from omnigent.acp_permission_mode import (
+        ACP_PERMISSION_MODE_HEADER,
+        ACP_PERMISSION_MODES,
+        with_acp_permission_mode,
+    )
     from omnigent.automations_availability import AUTOMATIONS_HEADER, without_scheduled_task_tools
     from omnigent.mcp_selection import MCP_SELECTION_HEADER, selected_mcp_spec
     from omnigent.runner.native import ResolvedSpec
@@ -1595,6 +1600,9 @@ def _load_agent_spec_bundle(
     # Older servers send no header; keep the tools there, as before.
     if resp.headers.get(AUTOMATIONS_HEADER) == "0":
         spec = without_scheduled_task_tools(spec)
+    session_mode = resp.headers.get(ACP_PERMISSION_MODE_HEADER)
+    if session_mode in ACP_PERMISSION_MODES:
+        spec = with_acp_permission_mode(spec, session_mode)
     _apply_host_interactive_shells(spec)
     return ResolvedSpec(spec=spec, workdir=dest)
 

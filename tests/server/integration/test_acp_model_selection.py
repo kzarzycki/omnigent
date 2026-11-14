@@ -664,3 +664,44 @@ async def test_multipart_ignores_server_acp_default(
         files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
     )
     assert response.status_code == 201, response.text
+
+
+async def test_session_permission_mode_reaches_that_sessions_runner_env_only(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """``permission_mode`` on create reaches that session's ``HARNESS_ACP_PERMISSION_MODE``.
+
+    A sibling created without it keeps the default (an approval card), and a
+    client cannot forge the mode through a raw label or an unknown value.
+    """
+    from omnigent.runner._entry import _AgentSpecCache, _resolve_agent_spec_from_server
+
+    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+
+    async def launch_env(**create_fields: Any) -> dict[str, str]:
+        created = await client.post(
+            "/v1/sessions",
+            json={"agent_id": agent["id"], "initial_items": [], **create_fields},
+        )
+        assert created.status_code == 201, created.text
+        resolved = await _resolve_agent_spec_from_server(
+            client, _AgentSpecCache(tmp_path), agent["id"], session_id=created.json()["id"]
+        )
+        assert resolved is not None
+        env = _build_spawn_env_from_spec(resolved.spec, "acp:synthetic")
+        assert env is not None
+        return env
+
+    assert (await launch_env(permission_mode="bypassPermissions"))[
+        "HARNESS_ACP_PERMISSION_MODE"
+    ] == "bypassPermissions"
+    assert "HARNESS_ACP_PERMISSION_MODE" not in await launch_env()
+
+    for rejected in (
+        {"permission_mode": "yolo"},
+        {"labels": {"omnigent.acp.permission_mode": "bypassPermissions"}},
+    ):
+        response = await client.post(
+            "/v1/sessions", json={"agent_id": agent["id"], "initial_items": [], **rejected}
+        )
+        assert response.status_code == 400, response.text
