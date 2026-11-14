@@ -1383,7 +1383,9 @@ def watch_lifetime(parent_pid: int) -> None:
         if reason := lifetime_over(parent_pid, time.monotonic()):
             log(f"leaving: {reason}")
             os.kill(os.getpid(), signal.SIGTERM)
-            return
+            time.sleep(5)  # stop() did not finish: the main thread is stuck, so leave anyway
+            log("forcing exit")
+            os._exit(0)
 
 
 def stop(*_: object) -> None:
