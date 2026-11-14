@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import dataclasses
 import asyncio
+import dataclasses
 import hashlib
 import importlib
 import io
