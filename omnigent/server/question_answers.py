@@ -23,8 +23,8 @@ class QuestionAnswer:
 
     :param session_id: The session that asked, e.g. ``"conv_abc123"``.
     :param action: The card verdict: ``"accept"``, ``"decline"`` or ``"cancel"``.
-    :param choices: Short question label to the choice, never the question text,
-        e.g. ``{"Release": "Yes"}``.
+    :param choices: Question label to the choice. The label is the question's header,
+        else its first 80 characters, never the full text, e.g. ``{"Release": "Yes"}``.
     """
 
     session_id: str
