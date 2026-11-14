@@ -1019,3 +1019,26 @@ def test_cleanup_warning_preserves_original_validation_error(
     assert "Could not clean agent cache staging directory" in caplog.text
     assert "cleanup denied" in caplog.text
     assert not (cache_dir / "agent").exists()
+
+
+def test_warm_load_touches_no_filesystem_path(
+    artifact_store: LocalArtifactStore,
+    cache_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load served from memory resolves no path: session lists load one spec per row."""
+    bundle_location = "agent-warm/abc123"
+    _store_bundle(artifact_store, bundle_location, {"config.yaml": _MINIMAL_CONFIG})
+    cache = AgentCache(artifact_store=artifact_store, cache_dir=cache_dir)
+    first = cache.load("agent-warm", bundle_location)
+
+    def fail_resolve(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("a warm load must not resolve a filesystem path")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    for _ in range(50):
+        again = cache.load("agent-warm", bundle_location)
+
+    assert again.spec is first.spec
+    assert again.workdir == first.workdir
