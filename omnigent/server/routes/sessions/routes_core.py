@@ -153,6 +153,7 @@ from omnigent.server.routes._sessions.helpers import (
     _announce_session_added,
     _apply_liveness_to_items,
     _authorize_bundled_parent_and_inherit_runner,
+    _bound_specs,
     _codex_plan_mode_enabled,
     _create_session_worktree,
     _delete_stored_session_bundle_after_failure,
@@ -188,6 +189,7 @@ from omnigent.server.routes._sessions.helpers import (
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
     _resolve_harness,
+    _resolve_spec_model_defaults,
     _runner_supports_side_chat_settings,
     _RunnerForwardResult,
     _same_provider_family,
@@ -2090,28 +2092,47 @@ def register_core_routes(
 
     def _session_agent_metadata(
         conversations: Sequence[Conversation],
-    ) -> tuple[dict[str, str], dict[str, str | None]]:
+    ) -> tuple[
+        dict[str, str],
+        dict[str, str | None],
+        dict[str, tuple[str | None, str | None]],
+    ]:
         """Resolve list metadata off the event loop with one batched agent read."""
         agents = agent_store.get_many(
             list({conv.agent_id for conv in conversations if conv.agent_id is not None})
         )
         harnesses_by_id: dict[str, str | None] = {}
+        spec_defaults_by_id: dict[str, tuple[str | None, str | None]] = {}
         for conv in conversations:
+            # One spec load per row feeds the harness, model and effort.
             try:
-                harnesses_by_id[conv.id] = _resolve_harness(
-                    conv, agent_cache=agent_cache, agents_by_id=agents
-                )
+                bound_specs = _bound_specs(conv, agent_cache=agent_cache, agents_by_id=agents)
             except Exception as error:
                 # Optional artifact metadata must not hide an otherwise readable session.
+                bound_specs = None
+                _logger.warning(
+                    "Could not load list spec for session %s (%s)",
+                    conv.id,
+                    type(error).__name__,
+                )
+            try:
+                harnesses_by_id[conv.id] = _resolve_harness(
+                    conv, agent_cache=agent_cache, agents_by_id=agents, bound_specs=bound_specs
+                )
+            except Exception as error:
                 harnesses_by_id[conv.id] = None
                 _logger.warning(
                     "Could not resolve list harness for session %s (%s)",
                     conv.id,
                     type(error).__name__,
                 )
+            spec_defaults_by_id[conv.id] = _resolve_spec_model_defaults(
+                harnesses_by_id[conv.id], bound_specs
+            )
         return (
             {agent.id: agent.name for agent in agents.values()},
             harnesses_by_id,
+            spec_defaults_by_id,
         )
 
     @router.get(
@@ -2359,7 +2380,7 @@ def register_core_routes(
                     ),
                 )
                 perms_by_conv = {}
-            agent_names_by_id, harnesses_by_id = agent_metadata
+            agent_names_by_id, harnesses_by_id, spec_defaults_by_id = agent_metadata
             # In-memory lookup — no I/O, so batching avoids re-acquiring
             # the index's lock per row but otherwise has no DB cost.
             open_questions.restore(list_batch)
@@ -2410,6 +2431,8 @@ def register_core_routes(
                         conv,
                         agent_names_by_id=agent_names_by_id,
                         harness=harnesses_by_id.get(conv.id),
+                        spec_model=spec_defaults_by_id[conv.id][0],
+                        spec_reasoning_effort=spec_defaults_by_id[conv.id][1],
                         grants=perms_by_conv.get(conv.id, []),
                         user_id=user_id,
                         user_is_admin=user_is_admin,
@@ -2595,7 +2618,7 @@ def register_core_routes(
             _comments_fingerprints_for(conv_ids),
             _pull_requests_for(conv_ids),
         )
-        agent_names_by_id, harnesses_by_id = agent_metadata
+        agent_names_by_id, harnesses_by_id, spec_defaults_by_id = agent_metadata
         open_questions.restore(convs)
         pending_counts = pending_elicitations.counts_for(conv_ids)
         items = [
@@ -2603,6 +2626,8 @@ def register_core_routes(
                 conv,
                 agent_names_by_id=agent_names_by_id,
                 harness=harnesses_by_id.get(conv.id),
+                spec_model=spec_defaults_by_id[conv.id][0],
+                spec_reasoning_effort=spec_defaults_by_id[conv.id][1],
                 grants=perms_by_conv.get(conv.id, []),
                 user_id=user_id,
                 user_is_admin=user_is_admin,
