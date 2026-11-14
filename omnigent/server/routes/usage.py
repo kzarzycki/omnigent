@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
-from omnigent.entities import Conversation
+from omnigent.entities import Agent, Conversation
 from omnigent.errors import restart_on_stale_cursor
 from omnigent.runtime.policies.builder import (
     _sum_subtree_usage,
@@ -18,16 +21,62 @@ from omnigent.runtime.policies.builder import (
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes._auth_helpers import require_user
-from omnigent.server.routes._sessions.helpers import (
-    _resolve_harness_impl,
-    _resolve_llm_model,
-)
+from omnigent.server.routes._sessions import helpers as _session_helpers
+from omnigent.server.routes._sessions.helpers import _resolve_harness_impl
 from omnigent.server.schemas import DailyCost, SessionUsage, UsageReport
 from omnigent.stores import ConversationStore
 
 # The daily rollup floor for an "all-time" sum: earlier than any real row, so
 # ``sum_daily_cost`` with this lower bound totals every recorded day.
 _EPOCH_DAY = "0000-00-00"
+
+
+# Agents the current report preloaded in one read, so resolving each session's
+# harness and model does not hit the agent store once per session.
+_preloaded_agents: ContextVar[dict[str, Agent] | None] = ContextVar(
+    "usage_preloaded_agents", default=None
+)
+
+_AGENT_READ_CHUNK = 500
+
+
+def _add_preloaded_agents(conversations: Iterable[Conversation]) -> None:
+    """Read the agents *conversations* are bound to that the active map lacks."""
+    from omnigent.runtime._globals import _agent_store
+
+    agents = _preloaded_agents.get()
+    if agents is None or _agent_store is None:
+        return
+    missing = sorted(
+        {conv.agent_id for conv in conversations if conv.agent_id is not None} - agents.keys()
+    )
+    for start in range(0, len(missing), _AGENT_READ_CHUNK):
+        agents.update(_agent_store.get_many(missing[start : start + _AGENT_READ_CHUNK]))
+
+
+@contextmanager
+def _preload_agents(conversations: Iterable[Conversation]) -> Iterator[None]:
+    """
+    Read every agent the given conversations are bound to in a few queries.
+
+    While active, :func:`_resolve_session_harness` and :func:`_resolve_llm_model`
+    take agents from this map instead of one store read per session; rows found
+    later (see :func:`_add_preloaded_agents`) extend it. Without a runtime agent
+    store the resolvers keep their own lookup.
+    """
+    from omnigent.runtime._globals import _agent_store
+
+    token = _preloaded_agents.set({} if _agent_store is not None else None)
+    try:
+        _add_preloaded_agents(conversations)
+        yield
+    finally:
+        _preloaded_agents.reset(token)
+
+
+def _resolve_llm_model(conv: Conversation) -> str | None:
+    """Resolve a session's LLM model from its bound agent, using preloaded agents."""
+    return _session_helpers._resolve_llm_model(conv, agents_by_id=_preloaded_agents.get())
 
 
 def _utc_today() -> str:
@@ -100,7 +149,7 @@ def _resolve_session_harness(conv: Conversation) -> str | None:
     if wrapper:
         # Strip the "-ui" suffix for display: "claude-code-native-ui" → "claude-code-native"
         return wrapper.removesuffix("-ui") if wrapper.endswith("-ui") else wrapper
-    return _resolve_harness_impl(conv)
+    return _resolve_harness_impl(conv, agents_by_id=_preloaded_agents.get())
 
 
 def _session_cost(usage: dict[str, Any]) -> float:
@@ -219,48 +268,60 @@ def _build_usage_report(
             order="desc",
             sort_by="updated_at",
         )
+        # Newest first: the window ends at the first older row, and nothing
+        # past it needs its tree read.
+        in_window = page.data
+        if cutoff_epoch is not None:
+            for position, conv in enumerate(page.data):
+                if conv.updated_at < cutoff_epoch:
+                    in_window = page.data[:position]
+                    window_exhausted = True
+                    break
         trees = _load_trees_by_root(
             conversation_store,
-            [conv.root_conversation_id for conv in page.data],
+            [conv.root_conversation_id for conv in in_window],
         )
-        for conv in page.data:
-            if cutoff_epoch is not None and conv.updated_at < cutoff_epoch:
-                window_exhausted = True
-                break
-            if conv.agent_id is None:
-                continue
-            # One batched read covers the whole page's trees. A row missing
-            # from its tree (deleted and recreated mid-request) falls back to
-            # the verified per-session load.
-            tree = trees.get(conv.root_conversation_id, [])
-            if any(member.id == conv.id for member in tree):
-                usage = _sum_subtree_usage(tree, conv.id)
-            else:
-                usage, tree = load_session_usage_and_tree(conv.id, conversation_store)
-            primary_harness = _resolve_session_harness(conv) if include_page_details else None
-            other_harnesses = (
-                _collect_other_harnesses(primary_harness, tree, conv.id)
-                if include_page_details
-                else None
-            )
-            sessions.append(
-                SessionUsage(
-                    id=conv.id,
-                    created_at=conv.created_at,
-                    updated_at=conv.updated_at,
-                    title=conv.title,
-                    cost_usd=_session_cost(usage),
-                    models=_session_models(usage),
-                    harness=primary_harness,
-                    other_harnesses=other_harnesses,
-                    llm_model=(
-                        conv.model_override or _resolve_llm_model(conv)
-                        if include_page_details
-                        else None
-                    ),
-                    agent_name=conv.sub_agent_name if include_page_details else None,
+        page_conversations = [
+            *in_window,
+            *(member for tree in trees.values() for member in tree),
+        ]
+        with _preload_agents(page_conversations) if include_page_details else nullcontext():
+            for conv in in_window:
+                if conv.agent_id is None:
+                    continue
+                # One batched read covers the whole page's trees. A row missing
+                # from its tree (deleted and recreated mid-request) falls back to
+                # the verified per-session load.
+                tree = trees.get(conv.root_conversation_id, [])
+                if any(member.id == conv.id for member in tree):
+                    usage = _sum_subtree_usage(tree, conv.id)
+                else:
+                    usage, tree = load_session_usage_and_tree(conv.id, conversation_store)
+                    _add_preloaded_agents(tree)
+                primary_harness = _resolve_session_harness(conv) if include_page_details else None
+                other_harnesses = (
+                    _collect_other_harnesses(primary_harness, tree, conv.id)
+                    if include_page_details
+                    else None
                 )
-            )
+                sessions.append(
+                    SessionUsage(
+                        id=conv.id,
+                        created_at=conv.created_at,
+                        updated_at=conv.updated_at,
+                        title=conv.title,
+                        cost_usd=_session_cost(usage),
+                        models=_session_models(usage),
+                        harness=primary_harness,
+                        other_harnesses=other_harnesses,
+                        llm_model=(
+                            conv.model_override or _resolve_llm_model(conv)
+                            if include_page_details
+                            else None
+                        ),
+                        agent_name=conv.sub_agent_name if include_page_details else None,
+                    )
+                )
         if not page.has_more:
             break
         after = page.last_id

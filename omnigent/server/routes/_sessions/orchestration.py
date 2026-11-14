@@ -371,6 +371,7 @@ from omnigent.server.routes._sessions.helpers import (
     _query_host_runner_status,
     _read_state_entry,
     _record_daily_cost,
+    _recorded_token_count,
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
     _relay_item_stable_id,
@@ -1282,8 +1283,6 @@ def _build_session_list_item(
     child_session_ids: list[str],
     comments_fingerprint: CommentsFingerprint | None,
     harness: str | None = None,
-    spec_model: str | None = None,
-    spec_reasoning_effort: str | None = None,
     pull_request: SessionPullRequestSummary | None = None,
     pull_requests_synced: bool | None = None,
 ) -> SessionListItem:
@@ -1328,8 +1327,6 @@ def _build_session_list_item(
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
     :param harness: Resolved session harness from the batch's cached agent specs.
-    :param spec_model: The bound spec's model, from the batch's cached agent specs.
-    :param spec_reasoning_effort: The bound spec's default reasoning effort.
     :param pull_request: The conversation's first linked pull request,
         from the server's PR store; ``None`` when it has none.
     :param pull_requests_synced: Whether the server has imported the
@@ -1370,11 +1367,6 @@ def _build_session_list_item(
         runner_id=conv.runner_id,
         host_id=conv.host_id,
         reasoning_effort=conv.reasoning_effort,
-        # Same precedence as the snapshot's ``llm_model``: report, pick, spec.
-        llm_model=(
-            concrete_reported_model(conv.reported_model) or conv.model_override or spec_model
-        ),
-        effective_reasoning_effort=conv.reasoning_effort or spec_reasoning_effort,
         permission_level=level,
         owner=owner,
         external_session_id=conv.external_session_id,
@@ -1412,6 +1404,8 @@ def _build_session_list_item(
         project_id=conv.project_id,
         pull_request=pull_request,
         pull_requests_synced=pull_requests_synced,
+        input_tokens=_recorded_token_count(conv.session_usage or {}, "input_tokens"),
+        output_tokens=_recorded_token_count(conv.session_usage or {}, "output_tokens"),
     )
 
 
@@ -1649,6 +1643,9 @@ def _build_session_response(
         share_workspace_files=conv.share_workspace_files,
         context_window=context_window,
         last_total_tokens=last_total_tokens,
+        # The session's own counters, not the subtree total shown below.
+        input_tokens=_recorded_token_count(conv.session_usage or {}, "input_tokens"),
+        output_tokens=_recorded_token_count(conv.session_usage or {}, "output_tokens"),
         # Seed the client's cost indicator on resume. Uses the SUBTREE
         # total (this session + its sub-agents) when the caller computed
         # it, so a parent's badge reflects its sub-agents' spend; falls
@@ -2585,20 +2582,31 @@ async def _resolve_native_delivery(
     return True
 
 
-def _question_answer_text(question_id: str, questions: list[Any], data: dict[str, Any]) -> str:
-    """
-    Render a ``sys_ask_user_question`` verdict as the user message the session gets.
+# Longest label for a question that has no ``header``.
+_QUESTION_LABEL_CHARS = 80
 
-    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+
+def _question_choices(questions: list[Any], data: dict[str, Any]) -> dict[str, str]:
+    """
+    Map each question's short label to the choice the user gave.
+
+    The label is the question's ``header`` when it has one, else its first 80
+    characters, so a long card is never echoed back. A repeated label gets a
+    ``" (2)"``-style suffix so every question keeps its own entry.
+
     :param questions: The published ``ask_user_question`` questions.
     :param data: The verdict: ``action`` plus, on accept, ``content`` keyed by
         question id or text, e.g. ``{"action": "accept", "content": {"Which?": "A"}}``.
-    :returns: One ``[answer to <id>] <question>: <choice>`` line per question.
+    :returns: Labels to choices in question order, e.g. ``{"Release": "Yes"}``.
     """
     content = data.get("content") if data.get("action") == "accept" else None
-    lines = []
+    choices: dict[str, str] = {}
     for question in questions:
-        text = question.get("question", "") if isinstance(question, dict) else ""
+        if not isinstance(question, dict):
+            question = {}
+        text = question.get("question", "")
+        header = question.get("header")
+        label = header if isinstance(header, str) and header else text[:_QUESTION_LABEL_CHARS]
         if not isinstance(content, dict):
             choice = "(dismissed without an answer)"
         else:
@@ -2607,8 +2615,26 @@ def _question_answer_text(question_id: str, questions: list[Any], data: dict[str
                 choice = ", ".join(str(item) for item in value) or "(no answer)"
             else:
                 choice = str(value) if value not in (None, "") else "(no answer)"
-        lines.append(f"{ANSWER_LINE_PREFIX}{question_id}] {text}: {choice}")
-    return "\n".join(lines)
+        unique, copy = label, 1
+        while unique in choices:
+            copy += 1
+            unique = f"{label} ({copy})"
+        choices[unique] = choice
+    return choices
+
+
+def _question_answer_text(question_id: str, choices: dict[str, str]) -> str:
+    """
+    Render a ``sys_ask_user_question`` verdict as the user message the session gets.
+
+    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+    :param choices: Label to choice per question, from :func:`_question_choices`.
+    :returns: One ``[answer to <id>] <label>: <choice>`` line per question.
+    """
+    return "\n".join(
+        f"{ANSWER_LINE_PREFIX}{question_id}] {label}: {choice}"
+        for label, choice in choices.items()
+    )
 
 
 def _own_pending_question(question_id: str, session_id: str) -> dict[str, Any] | None:
@@ -2670,14 +2696,15 @@ async def _answer_question(
             "This server cannot deliver question answers.", code=ErrorCode.INTERNAL_ERROR
         )
     ask = card.get("params", {}).get("ask_user_question") or {}
-    text = _question_answer_text(question_id, ask.get("questions") or [], data)
+    choices = _question_choices(ask.get("questions") or [], data)
+    text = _question_answer_text(question_id, choices)
     _answering_questions.add(question_id)
     try:
         # Recorded first: the session may call sys_read_answer as soon as the message lands.
         question_answers.record(
             question_id,
             question_answers.QuestionAnswer(
-                session_id=session_id, action=str(data.get("action")), answer=text
+                session_id=session_id, action=str(data.get("action")), choices=choices
             ),
         )
         try:

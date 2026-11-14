@@ -2404,6 +2404,10 @@ class SessionResponse(BaseModel):
         ``None`` when no task has completed yet. Lets clients seed
         their context-ring on conversation resume without waiting for
         the next ``response.completed`` SSE event.
+    :param input_tokens: Input tokens this session itself recorded, e.g.
+        ``12000`` (sub-agents excluded). ``None`` when none were recorded.
+    :param output_tokens: Output tokens this session itself recorded, e.g.
+        ``350`` (sub-agents excluded). ``None`` when none were recorded.
     :param total_cost_usd: Cumulative LLM spend for this session in
         USD, e.g. ``0.42``. ``None`` when the session is **unpriced**
         — no turn has been priced yet (the model is absent from the
@@ -2565,6 +2569,8 @@ class SessionResponse(BaseModel):
     share_workspace_files: bool = False
     context_window: int | None = None
     last_total_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     total_cost_usd: float | None = None
     usage_by_model: dict[str, ModelUsage] | None = None
     usage_included: bool = True
@@ -3212,12 +3218,6 @@ class SessionListItem(BaseModel):
         "host offline" for the open-session view; not used by the
         sidebar.
     :param reasoning_effort: Per-session reasoning-effort hint.
-    :param llm_model: The model the session is on: the harness's own report
-        when it has one, else the session's model override, else the bound
-        spec's model (not claimed for self-authenticated harnesses).
-        ``None`` when none is known.
-    :param effective_reasoning_effort: ``reasoning_effort`` when set, else the
-        bound spec's default effort; ``None`` when neither exists.
     :param permission_level: The requesting user's numeric
         permission level on this session: ``1`` = read, ``2`` =
         edit, ``3`` = manage. ``None`` when permissions are
@@ -3305,6 +3305,10 @@ class SessionListItem(BaseModel):
     :param pull_requests_synced: Whether the server has imported the session's
         PRs from its host, so a missing ``pull_request`` means "none" rather than
         "not known yet". ``None`` on servers without PR storage.
+    :param input_tokens: Input tokens this session itself recorded, e.g.
+        ``12000`` (sub-agents excluded). ``None`` when none were recorded.
+    :param output_tokens: Output tokens this session itself recorded, e.g.
+        ``350`` (sub-agents excluded). ``None`` when none were recorded.
     """
 
     family: SessionFamily | None = None
@@ -3322,8 +3326,6 @@ class SessionListItem(BaseModel):
     runner_online: bool | None = None
     host_online: bool | None = None
     reasoning_effort: str | None = None
-    llm_model: str | None = None
-    effective_reasoning_effort: str | None = None
     permission_level: int | None = None
     owner: str | None = None
     external_session_id: str | None = None
@@ -3346,6 +3348,8 @@ class SessionListItem(BaseModel):
     project_id: str | None = None
     pull_request: SessionPullRequestSummary | None = None
     pull_requests_synced: bool | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class SessionPageBoundary(BaseModel):

@@ -719,15 +719,6 @@ def test_usage_with_active_model_tags_the_model() -> None:
     }
 
 
-def test_usage_keeps_the_model_an_agent_reports_with_its_result() -> None:
-    """An agent that knows the model it ran (claude-cloud) wins over the session/new model."""
-    ex = AcpExecutor(AcpAgentConfig(command="x"))
-    ex._active_model = "from-session-new"
-    assert ex._usage_with_active_model({"usage": {"model": "ran-model-1"}}) == {
-        "model": "ran-model-1"
-    }
-
-
 def test_usage_with_active_model_skips_stamp_when_model_unknown() -> None:
     """No active model → no ``model`` key (attribution simply stays absent)."""
     ex = AcpExecutor(AcpAgentConfig(command="x"))
@@ -2171,6 +2162,78 @@ async def test_respawned_agent_gets_new_session_and_transcript(tmp_path: Path) -
     assert prompts[0] == "remember PELICAN"
     assert "remember PELICAN" in prompts[1] and "noted" in prompts[1]
     assert prompts[1].endswith("user: word?")
+
+
+_IDLE_LEAVING_ACP_AGENT = r"""
+import os, sys, json
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+session_id = f"sess-{os.getpid()}"
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if method == "initialize":
+        caps = {"omnigentIdleExit": {"status": 75}} if sys.argv[4] == "declared" else {}
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": 1, "agentCapabilities": caps}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session_id}})
+    elif method == "session/prompt":
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps(params["prompt"][0]["text"]) + "\n")
+        if not os.path.exists(sys.argv[2]):
+            # The first process decided to leave idle just as this prompt arrived.
+            open(sys.argv[2], "w").close()
+            os._exit(int(sys.argv[3]))
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "status", "resent"),
+    [("declared", 75, True), ("declared", 1, False), ("undeclared", 75, False)],
+)
+async def test_prompt_met_by_idle_exit_is_resent_once(
+    tmp_path: Path, capability: str, status: int, resent: bool
+) -> None:
+    """A prompt that reaches an agent as it leaves idle is sent to the next process and
+    answered, only for an agent that declared that exit status; any other exit before an
+    answer still fails the turn, so a generic agent's side effects are never repeated."""
+    agent_path = tmp_path / "idle_leaving_acp_agent.py"
+    agent_path.write_text(_IDLE_LEAVING_ACP_AGENT)
+    prompt_log = tmp_path / "prompts.jsonl"
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join(
+                [
+                    sys.executable,
+                    str(agent_path),
+                    str(prompt_log),
+                    str(tmp_path / "left"),
+                    str(status),
+                    capability,
+                ]
+            ),
+            name="Leaver",
+        )
+    )
+    first = [{"role": "user", "content": "remember PELICAN"}]
+    try:
+        events = [ev async for ev in ex.run_turn(first, [], "")]
+    finally:
+        await ex.close()
+
+    prompts = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    if resent:
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert prompts == ["remember PELICAN", "remember PELICAN"]
+    else:
+        assert any(isinstance(e, ExecutorError) for e in events), events
+        assert prompts == ["remember PELICAN"]
 
 
 # ---------------------------------------------------------------------------

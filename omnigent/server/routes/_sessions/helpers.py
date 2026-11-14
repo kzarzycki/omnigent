@@ -95,7 +95,6 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_wrapper_label,
 )
 from omnigent.native.session_todos import validate_session_todos
-from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
     token_bound_runner_id,
@@ -1985,6 +1984,7 @@ def _resolve_llm_model(
     *,
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> str | None:
     """
     Resolve the LLM model identifier from a conversation's agent spec.
@@ -1996,6 +1996,7 @@ def _resolve_llm_model(
     :param conv: The conversation entity, or ``None``.
     :param agent_store: Optional store for resolving the bound agent.
     :param agent_cache: Optional cache for loading the bound agent spec.
+    :param agents_by_id: Optional preloaded agents, avoiding a store read per session.
     :returns: Model string (e.g. ``"databricks-gpt-5-5"``), or
         ``None`` when unavailable.
     """
@@ -2007,15 +2008,18 @@ def _resolve_llm_model(
         # module-level name is a facade proxy that bypasses that patch).
         from omnigent.runtime import get_agent_cache
 
-        if agent_store is None:
-            from omnigent.runtime._globals import _agent_store
+        if agents_by_id is not None:
+            agent = agents_by_id.get(conv.agent_id)
+        else:
+            if agent_store is None:
+                from omnigent.runtime._globals import _agent_store
 
-            agent_store = _agent_store
-        if agent_store is None:
-            return None
+                agent_store = _agent_store
+            if agent_store is None:
+                return None
+            agent = agent_store.get(conv.agent_id)
         if agent_cache is None:
             agent_cache = get_agent_cache()
-        agent = agent_store.get(conv.agent_id)
         if agent is None:
             return None
         loaded = agent_cache.load(
@@ -2049,63 +2053,12 @@ def _resolve_harness(*args: Any, **kwargs: Any) -> str | None:
     return _facade._resolve_harness(*args, **kwargs)
 
 
-def _bound_specs(
-    conv: Conversation,
-    *,
-    agent_store: AgentStore | None = None,
-    agent_cache: AgentCache | None = None,
-    agents_by_id: Mapping[str, Agent] | None = None,
-) -> tuple[AgentSpec, AgentSpec] | None:
-    """
-    Load a conversation's bound agent spec and the spec its session runs.
-
-    For a bundled-agent head sub-agent the session spec is the head's own, so
-    harness and model describe that head, not the bundle brain; it falls back to
-    the root spec when the head can't be matched.
-
-    :param conv: The conversation entity.
-    :param agent_store: Optional store for resolving the bound agent.
-    :param agent_cache: Optional cache for loading the bound agent spec.
-    :param agents_by_id: Optional preloaded agents, avoiding per-session store reads.
-    :returns: ``(root_spec, session_spec)``, or ``None`` when the agent or its
-        bundle is unavailable.
-    """
-    from omnigent.runtime import get_agent_cache
-
-    if conv.agent_id is None:
-        return None
-    if agents_by_id is not None:
-        agent = agents_by_id.get(conv.agent_id)
-    else:
-        if agent_store is None:
-            from omnigent.runtime._globals import _agent_store
-
-            agent_store = _agent_store
-        if agent_store is None:
-            return None
-        agent = agent_store.get(conv.agent_id)
-    if agent is None:
-        return None
-    if agent_cache is None:
-        agent_cache = get_agent_cache()
-    root_spec = agent_cache.load(
-        agent.id, agent.bundle_location, expand_env=agent.operator_authored
-    ).spec
-    session_spec = root_spec
-    if conv.sub_agent_name:
-        from omnigent.runtime.workflow import _find_spec_by_name
-
-        session_spec = _find_spec_by_name(root_spec, conv.sub_agent_name) or root_spec
-    return root_spec, session_spec
-
-
 def _resolve_harness_impl(
     conv: Conversation | None,
     *,
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
     agents_by_id: Mapping[str, Agent] | None = None,
-    bound_specs: tuple[AgentSpec, AgentSpec] | None = None,
 ) -> str | None:
     """
     Resolve the canonical harness for a conversation's bound agent.
@@ -2123,8 +2076,6 @@ def _resolve_harness_impl(
     :param agent_store: Optional store for resolving the bound agent.
     :param agent_cache: Optional cache for loading the bound agent spec.
     :param agents_by_id: Optional preloaded agents, avoiding per-session store reads.
-    :param bound_specs: Optional ``(root, session)`` specs from
-        :func:`_bound_specs`, so a caller that already loaded them skips the load.
     :returns: The canonical harness (e.g. ``"openai-agents"`` or
         ``"claude-sdk"``), or ``None`` when unavailable.
     """
@@ -2139,18 +2090,39 @@ def _resolve_harness_impl(
         return None
     try:
         from omnigent.harness_aliases import canonicalize_harness
+        from omnigent.runtime import get_agent_cache
 
-        if bound_specs is None:
-            bound_specs = _bound_specs(
-                conv, agent_store=agent_store, agent_cache=agent_cache, agents_by_id=agents_by_id
-            )
-        if bound_specs is None:
+        if agents_by_id is not None:
+            agent = agents_by_id.get(conv.agent_id)
+        else:
+            if agent_store is None:
+                from omnigent.runtime._globals import _agent_store
+
+                agent_store = _agent_store
+            if agent_store is None:
+                return None
+            agent = agent_store.get(conv.agent_id)
+        if agent is None:
             return None
-        root_spec, session_spec = bound_specs
-        executor = session_spec.executor
+        if agent_cache is None:
+            agent_cache = get_agent_cache()
+        loaded = agent_cache.load(
+            agent.id, agent.bundle_location, expand_env=agent.operator_authored
+        )
+        executor = loaded.spec.executor
+        # For a bundled-agent head sub-agent, report the HEAD's own harness,
+        # not the bundle brain's — `harness` is this session's provider family
+        # (a gpt head runs codex, not the claude-sdk brain). Falls back to the
+        # brain harness when the head declares none or can't be matched.
+        if conv.sub_agent_name:
+            from omnigent.runtime.workflow import _find_spec_by_name
+
+            sub = _find_spec_by_name(loaded.spec, conv.sub_agent_name)
+            if sub is not None:
+                executor = sub.executor
         harness = (
             executor.config.get("harness")
-            or root_spec.executor.config.get("harness")
+            or loaded.spec.executor.config.get("harness")
             or executor.type
         )
         return canonicalize_harness(harness) or harness
@@ -2168,29 +2140,6 @@ def _resolve_harness_impl(
         OmnigentError,
     ):
         return None
-
-
-def _resolve_spec_model_defaults(
-    harness: str | None,
-    bound_specs: tuple[AgentSpec, AgentSpec] | None,
-) -> tuple[str | None, str | None]:
-    """
-    Read the bound spec's model and reasoning effort for a session list row.
-
-    A self-authenticated harness (own-auth ACP, e.g. claude-cloud) picks its own
-    model, so the spec's pin is not claimed for it; it shows once the harness
-    reports the model it ran.
-
-    :param harness: The session's resolved harness, e.g. ``"codex-native"``.
-    :param bound_specs: ``(root, session)`` specs from :func:`_bound_specs`.
-    :returns: ``(model, reasoning_effort)``; each ``None`` when the spec pins none
-        or could not be loaded.
-    """
-    if bound_specs is None:
-        return None, None
-    executor = bound_specs[1].executor
-    owns_model = harness is not None and harness_owns_its_credential(harness)
-    return (None if owns_model else executor.model), executor.reasoning_effort
 
 
 def _validated_harness_override(value: str | None, agent: Agent) -> str | None:
@@ -2405,6 +2354,24 @@ def _priced_cost_for_display(usage: dict[str, Any]) -> float | None:
     except (TypeError, ValueError):
         # Defensive: a malformed persisted value must not break the
         # snapshot / SSE emit. Treat it as unpriced.
+        return None
+
+
+def _recorded_token_count(usage: dict[str, Any], key: str) -> int | None:
+    """
+    Read one token counter a session itself recorded, or ``None`` when absent.
+
+    :param usage: A conversation's own ``session_usage`` dict, e.g.
+        ``{"input_tokens": 1200}``.
+    :param key: Counter name, e.g. ``"input_tokens"``.
+    :returns: The count, or ``None`` when never recorded or malformed.
+    """
+    value = usage.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -12795,7 +12762,6 @@ __all__ = [
     "_await_settled_managed_launch",
     "_background_task_delivery_status",
     "_blocked_on_for",
-    "_bound_specs",
     "_build_actor",
     "_build_evaluation_context",
     "_build_new_item",
@@ -12965,7 +12931,6 @@ __all__ = [
     "_resolve_harness",
     "_resolve_llm_model",
     "_resolve_skill_meta_text_via_runner",
-    "_resolve_spec_model_defaults",
     "_resolve_subagent_spec",
     "_resource_event_item_from_sse",
     "_routing_decision_item_from_sse",

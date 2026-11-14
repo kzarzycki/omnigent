@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -345,14 +346,66 @@ async def test_the_asking_session_reads_back_the_answer_its_user_gave_on_the_car
     )
 
     assert resolved.status_code == 202, resolved.text
-    delivered = f"[answer to {question_id}] Ship it?: Yes"
-    assert runner.notices(session) == [delivered]
+    assert runner.notices(session) == [f"[answer to {question_id}] Ship it?: Yes"]
     assert await _read_answer(client, session, question_id) == {
         "question_id": question_id,
         "status": "answered",
         "action": "accept",
-        "answer": delivered,
+        "choices": {"Ship it?": "Yes"},
     }
+
+
+async def test_a_long_question_is_not_echoed_in_the_answer_line_or_the_read_back(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    session = (await create_test_session(client))["id"]
+    long_text = "Detail " * 430  # about 3,000 characters
+    question_id = await _ask(client, session, _question(long_text, "Yes", "No"))
+
+    resolved = await client.post(
+        f"/v1/sessions/{session}/elicitations/{question_id}/resolve",
+        json={"action": "accept", "content": {long_text: "Yes"}},
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    label = long_text[:80]
+    (line,) = runner.notices(session)
+    assert line == f"[answer to {question_id}] {label}: Yes"
+    read_back = await _read_answer(client, session, question_id)
+    assert read_back["choices"] == {label: "Yes"}
+    assert long_text not in line
+    assert long_text not in json.dumps(read_back)
+
+
+async def test_a_two_question_card_labels_each_line_and_read_back_choice(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    session = (await create_test_session(client))["id"]
+    question_id = await _ask(
+        client,
+        session,
+        {
+            **_question("Which environment should receive the release?", "dev", "prod"),
+            "header": "Env",
+        },
+        _question("Tag it?", "v1", "v2"),
+    )
+
+    resolved = await client.post(
+        f"/v1/sessions/{session}/elicitations/{question_id}/resolve",
+        json={
+            "action": "accept",
+            "content": {"Which environment should receive the release?": "prod", "Tag it?": "v2"},
+        },
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    assert runner.notices(session) == [
+        f"[answer to {question_id}] Env: prod\n[answer to {question_id}] Tag it?: v2"
+    ]
+    read_back = await _read_answer(client, session, question_id)
+    assert read_back["choices"] == {"Env": "prod", "Tag it?": "v2"}
+    assert "release" not in json.dumps(read_back)
 
 
 async def test_a_message_typed_as_an_answer_does_not_read_back_as_one(

@@ -69,6 +69,13 @@ STALL_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_STALL_TIMEOUT_S", "1800"))
 STALL_STEP_S = 2.0
 # Quiet seconds after the cloud started a new CLI mid-turn before the turn counts as cut off.
 CUT_OFF_GRACE_S = 30
+# An idle bridge holds a process and its MCP child for nothing: it exits this long after
+# its last message or turn (0 keeps it). Omnigent starts a new one for the next message,
+# which re-attaches the same cloud session from the replayed transcript.
+IDLE_EXIT_S = float(os.environ.get("CLAUDE_CLOUD_IDLE_EXIT_S", "60"))
+LIFETIME_POLL_S = 1.0
+# Exit status of an idle bridge: Omnigent resends a prompt that ended with it unanswered.
+IDLE_EXIT_STATUS = 75
 # What the bridge posts to a session whose turn its sandbox cut off.
 CONTINUE_PROMPT = (
     "The sandbox restarted and cut your last turn off before it finished. Tool calls that "
@@ -660,13 +667,6 @@ def _text_of(content: object) -> str:
     return ""
 
 
-def note_ran_model(s: Session, payload: dict) -> None:
-    """Remember the model the cloud's init event reports, so the turn's result can carry it."""
-    model = payload.get("model")
-    if payload.get("type") == "system" and payload.get("subtype") == "init" and model:
-        s.ran_model = str(model)
-
-
 def to_updates(payload: dict) -> tuple[list[dict], bool]:
     """Map one cloud-session event payload to ACP updates; True ends the turn."""
     kind = payload.get("type")
@@ -762,8 +762,6 @@ class Session:
         self.started_model: str | None = None
         # A pick already answered with the adopted-session note.
         self.noted_model: str | None = None
-        # The model the cloud's init event said it runs; sent back as the turn's usage model.
-        self.ran_model: str | None = None
         # The effort the cloud session was created with ("" = default); None if adopted.
         self.started_effort: str | None = None
         self.mcp: dict[str, McpProxy] = {}
@@ -1078,6 +1076,7 @@ def run_turn(acp_id: str, text: str) -> str:
         turn_done.set()
         beat.join()
         s.running = False
+        touch()
 
 
 def announce(acp_id: str, s: Session) -> None:
@@ -1222,7 +1221,6 @@ def _mirror(acp_id: str, s: Session, after: int) -> str:
             quiet = 0  # a CLI that starts before the turn does takes the message instead
         elif quiet is not None:
             quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
-        note_ran_model(s, payload)
         updates, done = to_updates(payload)
         for upd in updates:
             update(acp_id, upd)
@@ -1244,7 +1242,6 @@ def _bootstrap(acp_id: str, s: Session, text: str) -> int:
     for event in s.events_while_alive():
         payload = (event or {}).get("payload") or {}
         if payload.get("type") in ("env_manager_log", "system"):
-            note_ran_model(s, payload)
             for upd in to_updates(payload)[0]:
                 update(acp_id, upd)
         elif to_updates(payload)[1]:
@@ -1331,15 +1328,18 @@ def check_model(acp_id: str, s: Session) -> None:
     s.noted_model = s.model
 
 
+def handle_accepted(msg: dict) -> None:
+    try:
+        handle_prompt(msg)
+    finally:
+        prompt_done()
+
+
 def handle_prompt(msg: dict) -> None:
     params = msg.get("params") or {}
     try:
         stop = run_turn(params["sessionId"], prompt_text(params.get("prompt") or []))
-        result: dict = {"stopReason": stop}
-        ran_model = SESSIONS[params["sessionId"]].ran_model
-        if ran_model:
-            result["usage"] = {"model": ran_model}
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"stopReason": stop}})
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
@@ -1352,25 +1352,96 @@ def handle_prompt(msg: dict) -> None:
             remember(f"seen:{session.cloud_id}", str(session.mirrored))
 
 
+_last_activity = time.monotonic()
+# Taken to decide to leave and to accept a prompt, so no prompt is accepted once the
+# decision is made, and none is dropped after it was accepted.
+_lifecycle = threading.Lock()
+_prompts_accepted = 0  # prompts read from Omnigent whose turn has not ended
+_leaving = False
+
+
+def touch() -> None:
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def accept_prompt() -> bool:
+    """Count a prompt as taken, unless the bridge has decided to leave."""
+    global _prompts_accepted
+    with _lifecycle:
+        if _leaving:
+            return False
+        _prompts_accepted += 1
+        return True
+
+
+def prompt_done() -> None:
+    global _prompts_accepted
+    with _lifecycle:
+        _prompts_accepted -= 1
+    touch()
+
+
+def lifetime_over(parent_pid: int, now: float) -> str | None:
+    """Why this bridge should exit, or ``None``: its runner is gone, or it has been idle."""
+    if os.getppid() != parent_pid:
+        return "its runner exited"
+    if IDLE_EXIT_S > 0 and not _prompts_accepted and not any(s.running for s in SESSIONS.values()):
+        if now - _last_activity >= IDLE_EXIT_S:
+            return f"idle for {IDLE_EXIT_S:g}s"
+    return None
+
+
+def watch_lifetime(parent_pid: int) -> None:
+    """Leave once :func:`lifetime_over` says so, deciding and exiting under the lifecycle lock.
+
+    :func:`serve` takes the lock to accept a prompt, so a prompt is either accepted
+    before the decision (and keeps the bridge) or is never read.
+    """
+    global _leaving
+    while True:
+        time.sleep(LIFETIME_POLL_S)
+        with _lifecycle:
+            if not (reason := lifetime_over(parent_pid, time.monotonic())):
+                continue
+            _leaving = True
+            log(f"leaving: {reason}")
+            leave()
+            os._exit(IDLE_EXIT_STATUS if reason.startswith("idle") else 0)
+
+
+def leave() -> None:
+    """Hand a cancel on its way to the cloud session, and end the MCP server children."""
+    for session in SESSIONS.values():
+        if session.cancelled.is_set():
+            session.cancel()
+        elif session.running:
+            log(f"leaving {session.cloud_id} running")
+    for session in SESSIONS.values():
+        for proxy in session.mcp.values():
+            if proxy.proc is not None and proxy.proc.poll() is None:
+                proxy.proc.terminate()
+    log("stopping")
+
+
 def stop(*_: object) -> None:
     """On SIGTERM or EOF, leave: a running cloud turn goes on, and the next bridge mirrors it.
 
     Only ``session/cancel`` stops the cloud session. Omnigent terminates the bridge
     straight after sending one, so a cancel still on its way is delivered first.
     """
-    for session in SESSIONS.values():
-        if session.cancelled.is_set():
-            session.cancel()
-        elif session.running:
-            log(f"leaving {session.cloud_id} running")
-    log("stopping")
+    leave()
     sys.exit(0)
 
 
 def serve() -> None:
     signal.signal(signal.SIGTERM, stop)
     forget_sent_answers()
+    threading.Thread(
+        target=watch_lifetime, args=(os.getppid(),), name="lifetime", daemon=True
+    ).start()
     for line in sys.stdin:
+        touch()
         if not line.strip():
             continue
         msg = json.loads(line)
@@ -1387,6 +1458,7 @@ def serve() -> None:
                         "agentCapabilities": {
                             "loadSession": False,
                             "promptCapabilities": {"image": False},
+                            "omnigentIdleExit": {"status": IDLE_EXIT_STATUS},
                         },
                         "authMethods": [],
                     },
@@ -1413,7 +1485,8 @@ def serve() -> None:
             set_model(params)
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/prompt":
-            threading.Thread(target=handle_prompt, args=(msg,), daemon=True).start()
+            if accept_prompt():
+                threading.Thread(target=handle_accepted, args=(msg,), daemon=True).start()
         elif method == "session/cancel":
             log(f"cancel {params.get('sessionId')}")
             if session := SESSIONS.get(params.get("sessionId", "")):
@@ -1450,6 +1523,127 @@ for line in sys.stdin:
 """
 
 
+def check_lifetime() -> None:
+    """An idle bridge, or one whose runner is gone, exits; a busy one stays."""
+    global IDLE_EXIT_S
+    saved, saved_idle = dict(SESSIONS), IDLE_EXIT_S
+    SESSIONS.clear()
+    try:
+        IDLE_EXIT_S = 60.0
+        parent = os.getppid()
+        start = time.monotonic()
+
+        def at(offset: float, pid: int = parent) -> str | None:
+            # Earlier checks leave threads that touch(); pin the activity time.
+            globals()["_last_activity"] = start
+            return lifetime_over(pid, start + offset)
+
+        assert at(59) is None
+        assert at(60) == "idle for 60s"
+        working = SESSIONS["acp-working"] = Session("/", "acp-working")
+        working.running = True
+        assert at(3600) is None  # a turn keeps it
+        working.running = False
+        assert at(3600) is not None
+        assert at(0, parent + 1) == "its runner exited"
+        IDLE_EXIT_S = 0.0
+        assert at(3600) is None  # 0 keeps an idle bridge
+        # A prompt taken before the decision keeps the bridge; none is taken after it.
+        IDLE_EXIT_S = 60.0
+        assert accept_prompt() and at(3600) is None
+        prompt_done()
+        assert at(60) == "idle for 60s"
+        globals()["_leaving"] = True
+        assert not accept_prompt() and _prompts_accepted == 0
+        globals()["_leaving"] = False
+        IDLE_EXIT_S = 0.0
+        # An idle bridge exits with the idle status, and takes its MCP server child with
+        # it. The child outlives its stdin, so only the bridge ending it makes it go.
+        lingering = ECHO_MCP + "\nwhile True:\n    time.sleep(1)\n"
+        host = (
+            "import runpy, sys, time\n"
+            "b = runpy.run_path(sys.argv[1])\n"
+            "proxy = b['McpProxy']({'name': 'echo', 'command': sys.executable,"
+            " 'args': ['-c', 'import time\\n' + sys.argv[2]]})\n"
+            "proxy._start()\n"
+            "b['SESSIONS']['acp-x'] = b['Session']('/', 'acp-x')\n"
+            "b['SESSIONS']['acp-x'].mcp = {'echo': proxy}\n"
+            "print(proxy.proc.pid, flush=True)\n"
+            "b['serve']()\n"
+        )
+        env = {**os.environ, "CLAUDE_CLOUD_IDLE_EXIT_S": "2", "HOME": tempfile.mkdtemp()}
+        bridge = subprocess.Popen(
+            [sys.executable, "-c", host, __file__, lingering],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        child_pid = int(bridge.stdout.readline())
+        status = bridge.wait(timeout=30)
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("an idle bridge left its MCP server child running")
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+        assert status == IDLE_EXIT_STATUS, status
+        # The bridge declares its idle exit, which is what lets Omnigent resend a prompt.
+        hello = subprocess.Popen(
+            [sys.executable, __file__],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        try:
+            hello.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n"
+            )
+            hello.stdin.flush()
+            caps = json.loads(hello.stdout.readline())["result"]["agentCapabilities"]
+            assert caps["omnigentIdleExit"] == {"status": IDLE_EXIT_STATUS}, caps
+        finally:
+            hello.kill()
+            hello.wait()
+        # A runner that dies leaves the bridge with a new parent: it exits though stdin stays open.
+        lead = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys; b = subprocess.Popen([sys.executable, sys.argv[1]], "
+                "stdin=subprocess.PIPE); print(b.pid, flush=True)",
+                __file__,
+            ],
+            stdout=subprocess.PIPE,
+            env={**env, "CLAUDE_CLOUD_IDLE_EXIT_S": "0"},
+            text=True,
+        )
+        orphan = int(lead.stdout.readline())
+        lead.wait(timeout=30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                os.kill(orphan, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            os.kill(orphan, signal.SIGKILL)
+            raise AssertionError("a bridge outlived its runner")
+    finally:
+        SESSIONS.clear()
+        SESSIONS.update(saved)
+        IDLE_EXIT_S = saved_idle
+
+
 def self_check() -> None:
     globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
     real_stream_events = stream_events
@@ -1480,11 +1674,6 @@ def self_check() -> None:
     # A per-session pick wins over the bridge-wide default.
     assert create_cloud_session("hi", str(not_repo), None, "max")
     assert (not_repo / "args").read_text().strip() == "--cloud hi --effort max"
-    ran = Session("/tmp")
-    note_ran_model(ran, {"type": "system", "subtype": "init", "model": "test-model-1"})
-    assert ran.ran_model == "test-model-1"
-    note_ran_model(ran, {"type": "assistant", "model": "ignored"})
-    assert ran.ran_model == "test-model-1"
     init_upd, _ = to_updates({"type": "system", "subtype": "init", "model": "test-model-1"})
     assert "model: test-model-1" in init_upd[0]["content"]["text"], init_upd
     globals()["CLAUDE_CLI"] = real_cli
@@ -1550,31 +1739,6 @@ def self_check() -> None:
     with contextlib.redirect_stdout(out):
         _bootstrap("acp-boot", boot, "go")
     assert "model: test-model-1" in out.getvalue(), out.getvalue()
-    # The model the cloud ran reaches Omnigent in the prompt result, whether the turn
-    # went through the bootstrap (MCP servers) or the plain mirror path.
-    for acp_id, with_mcp in (("acp-ran-boot", True), ("acp-ran-mirror", False)):
-        ran = SESSIONS[acp_id] = Session("/", acp_id)
-        ran.reader = threading.current_thread()
-        if with_mcp:
-            ran.mcp = {
-                "echo": McpProxy(
-                    {"name": "echo", "command": sys.executable, "args": ["-c", ECHO_MCP]}
-                )
-            }
-        for seq, payload in enumerate(
-            [{"type": "system", "subtype": "init", "model": "ran-model-1"}, {"type": "result"}]
-            + ([{"type": "result"}] if with_mcp else []),
-            1,
-        ):
-            ran.events.put({"sequence_num": str(seq), "payload": payload})
-        params = {"sessionId": acp_id, "prompt": [{"type": "text", "text": "go"}]}
-        with contextlib.redirect_stdout(sent := io.StringIO()):
-            handle_prompt({"id": 7, "params": params})
-        replies = [json.loads(line) for line in sent.getvalue().splitlines() if '"id": 7' in line]
-        assert replies and replies[-1]["result"]["usage"] == {"model": "ran-model-1"}, (
-            acp_id,
-            sent.getvalue(),
-        )
     # Over the real wire: catalog in session/new, set_model acknowledged, prompt dispatched.
     server = subprocess.Popen(
         [sys.executable, __file__], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
@@ -2296,6 +2460,7 @@ def self_check() -> None:
     assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7", "7"], urls
     assert naps == [1, 2], naps
     globals()["time"] = real_time
+    check_lifetime()
     check_archive_and_title()
     print("self-check ok")
 

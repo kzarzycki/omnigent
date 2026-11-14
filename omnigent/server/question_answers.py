@@ -23,12 +23,13 @@ class QuestionAnswer:
 
     :param session_id: The session that asked, e.g. ``"conv_abc123"``.
     :param action: The card verdict: ``"accept"``, ``"decline"`` or ``"cancel"``.
-    :param answer: The delivered text, e.g. ``"[answer to question_0f3a] Ship it?: Yes"``.
+    :param choices: Question label to the choice. The label is the question's header,
+        else its first 80 characters, never the full text, e.g. ``{"Release": "Yes"}``.
     """
 
     session_id: str
     action: str
-    answer: str
+    choices: dict[str, str]
 
 
 # custom-lint: disable-next=workspace-scoped-cache -- ids are unique, lookups session-checked
