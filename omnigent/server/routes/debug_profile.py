@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -15,6 +16,12 @@ from omnigent.util.stack_sampler import sample_stacks
 
 MAX_PROFILE_SECONDS = 60
 DEFAULT_PROFILE_SECONDS = 30
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    """Return once the client has disconnected."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
 
 
 def create_debug_profile_router(
@@ -41,7 +48,8 @@ def create_debug_profile_router(
         :returns: Plain text: collapsed stacks with counts, samples per thread, and the
             sampling interval achieved.
         :raises OmnigentError: 401/403 for a non-admin, 400 for ``seconds`` outside
-            1..60, 409 while another profile is running.
+            1..60, 409 while another profile is running. A cancelled or disconnected
+            request ends its sampler before the next profile may start.
         """
         await _require_admin(request, auth_provider, permission_store)
         if not 1 <= seconds <= MAX_PROFILE_SECONDS:
@@ -52,7 +60,16 @@ def create_debug_profile_router(
         if running.locked():
             raise OmnigentError("A profile is already running", code=ErrorCode.CONFLICT)
         async with running:
-            report = await asyncio.to_thread(sample_stacks, seconds)
-        return PlainTextResponse(report)
+            stop = threading.Event()
+            worker = asyncio.ensure_future(asyncio.to_thread(sample_stacks, seconds, stop=stop))
+            disconnect = asyncio.ensure_future(_wait_for_disconnect(request))
+            try:
+                await asyncio.wait({worker, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+                return PlainTextResponse(worker.result() if worker.done() else "")
+            finally:
+                # Cancellation or disconnect: end the sampler before the lock is released.
+                stop.set()
+                disconnect.cancel()
+                await asyncio.wait({worker})
 
     return router
