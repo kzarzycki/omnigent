@@ -29,7 +29,6 @@ POLICY = {
     "spec": {"auto": [{"paths": GLOBS}]},
     "ci": False,
     "delegate": "all",
-    "land": {"signed_squash_to": "mine", "allowed_signers": "~/.config/omnigent/allowed_signers"},
 }
 INSIDE = [
     "mise.toml",
@@ -116,6 +115,7 @@ def main() -> int:
     expect("spec.auto is not true", approvals.spec_auto(read), False)
     expect("delegate", approvals.delegation(read), "all")
 
+    expect("no land section: PRs land as GitHub merges", "land" in settings, False)
     expect("the whole policy", settings, POLICY)
 
     expect("check build, inside the globs", approvals.scoped(pull(*INSIDE), issue(), read), None)

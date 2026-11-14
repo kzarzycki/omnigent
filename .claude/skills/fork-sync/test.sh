@@ -25,6 +25,39 @@ refuses() {
 refuses upstream "remote add origin $tmp/none" "branch mine"
 refuses origin "remote add upstream $tmp/none" "branch mine"
 refuses mine "remote add upstream $tmp/none" "remote add origin $tmp/none"
+# Unsigned commits are fine: GitHub is the trust anchor. A commit a GitHub merge put on
+# origin/mine (no signature, no signing key configured) is taken, rebased and pushed, and
+# setup.sh needs no signer list or key (it sets none).
+git_as() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+upstream="$tmp/upstream.git"; origin="$tmp/origin.git"
+git init -q --bare -b main "$upstream"; git init -q --bare -b main "$origin"
+seed="$tmp/seed"; git init -q -b main "$seed"
+echo base > "$seed/base"; git -C "$seed" add base; git_as -C "$seed" commit -q -m base
+git -C "$seed" push -q "$upstream" main; git -C "$seed" push -q "$origin" main
+git -C "$seed" checkout -q -b mine; echo p1 > "$seed/p1"; git -C "$seed" add p1; git_as -C "$seed" commit -q -m patch
+git -C "$seed" push -q "$origin" mine
+git -C "$seed" checkout -q main; echo up > "$seed/up"; git -C "$seed" add up; git_as -C "$seed" commit -q -m upstream
+git -C "$seed" push -q "$upstream" main
+target="$(git -C "$seed" rev-parse HEAD)"
+work="$tmp/work"; git clone -q "$origin" "$work"
+git -C "$work" remote add upstream "$upstream"
+git -C "$work" config user.name t; git -C "$work" config user.email t@t; git -C "$work" config commit.gpgsign false
+git -C "$work" branch -q mine origin/mine
+(cd "$work" && bash "$here/setup.sh" >/dev/null) \
+  || { echo "setup.sh fails without a signer list or key" >&2; exit 1; }
+[ "$(git -C "$work" config --get commit.gpgsign)" = false ] \
+  || { echo "setup.sh turned on commit signing" >&2; exit 1; }
+# the unsigned commit lands on origin/mine after this checkout last saw it
+git -C "$seed" checkout -q mine; echo merged > "$seed/merged"; git -C "$seed" add merged; git_as -C "$seed" commit -q -m "merged on GitHub"
+git -C "$seed" push -q "$origin" mine
+git -C "$work" checkout -q -b work
+(cd "$work" && bash "$here/sync-fork.sh" "$target" >"$tmp/sync.log" 2>&1) \
+  || { echo "sync-fork.sh refused an unsigned commit on origin/mine" >&2; cat "$tmp/sync.log" >&2; exit 1; }
+for file in merged p1 up; do
+  git -C "$origin" show "mine:$file" >/dev/null 2>&1 \
+    || { echo "origin/mine lacks $file after the sync" >&2; exit 1; }
+done
+echo "sync-fork.sh takes and pushes unsigned commits"
 # pin-pr-target.sh: bare `gh` resolves to the fork, also over a default left on upstream,
 # worktrees share the pin, and a clone without origin is left alone.
 fork="kzarzycki/omnigent"
