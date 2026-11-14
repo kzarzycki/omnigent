@@ -95,7 +95,7 @@ async def test_reading_an_answer_returns_what_the_server_recorded() -> None:
         "question_id": "question_1",
         "status": "answered",
         "action": "accept",
-        "answer": "[answer to question_1] Ship it?: Yes",
+        "choices": {"Ship it?": "Yes"},
     }
 
     def handler(request: httpx.Request) -> httpx.Response:

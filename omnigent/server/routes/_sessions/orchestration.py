@@ -2582,20 +2582,31 @@ async def _resolve_native_delivery(
     return True
 
 
-def _question_answer_text(question_id: str, questions: list[Any], data: dict[str, Any]) -> str:
-    """
-    Render a ``sys_ask_user_question`` verdict as the user message the session gets.
+# Longest label for a question that has no ``header``.
+_QUESTION_LABEL_CHARS = 80
 
-    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+
+def _question_choices(questions: list[Any], data: dict[str, Any]) -> dict[str, str]:
+    """
+    Map each question's short label to the choice the user gave.
+
+    The label is the question's ``header`` when it has one, else its first 80
+    characters, so a long card is never echoed back. A repeated label gets a
+    ``" (2)"``-style suffix so every question keeps its own entry.
+
     :param questions: The published ``ask_user_question`` questions.
     :param data: The verdict: ``action`` plus, on accept, ``content`` keyed by
         question id or text, e.g. ``{"action": "accept", "content": {"Which?": "A"}}``.
-    :returns: One ``[answer to <id>] <question>: <choice>`` line per question.
+    :returns: Labels to choices in question order, e.g. ``{"Release": "Yes"}``.
     """
     content = data.get("content") if data.get("action") == "accept" else None
-    lines = []
+    choices: dict[str, str] = {}
     for question in questions:
-        text = question.get("question", "") if isinstance(question, dict) else ""
+        if not isinstance(question, dict):
+            question = {}
+        text = question.get("question", "")
+        header = question.get("header")
+        label = header if isinstance(header, str) and header else text[:_QUESTION_LABEL_CHARS]
         if not isinstance(content, dict):
             choice = "(dismissed without an answer)"
         else:
@@ -2604,8 +2615,26 @@ def _question_answer_text(question_id: str, questions: list[Any], data: dict[str
                 choice = ", ".join(str(item) for item in value) or "(no answer)"
             else:
                 choice = str(value) if value not in (None, "") else "(no answer)"
-        lines.append(f"{ANSWER_LINE_PREFIX}{question_id}] {text}: {choice}")
-    return "\n".join(lines)
+        unique, copy = label, 1
+        while unique in choices:
+            copy += 1
+            unique = f"{label} ({copy})"
+        choices[unique] = choice
+    return choices
+
+
+def _question_answer_text(question_id: str, choices: dict[str, str]) -> str:
+    """
+    Render a ``sys_ask_user_question`` verdict as the user message the session gets.
+
+    :param question_id: The question's id, e.g. ``"question_0f3a..."``.
+    :param choices: Label to choice per question, from :func:`_question_choices`.
+    :returns: One ``[answer to <id>] <label>: <choice>`` line per question.
+    """
+    return "\n".join(
+        f"{ANSWER_LINE_PREFIX}{question_id}] {label}: {choice}"
+        for label, choice in choices.items()
+    )
 
 
 def _own_pending_question(question_id: str, session_id: str) -> dict[str, Any] | None:
@@ -2667,14 +2696,15 @@ async def _answer_question(
             "This server cannot deliver question answers.", code=ErrorCode.INTERNAL_ERROR
         )
     ask = card.get("params", {}).get("ask_user_question") or {}
-    text = _question_answer_text(question_id, ask.get("questions") or [], data)
+    choices = _question_choices(ask.get("questions") or [], data)
+    text = _question_answer_text(question_id, choices)
     _answering_questions.add(question_id)
     try:
         # Recorded first: the session may call sys_read_answer as soon as the message lands.
         question_answers.record(
             question_id,
             question_answers.QuestionAnswer(
-                session_id=session_id, action=str(data.get("action")), answer=text
+                session_id=session_id, action=str(data.get("action")), choices=choices
             ),
         )
         try:
