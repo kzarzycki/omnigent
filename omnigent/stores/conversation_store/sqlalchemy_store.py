@@ -3798,6 +3798,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        root_conversation_ids: Sequence[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -4048,6 +4049,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             if root_conversation_id is not None:
                 stmt = stmt.where(
                     SqlConversation.root_conversation_id == root_conversation_id,
+                )
+            if root_conversation_ids is not None:
+                stmt = stmt.where(
+                    SqlConversation.root_conversation_id.in_(list(root_conversation_ids)),
                 )
             if has_agent_id is True:
                 stmt = stmt.where(SqlConversation.agent_id.is_not(None))

@@ -378,7 +378,7 @@ async def test_usage_report_loads_each_session_tree_once(
     db_uri: str,
 ) -> None:
     """
-    ``GET /v1/usage`` must load each listed session's tree once, not twice.
+    ``GET /v1/usage`` must not scan a spawn tree per listed session.
 
     With the usage page enabled the report needs both the subtree sums and
     the tree's rows (to roll up which harnesses ran in it). Asking for the
@@ -425,8 +425,9 @@ async def test_usage_report_loads_each_session_tree_once(
     listed = len(resp.json()["sessions"])
     assert listed >= len(sessions)
     scans = _conversation_tree_scans(statements)
-    assert len(scans) == listed, (
-        f"usage report issued {len(scans)} tree scans for {listed} listed sessions "
-        f"(expected one each); the harness roll-up should reuse the tree the sums "
-        f"were computed from. statements={scans}"
+    # Trees load in one batched read per listing page, so scans must not grow
+    # with the number of listed sessions.
+    assert len(scans) <= 1, (
+        f"usage report issued {len(scans)} per-root tree scans for {listed} listed "
+        f"sessions; trees should load in one batched read per page. statements={scans}"
     )
