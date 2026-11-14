@@ -424,6 +424,16 @@ def create_cloud_session(
 HIDDEN_TOOL_PREFIX = "sys_os_"
 
 
+# Taken to start an MCP child and to begin shutdown, so no child starts once the children
+# to end have been counted.
+_spawn_lock = threading.Lock()
+_shutting_down = threading.Event()
+
+
+class ShuttingDown(RuntimeError):
+    """The bridge is leaving: no MCP server child may start."""
+
+
 class McpProxy:
     """A local stdio MCP server, served to the cloud session as an SDK MCP server.
 
@@ -444,7 +454,11 @@ class McpProxy:
         """Answer one MCP JSON-RPC message from the cloud CLI."""
         method, mid = message.get("method"), message.get("id")
         with self.lock:
-            self._start()
+            try:
+                self._start()
+            except ShuttingDown:
+                error = {"code": -32000, "message": "the bridge is shutting down"}
+                return {"jsonrpc": "2.0", "id": mid, "error": error}
             if method == "initialize":
                 # The proxy did the handshake once; a re-registered server reuses it.
                 return {"jsonrpc": "2.0", "id": mid, "result": self.init_result}
@@ -468,13 +482,16 @@ class McpProxy:
         if self.proc is not None and self.proc.poll() is None:
             return
         env = {**os.environ, **{e["name"]: e["value"] for e in self.spec.get("env") or []}}
-        self.proc = subprocess.Popen(
-            [self.spec["command"], *self.spec.get("args", [])],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            env=env,
-            text=True,
-        )
+        with _spawn_lock:
+            if _shutting_down.is_set():
+                raise ShuttingDown
+            self.proc = subprocess.Popen(
+                [self.spec["command"], *self.spec.get("args", [])],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                env=env,
+                text=True,
+            )
         reply = self._call(
             {
                 "jsonrpc": "2.0",
@@ -1401,12 +1418,12 @@ def prompt_done() -> None:
     touch()
 
 
-def lifetime_over(parent_pid: int, now: float) -> str | None:
+def lifetime_over(parent_pid: int, now: float, last_activity: float | None = None) -> str | None:
     """Why this bridge should exit, or ``None``: its runner is gone, or it has been idle."""
     if os.getppid() != parent_pid:
         return "its runner exited"
     if IDLE_EXIT_S > 0 and not _prompts_accepted and not any(s.running for s in SESSIONS.values()):
-        if now - _last_activity >= IDLE_EXIT_S:
+        if now - (_last_activity if last_activity is None else last_activity) >= IDLE_EXIT_S:
             return f"idle for {IDLE_EXIT_S:g}s"
     return None
 
@@ -1431,12 +1448,14 @@ def watch_lifetime(parent_pid: int) -> None:
 
 def end_children() -> None:
     """End the MCP server children: SIGTERM, then SIGKILL for one that ignores it."""
-    procs = [
-        proxy.proc
-        for session in list(SESSIONS.values())
-        for proxy in list(session.mcp.values())
-        if proxy.proc is not None and proxy.proc.poll() is None
-    ]
+    with _spawn_lock:
+        _shutting_down.set()
+        procs = [
+            proxy.proc
+            for session in list(SESSIONS.values())
+            for proxy in list(session.mcp.values())
+            if proxy.proc is not None and proxy.proc.poll() is None
+        ]
     for proc in procs:
         proc.terminate()
     deadline = time.monotonic() + CHILD_GRACE_S
@@ -1576,9 +1595,8 @@ def check_lifetime() -> None:
         start = time.monotonic()
 
         def at(offset: float, pid: int = parent) -> str | None:
-            # Earlier checks leave threads that touch(); pin the activity time.
-            globals()["_last_activity"] = start
-            return lifetime_over(pid, start + offset)
+            # Earlier checks leave threads that touch(); the activity time is given.
+            return lifetime_over(pid, start + offset, start)
 
         assert at(59) is None
         assert at(60) == "idle for 60s"
@@ -1697,12 +1715,25 @@ def check_sigterm() -> None:
         "spec = {'name': 'echo', 'command': sys.executable, 'args': ['-c', stubborn]}\n"
         "proxy = g['McpProxy'](spec)\n"
         "proxy._start()\n"
+        "fresh = g['McpProxy']({**spec, 'name': 'fresh'})\n"
         "s = g['SESSIONS']['acp-x'] = g['Session']('/', 'acp-x')\n"
-        "s.cloud_id, s.running, s.mcp = 'session_x', True, {'echo': proxy}\n"
+        "s.cloud_id, s.running = 'session_x', True\n"
+        "s.mcp = {'echo': proxy, 'fresh': fresh}\n"
+        "def hammer():\n"  # cloud MCP requests that keep arriving while the bridge leaves
+        "    time.sleep(0.5)\n"  # serve() has installed its SIGTERM handler by now
+        "    seen = set()\n"
+        "    while True:\n"
+        "        for p in (proxy, fresh):\n"
+        "            threading.Thread(target=p.handle, args=({'jsonrpc': '2.0', 'id': 1,"
+        " 'method': 'tools/list'},), daemon=True).start()\n"
+        "            if p.proc is not None and p.proc.pid not in seen:\n"
+        "                seen.add(p.proc.pid)\n"
+        "                print(p.proc.pid, flush=True)\n"
+        "        time.sleep(0.05)\n"
+        "threading.Thread(target=hammer, daemon=True).start()\n"
         "s.cancelled.set()\n"
         "threading.Thread(target=s.cancel, daemon=True).start()\n"  # the turn loop's retry
         "time.sleep(0.3)\n"
-        "print(proxy.proc.pid, flush=True)\n"
         "g['serve']()\n"
     )
     lingering = ECHO_MCP + "\nwhile True:\n    time.sleep(1)\n"
@@ -1714,28 +1745,31 @@ def check_sigterm() -> None:
         env=env,
         text=True,
     )
-    child_pid = int(bridge.stdout.readline())
+    pids = {int(bridge.stdout.readline())}
     try:
         bridge.send_signal(signal.SIGTERM)
         try:
-            bridge.wait(timeout=5)
+            bridge.wait(timeout=8)
         except subprocess.TimeoutExpired:
             bridge.kill()
-            raise AssertionError("SIGTERM did not end the bridge within 5 s") from None
+            raise AssertionError("SIGTERM did not end the bridge within 8 s") from None
+        pids |= {int(line) for line in bridge.stdout.read().split()}  # children started later
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
-            except FileNotFoundError:
-                break
-            if state == "Z":
-                break
-            time.sleep(0.1)
-        else:
-            raise AssertionError("a SIGTERM-proof MCP server child outlived the bridge")
+        for pid in pids:
+            while time.monotonic() < deadline:
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+                except FileNotFoundError:
+                    break
+                if state == "Z":
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError(f"MCP server child {pid} outlived the bridge")
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def self_check() -> None:
