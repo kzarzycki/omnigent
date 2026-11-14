@@ -935,8 +935,12 @@ class SysSessionCreateTool(Tool):
             "message. By default the new session is a child of the caller. "
             "With agent_id, placement='same_host' creates a private independent session "
             "on the caller's host/workspace; placement='managed' creates one on a new sandbox "
-            "using the server's configured default provider. These sessions are grouped as "
-            "nested agents when enabled on the server; otherwise they appear at the top level. "
+            "using the server's configured default provider. "
+            "Without project_id or environment_id, these sessions are grouped as nested "
+            "agents when enabled on the server; "
+            "otherwise they appear at the top level. "
+            "Naming project_id or environment_id creates a top-level session in that "
+            "project, outside this session's family. "
             "Managed creation requires a "
             "configured sandbox provider; use same_host for an existing connected host. "
             "These placements require orchestration enabled "
@@ -976,21 +980,25 @@ class SysSessionCreateTool(Tool):
                             "description": (
                                 "Default child; same_host or managed launches a private "
                                 "independent session (agent_id only), grouped in this family "
-                                "when nested agents are enabled."
+                                "when nested agents are enabled, unless project_id or "
+                                "environment_id is named (then top-level)."
                             ),
                         },
                         "project_id": {
                             "type": "string",
                             "description": (
                                 "Optional, placement='same_host': start on the host and "
-                                "workspace this project pins, instead of this session's."
+                                "workspace this project pins, instead of this session's. "
+                                "Creates a top-level session in that project, outside "
+                                "this session's family."
                             ),
                         },
                         "environment_id": {
                             "type": "string",
                             "description": (
                                 "Optional, placement='same_host': like project_id, naming "
-                                "the project by its config's environment_id."
+                                "the project by its config's environment_id; also creates "
+                                "a top-level session outside this session's family."
                             ),
                         },
                         "sandbox_provider": {
