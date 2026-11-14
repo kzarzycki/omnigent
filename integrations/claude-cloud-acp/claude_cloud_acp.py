@@ -74,6 +74,8 @@ CUT_OFF_GRACE_S = 30
 # which re-attaches the same cloud session from the replayed transcript.
 IDLE_EXIT_S = float(os.environ.get("CLAUDE_CLOUD_IDLE_EXIT_S", "60"))
 LIFETIME_POLL_S = 1.0
+# Exit status of an idle bridge: Omnigent resends a prompt that ended with it unanswered.
+IDLE_EXIT_STATUS = 75
 # What the bridge posts to a session whose turn its sandbox cut off.
 CONTINUE_PROMPT = (
     "The sandbox restarted and cut your last turn off before it finished. Tool calls that "
@@ -1337,6 +1339,13 @@ def check_model(acp_id: str, s: Session) -> None:
     s.noted_model = s.model
 
 
+def handle_accepted(msg: dict) -> None:
+    try:
+        handle_prompt(msg)
+    finally:
+        prompt_done()
+
+
 def handle_prompt(msg: dict) -> None:
     params = msg.get("params") or {}
     try:
@@ -1359,6 +1368,11 @@ def handle_prompt(msg: dict) -> None:
 
 
 _last_activity = time.monotonic()
+# Taken to decide to leave and to accept a prompt, so no prompt is accepted once the
+# decision is made, and none is dropped after it was accepted.
+_lifecycle = threading.Lock()
+_prompts_accepted = 0  # prompts read from Omnigent whose turn has not ended
+_leaving = False
 
 
 def touch() -> None:
@@ -1366,34 +1380,53 @@ def touch() -> None:
     _last_activity = time.monotonic()
 
 
+def accept_prompt() -> bool:
+    """Count a prompt as taken, unless the bridge has decided to leave."""
+    global _prompts_accepted
+    with _lifecycle:
+        if _leaving:
+            return False
+        _prompts_accepted += 1
+        return True
+
+
+def prompt_done() -> None:
+    global _prompts_accepted
+    with _lifecycle:
+        _prompts_accepted -= 1
+    touch()
+
+
 def lifetime_over(parent_pid: int, now: float) -> str | None:
     """Why this bridge should exit, or ``None``: its runner is gone, or it has been idle."""
     if os.getppid() != parent_pid:
         return "its runner exited"
-    if IDLE_EXIT_S > 0 and not any(s.running for s in SESSIONS.values()):
+    if IDLE_EXIT_S > 0 and not _prompts_accepted and not any(s.running for s in SESSIONS.values()):
         if now - _last_activity >= IDLE_EXIT_S:
             return f"idle for {IDLE_EXIT_S:g}s"
     return None
 
 
 def watch_lifetime(parent_pid: int) -> None:
-    """Leave (through :func:`stop`) once :func:`lifetime_over` says so."""
+    """Leave once :func:`lifetime_over` says so, deciding and exiting under the lifecycle lock.
+
+    :func:`serve` takes the lock to accept a prompt, so a prompt is either accepted
+    before the decision (and keeps the bridge) or is never read.
+    """
+    global _leaving
     while True:
         time.sleep(LIFETIME_POLL_S)
-        if reason := lifetime_over(parent_pid, time.monotonic()):
+        with _lifecycle:
+            if not (reason := lifetime_over(parent_pid, time.monotonic())):
+                continue
+            _leaving = True
             log(f"leaving: {reason}")
-            os.kill(os.getpid(), signal.SIGTERM)
-            time.sleep(5)  # stop() did not finish: the main thread is stuck, so leave anyway
-            log("forcing exit")
-            os._exit(0)
+            leave()
+            os._exit(IDLE_EXIT_STATUS if reason.startswith("idle") else 0)
 
 
-def stop(*_: object) -> None:
-    """On SIGTERM or EOF, leave: a running cloud turn goes on, and the next bridge mirrors it.
-
-    Only ``session/cancel`` stops the cloud session. Omnigent terminates the bridge
-    straight after sending one, so a cancel still on its way is delivered first.
-    """
+def leave() -> None:
+    """Hand a cancel on its way to the cloud session, and end the MCP server children."""
     for session in SESSIONS.values():
         if session.cancelled.is_set():
             session.cancel()
@@ -1404,6 +1437,15 @@ def stop(*_: object) -> None:
             if proxy.proc is not None and proxy.proc.poll() is None:
                 proxy.proc.terminate()
     log("stopping")
+
+
+def stop(*_: object) -> None:
+    """On SIGTERM or EOF, leave: a running cloud turn goes on, and the next bridge mirrors it.
+
+    Only ``session/cancel`` stops the cloud session. Omnigent terminates the bridge
+    straight after sending one, so a cancel still on its way is delivered first.
+    """
+    leave()
     sys.exit(0)
 
 
@@ -1457,7 +1499,8 @@ def serve() -> None:
             set_model(params)
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/prompt":
-            threading.Thread(target=handle_prompt, args=(msg,), daemon=True).start()
+            if accept_prompt():
+                threading.Thread(target=handle_accepted, args=(msg,), daemon=True).start()
         elif method == "session/cancel":
             log(f"cancel {params.get('sessionId')}")
             if session := SESSIONS.get(params.get("sessionId", "")):
@@ -1514,12 +1557,54 @@ def check_lifetime() -> None:
         assert lifetime_over(parent + 1, start) == "its runner exited"
         IDLE_EXIT_S = 0.0
         assert lifetime_over(parent, start + 3600) is None  # 0 keeps an idle bridge
-        # A real bridge process: idle it exits, and its MCP child goes with it.
-        env = {**os.environ, "CLAUDE_CLOUD_IDLE_EXIT_S": "1", "HOME": tempfile.mkdtemp()}
-        bridge = subprocess.Popen(
-            [sys.executable, __file__], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env
+        # A prompt taken before the decision keeps the bridge; none is taken after it.
+        IDLE_EXIT_S = 60.0
+        assert accept_prompt() and lifetime_over(parent, start + 3600) is None
+        prompt_done()
+        _last = _last_activity
+        assert lifetime_over(parent, _last + 60) == "idle for 60s"
+        globals()["_leaving"] = True
+        assert not accept_prompt() and _prompts_accepted == 0
+        globals()["_leaving"] = False
+        IDLE_EXIT_S = 0.0
+        # An idle bridge exits with the idle status, and takes its MCP server child with
+        # it. The child outlives its stdin, so only the bridge ending it makes it go.
+        lingering = ECHO_MCP + "\nwhile True:\n    time.sleep(1)\n"
+        host = (
+            "import runpy, sys, time\n"
+            "b = runpy.run_path(sys.argv[1])\n"
+            "proxy = b['McpProxy']({'name': 'echo', 'command': sys.executable,"
+            " 'args': ['-c', 'import time\\n' + sys.argv[2]]})\n"
+            "proxy._start()\n"
+            "b['SESSIONS']['acp-x'] = b['Session']('/', 'acp-x')\n"
+            "b['SESSIONS']['acp-x'].mcp = {'echo': proxy}\n"
+            "print(proxy.proc.pid, flush=True)\n"
+            "b['serve']()\n"
         )
-        assert bridge.wait(timeout=30) == 0
+        env = {**os.environ, "CLAUDE_CLOUD_IDLE_EXIT_S": "2", "HOME": tempfile.mkdtemp()}
+        bridge = subprocess.Popen(
+            [sys.executable, "-c", host, __file__, lingering],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        child_pid = int(bridge.stdout.readline())
+        status = bridge.wait(timeout=30)
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("an idle bridge left its MCP server child running")
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+        assert status == IDLE_EXIT_STATUS, status
         # A runner that dies leaves the bridge with a new parent: it exits though stdin stays open.
         lead = subprocess.Popen(
             [

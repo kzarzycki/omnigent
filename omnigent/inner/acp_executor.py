@@ -98,6 +98,9 @@ logger = logging.getLogger(__name__)
 
 ACP_CANCEL_GRACE_SECONDS = 1.0
 _ACP_TERMINATION_TIMEOUT_SECONDS = 5.0
+# An agent that leaves while idle (the claude-cloud bridge) exits with this status; a
+# prompt it left unanswered never ran and is sent to the next process.
+_IDLE_EXIT_STATUS = 75
 _ACP_CLEANUP_HEADROOM_SECONDS = 1.0
 ACP_REAP_TIMEOUT_SECONDS = (
     ACP_CANCEL_GRACE_SECONDS + _ACP_TERMINATION_TIMEOUT_SECONDS + _ACP_CLEANUP_HEADROOM_SECONDS
@@ -515,6 +518,7 @@ class AcpExecutor(Executor):
             raise ValueError("AcpAgentConfig.command is empty")
 
         self._proc: asyncio.subprocess.Process | None = None
+        self._resent_after_idle_exit = False
         self._queue: asyncio.Queue[_AcpJsonObject] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -1568,6 +1572,14 @@ class AcpExecutor(Executor):
         candidates = {c for c in (name, raw_tool, meta_tool) if c}
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
+    async def _exited_idle(self) -> bool:
+        """Whether the agent process ended with :data:`_IDLE_EXIT_STATUS`, as an idle agent does."""
+        if self._proc is None:
+            return False
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._proc.wait(), timeout=_ACP_TERMINATION_TIMEOUT_SECONDS)
+        return self._proc.returncode == _IDLE_EXIT_STATUS
+
     def _reset_session_state(self) -> None:
         """Forget state that is only valid for the current ACP session."""
         self._session_id = None
@@ -2080,6 +2092,20 @@ class AcpExecutor(Executor):
                 try:
                     response = fut.result()
                 except Exception as exc:
+                    if (
+                        isinstance(exc, EOFError)
+                        and not accumulated_text
+                        and not self._resent_after_idle_exit
+                        and await self._exited_idle()
+                    ):
+                        # The agent left idle as this prompt arrived: it never ran, so send it again.
+                        self._resent_after_idle_exit = True
+                        try:
+                            async for event in self.run_turn(messages, tools, system_prompt, config):
+                                yield event
+                        finally:
+                            self._resent_after_idle_exit = False
+                        return
                     logger.exception("ACP process response retrieval failed")
                     self._reset_session_state()
                     yield ExecutorError(message=f"ACP process error: {exc}", retryable=True)
