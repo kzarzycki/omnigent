@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -33,7 +33,7 @@ _EPOCH_DAY = "0000-00-00"
 
 # Agents the current report preloaded in one read, so resolving each session's
 # harness and model does not hit the agent store once per session.
-_preloaded_agents: ContextVar[Mapping[str, Agent] | None] = ContextVar(
+_preloaded_agents: ContextVar[dict[str, Agent] | None] = ContextVar(
     "usage_preloaded_agents", default=None
 )
 
