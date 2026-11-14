@@ -107,6 +107,100 @@ async def test_list_sessions_after_create(
     assert session_id in ids
 
 
+async def _list_row(client: httpx.AsyncClient, session_id: str) -> dict[str, object]:
+    """Return one session's row from the ``GET /v1/sessions`` listing."""
+    rows = (await client.get("/v1/sessions")).json()["data"]
+    return next(row for row in rows if row["id"] == session_id)
+
+
+@pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
+async def test_list_sessions_carries_model_and_spec_default_effort(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    harness: str,
+) -> None:
+    """
+    A native session's row shows its model and the spec's default effort.
+
+    The model is the harness's report when it has one, else the spec's; the
+    effective effort falls back to the spec default while ``reasoning_effort``
+    stays the explicit pick only.
+    """
+    agent = await create_test_agent(
+        client,
+        name=f"{harness}-ui",
+        executor={
+            "type": "omnigent",
+            "reasoning_effort": "medium",
+            "config": {"harness": harness},
+        },
+    )
+    session = (await client.post("/v1/sessions", json={"agent_id": agent["id"]})).json()
+    # Create may stamp the spec effort on the row; clear it to exercise the fallback.
+    SqlAlchemyConversationStore(db_uri).update_conversation(
+        session["id"], _unset_reasoning_effort=True
+    )
+
+    row = await _list_row(client, session["id"])
+    assert row["llm_model"] == f"{harness}-ui"
+    assert row["effective_reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in row
+
+    reported = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "reported-model-1"}},
+    )
+    assert reported.status_code == 202, reported.text
+    assert (await _list_row(client, session["id"]))["llm_model"] == "reported-model-1"
+
+
+async def test_list_sessions_claude_cloud_model_comes_from_the_harness_not_the_spec(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    claude-cloud owns its model: the spec's pin is not claimed for it.
+
+    Until the bridge reports the model the cloud ran (it does with each turn's
+    usage), the row has no model; a pick or the report then shows. An explicit
+    effort pick wins over the spec default.
+    """
+    agent = await create_test_agent(
+        client,
+        name="claude-cloud-ui",
+        executor={
+            "type": "omnigent",
+            "reasoning_effort": "medium",
+            "config": {"harness": "acp:claude-cloud"},
+        },
+    )
+    default = (await client.post("/v1/sessions", json={"agent_id": agent["id"]})).json()
+    SqlAlchemyConversationStore(db_uri).update_conversation(
+        default["id"], _unset_reasoning_effort=True
+    )
+    row = await _list_row(client, default["id"])
+    assert "llm_model" not in row
+    assert row["effective_reasoning_effort"] == "medium"
+
+    reported = await client.post(
+        f"/v1/sessions/{default['id']}/events",
+        json={"type": "external_model_change", "data": {"model": "cloud-model-1"}},
+    )
+    assert reported.status_code == 202, reported.text
+    assert (await _list_row(client, default["id"]))["llm_model"] == "cloud-model-1"
+
+    picked = (
+        await client.post(
+            "/v1/sessions",
+            json={"agent_id": agent["id"], "model_override": "opus", "reasoning_effort": "high"},
+        )
+    ).json()
+    picked_row = await _list_row(client, picked["id"])
+    assert picked_row["llm_model"] == "opus"
+    assert picked_row["reasoning_effort"] == "high"
+    assert picked_row["effective_reasoning_effort"] == "high"
+
+
 async def test_list_sessions_pagination(
     client: httpx.AsyncClient,
     db_uri: str,
