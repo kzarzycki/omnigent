@@ -16,8 +16,7 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 ## The environment
 
 - Sessions use the `omnigent-dev` cloud environment (its ID:
-  `fork-env.sh OMNIGENT_DEV_ENVIRONMENT_ID`). It holds no secrets and no signing key:
-  landing signs on a host.
+  `fork-env.sh OMNIGENT_DEV_ENVIRONMENT_ID`). It holds no secrets.
 - The host workspace a session starts from pins it in `.claude/settings.local.json`:
   `{"remote": {"defaultEnvironmentId": "<that ID>"}}`. Without that the
   session lands in the account's default environment, which lacks the tools below.
@@ -81,7 +80,6 @@ and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that chec
 |---|---|
 | Every `approvals.py` call: `check build`, `verdict`, `local-ci`, `land` | It reads PRs, issues, edit history and review threads through GraphQL |
 | Resolving review threads | GraphQL only |
-| The signed squash onto `mine` (inside `land`) | It signs with the host's key; the VM holds none |
 | The Codex verifier | It is the other model family, and there is no Codex cloud bridge |
 | Reading the verifier's report, writing your own report | Those files are on the host, where the chief of staff reads them |
 | The bridge and the Omnigent MCP relay | They drive the cloud session from the host that holds the personal claude.ai login; Omnigent's tools reach the VM through them |

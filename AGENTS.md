@@ -227,34 +227,16 @@ every fork-only commit in it. As a backstop, `mise run pin-pr-target` makes the
 fork the default for bare `gh` commands; run it once per clone (worktrees share
 it), and `mise run check:all` runs it too.
 
-Never merge a PR into `mine` with GitHub's merge button. GitHub signs that
-commit with its own key, so every machine's `omnigent-update` refuses to install
-the head and the nightly sync refuses to take it. Land a PR on a landing host
-with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
-land <pr> --wait`, run from a checkout of the PR's head (its worktree): it reads
-`docs/agents/gatekeeper.md` there, whose `land` setting makes it squash the PR into one
-commit signed with this checkout's key, check it against `allowed_signers`, and
-fast-forward `mine` to it. The fork runs no GitHub Actions (`loop.ci: false`), so
-first record `mise run check:all` passing on the head with `approvals.py
-local-ci <pr>` (run `mise trust` once in a new checkout).
+Land a PR with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
+land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
+the PR through GitHub, pinned to the head the gates checked; `docs/agents/gatekeeper.md`
+has no `land` section, so nothing is signed or checked against a signer list.
+The fork runs no GitHub Actions (`loop.ci: false`), so first record `mise run
+check:all` passing on the head with `approvals.py local-ci <pr>` (run `mise trust`
+once in a new checkout).
 
-A landing host has `gh` logged in to an account that can push to
-`kzarzycki/omnigent`, and an SSH signing key of its own: its public key in
-dotagents' `patches/omnigent/allowed_signers` and in every consumer's trust list
-(each machine's `~/.config/omnigent/allowed_signers`, read by `omnigent-update`,
-and the VPS's `/etc/omnigent/allowed_signers`, read by `omnigent-deploy`). The
-checkout signs with it:
-
-```sh
-git config gpg.format ssh
-git config user.signingkey ~/.ssh/git_signing_ed25519.pub
-git config commit.gpgsign true
-```
-
-`land` refuses a checkout that doesn't sign with SSH, and a squash the
-allowed signers file doesn't accept, before it pushes. Landing hosts today are the
-bridge host (a Linux VPS) and a macOS build host, each with its own key in the
-allowed signers file. Their names are machine-specific, so they stay out of this
+A landing host needs `gh` logged in to an account that can push to
+`kzarzycki/omnigent`. Their names are machine-specific, so they stay out of this
 repo: `.claude/skills/cloud-dev/fork-env.sh OMNIGENT_BRIDGE_HOST` and
 `... OMNIGENT_MACOS_BUILD_HOST` print them from the local overlay
 `~/.config/omnigent/fork-dev.conf`.
@@ -264,8 +246,8 @@ repo: `.claude/skills/cloud-dev/fork-env.sh OMNIGENT_BRIDGE_HOST` and
 Omnigent development runs in Claude cloud sessions (the `claude-cloud` agent,
 environment `omnigent-dev`), so the load is off the owner's machines. In such a
 session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
-first. The VM can't reach GitHub's GraphQL API or hold a signing key, so every
-`approvals.py` step, the signed land and the Codex verifier run on the bridge host,
+first. The VM can't reach GitHub's GraphQL API, so every
+`approvals.py` step, the land and the Codex verifier run on the bridge host,
 through a host helper session the skill describes.
 
 ## This fork: filing upstream issues and PRs

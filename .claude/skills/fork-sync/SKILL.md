@@ -17,13 +17,11 @@ when idle.
 - **Repo:** the fork checkout the run starts in — a Claude cloud session's
   clone or a local checkout. Every git command below runs at its top level.
 - **Scripts:** `setup.sh`, `gate.py` and `sync-fork.sh` sit next to this file:
-  `DIR=.claude/skills/fork-sync`. Run them from the top level. The skill is read
-  from the checked-out commit, and `setup.sh` refuses to continue unless that
-  commit is signed by an allowed key. `bash "$DIR/test.sh"` checks the gate and
-  sync-fork.sh's guard.
-- **Secrets**, from the environment (the cloud environment's variables):
-  `OMNIGENT_SYNC_ALLOWED_SIGNERS` and `OMNIGENT_SYNC_SIGNING_KEY`, both base64.
-  Never print them.
+  `DIR=.claude/skills/fork-sync`. Run them from the top level. `bash "$DIR/test.sh"` checks the gate, sync-fork.sh's guard
+  and that it takes and pushes unsigned commits.
+- **No secrets and no signing key:** GitHub is the trust anchor, so the sync commits
+  and pushes unsigned.
+
 The fork's remotes and branches:
 
 | Branch | Tracks | Role |
@@ -36,9 +34,8 @@ the `upstream` and `origin` remotes and the `mine` branch.
 
 ## Procedure
 
-0. **Set up:** `bash "$DIR/setup.sh"`. It adds the `upstream` remote, writes the
-   signer list and key from the environment, checks the checked-out commit is
-   signed, and makes this checkout sign as the sync key. Any non-zero exit →
+0. **Set up:** `bash "$DIR/setup.sh"`. It adds the `upstream` remote, turns commit
+   signing off and sets the sync's identity. Any non-zero exit →
    report `VERDICT: HOLD setup failed (exit N): <its message>` and stop.
 
 1. **Detect the delta.** The target is the newest upstream mainline commit at
@@ -96,8 +93,7 @@ mainline commit at least 3 days old. In order:
 2. `git fetch upstream`, `git fetch origin mine`.
 3. Fast-forward `main` to `upstream/main`, push to `origin`.
 4. Cherry-pick commits on `origin/mine` that have no patch-equivalent in the
-   local `mine`, after checking each is signed by a key in
-   `gpg.ssh.allowedSignersFile` (it stops on any that isn't). `origin/mine` is
+   local `mine`. `origin/mine` is
    the source of truth: a fix landed there from any machine survives the
    force-push below.
 5. Rebase `mine` onto `TARGET` (skipped when `mine` already contains it),
@@ -105,10 +101,7 @@ mainline commit at least 3 days old. In order:
    not fatal: the next run pushes.
 6. Return to the starting branch and restore the stash.
 
-Commits are signed (`commit.gpgsign`, SSH format, set by `setup.sh`),
-so the rebased `mine` head carries the sync key's signature.
-`omnigent-update` on every machine refuses to install a head that isn't signed
-by a key in its local allowed-signers file.
+Nothing is signed: GitHub is the trust anchor, and `omnigent-update` installs the pushed head as it is.
 
 The branch and remote names are variables at the top of `sync-fork.sh`; renaming
 one in the fork means editing them there.

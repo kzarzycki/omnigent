@@ -19,9 +19,8 @@
 # days, so a short lag keeps most of them off every machine. audit-sync passes
 # the exact commit it audited.
 #
-# Commits landed in origin/mine are only taken when signed by a key in
-# gpg.ssh.allowedSignersFile: this repo signs everything it commits, so taking
-# an unsigned one would re-sign whatever a stolen push token put there.
+# GitHub is the trust anchor: commits on origin/mine (GitHub merges included) are
+# taken as they are, and the sync commits and pushes unsigned.
 #
 # Usage, from the fork checkout: bash <this directory>/sync-fork.sh [TARGET]
 set -euo pipefail
@@ -79,10 +78,6 @@ git checkout -q "$PATCHED"
 # machine. Take them before rebasing, or the force-push below deletes them.
 landed=$(git cherry "$PATCHED" "$FORK/$PATCHED" | sed -n 's/^+ //p')
 if [ -n "$landed" ]; then
-  for c in $landed; do
-    git verify-commit "$c" 2>/dev/null \
-      || { echo "!! $FORK/$PATCHED has unsigned or unknown-signer commit $c — not taking it (a PR merged on GitHub? land PRs with the engineering loop's approvals.py land)" >&2; exit 1; }
-  done
   echo "==> taking $(echo "$landed" | wc -l | tr -d ' ') commit(s) landed in $FORK/$PATCHED"
   git cherry-pick $landed
 fi
