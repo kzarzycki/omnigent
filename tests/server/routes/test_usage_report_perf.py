@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 from omnigent.runtime import _globals
+from omnigent.server.routes import usage
 from omnigent.server.routes.usage import _build_usage_report
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -31,16 +33,23 @@ class _CountingAgentCache:
 
     def __init__(self) -> None:
         self.loads = 0
+        self.harness_by_agent: dict[str, str] = {}
 
     def load(self, agent_id: str, bundle_location: str, *, expand_env: bool = False):
         self.loads += 1
         executor = SimpleNamespace(
             type="claude-sdk",
-            config={"harness": "claude-sdk"},
+            config={"harness": self.harness_by_agent.get(agent_id, "claude-sdk")},
             model="model-a",
             reasoning_effort=None,
         )
-        spec = SimpleNamespace(executor=executor, llm=SimpleNamespace(model="model-a"))
+        spec = SimpleNamespace(
+            name="agent",
+            executor=executor,
+            sub_agents=[],
+            tools=[],
+            llm=SimpleNamespace(model="model-a"),
+        )
         return SimpleNamespace(spec=spec)
 
 
@@ -87,12 +96,13 @@ def _seed(
 
 @contextmanager
 def _query_latency(per_query_seconds: float) -> Iterator[dict[str, int]]:
-    """Count SQL statements and delay each, modelling a database a network away."""
+    """Count SQL statements, delaying each to model a database a network away."""
     counter = {"queries": 0}
 
     def _before_execute(*_args: object, **_kwargs: object) -> None:
         counter["queries"] += 1
-        time.sleep(per_query_seconds)
+        if per_query_seconds:
+            time.sleep(per_query_seconds)
 
     event.listen(Engine, "before_cursor_execute", _before_execute)
     try:
@@ -101,11 +111,33 @@ def _query_latency(per_query_seconds: float) -> Iterator[dict[str, int]]:
         event.remove(Engine, "before_cursor_execute", _before_execute)
 
 
-@pytest.mark.parametrize(
-    ("sessions", "days", "budget_seconds"),
-    [(250, 7, 2.0), (1000, None, 5.0)],
+@pytest.mark.parametrize(("sessions", "days", "max_queries"), [(250, 7, 100), (1000, None, 250)])
+def test_usage_report_with_page_details_reads_a_bounded_number_of_rows(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    sessions: int,
+    days: int | None,
+    max_queries: int,
+) -> None:
+    store, _ = _seed(db_uri, monkeypatch, sessions=sessions, spread_days=7)
+    with _query_latency(0) as counter:
+        report = _build_usage_report(store, None, include_page_details=True, days=days)
+
+    assert len(report.sessions) >= sessions * 6 // 7 - 1
+    assert all(
+        item.harness == "claude-sdk" and item.llm_model == "model-a" for item in report.sessions
+    )
+    assert counter["queries"] < max_queries
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OMNIGENT_USAGE_TIMING"),
+    reason="timing benchmark; set OMNIGENT_USAGE_TIMING=1 (wall-clock, never a gate)",
 )
-def test_usage_report_with_page_details_stays_fast_at_scale(
+@pytest.mark.parametrize(
+    ("sessions", "days", "budget_seconds"), [(250, 7, 2.0), (1000, None, 5.0)]
+)
+def test_usage_report_timing_benchmark(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     sessions: int,
@@ -115,14 +147,34 @@ def test_usage_report_with_page_details_stays_fast_at_scale(
     store, _ = _seed(db_uri, monkeypatch, sessions=sessions, spread_days=7)
     with _query_latency(_QUERY_LATENCY_SECONDS) as counter:
         started = time.perf_counter()
-        report = _build_usage_report(store, None, include_page_details=True, days=days)
+        _build_usage_report(store, None, include_page_details=True, days=days)
         elapsed = time.perf_counter() - started
+    print(f"\nUSAGE_TIMING sessions={sessions} days={days} {elapsed:.2f}s {counter['queries']}q")
+    assert elapsed < budget_seconds
 
-    assert len(report.sessions) >= sessions * 6 // 7 - 1
-    assert all(
-        item.harness == "claude-sdk" and item.llm_model == "model-a" for item in report.sessions
+
+def test_verified_fallback_tree_resolves_sub_agent_harness_from_the_store(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, root_ids = _seed(db_uri, monkeypatch, sessions=1, spread_days=1)
+    other_agent_id = uuid.uuid4().hex
+    _globals._agent_cache.harness_by_agent[other_agent_id] = "codex"
+    SqlAlchemyAgentStore(db_uri).create(other_agent_id, "other", f"{other_agent_id}/bundle")
+    store.create_conversation(
+        kind="sub_agent",
+        title="late child",
+        parent_conversation_id=root_ids[0],
+        agent_id=other_agent_id,
+        sub_agent_name="late",
     )
-    assert elapsed < budget_seconds, f"{counter['queries']} queries took {elapsed:.1f}s"
+    # An empty batched read forces the verified per-session fallback, which
+    # finds a sub-agent bound to an agent the page never preloaded.
+    monkeypatch.setattr(usage, "_load_trees_by_root", lambda _store, _roots: {})
+
+    report = _build_usage_report(store, None, include_page_details=True)
+
+    assert report.sessions[0].harness == "claude-sdk"
+    assert report.sessions[0].other_harnesses == ["codex"]
 
 
 def test_usage_report_query_count_does_not_grow_with_session_count(

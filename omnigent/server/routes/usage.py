@@ -40,24 +40,35 @@ _preloaded_agents: ContextVar[Mapping[str, Agent] | None] = ContextVar(
 _AGENT_READ_CHUNK = 500
 
 
+def _add_preloaded_agents(conversations: Iterable[Conversation]) -> None:
+    """Read the agents *conversations* are bound to that the active map lacks."""
+    from omnigent.runtime._globals import _agent_store
+
+    agents = _preloaded_agents.get()
+    if agents is None or _agent_store is None:
+        return
+    missing = sorted(
+        {conv.agent_id for conv in conversations if conv.agent_id is not None} - agents.keys()
+    )
+    for start in range(0, len(missing), _AGENT_READ_CHUNK):
+        agents.update(_agent_store.get_many(missing[start : start + _AGENT_READ_CHUNK]))
+
+
 @contextmanager
 def _preload_agents(conversations: Iterable[Conversation]) -> Iterator[None]:
     """
     Read every agent the given conversations are bound to in a few queries.
 
     While active, :func:`_resolve_session_harness` and :func:`_resolve_llm_model`
-    take agents from this map instead of one store read per session. Without a
-    runtime agent store the resolvers keep their own lookup.
+    take agents from this map instead of one store read per session; rows found
+    later (see :func:`_add_preloaded_agents`) extend it. Without a runtime agent
+    store the resolvers keep their own lookup.
     """
     from omnigent.runtime._globals import _agent_store
 
-    agent_ids = sorted({conv.agent_id for conv in conversations if conv.agent_id is not None})
-    agents: dict[str, Agent] = {}
-    if _agent_store is not None:
-        for start in range(0, len(agent_ids), _AGENT_READ_CHUNK):
-            agents.update(_agent_store.get_many(agent_ids[start : start + _AGENT_READ_CHUNK]))
-    token = _preloaded_agents.set(agents if _agent_store is not None else None)
+    token = _preloaded_agents.set({} if _agent_store is not None else None)
     try:
+        _add_preloaded_agents(conversations)
         yield
     finally:
         _preloaded_agents.reset(token)
@@ -286,6 +297,7 @@ def _build_usage_report(
                     usage = _sum_subtree_usage(tree, conv.id)
                 else:
                     usage, tree = load_session_usage_and_tree(conv.id, conversation_store)
+                    _add_preloaded_agents(tree)
                 primary_harness = _resolve_session_harness(conv) if include_page_details else None
                 other_harnesses = (
                     _collect_other_harnesses(primary_harness, tree, conv.id)
