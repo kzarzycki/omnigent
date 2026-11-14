@@ -358,3 +358,33 @@ def test_usage_report_without_window_batches_tree_reads(
     assert {s.cost_usd for s in report.sessions} == {1.0}
     # Per-session tree reads would take ~2000 statements here.
     assert len(statements) < 150
+
+
+def test_list_conversations_root_conversation_ids_filters_to_requested_roots(
+    db_uri: str,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    roots = [store.create_conversation(title=f"r{i}", agent_id=_AGENT_ID) for i in range(3)]
+    children = {
+        root.id: store.create_conversation(
+            kind="sub_agent", parent_conversation_id=root.id, agent_id=_AGENT_ID
+        )
+        for root in roots
+    }
+    requested = [roots[0].id, roots[1].id]
+
+    page = store.list_conversations(
+        limit=100, kind=None, include_archived=True, root_conversation_ids=requested
+    )
+
+    assert {c.id for c in page.data} == {
+        roots[0].id,
+        roots[1].id,
+        children[roots[0].id].id,
+        children[roots[1].id].id,
+    }
+    # Unrequested root and its child are excluded; an empty list matches nothing.
+    empty = store.list_conversations(
+        limit=100, kind=None, include_archived=True, root_conversation_ids=[]
+    )
+    assert empty.data == []
