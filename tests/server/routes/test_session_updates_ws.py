@@ -400,29 +400,6 @@ def test_harness_override_is_streamed_and_cleared(app: FastAPI, stores, fast_res
         assert item["harness"] is None
 
 
-def test_snapshot_rows_carry_spec_model_and_effort(
-    app: FastAPI, stores, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The push stream builds rows like the list: spec model and default effort included."""
-    from omnigent.server.routes.sessions import routes_core
-    from omnigent.spec.types import AgentSpec, ExecutorSpec
-
-    spec = AgentSpec(
-        spec_version=1,
-        name="spec-agent",
-        executor=ExecutorSpec(model="spec-model-1", reasoning_effort="low"),
-    )
-    monkeypatch.setattr(routes_core, "_bound_specs", lambda *_a, **_k: (spec, spec))
-    session_id = _seed_session(stores, owner=ALICE, title="spec defaults")
-    with TestClient(app).websocket_connect(
-        "/v1/sessions/updates", headers={"X-Forwarded-Email": ALICE}
-    ) as ws:
-        ws.send_text(json.dumps({"type": "watch", "session_ids": [session_id]}))
-        item = _recv_until(ws, {"snapshot"})["items"][0]  # type: ignore[index]
-        assert item["llm_model"] == "spec-model-1"
-        assert item["effective_reasoning_effort"] == "low"
-
-
 def test_no_change_emits_no_changed_frame(app: FastAPI, stores, fast_rescan: None) -> None:
     """An idle watched session produces no ``changed`` frames — only
     heartbeats — so a static list generates no diff traffic."""

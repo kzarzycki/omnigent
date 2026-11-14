@@ -1283,8 +1283,6 @@ def _build_session_list_item(
     child_session_ids: list[str],
     comments_fingerprint: CommentsFingerprint | None,
     harness: str | None = None,
-    spec_model: str | None = None,
-    spec_reasoning_effort: str | None = None,
     pull_request: SessionPullRequestSummary | None = None,
     pull_requests_synced: bool | None = None,
 ) -> SessionListItem:
@@ -1329,8 +1327,6 @@ def _build_session_list_item(
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
     :param harness: Resolved session harness from the batch's cached agent specs.
-    :param spec_model: The bound spec's model, from the batch's cached agent specs.
-    :param spec_reasoning_effort: The bound spec's default reasoning effort.
     :param pull_request: The conversation's first linked pull request,
         from the server's PR store; ``None`` when it has none.
     :param pull_requests_synced: Whether the server has imported the
@@ -1371,11 +1367,6 @@ def _build_session_list_item(
         runner_id=conv.runner_id,
         host_id=conv.host_id,
         reasoning_effort=conv.reasoning_effort,
-        # Same precedence as the snapshot's ``llm_model``: report, pick, spec.
-        llm_model=(
-            concrete_reported_model(conv.reported_model) or conv.model_override or spec_model
-        ),
-        effective_reasoning_effort=conv.reasoning_effort or spec_reasoning_effort,
         permission_level=level,
         owner=owner,
         external_session_id=conv.external_session_id,

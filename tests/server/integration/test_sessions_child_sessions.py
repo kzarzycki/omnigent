@@ -1404,32 +1404,6 @@ async def test_native_subagent_session_stamps_terminal_ui_labels(
     assert labels.get("omnigent.ui") == "terminal"
 
 
-async def test_subagent_session_list_row_carries_the_sub_agents_model(
-    client: httpx.AsyncClient,
-) -> None:
-    """A sub-agent session lists its own spec's model, not the parent's."""
-    parent = await _create_parent_with_subagents(
-        client,
-        name="orch-model",
-        sub_agents=[{"name": "impl", "harness": "codex-native"}],
-    )
-    resp = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": parent["agent_id"],
-            "parent_session_id": parent["session_id"],
-            "title": "impl:task-1",
-            "sub_agent_name": "impl",
-        },
-    )
-    assert resp.status_code == 201, resp.text
-    rows = (await client.get("/v1/sessions", params={"kind": "any"})).json()["data"]
-    by_id = {row["id"]: row for row in rows}
-    # The bundle helper names each spec's model after the spec itself.
-    assert by_id[resp.json()["id"]]["llm_model"] == "impl"
-    assert by_id[parent["session_id"]]["llm_model"] == "orch-model"
-
-
 @pytest.mark.parametrize(
     "harness,sub_config,expected_args",
     [
