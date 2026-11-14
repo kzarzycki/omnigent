@@ -124,6 +124,7 @@ from omnigent.server.performance_metrics import (
 from omnigent.server.preference_requests import DEFAULT_PREFERENCE_POLICY, PreferencePolicy
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
+from omnigent.server.routes.debug_profile import create_debug_profile_router
 from omnigent.server.routes.default_policies import create_default_policies_router
 from omnigent.server.routes.dictation import create_dictation_router
 from omnigent.server.routes.extension_assets import create_extension_assets_router
@@ -4160,6 +4161,15 @@ def create_app(
         ),
         prefix="/v1",
         tags=["sharing"],
+    )
+    # Admin-only sampling profiler: starts a thread only while a request runs.
+    app.include_router(
+        create_debug_profile_router(
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+        tags=["debug"],
     )
     # First-class projects (owner-private session containers). Mounted only
     # when a project store is wired; the endpoints self-scope to the caller.

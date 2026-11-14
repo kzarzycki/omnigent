@@ -16,13 +16,19 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from time import monotonic
+from types import CodeType
 from typing import Literal
 
 from omnigent.debug_logging import CAPTURED_STACK_TRACE_FIELD, debug_event
+from omnigent.util.stack_frames import walk_frames
 
 _logger = logging.getLogger(__name__)
 _MAX_STACK_FRAMES = 64
 _MAX_STACK_BYTES = 8192
+
+
+def _render_frame(code: CodeType, lineno: int) -> str:
+    return f'  File "{code.co_filename}", line {lineno}, in {code.co_name}\n'
 
 
 def _capture_stack(thread_id: int) -> str:
@@ -30,24 +36,14 @@ def _capture_stack(thread_id: int) -> str:
     header = "Stack (innermost frame first):\n"
     omission_marker = "  ... older frames omitted ...\n"
     remaining_bytes = _MAX_STACK_BYTES - len(header) - len(omission_marker)
-    frame = sys._current_frames().get(thread_id)
-    lines: list[str] = []
-    try:
-        while frame is not None and len(lines) < _MAX_STACK_FRAMES:
-            line = (
-                f'  File "{frame.f_code.co_filename}", line {frame.f_lineno}, '
-                f"in {frame.f_code.co_name}\n"
-            )
-            line_bytes = len(line.encode("utf-8", errors="replace"))
-            if line_bytes > remaining_bytes:
-                break
-            lines.append(line)
-            remaining_bytes -= line_bytes
-            frame = frame.f_back
-        if frame is not None:
-            lines.append(omission_marker)
-    finally:
-        del frame
+    lines, truncated = walk_frames(
+        sys._current_frames().get(thread_id),
+        max_frames=_MAX_STACK_FRAMES,
+        render=_render_frame,
+        byte_budget=remaining_bytes,
+    )
+    if truncated:
+        lines.append(omission_marker)
     return header + "".join(lines)
 
 
