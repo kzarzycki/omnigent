@@ -1549,6 +1549,31 @@ def self_check() -> None:
     with contextlib.redirect_stdout(out):
         _bootstrap("acp-boot", boot, "go")
     assert "model: test-model-1" in out.getvalue(), out.getvalue()
+    # The model the cloud ran reaches Omnigent in the prompt result, whether the turn
+    # went through the bootstrap (MCP servers) or the plain mirror path.
+    for acp_id, with_mcp in (("acp-ran-boot", True), ("acp-ran-mirror", False)):
+        ran = SESSIONS[acp_id] = Session("/", acp_id)
+        ran.reader = threading.current_thread()
+        if with_mcp:
+            ran.mcp = {
+                "echo": McpProxy(
+                    {"name": "echo", "command": sys.executable, "args": ["-c", ECHO_MCP]}
+                )
+            }
+        for seq, payload in enumerate(
+            [{"type": "system", "subtype": "init", "model": "ran-model-1"}, {"type": "result"}]
+            + ([{"type": "result"}] if with_mcp else []),
+            1,
+        ):
+            ran.events.put({"sequence_num": str(seq), "payload": payload})
+        params = {"sessionId": acp_id, "prompt": [{"type": "text", "text": "go"}]}
+        with contextlib.redirect_stdout(sent := io.StringIO()):
+            handle_prompt({"id": 7, "params": params})
+        replies = [json.loads(line) for line in sent.getvalue().splitlines() if '"id": 7' in line]
+        assert replies and replies[-1]["result"]["usage"] == {"model": "ran-model-1"}, (
+            acp_id,
+            sent.getvalue(),
+        )
     # Over the real wire: catalog in session/new, set_model acknowledged, prompt dispatched.
     server = subprocess.Popen(
         [sys.executable, __file__], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
