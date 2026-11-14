@@ -405,6 +405,8 @@ def test_full_device_flow(app: TestClient) -> None:
     assert r.status_code == 200, r.text
     r = app.get("/auth/users", headers=auth)
     assert r.status_code in (401, 403), r.text  # scope blocks admin surface
+    r = app.get("/v1/debug/profile?seconds=1", headers=auth)
+    assert r.status_code in (401, 403), r.text  # nor does it reach the profiler
 
     # 6. Refresh rotates the token.
     r = app.post(
