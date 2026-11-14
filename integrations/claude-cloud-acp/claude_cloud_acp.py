@@ -69,6 +69,11 @@ STALL_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_STALL_TIMEOUT_S", "1800"))
 STALL_STEP_S = 2.0
 # Quiet seconds after the cloud started a new CLI mid-turn before the turn counts as cut off.
 CUT_OFF_GRACE_S = 30
+# An idle bridge holds a process and its MCP child for nothing: it exits this long after
+# its last message or turn (0 keeps it). Omnigent starts a new one for the next message,
+# which re-attaches the same cloud session from the replayed transcript.
+IDLE_EXIT_S = float(os.environ.get("CLAUDE_CLOUD_IDLE_EXIT_S", "60"))
+LIFETIME_POLL_S = 1.0
 # What the bridge posts to a session whose turn its sandbox cut off.
 CONTINUE_PROMPT = (
     "The sandbox restarted and cut your last turn off before it finished. Tool calls that "
@@ -1078,6 +1083,7 @@ def run_turn(acp_id: str, text: str) -> str:
         turn_done.set()
         beat.join()
         s.running = False
+        touch()
 
 
 def announce(acp_id: str, s: Session) -> None:
@@ -1352,6 +1358,34 @@ def handle_prompt(msg: dict) -> None:
             remember(f"seen:{session.cloud_id}", str(session.mirrored))
 
 
+_last_activity = time.monotonic()
+
+
+def touch() -> None:
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def lifetime_over(parent_pid: int, now: float) -> str | None:
+    """Why this bridge should exit, or ``None``: its runner is gone, or it has been idle."""
+    if os.getppid() != parent_pid:
+        return "its runner exited"
+    if IDLE_EXIT_S > 0 and not any(s.running for s in SESSIONS.values()):
+        if now - _last_activity >= IDLE_EXIT_S:
+            return f"idle for {IDLE_EXIT_S:g}s"
+    return None
+
+
+def watch_lifetime(parent_pid: int) -> None:
+    """Leave (through :func:`stop`) once :func:`lifetime_over` says so."""
+    while True:
+        time.sleep(LIFETIME_POLL_S)
+        if reason := lifetime_over(parent_pid, time.monotonic()):
+            log(f"leaving: {reason}")
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
 def stop(*_: object) -> None:
     """On SIGTERM or EOF, leave: a running cloud turn goes on, and the next bridge mirrors it.
 
@@ -1363,6 +1397,10 @@ def stop(*_: object) -> None:
             session.cancel()
         elif session.running:
             log(f"leaving {session.cloud_id} running")
+    for session in SESSIONS.values():
+        for proxy in session.mcp.values():
+            if proxy.proc is not None and proxy.proc.poll() is None:
+                proxy.proc.terminate()
     log("stopping")
     sys.exit(0)
 
@@ -1370,7 +1408,11 @@ def stop(*_: object) -> None:
 def serve() -> None:
     signal.signal(signal.SIGTERM, stop)
     forget_sent_answers()
+    threading.Thread(
+        target=watch_lifetime, args=(os.getppid(),), name="lifetime", daemon=True
+    ).start()
     for line in sys.stdin:
+        touch()
         if not line.strip():
             continue
         msg = json.loads(line)
@@ -1448,6 +1490,63 @@ for line in sys.stdin:
         r = {"content": [{"type": "text", "text": t}]}
     print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
 """
+
+
+def check_lifetime() -> None:
+    """An idle bridge, or one whose runner is gone, exits; a busy one stays."""
+    global IDLE_EXIT_S
+    saved, saved_idle = dict(SESSIONS), IDLE_EXIT_S
+    SESSIONS.clear()
+    try:
+        IDLE_EXIT_S = 60.0
+        parent = os.getppid()
+        touch()
+        start = _last_activity
+        assert lifetime_over(parent, start + 59) is None
+        assert lifetime_over(parent, start + 60) == "idle for 60s"
+        working = SESSIONS["acp-working"] = Session("/", "acp-working")
+        working.running = True
+        assert lifetime_over(parent, start + 3600) is None  # a turn keeps it
+        working.running = False
+        assert lifetime_over(parent, start + 3600) is not None
+        assert lifetime_over(parent + 1, start) == "its runner exited"
+        IDLE_EXIT_S = 0.0
+        assert lifetime_over(parent, start + 3600) is None  # 0 keeps an idle bridge
+        # A real bridge process: idle it exits, and its MCP child goes with it.
+        env = {**os.environ, "CLAUDE_CLOUD_IDLE_EXIT_S": "1", "HOME": tempfile.mkdtemp()}
+        bridge = subprocess.Popen(
+            [sys.executable, __file__], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env
+        )
+        assert bridge.wait(timeout=30) == 0
+        # A runner that dies leaves the bridge with a new parent: it exits though stdin stays open.
+        lead = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys; b = subprocess.Popen([sys.executable, sys.argv[1]], "
+                "stdin=subprocess.PIPE); print(b.pid, flush=True)",
+                __file__,
+            ],
+            stdout=subprocess.PIPE,
+            env={**env, "CLAUDE_CLOUD_IDLE_EXIT_S": "0"},
+            text=True,
+        )
+        orphan = int(lead.stdout.readline())
+        lead.wait(timeout=30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                os.kill(orphan, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            os.kill(orphan, signal.SIGKILL)
+            raise AssertionError("a bridge outlived its runner")
+    finally:
+        SESSIONS.clear()
+        SESSIONS.update(saved)
+        IDLE_EXIT_S = saved_idle
 
 
 def self_check() -> None:
@@ -2296,6 +2395,7 @@ def self_check() -> None:
     assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7", "7"], urls
     assert naps == [1, 2], naps
     globals()["time"] = real_time
+    check_lifetime()
     check_archive_and_title()
     print("self-check ok")
 
