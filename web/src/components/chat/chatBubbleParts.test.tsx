@@ -434,18 +434,20 @@ describe("UserBubble messages from another session", () => {
   it("opens a collapsed message from another session while find in chat targets it", () => {
     const client = new QueryClient();
     client.setQueryData(["session", "s_src"], { title: "Reviewer", parentSessionId: null });
-    const bubble = (anchor: string | null) => (
+    const findTarget = { anchor: "user_origin", itemIds: ["user_origin"], query: "needle" };
+    const bubble = (reveal: typeof findTarget | null) => (
       <QueryClientProvider client={client}>
         <ConversationScopeContext.Provider value="s_here">
-          <ChatFindRevealContext.Provider
-            value={anchor ? { anchor, itemIds: [anchor], query: "needle" } : null}
-          >
+          <ChatFindRevealContext.Provider value={reveal}>
             <BubbleView
               bubble={{
                 kind: "user",
                 itemId: "user_origin",
                 content: [
-                  { type: "input_text", text: "[Message from session s_src]\nSummary\nneedle details" },
+                  {
+                    type: "input_text",
+                    text: "[Message from session s_src]\nSummary\nneedle details",
+                  },
                 ],
               }}
               isLastAssistant={false}
@@ -457,7 +459,7 @@ describe("UserBubble messages from another session", () => {
     const { rerender } = render(bubble(null));
     expect(screen.getByTestId("collapsed-session-message")).toBeInTheDocument();
 
-    rerender(bubble("user_origin"));
+    rerender(bubble(findTarget));
     expect(screen.queryByTestId("collapsed-session-message")).not.toBeInTheDocument();
     expect(screen.getByTestId("user-message-content").textContent).toContain("needle details");
 

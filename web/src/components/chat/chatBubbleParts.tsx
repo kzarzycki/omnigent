@@ -1099,11 +1099,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   const [expandedByReader, setExpandedByReader] = useState(!isLong);
   const [expanded, setExpanded] = useRevealedOpen(revealed, expandedByReader, setExpandedByReader);
   // Find opens a collapsed message from another session too while it targets it.
-  const [originOpen, setOriginOpen] = useRevealedOpen(
-    revealed,
-    originExpanded,
-    setOriginExpanded,
-  );
+  const [originOpen, setOriginOpen] = useRevealedOpen(revealed, originExpanded, setOriginExpanded);
   const isCollapsed = !expanded;
   const visibleText = isCollapsed ? collapsedText : renderedText;
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
