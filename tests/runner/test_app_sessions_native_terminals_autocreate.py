@@ -3551,9 +3551,7 @@ async def test_auto_create_claude_terminal_forwarder_skips_replayed_transcript_o
         assert len(synth_calls) == int(fork_carry_history)
 
     # Startup gets image guidance; session-title metadata stays out of it.
-    assert (
-        launched_args[launched_args.index("--append-system-prompt") + 1] == _STARTUP_GUIDANCE
-    )
+    assert launched_args[launched_args.index("--append-system-prompt") + 1] == _STARTUP_GUIDANCE
 
     permission_mode_index = launched_args.index("--permission-mode")
     assert launched_args[permission_mode_index + 1] == "auto"
