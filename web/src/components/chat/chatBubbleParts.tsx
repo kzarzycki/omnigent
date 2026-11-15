@@ -1098,6 +1098,12 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   const revealed = useContext(ChatFindRevealContext)?.anchor === bubble.itemId;
   const [expandedByReader, setExpandedByReader] = useState(!isLong);
   const [expanded, setExpanded] = useRevealedOpen(revealed, expandedByReader, setExpandedByReader);
+  // Find opens a collapsed message from another session too while it targets it.
+  const [originOpen, setOriginOpen] = useRevealedOpen(
+    revealed,
+    originExpanded,
+    setOriginExpanded,
+  );
   const isCollapsed = !expanded;
   const visibleText = isCollapsed ? collapsedText : renderedText;
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
@@ -1109,14 +1115,14 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
     const parsed = parseSystemMessage(text);
     if (parsed) return <SystemMessageView message={parsed} revealed={revealed} />;
   }
-  if (origin && collapsesOrigin && !originExpanded) {
+  if (origin && collapsesOrigin && !originOpen) {
     return (
       <CollapsedSessionMessage
         bubble={bubble}
         origin={origin}
         text={text}
         currentSessionId={sessionId ?? null}
-        onExpand={() => setOriginExpanded(true)}
+        onExpand={() => setOriginOpen(true)}
       />
     );
   }
@@ -1235,7 +1241,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                     {collapsesOrigin && (
                       <button
                         type="button"
-                        onClick={() => setOriginExpanded(false)}
+                        onClick={() => setOriginOpen(false)}
                         aria-expanded
                         aria-label="Collapse message"
                         data-testid="collapse-session-message"

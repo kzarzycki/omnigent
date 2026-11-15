@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
+import { ChatFindRevealContext } from "@/components/chat/chatFindReveal";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElicitationBlock } from "@/lib/blocks";
 import type { Bubble, RenderItem } from "@/lib/renderItems";
@@ -427,6 +428,41 @@ describe("UserBubble messages from another session", () => {
     expect(screen.getByTestId("user-message-content").textContent).toContain("Details follow");
 
     fireEvent.click(screen.getByTestId("collapse-session-message"));
+    expect(screen.getByTestId("collapsed-session-message")).toBeInTheDocument();
+  });
+
+  it("opens a collapsed message from another session while find in chat targets it", () => {
+    const client = new QueryClient();
+    client.setQueryData(["session", "s_src"], { title: "Reviewer", parentSessionId: null });
+    const bubble = (anchor: string | null) => (
+      <QueryClientProvider client={client}>
+        <ConversationScopeContext.Provider value="s_here">
+          <ChatFindRevealContext.Provider
+            value={anchor ? { anchor, itemIds: [anchor], query: "needle" } : null}
+          >
+            <BubbleView
+              bubble={{
+                kind: "user",
+                itemId: "user_origin",
+                content: [
+                  { type: "input_text", text: "[Message from session s_src]\nSummary\nneedle details" },
+                ],
+              }}
+              isLastAssistant={false}
+            />
+          </ChatFindRevealContext.Provider>
+        </ConversationScopeContext.Provider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(bubble(null));
+    expect(screen.getByTestId("collapsed-session-message")).toBeInTheDocument();
+
+    rerender(bubble("user_origin"));
+    expect(screen.queryByTestId("collapsed-session-message")).not.toBeInTheDocument();
+    expect(screen.getByTestId("user-message-content").textContent).toContain("needle details");
+
+    // It closes again once find moves on.
+    rerender(bubble(null));
     expect(screen.getByTestId("collapsed-session-message")).toBeInTheDocument();
   });
 
