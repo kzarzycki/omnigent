@@ -11,11 +11,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 from pydantic import ValidationError
 
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_EDIT, RESERVED_USER_LOCAL, local_single_user_enabled
@@ -117,6 +117,11 @@ async def resolve_project_session_create(
     return ProjectCreateResolution(body=resolved, project_id=project_id)
 
 
+def _pinned(value: object) -> TypeGuard[str]:
+    """Whether a project config value names a host or workspace."""
+    return isinstance(value, str) and bool(value)
+
+
 @dataclass(frozen=True)
 class ProjectPlacement:
     """Host and workspace an orchestrated create takes from a named project."""
@@ -136,9 +141,11 @@ async def resolve_project_placement(
     """Resolve the host and workspace a named project or environment pins.
 
     ``environment_id`` finds the caller's project whose config carries that
-    ``environment_id``. Returns ``None`` when neither is named. A named project
-    that is unknown, ambiguous or lacks a ``host_id`` and ``workspace`` fails
-    rather than falling back to the sender's placement.
+    ``environment_id``; one that is unknown, ambiguous or lacks a ``host_id`` and
+    ``workspace`` fails rather than falling back to the sender's placement. A
+    ``project_id`` that pins no host and workspace returns ``None``, so the create
+    keeps the sender's placement and is only filed in that project. Returns
+    ``None`` when neither is named.
     """
     if project_id is None and environment_id is None:
         return None
@@ -146,34 +153,37 @@ async def resolve_project_placement(
         raise OmnigentError(
             "Set project_id or environment_id, not both", code=ErrorCode.INVALID_INPUT
         )
-    if project_store is None:
-        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
     if project_id is not None:
-        project = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
-    else:
-        matches = [
-            candidate
-            for candidate in await asyncio.to_thread(project_store.list, user_id=user_id)
-            if candidate.config.get("environment_id") == environment_id
-        ]
-        if len(matches) > 1:
-            raise OmnigentError(
-                f"Environment {environment_id!r} is named by more than one project",
-                code=ErrorCode.INVALID_INPUT,
-            )
-        project = matches[0] if matches else None
+        project = (
+            None
+            if project_store is None
+            else await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+        )
         if project is None:
-            raise OmnigentError("Environment not found", code=ErrorCode.NOT_FOUND)
-    if project is None:
-        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+            return None
+        host_id = project.config.get("host_id")
+        workspace = project.config.get("workspace")
+        if not _pinned(host_id) or not _pinned(workspace):
+            return None
+        return ProjectPlacement(project_id=project.id, host_id=host_id, workspace=workspace)
+    if project_store is None:
+        raise OmnigentError("Environment not found", code=ErrorCode.NOT_FOUND)
+    matches = [
+        candidate
+        for candidate in await asyncio.to_thread(project_store.list, user_id=user_id)
+        if candidate.config.get("environment_id") == environment_id
+    ]
+    if len(matches) > 1:
+        raise OmnigentError(
+            f"Environment {environment_id!r} is named by more than one project",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if not matches:
+        raise OmnigentError("Environment not found", code=ErrorCode.NOT_FOUND)
+    project = matches[0]
     host_id = project.config.get("host_id")
     workspace = project.config.get("workspace")
-    if (
-        not isinstance(host_id, str)
-        or not host_id
-        or not isinstance(workspace, str)
-        or not workspace
-    ):
+    if not _pinned(host_id) or not _pinned(workspace):
         raise OmnigentError(
             "Project has no host_id and workspace to start the session in",
             code=ErrorCode.INVALID_INPUT,
@@ -438,8 +448,8 @@ async def _authorize_host_for_workspace(
         the ownership check (minimal test wirings).
     :param host_registry: Live host tunnels on this replica.
     :returns: The host's display name for error messages, or ``None``.
-    :raises OmnigentError: ``WRONG_REPLICA`` when the host is live but
-        its tunnel is on another replica.
+    :raises WrongReplicaError: When the host is live but its tunnel is on
+        another replica.
     """
     from omnigent.server.routes._host_launch import resolve_host_owner
 
@@ -456,15 +466,14 @@ async def _authorize_host_for_workspace(
     # → "host is offline" (invalid_input), which the client can't recover
     # from. If the host is live per the store but its tunnel isn't on this
     # replica, the create landed on the wrong replica — surface WRONG_REPLICA
-    # so the client re-addresses WITHOUT the key. A genuinely offline host
+    # naming the slice key that re-addresses it. A genuinely offline host
     # falls through to the invalid_input case. Both are 400; the distinct
     # code, not the status, is what tells the client to re-address rather
     # than give up. Safe to raise here: workspace validation runs BEFORE
     # create_conversation, so no orphan row is left.
     if host_registry is not None and host_registry.get(host_id) is None and host_is_live(host):
-        raise OmnigentError(
-            f"host {host.name or host_id!r} is on another replica; retry",
-            code=ErrorCode.WRONG_REPLICA,
+        raise WrongReplicaError(
+            f"host {host.name or host_id!r} is on another replica", host_id=host_id
         )
     return host.name
 

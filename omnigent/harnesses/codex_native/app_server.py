@@ -37,7 +37,6 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 
 from omnigent.models import model_catalog
-from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
 from omnigent.telemetry.surface import CLIENT_SURFACE_ENV_VAR
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -2051,14 +2050,10 @@ def mark_launch_default(
     explicitly supported) marks NO default: crowning a different visible
     model would let the launch path pin a model the configuration never
     selected. Without a pin, prefer *preferred_model* (the user's configured
-    Codex model), then Omnigent's launch default, each only when a row names
-    it; otherwise keep Codex's own first default. An unlisted preference is
-    skipped, never treated as a hidden pin, so a retired config line falls back.
+    Codex model) when a row names it; otherwise keep Codex's own first default,
+    the model an unpinned Codex launch runs. An unlisted preference is skipped,
+    never treated as a hidden pin, so a retired config line falls back.
     Rows are otherwise verbatim.
-
-    Codex's own ``isDefault`` is its built-in preference, which says nothing
-    about the model this session launched on, so a picker that trusted it
-    would name a model the pane is not running.
 
     :param rows: Raw ``model/list`` rows.
     :param pinned_model: The model the session runs, or ``None``.
@@ -2075,11 +2070,9 @@ def mark_launch_default(
 
     codex_default_index: int | None = None
     configured_index: int | None = None
-    omnigent_default_index: int | None = None
     pinned_index: int | None = None
     pinned_key = comparable_model_id(pinned_model) if pinned_model else None
     configured_key = comparable_model_id(preferred_model) if preferred_model else None
-    omnigent_default_key = comparable_model_id(CODEX_DEFAULT_MODEL)
     marked: list[_JsonObject] = []
     for index, row in enumerate(rows):
         cleaned = {key: value for key, value in row.items() if key != "isDefault"}
@@ -2088,8 +2081,6 @@ def mark_launch_default(
             codex_default_index = index
         if configured_index is None and names(row, configured_key):
             configured_index = index
-        if omnigent_default_index is None and names(row, omnigent_default_key):
-            omnigent_default_index = index
         if pinned_index is None and names(row, pinned_key):
             pinned_index = index
     if pinned_key is not None:
@@ -2098,8 +2089,6 @@ def mark_launch_default(
         default_index = pinned_index
     elif configured_index is not None:
         default_index = configured_index
-    elif omnigent_default_index is not None:
-        default_index = omnigent_default_index
     else:
         default_index = codex_default_index
     if default_index is not None:
@@ -2295,7 +2284,7 @@ def codex_catalog_fingerprint(launch: NativeCodexLaunch, *, codex_path: str | No
     profile_host = _read_databrickscfg_host(launch.profile) if launch.profile is not None else None
     return fingerprint_of(
         "codex-native",
-        "isolated-picker-v5",
+        "isolated-picker-v6",
         _codex_config_identity(_codex_home_config_source_from_env(), launch.config_profile),
         (launch.profile, (profile_host or "").rstrip("/")) if launch.profile is not None else None,
         launch.model,
@@ -4227,6 +4216,30 @@ def databricks_profile_codex_models(profile: str) -> DatabricksCodexModelListing
 
 
 def _databricks_servable_codex_models(host: str, profile: str) -> DatabricksCodexModelListing:
+    """List codex-servable ids in Codex's preference order; empty when no listing reads."""
+    from omnigent.models.databricks_model_discovery import order_by_codex_catalog
+
+    listing = _databricks_listed_codex_models(host, profile)
+    if not listing.ids:
+        return listing
+    return DatabricksCodexModelListing(
+        order_by_codex_catalog(listing.ids, _codex_catalog_models()), cached=listing.cached
+    )
+
+
+def _codex_catalog_models() -> list[object]:
+    """Return the installed Codex's catalog rows, or ``[]`` when they cannot be read."""
+    codex_path = _find_codex_cli()
+    if codex_path is None:
+        return []
+    catalog = read_codex_model_catalog(
+        codex_path, _codex_home_config_source_from_env(), timeout=5.0
+    )
+    models = catalog.get("models") if catalog else None
+    return models if isinstance(models, list) else []
+
+
+def _databricks_listed_codex_models(host: str, profile: str) -> DatabricksCodexModelListing:
     """List codex-servable ids live, then from ucode's cached copy; empty when neither reads."""
     from omnigent.models.databricks_model_discovery import discover_databricks_codex_models
 

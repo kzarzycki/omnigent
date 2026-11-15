@@ -17,6 +17,7 @@ from omnigent.harnesses.devin_native.bridge import (
     build_devin_launch_args,
     build_devin_mcp_server,
     build_devin_native_spawn_env,
+    build_devin_native_terminal_env,
     build_hook_config,
     canonical_devin_permission_mode,
     clear_agent_instructions_preamble,
@@ -54,6 +55,7 @@ from omnigent.harnesses.devin_native.main import (
     list_devin_cli_model_options,
     resolve_devin_launch_model,
 )
+from omnigent.native.native_policy_hook import TOOL_FAILED_PAYLOAD_KEY
 
 # A real pane capture from devin 3000.10.21 (200x50), trimmed. The composer sits
 # between two horizontal rules with the model/context status line below.
@@ -446,12 +448,12 @@ class TestAgentRule:
 
     def test_plain_agent_rule_carries_question_card_guidance(self, tmp_path: Path) -> None:
         """A spec with no instructions still gets the card guidance in the rule."""
-        from omnigent.runner.app import _native_startup_raw_instructions_from_spec
+        from omnigent.runner.app import _native_startup_instructions_from_spec
         from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION
         from omnigent.spec.types import AgentSpec, ExecutorSpec
 
         spec = AgentSpec(spec_version=1, name="devin", instructions=None, executor=ExecutorSpec())
-        startup_text = _native_startup_raw_instructions_from_spec(spec)
+        startup_text = _native_startup_instructions_from_spec(spec)
         assert write_devin_agent_rule(tmp_path, startup_text, session_id="sess-a")
         rule = tmp_path / ".windsurf" / "rules" / "omnigent-agent-instructions.md"
         assert ASK_USER_QUESTION_INSTRUCTION in rule.read_text(encoding="utf-8")
@@ -748,6 +750,23 @@ class TestSpawnEnv:
         assert env["HARNESS_DEVIN_NATIVE_REQUEST_SESSION_ID"] == "conv_abc123"
         assert Path(env["HARNESS_DEVIN_NATIVE_BRIDGE_DIR"]).is_dir()
 
+    @pytest.mark.usefixtures("_isolated_bridge_root")
+    def test_terminal_env_keeps_variables_forwarded_for_the_session(self) -> None:
+        env = build_devin_native_terminal_env(
+            "conv_abc123",
+            source_env={
+                "PATH": "/usr/bin",
+                "OMNIGENT_RUNNER_SESSION_ENV_NAMES": "ARCATERM_CAPABILITY,ARCATERM_PROJECTS_ROOT",
+                "ARCATERM_CAPABILITY": "capability-for-pane-1",
+                "ARCATERM_PROJECTS_ROOT": "",
+                "UNLISTED_SECRET": "nope",
+            },
+        )
+        assert env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+        assert env["ARCATERM_PROJECTS_ROOT"] == ""
+        assert env["PATH"] == "/usr/bin"
+        assert "UNLISTED_SECRET" not in env
+
 
 class TestNormalizeToolResult:
     """Devin sends ``tool_response``; the shared policy seam reads ``tool_output``."""
@@ -763,6 +782,19 @@ class TestNormalizeToolResult:
             {"tool_response": {"success": False, "output": "", "error": "boom"}}
         )
         assert payload["tool_output"] == "boom"
+
+    def test_failure_is_flagged_for_result_policies(self) -> None:
+        payload = _normalize_tool_result(
+            {"tool_response": {"success": False, "output": "cat: x: No such file", "error": None}}
+        )
+        assert payload["tool_output"] == "cat: x: No such file"
+        assert payload[TOOL_FAILED_PAYLOAD_KEY] is True
+
+    def test_success_is_not_flagged(self) -> None:
+        payload = _normalize_tool_result(
+            {"tool_response": {"success": True, "output": "hi", "error": None}}
+        )
+        assert TOOL_FAILED_PAYLOAD_KEY not in payload
 
     def test_existing_tool_output_wins(self) -> None:
         payload = _normalize_tool_result({"tool_output": "kept", "tool_response": {"output": "x"}})

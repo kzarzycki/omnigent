@@ -116,11 +116,25 @@ async def test_unknown_project_or_environment_never_falls_back_to_the_sender(
     assert {c.id for c in store.list_conversations().data} == before
 
 
-async def test_project_without_a_host_and_workspace_is_refused(auth_client, stack):
-    source, _, _ = stack
+async def test_project_without_a_host_and_workspace_keeps_the_sender_placement(
+    auth_client, stack
+):
+    source, _, store = stack
     project_id = await _project(auth_client, "Bare", {"environment_id": ENVIRONMENT_ID})
 
     response = await _orchestrate(auth_client, source, project_id=project_id)
+
+    assert response.status_code == 201, response.text
+    created = store.get_conversation(response.json()["id"])
+    assert created.workspace == "/sender/checkout"
+    assert created.project_id == project_id
+
+
+async def test_environment_without_a_host_and_workspace_is_refused(auth_client, stack):
+    source, _, _ = stack
+    await _project(auth_client, "Bare", {"environment_id": ENVIRONMENT_ID})
+
+    response = await _orchestrate(auth_client, source, environment_id=ENVIRONMENT_ID)
 
     assert response.status_code == 400
     assert "no host_id and workspace" in response.json()["error"]["message"]
