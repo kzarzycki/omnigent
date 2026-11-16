@@ -117,21 +117,12 @@ def strip_ask_user_question_guidance(instructions: str) -> str:
     )
 
 
-def native_startup_instructions(spec: AgentSpec) -> str | None:
-    """
-    Compose the text a native harness gets once, at terminal launch.
-
-    The author's verbatim instructions plus the card guidance. Per-turn
-    framework text is left out: a launch is not tied to one turn, but the card
-    guidance is static, so it can ride the startup channel.
-
-    :param spec: The parsed AgentSpec.
-    :returns: The composed startup text, or ``None`` when nothing applies.
-    """
-    return append_framework_instructions(
-        raw_author_instructions(spec),
-        [ASK_USER_QUESTION_INSTRUCTION] if offers_ask_user_question(spec) else [],
-    )
+WORKSPACE_IMAGE_INSTRUCTION = (
+    "When showing an existing screenshot or raster image saved inside the session "
+    "workspace, embed it in your reply as `![description](/absolute/workspace/path/image.png)` "
+    "unless the user's instructions say otherwise. Use the actual workspace file path; "
+    "remote image URLs and files outside the workspace cannot be displayed."
+)
 
 
 def _framework_instructions_for(spec: AgentSpec) -> list[str]:
@@ -150,8 +141,7 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
     case the prompt must not steer the model toward tools it lacks.
 
     :param spec: The parsed AgentSpec.
-    :returns: The applicable spec-level framework instructions; empty for
-        an agent with no sub-agents and the browser group disabled.
+    :returns: The applicable spec-level framework instructions.
     """
     instructions: list[str] = []
     dispatches_web_researcher = any(entry.name == "web_fetch" for entry in spec.tools.builtins)
@@ -161,6 +151,7 @@ def _framework_instructions_for(spec: AgentSpec) -> list[str]:
         instructions.append(EMBEDDED_BROWSER_PRIORITY_INSTRUCTION)
     if offers_ask_user_question(spec):
         instructions.append(ASK_USER_QUESTION_INSTRUCTION)
+    instructions.append(WORKSPACE_IMAGE_INSTRUCTION)
     return instructions
 
 
@@ -264,11 +255,8 @@ def build_instructions_nullable(
 ) -> str | None:
     """Like :func:`build_instructions`, but returns ``None`` instead of seeding
     the fabricated ``"You are a helpful assistant."`` fallback when there is
-    truly nothing to compose (no author text, no per-request text, no skills
-    hint, no applicable spec-level or per-turn framework instructions).
-    The embedded-browser guidance makes this rare, but a spec that sets
-    ``tool_groups.browser: false`` with no author text and no sub-agents
-    composes to ``None``.
+    truly nothing to compose. Workspace-image guidance currently applies to
+    every spec, including agents with no author text or browser tools.
 
     Delivery channels that must not leak the fallback literal (e.g. a warn
     check, or a first-user-turn prefix) call this instead of comparing
@@ -290,8 +278,7 @@ def build_instructions_nullable(
 def raw_author_instructions(spec: AgentSpec) -> str | None:
     """Return ``AgentSpec.instructions`` verbatim, or ``None`` if empty/whitespace.
 
-    Used by startup channels that must carry only the author's text, not a
-    per-turn composed string.
+    Used to distinguish author text from additive framework guidance.
 
     :param spec: The resolved ``AgentSpec``.
     :returns: The original resolved instructions text, unstripped, or
@@ -300,6 +287,25 @@ def raw_author_instructions(spec: AgentSpec) -> str | None:
     if spec.instructions and spec.instructions.strip():
         return spec.instructions
     return None
+
+
+def build_native_startup_instructions(spec: AgentSpec | None) -> str:
+    """Compose author text and stable image guidance for native session startup.
+
+    Startup channels persist across turns, so they must not carry per-turn
+    framework metadata or guidance for tools the native harness does not expose.
+
+    The question-card guidance is static too, so it rides the startup channel.
+
+    :param spec: Resolved agent spec, or ``None`` when unavailable.
+    :returns: Author instructions followed by card and workspace-image guidance.
+    """
+    authored = raw_author_instructions(spec) if spec is not None else None
+    framework = [
+        *([ASK_USER_QUESTION_INSTRUCTION] if offers_ask_user_question(spec) else []),
+        WORKSPACE_IMAGE_INSTRUCTION,
+    ]
+    return append_framework_instructions(authored, framework) or "\n\n".join(framework)
 
 
 def _strip_output_annotations(

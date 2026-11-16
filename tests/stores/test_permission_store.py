@@ -1375,3 +1375,16 @@ def test_list_for_sessions_keys_by_caller_spelling(
     result = store.list_for_sessions([asked])
     assert list(result) == [asked]
     assert [g.user_id for g in result[asked]] == ["alice"]
+
+
+# ── validate_grants (default) ─────────────────────────────────────────────────
+
+
+def test_validate_grants_default_keeps_order_and_creates_no_users(
+    store: SqlAlchemyPermissionStore,
+) -> None:
+    """The base default accepts every grant in input order and writes nothing."""
+    grants = [("bob@example.com", 1), ("alice@example.com", 2), ("__public__", 1)]
+    assert store.validate_grants(grants) == grants
+    assert store.validate_grants([]) == []
+    assert store.user_exists("bob@example.com") is False
