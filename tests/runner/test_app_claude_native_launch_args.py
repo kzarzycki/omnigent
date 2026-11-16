@@ -1956,3 +1956,20 @@ def test_claude_terminal_env_keeps_a_user_api_timeout(
         assert terminal_env["API_TIMEOUT_MS"] == "600000"
     else:
         assert "API_TIMEOUT_MS" not in terminal_env
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (("Read", "Grep"), "Read,Grep"),
+        (("*",), ""),
+        (("Read", "*"), ""),
+        (("Read", "Task(foo)", "Task(bar)"), "Read,Task"),
+        (("Read", "mcp__x__y"), "Read"),
+        (("mcp__x__y",), ""),
+    ],
+)
+def test_claude_tools_arg_maps_imported_tool_names(names: tuple[str, ...], expected: str) -> None:
+    from omnigent.runner.native.orchestration import _claude_tools_arg
+
+    assert _claude_tools_arg(names) == expected

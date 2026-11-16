@@ -12649,6 +12649,20 @@ def _claude_code_agent_from_file(path: Path, root: Path | None = None) -> Any:  
         ) from None
 
 
+def _claude_code_agent_bundle_noting_tools(path: Path, root: Path | None = None) -> bytes:
+    """Bundle a Claude Code agent file, noting when its tool limits apply only on claude-native."""
+    from omnigent.claude_code_agent import claude_code_agent_bundle
+
+    agent = _claude_code_agent_from_file(path, root)
+    if agent.allowed_tools or agent.disallowed_tools:
+        click.echo(
+            f"Note: {_printable(agent.name)}'s tool restrictions are enforced "
+            "on claude-native sessions only.",
+            err=True,
+        )
+    return claude_code_agent_bundle(agent)
+
+
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/"
 
 
@@ -12776,9 +12790,7 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
         if list_only:
             raise click.UsageError("--list only applies to a GitHub repo.")
         if path.is_file() and path.suffix.lower() == ".md":
-            from omnigent.claude_code_agent import claude_code_agent_bundle
-
-            bundle_bytes = claude_code_agent_bundle(_claude_code_agent_from_file(path))
+            bundle_bytes = _claude_code_agent_bundle_noting_tools(path)
         else:
             bundle_bytes = _bundle(path)
         with _agent_api_client(server) as client:
@@ -12841,11 +12853,9 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
             return
         if not yes:
             click.confirm("Install them? Only install agents from repos you trust", abort=True)
-        from omnigent.claude_code_agent import claude_code_agent_bundle
-
         bundles = {
             n: (
-                claude_code_agent_bundle(_claude_code_agent_from_file(d, checkout))
+                _claude_code_agent_bundle_noting_tools(d, checkout)
                 if d.is_file()
                 else _bundle_untrusted_dir(d)
             )

@@ -676,3 +676,96 @@ def test_add_repo_at_name_picks_one_plugin_agent(
 
     assert result.exit_code == 0, result.output
     assert [yaml.safe_load(t["config.yaml"])["name"] for t in _posted_tars(server)] == ["scout"]
+
+
+def test_add_says_tool_restrictions_apply_on_claude_native_only(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "reviewer.md"
+    source.write_text(_REVIEWER)
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+    assert result.exit_code == 0, result.output
+    assert "tool restrictions are enforced on claude-native sessions only" in result.stderr
+
+    plain = tmp_path / "scout.md"
+    plain.write_text("---\nname: scout\n---\nFind files.\n")
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(plain)])
+    assert result.exit_code == 0, result.output
+    assert "claude-native" not in result.stderr
+
+
+@pytest.mark.parametrize("name", ["../../x", "a.b", "a b", "ui"])
+def test_add_refuses_an_agent_name_the_server_would_reject(
+    tmp_path: Path, server: _FakeServer, name: str
+) -> None:
+    source = tmp_path / "bad.md"
+    source.write_text(f"---\nname: {name!r}\n---\nbody\n")
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+    assert result.exit_code != 0
+    assert "agent name" in result.stderr
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+def _add_repo_listing(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, server: _FakeServer
+) -> tuple[list[str], str]:
+    _fake_clone(monkeypatch, repo)
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", "acme/kit", "-y"])
+    names = [yaml.safe_load(t["config.yaml"])["name"] for t in _posted_tars(server)]
+    return names, result.output + result.stderr
+
+
+def _outside_agent(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("---\nname: leaked\n---\nOutside the checkout.\n")
+    return outside
+
+
+def test_add_repo_ignores_a_symlinked_agents_dir(
+    tmp_path: Path, server: _FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "src"
+    (repo / "kit" / ".claude-plugin").mkdir(parents=True)
+    (repo / "kit" / ".claude-plugin" / "plugin.json").write_text("{}")
+    (repo / "kit" / "agents").symlink_to(_outside_agent(tmp_path))
+    names, output = _add_repo_listing(repo, monkeypatch, server)
+    assert "leaked" not in names and "leaked" not in output
+
+
+def test_add_repo_ignores_a_symlinked_plugin_manifest(
+    tmp_path: Path, server: _FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "src"
+    (repo / "kit" / ".claude-plugin").mkdir(parents=True)
+    outside = _outside_agent(tmp_path)
+    (outside / "plugin.json").write_text("{}")
+    (repo / "kit" / ".claude-plugin" / "plugin.json").symlink_to(outside / "plugin.json")
+    (repo / "kit" / "agents").mkdir()
+    (repo / "kit" / "agents" / "scout.md").write_text("---\nname: scout\n---\nx\n")
+    names, _ = _add_repo_listing(repo, monkeypatch, server)
+    assert names == []
+
+
+def test_add_repo_refuses_a_symlinked_agent_file(
+    tmp_path: Path, server: _FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "src"
+    _write_plugin(repo)
+    (repo / "kit" / "agents" / "scout.md").unlink()
+    (repo / "kit" / "agents" / "scout.md").symlink_to("reviewer.md")
+    names, output = _add_repo_listing(repo, monkeypatch, server)
+    assert names == []
+    assert "is a symlink" in output
+
+
+def test_find_plugin_agent_files_skips_git_dirs(tmp_path: Path) -> None:
+    from omnigent.claude_code_agent import find_plugin_agent_files
+
+    for plugin in ("kit", ".git/modules/kit"):
+        base = tmp_path / plugin
+        (base / ".claude-plugin").mkdir(parents=True)
+        (base / ".claude-plugin" / "plugin.json").write_text("{}")
+        (base / "agents").mkdir()
+        (base / "agents" / "a.md").write_text("x")
+    assert find_plugin_agent_files(tmp_path) == [tmp_path / "kit" / "agents" / "a.md"]

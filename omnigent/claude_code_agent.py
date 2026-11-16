@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from omnigent.spec.validator import _AGENT_NAME_PATTERN, _RESERVED_AGENT_NAMES
+
 _FRONTMATTER_FENCE = "---"
 
 
@@ -76,9 +78,15 @@ def parse_claude_code_agent(text: str) -> ClaudeCodeAgent:
     name = meta.get("name")
     if not isinstance(name, str) or not name.strip():
         raise ClaudeCodeAgentError("the frontmatter has no `name`.")
+    name = name.strip()
+    if not _AGENT_NAME_PATTERN.match(name) or name in _RESERVED_AGENT_NAMES:
+        raise ClaudeCodeAgentError(
+            f"agent name {name!r} must match [a-zA-Z0-9_-]+ and not be reserved "
+            f"(no dots, slashes or whitespace)."
+        )
     description = meta.get("description")
     return ClaudeCodeAgent(
-        name=name.strip(),
+        name=name,
         description=description.strip() if isinstance(description, str) else "",
         instructions="\n".join(lines[end + 1 :]).strip(),
         allowed_tools=_name_list(meta.get("tools"), "tools"),
@@ -126,11 +134,16 @@ def find_plugin_agent_files(root: Path) -> list[Path]:
     """Agent Markdown files shipped by the Claude Code plugins under ``root``.
 
     A plugin is a directory with ``.claude-plugin/plugin.json``; its agents are
-    the ``agents/**/*.md`` files beside it.
+    the ``agents/**/*.md`` files beside it. Any manifest or agent file that
+    resolves outside ``root`` (through a symlinked file or directory) is skipped.
     """
+    resolved_root = root.resolve()
     found: list[Path] = []
     for manifest in sorted(root.rglob(".claude-plugin/plugin.json")):
-        if ".git" in manifest.parts:
+        if ".git" in manifest.parts or not manifest.resolve().is_relative_to(resolved_root):
             continue
-        found.extend(sorted((manifest.parent.parent / "agents").rglob("*.md")))
+        agents_dir = manifest.parent.parent / "agents"
+        found.extend(
+            f for f in sorted(agents_dir.rglob("*.md")) if f.resolve().is_relative_to(resolved_root)
+        )
     return list(dict.fromkeys(found))

@@ -7968,6 +7968,26 @@ def _spec_tool_names(spec: AgentSpec, key: str) -> tuple[str, ...]:
     return tuple(name for name in value if isinstance(name, str) and name)
 
 
+def _claude_tools_arg(names: tuple[str, ...]) -> str:
+    """
+    The ``--tools`` value for an imported agent's ``tools`` list, or ``""`` for none.
+
+    ``--tools`` takes built-in tool names only and silently drops the rest; ``*``
+    would leave no tools. So ``*`` means no restriction, ``Task(x)`` narrows to
+    ``Task``, and ``mcp__`` names (not governed by ``--tools``) are dropped.
+    """
+    if "*" in names:
+        return ""
+    kept: list[str] = []
+    for name in names:
+        base = name.split("(", 1)[0].strip()
+        if base.startswith("mcp__") or not base:
+            _logger.warning("Claude --tools cannot restrict %r; leaving it unrestricted", name)
+        elif base not in kept:
+            kept.append(base)
+    return ",".join(kept)
+
+
 async def _launch_claude_native_terminal(
     resource_registry: SessionResourceRegistry,
     *,
@@ -7978,7 +7998,10 @@ async def _launch_claude_native_terminal(
     """
     Launch a session's Claude Code terminal with its agent's tool switches.
 
-    Every claude-native launch (runner auto-create, and XX however Claude starts.
+    Every claude-native launch (runner auto-create, and the CLI's explicit
+    terminal spec on fresh start or cold resume) goes through here, so an
+    agent's ``native_ask_user_question: false`` and imported ``allowed_tools``
+    (as ``--tools``) hold however Claude starts.
 
     :param resource_registry: Registry that launches the terminal.
     :param agent_spec: The session's agent spec, or ``None`` when unknown.
@@ -7993,9 +8016,11 @@ async def _launch_claude_native_terminal(
     if disallowed:
         spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
     inner_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    allowed = _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
+    allowed = _claude_tools_arg(
+        _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
+    )
     if allowed and "--tools" not in spec.args:
-        spec = dataclasses.replace(spec, args=[*spec.args, "--tools", ",".join(allowed)])
+        spec = dataclasses.replace(spec, args=[*spec.args, "--tools", allowed])
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
