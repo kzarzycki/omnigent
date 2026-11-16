@@ -130,10 +130,12 @@ one in the fork means editing them there.
 the branch and any stash alone. Resolve each conflict by what the fork's commit was
 for, read from its message and diff (`git log -p MERGE_HEAD..HEAD -- <file>`):
 
-- **Upstream fixed the same thing a bit differently → take upstream's version.**
-  Upstream's code is what every later upstream change builds on.
-- **Keep ours, or combine the two, only where upstream's version gives less of
-  what our commit was for.**
+- **Take upstream's behaviour.** Upstream's code is what every later upstream
+  change builds on, and the fork builds on upstream, never against it
+  (`AGENTS.md`, This fork: build on upstream).
+- **Then re-add what our commit was for, as an addition on top:** a new
+  argument, flag or hook, never a different meaning for something upstream has.
+  Drop ours where upstream's version already covers it.
 - **Never weaken a sandbox, auth or permission check** in a resolution: where
   ours and upstream's disagree on one, keep the stricter.
 - **Can't tell what our commit was for, or which version gives more of it →**
@@ -150,8 +152,8 @@ bash "$DIR/sync-fork.sh" $NEW <summary file>   # sees the merge, pushes, opens t
 git stash list -n1 | grep -q 'sync-fork autostash' && git stash pop
 ```
 
-Report one line per conflict: the file, our commit, `took upstream`, `kept
-ours`, `combined` or `dropped ours`, and why in a few words.
+Report one line per conflict: the file, our commit, `took upstream`,
+`re-added ours on top` or `dropped ours`, and why in a few words.
 
 An unresolved conflict is a HOLD. Abort the merge and delete the local sync branch
 (`mine` was never touched), return and pop the stash, then report
