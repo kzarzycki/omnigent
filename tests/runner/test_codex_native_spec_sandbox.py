@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from omnigent.runner.native.orchestration import (
-    _CodexNativeLaunchConfig,
     _codex_launch_config_for_spec,
+    _CodexNativeLaunchConfig,
 )
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 
