@@ -446,6 +446,11 @@ from omnigent.server.schemas import (
     SessionStatusEvent,
     SessionUsageEvent,
 )
+from omnigent.server.session_defaults import (
+    read_session_defaults,
+    require_default_harness,
+    spec_names_harness,
+)
 from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     StartupInputContext,
@@ -12686,6 +12691,45 @@ async def _resolve_native_smart_routing(
     return native_agent.agent_name, model, verdict, None
 
 
+async def _session_defaults_for_unpinned_spec(
+    request: Request,
+    user_id: str | None,
+    agent: Agent,
+    spec: AgentSpec,
+    model_override: str | None,
+) -> tuple[str, str | None]:
+    """
+    Pick the harness and model for a spec that names no harness.
+
+    The request named no harness, so the user's default harness applies. Their
+    default model rides along only when neither the request nor the spec names
+    one, since it was chosen for that default harness.
+
+    :param request: The create request, for the server's preference store.
+    :param user_id: Authenticated user id, or ``None`` in single-user mode.
+    :param agent: The agent being started.
+    :param spec: The agent's (or named sub-agent's) parsed spec.
+    :param model_override: The request's validated model, if any.
+    :returns: ``(harness_override, model_override)`` for the new session.
+    :raises OmnigentError: ``invalid_input`` when the user has no default harness.
+    """
+    defaults = await asyncio.to_thread(
+        read_session_defaults,
+        user_id=user_id,
+        preference_store=getattr(request.app.state, "preference_store", None),
+        preference_policy=getattr(request.app.state, "preference_policy", None),
+    )
+    harness = await asyncio.to_thread(
+        _validated_harness_override, require_default_harness(defaults, agent.name), agent
+    )
+    assert harness is not None
+    if model_override is None and not spec.executor.model and defaults.model:
+        model_override, _ = validate_session_model_metadata(
+            model_override=defaults.model, reasoning_effort=None
+        )
+    return harness, model_override
+
+
 async def _create_session_from_existing_agent(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -13062,6 +13106,15 @@ async def _create_session_from_existing_agent(
         selected_registry_services.update(registry_services(selection_spec))
         if selection_spec is not None and body.sub_agent_name:
             selection_spec = _find_spec_by_name(selection_spec, body.sub_agent_name)
+        if (
+            harness_override is None
+            and not _native_smart_routing
+            and selection_spec is not None
+            and not spec_names_harness(selection_spec)
+        ):
+            harness_override, model_override = await _session_defaults_for_unpinned_spec(
+                request, user_id, agent, selection_spec, model_override
+            )
         from omnigent.server.routes.sandbox_inference import (
             configured_snapshot,
             prepare_create_inference,
@@ -13292,7 +13345,9 @@ async def _create_session_from_existing_agent(
         )
         try:
             validated_launch_args = (
-                _derive_terminal_launch_args_from_spec(sub_spec) if sub_spec is not None else None
+                _derive_terminal_launch_args_from_spec(sub_spec, harness=selected_harness)
+                if sub_spec is not None
+                else None
             )
         except ValueError as exc:
             raise OmnigentError(
@@ -13365,7 +13420,7 @@ async def _create_session_from_existing_agent(
     if needs_launch_args_from_spec and own_spec is not None:
         try:
             validated_launch_args = _derive_terminal_launch_args_from_spec(
-                own_spec, headless_defaults=False
+                own_spec, headless_defaults=False, harness=selected_harness
             )
         except ValueError as exc:
             raise OmnigentError(
@@ -13793,6 +13848,14 @@ def _create_session_from_bundle(
             enforce_handler_allowlist=True,
         )
     assert spec.name is not None
+    if not spec_names_harness(spec):
+        # An upload carries no harness_override; the CLI writes ``--harness``
+        # or the configured default into the bundle before uploading.
+        raise OmnigentError(
+            f"agent bundle {spec.name!r} names no harness: set executor.config.harness, "
+            "pass --harness, or set a default harness in your Omnigent config",
+            code=ErrorCode.INVALID_INPUT,
+        )
 
     from omnigent.server.routes.sandbox_inference import configured_snapshot
 

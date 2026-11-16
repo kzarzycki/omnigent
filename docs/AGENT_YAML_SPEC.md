@@ -89,6 +89,15 @@ Canonical `executor.harness` ids:
 Aliases such as `claude`, `opencode`, `devin`, `agy`, `github-copilot`,
 `kimi-code`, `qwen-code`, `grok-build` and `native-goose` resolve to these ids.
 
+`harness` and `model` are optional. A spec without them (for example a reviewer
+meant for Claude one day and Codex the next) runs on the harness and model the
+session-create request names (`harness_override`, `model_override`), else on the
+user's defaults: the configuration saved to the server with
+`omnigent config cloud save`, or on a single-user server its own `harness` and
+`model` config. The user's default model applies only when the default harness
+does. With neither, the session is refused. Harness-specific keys such as
+`executor.config.permission_mode` apply only when the session runs that harness.
+
 Set the Databricks profile under `executor.auth`. The older top-level
 `executor.profile` shorthand is legacy and should not be used in new specs.
 

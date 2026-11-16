@@ -2504,6 +2504,9 @@ def create_app(
     app.state.startup_inputs = startup_inputs
     app.state.permission_store = permission_store
     app.state.host_store = host_store
+    # Session create reads a user's saved defaults for a spec that names no harness.
+    app.state.preference_store = preference_store
+    app.state.preference_policy = preference_policy
     from omnigent.runtime import _globals as runtime_globals
 
     runtime_globals._host_store = host_store

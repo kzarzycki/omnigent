@@ -443,23 +443,19 @@ def test_omnigent_executor_accepts_antigravity_native_harness() -> None:
     assert result.valid, f"Expected valid spec, got errors: {result.errors}"
 
 
-def test_omnigent_executor_rejects_missing_harness() -> None:
+def test_omnigent_executor_accepts_missing_harness() -> None:
     """
-    ``omnigent`` executor without ``config.harness`` is rejected.
+    ``omnigent`` executor without ``config.harness`` is valid.
 
-    Without the harness selector the omnigent factory cannot
-    pick a backend and would silently fall back to a MockExecutor.
-    The validator fails loud instead.
+    The spec is portable: session create picks the harness from the request
+    or the user's configured default, and refuses when neither names one.
     """
     spec = _minimal_spec(
         llm=LLMConfig(model="databricks-claude-sonnet-4-6"),
         executor=ExecutorSpec(type="omnigent", config={}),
     )
     result = validate(spec)
-    assert not result.valid
-    assert any("executor.config.harness" in e.path for e in result.errors), (
-        f"Expected executor.config.harness error, got: {result.errors}"
-    )
+    assert result.valid, f"Expected valid spec, got errors: {result.errors}"
 
 
 def test_omnigent_executor_rejects_unknown_harness() -> None:

@@ -11088,7 +11088,7 @@ def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
 
 
 def _derive_terminal_launch_args_from_spec(
-    spec: AgentSpec, *, headless_defaults: bool = True
+    spec: AgentSpec, *, headless_defaults: bool = True, harness: str | None = None
 ) -> list[str] | None:
     """
     Derive native-terminal YOLO pass-through args from a trusted sub-spec.
@@ -11165,12 +11165,18 @@ def _derive_terminal_launch_args_from_spec(
         cursor-native spec falls back to the headless full-bypass default.
         ``True`` for headless worker creates; ``False`` for top-level /
         self-resolved creates, where only explicit opt-ins translate.
+    :param harness: The session's effective harness, e.g. ``"codex-native"``
+        from a ``harness_override``. ``None`` reads the spec's own harness. A
+        harness-specific key such as ``permission_mode`` translates only for the
+        harness the session actually runs, never the one the spec names.
     :returns: A flat CLI-arg list to store as the child session's
         ``terminal_launch_args``, or ``None`` when nothing should be set.
     :raises ValueError: If a spec-derived argument violates the same
         bounds enforced for request-supplied ``terminal_launch_args``.
     """
-    harness = _spec_harness(spec)
+    from omnigent.harness_aliases import canonicalize_harness
+
+    harness = (canonicalize_harness(harness) or harness) if harness else _spec_harness(spec)
     if harness == _CLAUDE_NATIVE_HARNESS:
         permission_mode = spec.executor.config.get("permission_mode")
         if permission_mode:

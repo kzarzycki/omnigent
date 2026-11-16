@@ -166,8 +166,8 @@ def validate_omnigent_executor(
     Validate fields for ``executor.type: omnigent``.
 
     The omnigent executor wraps an omnigent harness subprocess.
-    ``executor.config.harness`` is optional — when absent, the
-    omnigent factory selects a default. When set, it must be one
+    ``executor.config.harness`` is optional — when absent, session
+    create picks one from the request or the user's configuration. When set, it must be one
     of :data:`OMNIGENT_HARNESSES`. ``executor.config.profile`` is
     always optional and names a Databricks credential profile when
     the harness routes through Databricks.
@@ -209,13 +209,9 @@ def validate_omnigent_executor(
                 "instructions",
                 "pi-native system_prompt_mode='replace' requires non-empty authored instructions",
             )
-    if not harness:
-        result.add(
-            "executor.config.harness",
-            f"required when executor.type is {OMNIGENT_EXECUTOR_TYPE!r} — "
-            f"must be one of {sorted(_OMNIGENT_ACCEPTED_HARNESSES)}",
-        )
-    elif canonicalize_harness(harness) not in OMNIGENT_HARNESSES:
+    # A spec without a harness is portable: session create picks one from the
+    # request or the user's configuration (see ``resolve_unpinned_harness``).
+    if harness and canonicalize_harness(harness) not in OMNIGENT_HARNESSES:
         package = missing_install_packages().get(harness) or missing_install_packages().get(
             canonicalize_harness(harness) or harness
         )
@@ -432,12 +428,9 @@ def load_omnigent_yaml(
         #
         # The ``"must be one of"`` prefix is the wording emitted by
         # ``validate_omnigent_executor`` (same module) for an
-        # out-of-allowlist harness. It deliberately does NOT match the
-        # sibling "required when executor.type is 'omnigent' — must be
-        # one of ..." message for a *missing* harness, which is a plain
-        # authoring mistake, not a version skew. Producer and matcher
-        # live in this file, so the coupling stays local; if that
-        # message is reworded, update both together.
+        # out-of-allowlist harness. Producer and matcher live in this
+        # file, so the coupling stays local; if that message is
+        # reworded, update both together.
         if any(
             e.path == "executor.config.harness" and e.message.startswith("must be one of")
             for e in result.errors

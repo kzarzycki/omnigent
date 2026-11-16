@@ -561,3 +561,129 @@ async def test_override_growth_rejects_patch_without_mutation(client: httpx.Asyn
     assert conv.harness_override == harness
     assert conv.model_override is None
     assert conv.title != "must not persist"
+
+
+async def _install_unpinned_agent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    executor_config: dict[str, str] | None = None,
+) -> str:
+    """Install an agent whose spec names no model and, by default, no harness.
+
+    :param client: Test HTTP client.
+    :param monkeypatch: Clears the single-user marker: this unauthenticated app
+        stamps no owner on installs, and the marker maps the creator to ``local``.
+    :param executor_config: Extra ``executor.config`` keys, e.g. ``{"permission_mode": "plan"}``.
+    :returns: The installed agent's id.
+    """
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    import yaml
+
+    from tests._helpers.session import bundle_files
+
+    config = {
+        "spec_version": 1,
+        "name": "portable-reviewer",
+        "instructions": "Review the change.",
+        "executor": {"type": "omnigent", "config": dict(executor_config or {})},
+    }
+    bundle = bundle_files({"config.yaml": yaml.safe_dump(config).encode()})
+    installed = await client.post(
+        "/v1/agents", files={"bundle": ("agent.tar.gz", bundle, "application/gzip")}
+    )
+    assert installed.status_code in (200, 201), installed.text
+    return installed.json()["id"]
+
+
+async def test_unpinned_spec_starts_on_the_requested_harness_and_model(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec without harness or model runs on what the create request names."""
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent_id, "harness_override": "pi", "model_override": "model-a"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["harness"] == "pi"
+    session = (await client.get(f"/v1/sessions/{resp.json()['id']}")).json()
+    assert session["model_override"] == "model-a"
+
+
+@pytest.mark.parametrize(
+    ("user_config", "expected"),
+    [
+        ({"harness": {"default": "pi"}, "model": "model-b"}, ("pi", "model-b")),
+        ({"harness": "codex-native"}, ("codex-native", None)),
+    ],
+)
+async def test_unpinned_spec_falls_back_to_the_users_configured_defaults(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    user_config: dict[str, Any],
+    expected: tuple[str, str | None],
+) -> None:
+    """With no override, a single-user server starts on the user's config defaults."""
+    import yaml
+
+    from omnigent.runtime import get_conversation_store
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(user_config))
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    resp = await client.post("/v1/sessions", json={"agent_id": agent_id})
+    assert resp.status_code == 201, resp.text
+    conv = get_conversation_store().get_conversation(resp.json()["id"])
+    assert (conv.harness_override, conv.model_override) == expected
+
+
+async def test_unpinned_spec_without_any_default_is_refused(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nothing names a harness: the create fails before any session exists."""
+    from omnigent.runtime import get_conversation_store
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    store = get_conversation_store()
+    before = {conv.id for conv in store.list_conversations().data}
+    resp = await client.post("/v1/sessions", json={"agent_id": agent_id})
+    assert resp.status_code == 400, resp.text
+    assert "names no harness" in resp.text
+    assert {conv.id for conv in store.list_conversations().data} == before
+
+
+@pytest.mark.parametrize(
+    ("spec_harness", "harness", "expected_args"),
+    [
+        (None, "claude-native", ["--permission-mode", "plan"]),
+        # A Claude-only key must not reach codex: ``--permission-mode`` is not a
+        # codex flag, and codex would exit before its thread starts.
+        (None, "codex-native", None),
+        ("claude-native", "codex-native", None),
+    ],
+)
+async def test_spec_claude_keys_follow_the_session_harness(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    spec_harness: str | None,
+    harness: str,
+    expected_args: list[str] | None,
+) -> None:
+    """``permission_mode`` translates for the harness the session actually runs."""
+    from omnigent.runtime import get_conversation_store
+
+    executor_config = {"permission_mode": "plan"}
+    if spec_harness is not None:
+        executor_config["harness"] = spec_harness
+    agent_id = await _install_unpinned_agent(client, monkeypatch, executor_config)
+    resp = await client.post(
+        "/v1/sessions", json={"agent_id": agent_id, "harness_override": harness}
+    )
+    assert resp.status_code == 201, resp.text
+    conv = get_conversation_store().get_conversation(resp.json()["id"])
+    assert conv.terminal_launch_args == expected_args
