@@ -18484,6 +18484,9 @@ def test_disabled_mcp_settings_launch_hook(tmp_path, monkeypatch, active, saved)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write a read-only directory"
+)
 def test_a_read_only_pinned_tmpdir_still_allocates_bridges_elsewhere(tmp_path: Path) -> None:
     """A runner whose ``TMPDIR`` exists but can't be written keeps tempfile's fallback."""
     pinned = tmp_path / "read-only-tmp"

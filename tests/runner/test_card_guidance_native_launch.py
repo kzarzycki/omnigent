@@ -65,7 +65,7 @@ def _assert_guidance(text: str, offered: bool) -> None:
 async def test_devin_rule_file_carries_guidance_only_when_offered(
     offered: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A spec with no instructions still gets the paragraph in the always-on rule."""
+    """A spec with no instructions gets the paragraph in the session preamble, not the rule."""
     _set_offered(monkeypatch, offered)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -102,12 +102,15 @@ async def test_devin_rule_file_carries_guidance_only_when_offered(
             agent_spec=_spec("devin-native", None),
         )
 
-    rule_path = workspace / ".windsurf" / "rules" / "omnigent-agent-instructions.md"
-    if offered:
-        assert rule_path.is_file()
-        _assert_guidance(rule_path.read_text(encoding="utf-8"), True)
-    else:
-        assert not rule_path.exists()
+    from omnigent.harnesses.devin_native import bridge as devin_bridge
+
+    # The shared workspace rule is reserved for authored roles.
+    assert not (workspace / ".windsurf" / "rules" / "omnigent-agent-instructions.md").exists()
+    preamble = devin_bridge.read_agent_instructions_preamble(
+        devin_bridge.prepare_bridge_dir("5f0c2d7e9a8b4c6d8e1f2a3b4c5d6e7f")
+    )
+    assert preamble is not None
+    _assert_guidance(preamble, offered)
 
 
 @_OFFERED

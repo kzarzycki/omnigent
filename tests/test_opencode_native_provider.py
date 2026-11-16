@@ -380,7 +380,7 @@ def test_disabled_mcp_allows_only_approved_stdio_and_keeps_omnigent_relay(
         "external": {
             "type": "local",
             "command": ["safe-server", "--mode", "safe"],
-            "enabled": True,
+            "codemode": False,
             "environment": {"MODE": "safe"},
         },
         "omnigent": build_opencode_omnigent_mcp_server(Path("/tmp/bridge"))["omnigent"],

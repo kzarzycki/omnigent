@@ -8948,6 +8948,19 @@
             "title": "Id",
             "type": "string"
           },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Input tokens this session itself recorded, e.g. `12000` (sub-agents excluded). `None` when none were recorded.",
+            "title": "Input Tokens"
+          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -8955,6 +8968,19 @@
             "description": "Session-scoped guardrails labels.",
             "title": "Labels",
             "type": "object"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Output tokens this session itself recorded, e.g. `350` (sub-agents excluded). `None` when none were recorded.",
+            "title": "Output Tokens"
           },
           "owner": {
             "anyOf": [
@@ -10696,6 +10722,19 @@
             ],
             "title": "Inference Error"
           },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Input tokens this session itself recorded, e.g. `12000` (sub-agents excluded). `None` when none were recorded.",
+            "title": "Input Tokens"
+          },
           "items": {
             "description": "Committed conversation items in chronological order. Empty for a freshly created session.",
             "items": {
@@ -10801,6 +10840,19 @@
               }
             ],
             "description": "Pi's own cumulative token baseline, excluding descendants. Available even when display usage aggregation is skipped; `None` for other harnesses or older servers."
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Output tokens this session itself recorded, e.g. `350` (sub-agents excluded). `None` when none were recorded.",
+            "title": "Output Tokens"
           },
           "parent_session_id": {
             "anyOf": [
@@ -12627,6 +12679,18 @@
             "title": "Background Titles Enabled",
             "type": "boolean"
           },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
           "model_override": {
             "anyOf": [
               {
@@ -12647,6 +12711,17 @@
                 "type": "null"
               }
             ]
+          },
+          "sender_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Session Id"
           },
           "tools": {
             "anyOf": [
@@ -14535,6 +14610,51 @@
           }
         },
         "summary": "Branding Logo"
+      }
+    },
+    "/v1/debug/profile": {
+      "get": {
+        "description": "Sample every server thread's stack for *seconds* and return collapsed stacks.\n\n**Returns:** Plain text: collapsed stacks with counts, samples per thread, and the sampling interval achieved.\n\n**Raises**\n\n- `OmnigentError` \u2014 401/403 for a non-admin, 400 for `seconds` outside 1..60, 409 while another profile is running. A cancelled or disconnected request ends its sampler before the next profile may start.",
+        "operationId": "get_profile_v1_debug_profile_get",
+        "parameters": [
+          {
+            "description": "Window length, 1 to 60.",
+            "in": "query",
+            "name": "seconds",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "title": "Seconds",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Profile",
+        "tags": [
+          "debug"
+        ]
       }
     },
     "/v1/extensions": {
@@ -23942,6 +24062,28 @@
       "get": {
         "description": "Aggregate the calling user's LLM spend across their sessions.\n\nrequire_user, not get_user_id: the aggregation scopes to the caller,\nso a request slipping through as `None` in multi-user mode would\nread another scope. Fail closed with 401 instead (`user_id` is\n`None` only when auth is disabled \u2014 the single-user / local case).",
         "operationId": "get_usage_v1_usage_get",
+        "parameters": [
+          {
+            "description": "Only list sessions active in the last N UTC days.",
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 3650,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only list sessions active in the last N UTC days.",
+              "title": "Days"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -23952,6 +24094,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Get Usage",

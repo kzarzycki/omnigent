@@ -1634,6 +1634,8 @@ async def test_relaunch_that_reads_a_move_claim_is_refused(
     assert seen is not None
 
     class _NoAdmission:
+        machine_launch_guard = None
+
         async def admit_launch(self, conn: object, conversation_id: str, **_: object) -> None:
             raise AssertionError("a refused relaunch must not reach admission")
 
@@ -1757,6 +1759,8 @@ async def test_move_launch_queued_behind_a_refused_relaunch_still_starts(
     admissions: list[str] = []
 
     class _Registry:
+        machine_launch_guard = None
+
         async def admit_launch(self, conn: object, conversation_id: str, **_: object) -> None:
             admissions.append(conversation_id)
 
@@ -1773,7 +1777,11 @@ async def test_move_launch_queued_behind_a_refused_relaunch_still_starts(
     registry = cast(Any, _Registry())
 
     def host_conn() -> Any:
-        return SimpleNamespace(host_id=_MOVED_SANDBOX_HOST_ID, pending_launches={})
+        return SimpleNamespace(
+            host_id=_MOVED_SANDBOX_HOST_ID,
+            pending_launches={},
+            hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="sandbox"),
+        )
 
     recovery = asyncio.create_task(
         _launch_runner_on_host_impl(seen, env.conv_store, registry, host_conn())
@@ -2411,7 +2419,11 @@ async def test_sandbox_bound_on_another_replica_hands_over_without_the_claim(
 
     def sandbox_connection(host_id: str) -> Any:
         return SimpleNamespace(
-            host_id=host_id, owner=None, pending_launches={}, registered_with_managed_token=True
+            host_id=host_id,
+            owner=None,
+            pending_launches={},
+            registered_with_managed_token=True,
+            hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="sandbox"),
         )
 
     loop = asyncio.get_running_loop()

@@ -7,7 +7,7 @@ import pytest
 from omnigent.cli import _bundle
 from omnigent.inner.bundle_skills import claude_native_skill_args
 from omnigent.runner.tool_dispatch import _execute_skill_tool
-from omnigent.runtime.prompt import build_instructions
+from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION, build_instructions
 from omnigent.server.bundles import validate_agent_bundle
 from omnigent.spec import load, materialize_bundle
 from omnigent.tools.builtins.load_skill import LoadSkillTool, list_skill_resources
@@ -62,8 +62,10 @@ def test_resolve_startup_prompt_routes_to_procedures_without_inlining_them() -> 
     tool = LoadSkillTool(spec.skills, skills_filter="none")
     prompt = build_instructions(spec, None, [tool.get_schema()])
 
-    # Include the shared framework guidance alongside the agent's procedure index.
-    assert len(prompt.split()) < 1600
+    # Include the shared framework guidance alongside the agent's procedure index;
+    # the question-card guidance is framework text on top of that budget.
+    assert ASK_USER_QUESTION_INSTRUCTION in prompt
+    assert len(prompt.split()) < 1600 + len(ASK_USER_QUESTION_INSTRUCTION.split())
     assert spec.skills
     for skill in spec.skills:
         assert skill.name in prompt

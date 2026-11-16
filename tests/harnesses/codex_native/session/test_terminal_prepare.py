@@ -15,7 +15,7 @@ import pytest
 
 from omnigent._runner_startup import RunnerStartupProgress
 from omnigent.harnesses.codex_native import main as codex_native
-from omnigent.runtime.prompt import WORKSPACE_IMAGE_INSTRUCTION
+from omnigent.runtime.prompt import ASK_USER_QUESTION_INSTRUCTION, WORKSPACE_IMAGE_INSTRUCTION
 from tests.harnesses.codex_native.session._support import (
     _write_source_rollout,
 )
@@ -39,7 +39,10 @@ def test_wrapper_spec_startup_instructions_degrades_on_malformed_spec(tmp_path: 
     """A malformed wrapper spec must not block the terminal launch."""
     bad_spec = tmp_path / "bad.yaml"
     bad_spec.write_text("not: [valid, agent, spec")
-    assert codex_native._wrapper_spec_startup_instructions(bad_spec) == WORKSPACE_IMAGE_INSTRUCTION
+    # Without a spec the session still gets the framework-owned startup guidance.
+    assert codex_native._wrapper_spec_startup_instructions(bad_spec) == (
+        f"{ASK_USER_QUESTION_INSTRUCTION}\n\n{WORKSPACE_IMAGE_INSTRUCTION}"
+    )
 
 
 @pytest.mark.asyncio
