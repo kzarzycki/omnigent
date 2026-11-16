@@ -3619,9 +3619,16 @@ def register_resources_routes(
         session_id: str,
         conv: Conversation,
         pr_url: str | None = None,
+        *,
+        background: bool = False,
     ) -> dict[str, Any]:
-        """Read PR context through the runner or host and store what it reports."""
+        """Read PR context through the runner or host and store what it reports.
+
+        A ``background`` refresh needs only each PR's state, so the runner skips its conversation.
+        """
         params = await _github_params(session_id, {"pr_url": pr_url} if pr_url else {})
+        if background:
+            params = {**params, "background": "1"}
         requested_at = time.time()
         info = await _fs_get_with_host_fallback(
             session_id,
@@ -3722,7 +3729,7 @@ def register_resources_routes(
         # Outside a git checkout, a synced session without PRs has none to refresh.
         if conv.git_branch is None and stored is not None and stored.synced and not stored.entries:
             return
-        await _github_info(session_id, conv)
+        await _github_info(session_id, conv, background=True)
 
     if pull_request_refresher is not None and pull_request_store is not None:
         pull_request_refresher.bind(_refresh_session_pull_requests)

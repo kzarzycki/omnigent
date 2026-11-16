@@ -66,8 +66,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -76,6 +77,7 @@ import httpx
 from omnigent import config as _config
 from omnigent.git_providers import host_of
 from omnigent.host.identity_env import in_managed_sandbox
+from omnigent.process_logging import data_dir
 from omnigent.runner import pr_resource
 from omnigent.runner.git_providers import (
     COMMIT_OBJECT,
@@ -813,15 +815,15 @@ def _refused_pr_fields(stderr: str) -> set[str]:
     }
 
 
-def _gh_pr_view(
-    args: list[str], fields: str, *, cwd: str, token: str | None = None
-) -> dict[str, Any] | None:
-    """Return ``gh pr view <args> --json <fields>`` as a dict, or ``None``.
+def _gh_pr_read(
+    verb: list[str], fields: str, *, cwd: str, token: str | None = None
+) -> tuple[Any, str] | None:
+    """Return ``gh pr <verb> --json <fields>`` parsed, with the fields it answered, or ``None``.
 
     Retry without optional checks, reviewer, or merge fields only when the error
     names them. Each retry removes fields, so unrelated failures never retry here.
     """
-    rc, out, err = _gh(["pr", "view", *args, "--json", fields], cwd=cwd, token=token)
+    rc, out, err = _gh(["pr", *verb, "--json", fields], cwd=cwd, token=token)
     while rc != 0:
         refused = _refused_pr_fields(err) & set(fields.split(","))
         refused &= _PR_REVIEW_FIELDS | _PR_MERGE_FIELDS | {_PR_CHECKS_FIELD, _PR_COMMENTS_FIELD}
@@ -831,14 +833,22 @@ def _gh_pr_view(
         if not remaining or remaining == fields:
             return None
         fields = remaining
-        rc, out, err = _gh(["pr", "view", *args, "--json", fields], cwd=cwd, token=token)
+        rc, out, err = _gh(["pr", *verb, "--json", fields], cwd=cwd, token=token)
     try:
-        data = json.loads(out)
+        return json.loads(out), fields
     except ValueError:
         return None
-    if not isinstance(data, dict):
+
+
+def _gh_pr_view(
+    args: list[str], fields: str, *, cwd: str, token: str | None = None
+) -> dict[str, Any] | None:
+    """Return ``gh pr view <args> --json <fields>`` as a dict, or ``None``."""
+    read = _gh_pr_read(["view", *args], fields, cwd=cwd, token=token)
+    if read is None or not isinstance(read[0], dict):
         return None
-    if "comments" in fields.split(","):
+    data, answered = read
+    if "comments" in answered.split(","):
         _refresh_conversation(data, cwd=cwd, token=token)
     return data
 
@@ -1129,6 +1139,131 @@ def _pr_json(root: str, reference: PullRequestRef, fields: str) -> dict[str, Any
     )
 
 
+_REFERENCE_EXTRA_FIELDS = ",headRefOid,baseRefOid,headRepository,headRepositoryOwner"
+# ``comments`` and the timeline are per-PR reads; the open-PR listing leaves them out.
+_LISTING_FIELDS = (
+    ",".join(field for field in _PR_VIEW_FIELDS.split(",") if field != "comments")
+    + _REFERENCE_EXTRA_FIELDS
+)
+_LISTING_LIMIT = 100
+# An open PR's CI and reviews change within the poll cadence; a merged or closed one doesn't.
+_OPEN_PR_TTL_SECONDS = 10.0
+_CLOSED_PR_TTL_SECONDS = 6 * 3600.0
+_ACCOUNTS_TTL_SECONDS = 30.0
+
+# Set for the server's own refreshes, which need no conversation (comments, timeline).
+_background_read: ContextVar[bool] = ContextVar("github_background_read", default=False)
+
+
+@contextmanager
+def background_reads(enabled: object) -> Iterator[None]:
+    """Mark PR reads inside the block as background refreshes (``"1"`` in a query string)."""
+    token = _background_read.set(enabled is True or enabled in ("1", "true"))
+    try:
+        yield
+    finally:
+        _background_read.reset(token)
+
+
+def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
+    """:func:`_list_accounts`, shared by the host's runners for a short while."""
+    key = ("accounts",)
+    hit, cached = _cache_get(key, shared=True)
+    if hit and isinstance(cached, dict):
+        return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
+    authenticated, accounts = _list_accounts(root)
+    _cache_put(
+        key,
+        {"authenticated": authenticated, "accounts": accounts},
+        _ACCOUNTS_TTL_SECONDS,
+        shared=True,
+    )
+    return authenticated, accounts
+
+
+def _pr_read_identity(root: str, reference: PullRequestRef) -> str | None:
+    """Who a PR read is made as, for its cache key; ``None`` when that is unknown."""
+    ambient = (
+        None if _in_sandbox() else os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    )
+    login = None if _in_sandbox() else _config.github_account_preference(_repo_argument(reference))
+    if login:
+        return f"account:{reference.host}:{login}"
+    if ambient:
+        return "env:" + hashlib.sha256(ambient.encode()).hexdigest()
+    _, accounts = _cached_accounts(root)
+    active = next(
+        (a for a in accounts if a.get("host") == reference.host and a.get("active")), None
+    )
+    if active is None or active.get("state") != "success":
+        return None
+    return f"active:{reference.host}:{active.get('login')}"
+
+
+def _open_pr_listing(
+    root: str, reference: PullRequestRef, identity: str
+) -> list[dict[str, Any]] | None:
+    """The repository's open PRs from one ``gh pr list``, shared by every session reading it."""
+    key = ("pr-list", identity, _repo_argument(reference).lower())
+    hit, listing = _cache_get(key, shared=True)
+    if hit:
+        return listing
+    read = _gh_pr_read(
+        [
+            "list",
+            "-R",
+            _repo_argument(reference),
+            "--state",
+            "open",
+            "--limit",
+            str(_LISTING_LIMIT),
+        ],
+        _LISTING_FIELDS,
+        cwd=root,
+        token=_pr_token(root, reference),
+    )
+    if read is None or not isinstance(read[0], list):
+        return None
+    _cache_put(key, read[0], _OPEN_PR_TTL_SECONDS, shared=True)
+    return read[0]
+
+
+def _reference_pr_data(
+    root: str, reference: PullRequestRef, *, background: bool
+) -> dict[str, Any] | None:
+    """One tracked PR's ``gh`` data for the panel, shared across sessions and refreshes.
+
+    A background refresh reads open PRs from the repository's shared listing, which
+    has no conversation. A viewer reads the PR itself, cached for the poll window.
+    Merged and closed PRs are cached for long: their state can't change back.
+    """
+    fields = _LISTING_FIELDS if background else _PR_VIEW_FIELDS + _REFERENCE_EXTRA_FIELDS
+    identity = _pr_read_identity(root, reference)
+    if identity is None:
+        return _pr_json(root, reference, fields)
+    key = (
+        "pr",
+        identity,
+        _repo_argument(reference).lower(),
+        str(reference.number),
+        "background" if background else "full",
+    )
+    hit, data = _cache_get(key, shared=True)
+    if hit:
+        return data
+    if background and reference.host == "github.com":
+        listing = _open_pr_listing(root, reference, identity)
+        for entry in listing or []:
+            if isinstance(entry, dict) and entry.get("number") == reference.number:
+                return entry
+    data = _pr_json(root, reference, fields)
+    if data is not None:
+        closed = data.get("state") != "OPEN"
+        ttl = _CLOSED_PR_TTL_SECONDS if closed else _OPEN_PR_TTL_SECONDS
+        _cache_put(key, data, ttl, shared=True)
+    return data
+
+
 def _head_repository_url(reference: PullRequestRef, head: object, owner: object) -> str | None:
     """The source (possibly fork) repository's web URL; ``None`` once the fork is deleted."""
     # Older gh reports headRepository as only {id, name}, so the owner comes separately.
@@ -1151,17 +1286,13 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
     }
     if not info["gh_available"]:
         return info
-    _, accounts = _list_accounts(root)
+    _, accounts = _cached_accounts(root)
     info["accounts"] = [a for a in accounts if a.get("host") == reference.host]
     preferred = _config.github_account_preference(_repo_argument(reference))
     info["selected_account"] = preferred or next(
         (a["login"] for a in info["accounts"] if a.get("active")), None
     )
-    data = _pr_json(
-        root,
-        reference,
-        _PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository,headRepositoryOwner",
-    )
+    data = _reference_pr_data(root, reference, background=_background_read.get())
     if data is None:
         return info
     author = data.get("author")
@@ -2617,6 +2748,61 @@ _preview_cache: dict[tuple[str, ...], tuple[float, dict[str, Any] | None]] = {}
 _public_blocked_until = 0.0
 
 
+def _cache_path(key: tuple[str, ...]) -> Path:
+    digest = hashlib.sha256("\0".join(key).encode()).hexdigest()
+    return data_dir() / "github" / "read-cache" / f"{digest}.json"
+
+
+def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any]:
+    """Look ``key`` up in the runner's read cache: ``(hit, value)``.
+
+    A ``shared`` entry also lives in a file under the data directory, since every
+    session runs in its own runner process and only the disk is common to them.
+    """
+    now = time.monotonic()
+    with _preview_lock:
+        cached = _preview_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return True, cached[1]
+    if not shared:
+        return False, None
+    try:
+        entry = json.loads(_cache_path(key).read_text(encoding="utf-8"))
+        remaining = float(entry["expires"]) - time.time()
+        value = entry["value"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+    if remaining <= 0:
+        return False, None
+    with _preview_lock:
+        _preview_cache[key] = (now + remaining, value)
+    return True, value
+
+
+def _cache_put(key: tuple[str, ...], value: Any, ttl: float, *, shared: bool = False) -> None:
+    """Remember ``value`` for ``ttl`` seconds, in memory and, if ``shared``, on disk."""
+    with _preview_lock:
+        if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+            _preview_cache.clear()
+        _preview_cache[key] = (time.monotonic() + ttl, value)
+    if not shared:
+        return
+    path = _cache_path(key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries = list(path.parent.glob("*.json"))
+        if len(entries) >= _PREVIEW_CACHE_MAX:
+            for stale in entries:
+                with suppress(OSError):
+                    stale.unlink()
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"expires": time.time() + ttl, "value": value}, handle)
+        os.replace(temporary, path)
+    except (OSError, TypeError, ValueError):
+        _logger.debug("github_resource: could not share a cached read", exc_info=True)
+
+
 class _PreviewReadError(Exception):
     """GitHub answered something other than a readable object or a refusal."""
 
@@ -2860,12 +3046,10 @@ def github_link_preview(
         return None
     signed_in, token, identity = _read_identity(root, owner, repo)
     key = (identity or "", owner.lower(), repo.lower(), kind, ref.lower())
-    now = time.monotonic()
     if identity is not None:
-        with _preview_lock:
-            cached = _preview_cache.get(key)
-        if cached is not None and cached[0] > now:
-            return cached[1]
+        hit, cached = _cache_get(key)
+        if hit:
+            return cached
     try:
         preview = _read_link_preview(
             root, owner, repo, kind, ref, signed_in=signed_in, token=token
@@ -2877,8 +3061,5 @@ def github_link_preview(
     # An account switched during the read may have answered it: remember it only if
     # the identity is the same after.
     if identity is not None and _read_identity(root, owner, repo)[2] == identity:
-        with _preview_lock:
-            if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
-                _preview_cache.clear()
-            _preview_cache[key] = (now + ttl, preview)
+        _cache_put(key, preview, ttl)
     return preview
