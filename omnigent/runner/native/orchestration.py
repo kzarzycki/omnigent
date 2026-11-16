@@ -1426,6 +1426,18 @@ async def _pi_native_launch_config(
     )
 
 
+def _insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[str]:
+    """
+    Insert ``extra`` before the first ``--``, which the CLIs read as the start of prompt text.
+
+    :param args: Launch args, possibly containing a ``--`` separator.
+    :param extra: Flags to place ahead of the separator (or at the end without one).
+    :returns: The combined args.
+    """
+    split = args.index("--") if "--" in args else len(args)
+    return [*args[:split], *extra, *args[split:]]
+
+
 def _codex_launch_config_for_spec(
     launch_config: _CodexNativeLaunchConfig,
     agent_spec: AgentSpec | ResolvedSpec | None,
@@ -1444,11 +1456,9 @@ def _codex_launch_config_for_spec(
     kept = _strip_approval_sandbox_flags(
         tuple(launch_config.terminal_launch_args or ()), drop_permission_config=True
     )
-    # Pin before any ``--``: codex treats everything after it as positional text.
-    split = kept.index("--") if "--" in kept else len(kept)
     return dataclasses.replace(
         launch_config,
-        terminal_launch_args=[*kept[:split], "--sandbox", "read-only", *kept[split:]],
+        terminal_launch_args=_insert_before_separator(kept, ["--sandbox", "read-only"]),
         bypass_sandbox=False,
     )
 
@@ -8021,6 +8031,7 @@ async def _launch_claude_native_terminal(
     *,
     agent_spec: AgentSpec | ResolvedSpec | None,
     spec: TerminalEnvSpec,
+    wrapper_args: Sequence[str] = (),
     **launch_kwargs: Any,
 ) -> SessionResourceView:
     """
@@ -8034,23 +8045,28 @@ async def _launch_claude_native_terminal(
     :param resource_registry: Registry that launches the terminal.
     :param agent_spec: The session's agent spec, or ``None`` when unknown.
     :param spec: Terminal spec whose ``args`` end with Claude's own args.
+    :param wrapper_args: Configured wrapper args leading ``spec.args``, e.g. ``["--"]``;
+        they belong to the wrapper, so the stored flags go only in what follows them.
     :param launch_kwargs: Remaining
         :meth:`SessionResourceRegistry.launch_required_terminal` arguments.
     :returns: The launched terminal's resource view.
     """
     from omnigent.harnesses.claude_native.bridge import _merge_disallowed_tools
 
+    prefix = list(spec.args[: len(wrapper_args)])
+    claude_args = list(spec.args[len(wrapper_args) :])
     disallowed = _claude_native_disallowed_tools_from_spec(agent_spec)
     if disallowed:
-        spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
+        claude_args = _merge_disallowed_tools(claude_args, disallowed)
     inner_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     allowed = _claude_tools_arg(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
     if allowed is not None:
-        spec = dataclasses.replace(
-            spec, args=[*_strip_claude_tools_args(spec.args), "--tools", allowed]
+        claude_args = _insert_before_separator(
+            _strip_claude_tools_args(claude_args), ["--tools", allowed]
         )
+    spec = dataclasses.replace(spec, args=[*prefix, *claude_args])
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
@@ -8060,12 +8076,17 @@ def _strip_claude_tools_args(args: Sequence[str]) -> list[str]:
     """
     Drop client ``--tools X`` and ``--tools=X`` so a stored restriction cannot be widened.
 
+    Args from the first ``--`` on are prompt text and pass through unchanged.
+
     :param args: Claude launch args.
-    :returns: Args without any ``--tools`` flag or its value.
+    :returns: Args without any ``--tools`` flag or its value before the separator.
     """
     out: list[str] = []
     skip_value = False
-    for arg in args:
+    for index, arg in enumerate(args):
+        if arg == "--":
+            out.extend(args[index:])
+            break
         if skip_value:
             skip_value = False
             # An empty value is legal (``--tools ""``); a following flag is not its value.
@@ -10307,6 +10328,7 @@ async def _auto_create_claude_terminal(
             terminal_name="claude",
             session_key="main",
             spec=env_spec,
+            wrapper_args=configured_args,
             parent_os_env=agent_os_env,
         )
     except (Exception, asyncio.CancelledError) as launch_error:
