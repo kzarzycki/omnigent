@@ -123,6 +123,7 @@ from omnigent.models.codex_model_vocabulary import codex_spawn_model
 from omnigent.native import native_bridge_common, policy_allow_cache
 from omnigent.process_logging import (
     DATA_DIR_ENV_VAR,
+    data_dir,
     harness_stderr_capture_enabled,
     log_info_once,
     log_once,
@@ -2042,7 +2043,7 @@ def _probe_codex_home(
             (str(source_home.resolve()), *config_overrides, *filter(None, [config_profile]))
         ).encode("utf-8")
     ).hexdigest()[:12]
-    home = Path.home() / ".omnigent" / "cache" / "codex-model-probe" / key
+    home = data_dir() / "cache" / "codex-model-probe" / key
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     # The bridge skips files that already exist, and config.toml is copied
     # (not symlinked), so drop the copy to re-read an edited source config.

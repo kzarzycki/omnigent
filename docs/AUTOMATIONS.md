@@ -52,12 +52,14 @@ When first firings overlap, the first session recorded on the automation wins. E
 
 | Situation | Run | `error_code` |
 | --- | --- | --- |
-| The session is archived | `failed` | `continued_session_archived` |
+| The session is archived, and the task does not set `archive_when_done` | `failed` | `continued_session_archived` |
 | The owner no longer owns the session | `failed` | `continued_session_forbidden` |
 | The automation has a budget, and the session already has a cost cap it did not set, such as another automation's or one from before this release | `failed` | `continued_session_budget_conflict` |
 | The automation's cost cap could not be set on the session; any cap it already had stays | `failed` | `continued_session_budget_failed` |
 | A first run could not record its new session on the automation | `failed` | `session_record_failed` |
 | The session runs a different agent, on a different host or workspace than the task pins, in a sandbox when the task targets a connected host (or the reverse), or, for a `managed_sandbox` task, outside the sandbox the task started | `failed` | `continued_session_incompatible` |
+
+With `archive_when_done` the archived case is not an error: a quiet run archives the session it continues, so the next run unarchives it, drops its `sys_session_keep` reason and carries on. A session a run kept is still visible, so it keeps its reason and stays visible until you archive it.
 
 Send `session_id: null` in a `PATCH` (**Start a new session on the next run** in the edit dialog) so the next firing creates a new session that later firings continue. A `PATCH` that changes `agent_id`, `host_id`, `workspace`, or `execution_target` without sending `session_id` does the same, since the old session cannot follow the change, and switching to `session_mode: "new"` clears `session_id`.
 

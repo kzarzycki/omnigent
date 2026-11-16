@@ -474,25 +474,48 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     // every list for changes the client can't attribute (a share changing, the
     // periodic round while frames starve the polls). Paced so a busy stream
     // can't stack refetch rounds against a slow server.
-    const reconciler = createListReconcileScheduler((scope) =>
-      scope === "all"
+    let staleWhileHidden = false;
+    const reconciler = createListReconcileScheduler((scope) => {
+      // A hidden tab only marks lists stale; they refetch once on return.
+      const hidden = document.visibilityState === "hidden";
+      if (hidden) staleWhileHidden = true;
+      const refetch = hidden ? { refetchType: "none" as const } : {};
+      return scope === "all"
         ? Promise.all([
             queryClient.invalidateQueries({
               queryKey: ["conversations"],
               predicate: (query) => query.meta?.snapshot !== true,
+              ...refetch,
             }),
             // Converge each project folder's own list too (new/archived/relabeled
             // members the local field-patch can't place).
-            queryClient.invalidateQueries({ queryKey: ["project-sessions"] }),
+            queryClient.invalidateQueries({ queryKey: ["project-sessions"], ...refetch }),
             // Another client archiving/relabeling/deleting can add or remove a
             // project from the Archived view's picker; only local mutations
             // invalidate this scan otherwise.
-            queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY }),
+            queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY, ...refetch }),
           ])
         : queryClient.invalidateQueries({
             predicate: (query) => scope.has(query.queryHash) && query.meta?.snapshot !== true,
-          }),
-    );
+            ...refetch,
+          });
+    });
+    const refetchStaleOnVisible = () => {
+      if (document.visibilityState === "hidden" || !staleWhileHidden) return;
+      staleWhileHidden = false;
+      for (const queryKey of [
+        ["conversations"],
+        ["project-sessions"],
+        ARCHIVED_PROJECT_NAMES_KEY,
+      ]) {
+        void queryClient.refetchQueries({
+          queryKey,
+          type: "active",
+          predicate: (query) => query.state.isInvalidated,
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", refetchStaleOnVisible);
 
     // See commentsFingerprintsRef: invalidate `["comments", id]` (prefix —
     // covers the per-file variants too) when a session's fingerprint moves.
@@ -539,7 +562,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           // The server decides whether the session now belongs in Shared.
           reconciler.schedule();
           return;
-        case "removed":
+        case "removed": {
           for (const id of frame.ids) {
             commentsFingerprintsRef.current.delete(id);
             snapshotArchivedRef.current.delete(id);
@@ -569,6 +592,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           }
           reconciler.schedule(removeIdsFromCache(queryClient, frame.ids));
           return;
+        }
         case "snapshot":
         case "changed": {
           syncCommentsFingerprints(frame.items);
@@ -657,6 +681,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
       unsubscribeMutations();
       unsubscribeCache();
       reconciler.dispose();
+      document.removeEventListener("visibilitychange", refetchStaleOnVisible);
       if (watchTimer !== null) clearTimeout(watchTimer);
       sessionUpdatesSocket.stop();
     };

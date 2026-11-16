@@ -4151,7 +4151,9 @@ async def test_ask_question_handler_returns_answers_on_accept() -> None:
     }
     out = await adapter._stable_ask_question_handler(tool_input)
     assert out == {**tool_input, "answers": {"q1": "dev"}}
-    [(_, params)] = ctx.seen
+    [(elicitation_id, params)] = ctx.seen
+    # The runner reads this prefix to deliver a decline without interrupting the turn.
+    assert elicitation_id.startswith("elicit_question_")
     payload = getattr(params, "ask_user_question", None)
     assert payload is not None, (
         "AskUserQuestion elicitation must carry the structured ask_user_question "

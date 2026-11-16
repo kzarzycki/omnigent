@@ -1686,6 +1686,7 @@ def _build_session_response(
     agent: Agent | None = None,
     background_agents: list[BackgroundTaskInfo] | None = None,
     harness: str | _UnresolvedHarness | None = _UNRESOLVED_HARNESS,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> SessionResponse:
     """
     Build a :class:`SessionResponse` from store-side entities.
@@ -1760,6 +1761,8 @@ def _build_session_response(
         e.g. ``"claude-sdk"``; resolved here from the agent spec otherwise.
     :param agent: The bound agent row when the caller already read it, so the
         harness resolution does not read it again.
+    :param agents_by_id: Rows the caller already read; a session missing from it
+        has no row, so the harness resolution does not read the store.
     :returns: The :class:`SessionResponse` for the API.
     :raises OmnigentError: If ``conv.agent_id`` is ``None``.
     """
@@ -1775,7 +1778,11 @@ def _build_session_response(
     display_usage = subtree_usage if subtree_usage is not None else (conv.session_usage or {})
     if isinstance(harness, _UnresolvedHarness):
         harness = _resolve_harness(
-            conv, agent_store=agent_store, agent_cache=agent_cache, agent=agent
+            conv,
+            agent_store=agent_store,
+            agent_cache=agent_cache,
+            agent=agent,
+            agents_by_id=agents_by_id,
         )
     native_usage_baseline = None
     if harness == "pi-native":
@@ -15150,6 +15157,7 @@ async def _fetch_model_options(
     conversation_store: ConversationStore | None = None,
     harness: str | _UnresolvedHarness | None = _UNRESOLVED_HARNESS,
     agent_cache: AgentCache | None = None,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Resolve the Web UI model-picker options for a native session.
@@ -15190,6 +15198,8 @@ async def _fetch_model_options(
     :param agent: The bound agent row when the caller already read it, so the
         harness check does not read it again.
     :param conversation_store: Store for resolving a child's inherited host in the background.
+    :param agents_by_id: Rows the caller already read, as for
+        :func:`_build_session_response`.
     :returns: Model options, or ``[]`` when the session has no model picker or
         the runner-owned options are not yet available.
     """
@@ -15227,7 +15237,7 @@ async def _fetch_model_options(
         from omnigent.harness_aliases import canonicalize_harness
 
         is_acp = (
-            _resolve_harness_impl_is_acp(conv, agent_store, agent=agent)
+            _resolve_harness_impl_is_acp(conv, agent_store, agent=agent, agents_by_id=agents_by_id)
             if isinstance(harness, _UnresolvedHarness)
             else canonicalize_harness(harness) == "acp"
         )
@@ -15336,7 +15346,10 @@ async def _codex_side_chat_fork_lost(
 
 
 def _resolve_harness_impl_is_acp(
-    conv: Conversation, agent_store: AgentStore | None, agent: Agent | None = None
+    conv: Conversation,
+    agent_store: AgentStore | None,
+    agent: Agent | None = None,
+    agents_by_id: Mapping[str, Agent] | None = None,
 ) -> bool:
     """Return whether *conv* runs a generic ``acp`` harness.
 
@@ -15347,11 +15360,15 @@ def _resolve_harness_impl_is_acp(
     :param agent_store: Optional store for the harness lookup; ``None`` lets
         :func:`_resolve_harness` fall back to the runtime global.
     :param agent: The bound agent row when the caller already read it.
+    :param agents_by_id: Rows the caller already read, as for
+        :func:`_build_session_response`.
     :returns: ``True`` when the session's resolved harness is ``"acp"``.
     """
     from omnigent.harness_aliases import canonicalize_harness
 
-    harness = _resolve_harness(conv, agent_store=agent_store, agent=agent)
+    harness = _resolve_harness(
+        conv, agent_store=agent_store, agent=agent, agents_by_id=agents_by_id
+    )
     return canonicalize_harness(harness) == "acp"
 
 
@@ -15841,10 +15858,18 @@ async def _get_session_snapshot(
     context_window: int | None = None
     agent_name: str | None = None
     harness_owns_model = False
+    # The snapshot's one agent read, shared with the harness resolutions below;
+    # ``None`` until it happens, and a missing or failed read leaves it empty.
+    agents_read: dict[str, Agent] | None = None
+    if agent is not None and agent.id == conv.agent_id:
+        agents_read = {agent.id: agent}
     if agent_store is not None and agent_cache is not None and conv.agent_id is not None:
         try:
             if agent is None or agent.id != conv.agent_id:
+                agents_read = {}
                 agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
+                if agent is not None:
+                    agents_read[conv.agent_id] = agent
             if agent is not None:
                 agent_name = agent.name
                 if agent.bundle_location is not None:
@@ -15918,7 +15943,12 @@ async def _get_session_snapshot(
     # Resolved once, off the event loop: the model picker and the response
     # both need it, and resolving reads the agent row and its bundle.
     harness = await asyncio.to_thread(
-        _resolve_harness, conv, agent_store=agent_store, agent_cache=agent_cache, agent=agent
+        _resolve_harness,
+        conv,
+        agent_store=agent_store,
+        agent_cache=agent_cache,
+        agent=agent,
+        agents_by_id=agents_read,
     )
     if inference_configured and conv.inference_snapshot is not None:
         catalog = (
@@ -15940,6 +15970,7 @@ async def _get_session_snapshot(
             conversation_store=conv_store,
             harness=harness,
             agent_cache=agent_cache,
+            agents_by_id=agents_read,
         )
     # Dynamic override from the forwarder (real Claude Code window).
     # Only present after the first statusLine tick; before that the
@@ -16022,6 +16053,7 @@ async def _get_session_snapshot(
         agent_cache=agent_cache,
         harness=harness,
         agent=agent,
+        agents_by_id=agents_read,
     )
     if request is not None:
         from omnigent.server.session_families import project_families

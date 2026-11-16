@@ -3541,7 +3541,7 @@ def _merge_disallowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str
 
     Merges into an existing flag if present (deduping while preserving
     order) so a user-supplied ``--disallowedTools`` is not silently
-    overridden; otherwise appends a new flag.
+    overridden; otherwise adds a new flag before any ``--`` prompt separator.
 
     :param args: Claude CLI argument list to mutate-and-return.
     :param extra: Tool names Omnigent wants disabled.
@@ -3549,10 +3549,12 @@ def _merge_disallowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str
     """
     if not extra:
         return args
+    split = args.index("--") if "--" in args else len(args)
     try:
-        idx = args.index("--disallowedTools")
+        idx = args.index("--disallowedTools", 0, split)
     except ValueError:
-        args.extend(["--disallowedTools", ",".join(extra)])
+        # Before the ``--`` prompt separator, after which Claude reads flags as text.
+        args[split:split] = ["--disallowedTools", ",".join(extra)]
         return args
     value_idx = idx + 1
     if value_idx >= len(args):

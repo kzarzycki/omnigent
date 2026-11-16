@@ -2854,6 +2854,12 @@ class _ExistingConversationStore(FakeConversationStore):
     def get_conversation(self, conversation_id: str) -> _FakeConversation | None:
         return self.existing.get(conversation_id)
 
+    def delete_label(self, conversation_id: str, key: str) -> None:
+        self.existing[conversation_id].labels.pop(key, None)
+
+    def update_conversation(self, conversation_id: str, *, archived: bool) -> None:
+        self.existing[conversation_id].archived = archived
+
     def list_conversations(self, *, root_conversation_id: str, **_: Any) -> SimpleNamespace:
         tree = [
             c for c in self.existing.values() if c.root_conversation_id == root_conversation_id
@@ -3098,6 +3104,23 @@ async def test_a_first_run_whose_owner_grant_fails_records_no_session(
     assert store.adopted == []
     assert [(run["status"], run["error_code"]) for run in store.runs] == [
         ("failed", "owner_grant_failed")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_continue_reopens_a_quiet_archive_when_done_session() -> None:
+    """A quiet run archived the session; the next run reopens it and sends its prompt."""
+    session = _continued_session(archived=True, labels={"omnigent.keep": "old finding"})
+    conv_store = _ExistingConversationStore(session)
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(archive_when_done=True)})
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store))
+
+    assert [conv.id for conv in launched] == ["conv_prev"]
+    assert session.archived is False
+    assert session.labels == {}
+    assert [(run["status"], run["conversation_id"]) for run in store.runs] == [
+        ("succeeded", "conv_prev")
     ]
 
 

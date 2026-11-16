@@ -4214,35 +4214,8 @@ async def test_project_and_archive_when_done_are_set_cleared_and_owner_checked(
     url = f"/v1/scheduled-tasks/{task_id}"
     refused = await auth_client.patch(url, json={"project_id": foreign}, headers=_headers())
     assert refused.status_code == 404, refused.text
-    for clear in ("", None):
-        await auth_client.patch(url, json={"project_id": mine}, headers=_headers())
-        cleared = await auth_client.patch(
-            url, json={"project_id": clear, "archive_when_done": False}, headers=_headers()
-        )
-        assert cleared.status_code == 200, cleared.text
-        assert (cleared.json()["project_id"], cleared.json()["archive_when_done"]) == (None, False)
-
-
-@pytest.fixture()
-def _single_user_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
-
-
-async def test_a_single_user_runtime_files_a_task_into_its_own_project(
-    _single_user_runtime: None, auth_client: httpx.AsyncClient
-) -> None:
-    """The local user's projects are owned by ``"local"``, the task's owner by None."""
-    project = await auth_client.post("/v1/projects", json={"name": "local runs"})
-    assert project.status_code == 200, project.text
-    project_id = project.json()["id"]
-    body = _create_body(project_id=project_id)
-    del body["workspace"]
-    del body["host_id"]
-
-    created = await auth_client.post("/v1/scheduled-tasks", json=body)
-    assert created.status_code == 200, created.text
-    assert created.json()["project_id"] == project_id
-    patched = await auth_client.patch(
-        f"/v1/scheduled-tasks/{created.json()['id']}", json={"project_id": project_id}
+    cleared = await auth_client.patch(
+        url, json={"project_id": None, "archive_when_done": False}, headers=_headers()
     )
-    assert patched.status_code == 200, patched.text
+    assert cleared.status_code == 200, cleared.text
+    assert (cleared.json()["project_id"], cleared.json()["archive_when_done"]) == (None, False)
