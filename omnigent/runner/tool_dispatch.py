@@ -3852,6 +3852,7 @@ async def _execute_session_create(
         "title": args.get("title"),
     }
     create_requested = False
+    requested_at = 0.0
     try:
         endpoint = "/v1/sessions" if placement == "child" else "/v1/sessions/orchestrated"
         if placement == "host":
