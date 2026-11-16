@@ -1021,24 +1021,30 @@ def test_cleanup_warning_preserves_original_validation_error(
     assert not (cache_dir / "agent").exists()
 
 
-def test_warm_load_touches_no_filesystem_path(
+def test_loads_resolve_no_root_and_warm_loads_resolve_nothing(
     artifact_store: LocalArtifactStore,
     cache_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A load served from memory resolves no path: session lists load one spec per row."""
+    """The root is resolved at construction; a load served from memory resolves no path."""
     bundle_location = "agent-warm/abc123"
     _store_bundle(artifact_store, bundle_location, {"config.yaml": _MINIMAL_CONFIG})
     cache = AgentCache(artifact_store=artifact_store, cache_dir=cache_dir)
+    resolved: list[Path] = []
+    original_resolve = Path.resolve
+
+    def recording_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        resolved.append(self)
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", recording_resolve)
     first = cache.load("agent-warm", bundle_location)
+    assert cache_dir not in resolved
 
-    def fail_resolve(*args: object, **kwargs: object) -> Path:
-        raise AssertionError("a warm load must not resolve a filesystem path")
-
-    monkeypatch.setattr(Path, "resolve", fail_resolve)
-
+    resolved.clear()
     for _ in range(50):
         again = cache.load("agent-warm", bundle_location)
 
+    assert resolved == []
     assert again.spec is first.spec
     assert again.workdir == first.workdir
