@@ -1,19 +1,19 @@
-"""The sys_session_create schema must say a named project is top-level."""
+"""The sys_session_create schema must say a named environment is top-level."""
 
 from omnigent.tools.builtins.spawn import SysSessionCreateTool
 
-TOP_LEVEL_SENTENCE = (
-    "Naming project_id or environment_id creates a top-level session in that "
-    "project, outside this session's family."
+ENVIRONMENT_SENTENCE = (
+    "With placement='same_host', an environment_id starts the session on the host "
+    "and workspace its project pins, top-level in that project, outside this "
+    "session's family."
 )
 
 
-def test_description_states_named_project_is_top_level() -> None:
-    assert TOP_LEVEL_SENTENCE in SysSessionCreateTool.description()
+def test_description_states_named_environment_is_top_level() -> None:
+    assert ENVIRONMENT_SENTENCE in SysSessionCreateTool.description()
 
 
-def test_project_and_environment_properties_state_top_level() -> None:
+def test_environment_and_placement_properties_state_top_level() -> None:
     properties = SysSessionCreateTool().get_schema()["function"]["parameters"]["properties"]
-    for field in ("project_id", "environment_id"):
-        assert "top-level session" in properties[field]["description"]
+    assert "top-level session" in properties["environment_id"]["description"]
     assert "top-level" in properties["placement"]["description"]
