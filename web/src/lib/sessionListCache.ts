@@ -71,6 +71,11 @@ export interface ConversationListFilters {
   visibility?: "mine" | "shared" | "archived";
   /** Sort order, present only when it isn't the default `updated_at`. */
   sortBy?: SessionSortBy;
+  /**
+   * The list is a project folder (`["project-sessions", name, ...]`), which is
+   * never searched, so only membership changes refetch it.
+   */
+  projectFolder?: boolean;
 }
 
 /**
@@ -234,20 +239,29 @@ function violatesKnownMembership(conv: Conversation, filters: ConversationListFi
  * window. The exception is the row the next page's cursor names; see
  * {@link mergeItemsIntoPages}.
  *
+ * A project folder only needs membership changes.
+ *
  * @param changed - Names of wire fields that changed the cached row.
+ * @param filters - Canonical filters for the query being patched.
  * @returns `true` when the query should be invalidated after patching.
  */
-function changedFieldsNeedRefetch(changed: Set<string>): boolean {
+function changedFieldsNeedRefetch(changed: Set<string>, filters: ConversationListFilters): boolean {
   if (changed.has("archived")) return true;
-  if (changed.has("title")) return true;
-  // A labels change can move a row between project-filtered variants and the
-  // project folders (["project-sessions", …]). A session relabeled INTO the
+  // A labels/project_id change can move a row between project-filtered variants
+  // and the project folders (["project-sessions", …]). A session moved INTO the
   // selected project isn't in that filtered cache yet, so no local patch can
   // place it; only a server reconcile can. The unfiltered variant where the
-  // row lives detects the label change here and flags the refetch, and the
-  // caller's invalidation is prefix-wide (["conversations"]), so it reconciles
-  // the filtered variants too.
-  return changed.has("labels");
+  // row lives detects the change here and flags the refetch, and the caller's
+  // invalidation is prefix-wide (["conversations"]), so it reconciles the
+  // filtered variants too.
+  if (isProjectMove(changed)) return true;
+  // Folders are never searched, so a title change can't change their membership.
+  return !filters.projectFolder && changed.has("title");
+}
+
+/** A labels or project_id change can move a row between project folders. */
+function isProjectMove(changed: Set<string>): boolean {
+  return changed.has("labels") || changed.has("project_id");
 }
 
 /** Query-key namespaces whose pages hold sidebar list rows. */
@@ -290,16 +304,23 @@ export function findCachedListRow(queryClient: QueryClient, id: string): Convers
  *   query.
  * @param itemsById - Wire items keyed by conversation id.
  * @param filters - Canonical filters for this conversations query.
- * @returns The possibly updated data, ids found in it, and whether this
- *   query needs a server refetch after the local patch.
+ * @returns The possibly updated data, ids found in it, ids whose project
+ *   membership may have moved, and whether this query needs a server refetch
+ *   after the local patch.
  */
 export function mergeItemsIntoPages(
   data: ConversationsInfiniteData | undefined,
   itemsById: Map<string, SessionListWireItem>,
   filters: ConversationListFilters,
-): { data: ConversationsInfiniteData | undefined; found: Set<string>; needsRefetch: boolean } {
+): {
+  data: ConversationsInfiniteData | undefined;
+  found: Set<string>;
+  movedIds: Set<string>;
+  needsRefetch: boolean;
+} {
   const found = new Set<string>();
-  if (!data) return { data, found, needsRefetch: false };
+  const movedIds = new Set<string>();
+  if (!data) return { data, found, movedIds, needsRefetch: false };
   let anyPageChanged = false;
   let needsRefetch = false;
   // The row the next page is fetched after, or the last loaded row when the
@@ -323,13 +344,14 @@ export function mergeItemsIntoPages(
         continue;
       }
       const nextConv = { ...conv, ...wire };
+      if (isProjectMove(changed)) movedIds.add(conv.id);
       if (violatesKnownMembership(nextConv, filters)) {
         rowChanged = true;
         needsRefetch = true;
         continue;
       }
       if (
-        changedFieldsNeedRefetch(changed) ||
+        changedFieldsNeedRefetch(changed, filters) ||
         (conv.id === cursorId && changed.has(filters.sortBy ?? "updated_at"))
       ) {
         needsRefetch = true;
@@ -341,8 +363,8 @@ export function mergeItemsIntoPages(
     anyPageChanged = true;
     return { ...page, data: nextData };
   });
-  if (!anyPageChanged) return { data, found, needsRefetch };
-  return { data: { ...data, pages }, found, needsRefetch };
+  if (!anyPageChanged) return { data, found, movedIds, needsRefetch };
+  return { data: { ...data, pages }, found, movedIds, needsRefetch };
 }
 
 // ── Recently-created keep-alive ───────────────────────────────────────
@@ -509,6 +531,7 @@ export function filtersFromProjectQueryKey(key: readonly unknown[]): Conversatio
     includeArchived: archived,
     visibility: archived ? "archived" : "mine",
     ...(sortBy === "created_at" ? { sortBy } : {}),
+    projectFolder: true,
   };
 }
 
