@@ -23,7 +23,7 @@ import logging
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC, env_var_is_truthy
 
@@ -205,7 +205,7 @@ class MachineSessionAccess:
         return self.allow_cloud_sessions and harness == CLOUD_SESSION_HARNESS
 
 
-def refuse_machine_request(reason: str) -> None:
+def refuse_machine_request(reason: str) -> NoReturn:
     """Raise the 403 every machine-grant refusal uses.
 
     :param reason: What was refused, without naming other users' hosts.
