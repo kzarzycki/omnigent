@@ -87,6 +87,7 @@ from omnigent.runtime import (
 from omnigent.server._runner_ws_tunnel import RunnerUnavailableWSError, WrongReplicaWSError
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, AuthProvider
 from omnigent.server.routes._auth_helpers import require_access
+from omnigent.server.routes._machine_start import machine_access_for
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
@@ -375,6 +376,12 @@ async def _authorize_terminal_attach(
         )
 
     required_level = LEVEL_READ if read_only else LEVEL_OWNER
+    if not read_only and machine_access_for(websocket, user_id) is not None:  # type: ignore[arg-type]
+        # Keystrokes into the host's PTY run as the host's user.
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="not authorized",
+        )
     try:
         await require_access(
             user_id,

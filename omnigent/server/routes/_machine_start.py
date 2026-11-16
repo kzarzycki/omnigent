@@ -10,8 +10,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Request
+from fastapi import FastAPI, Request
+from starlette.requests import HTTPConnection
 
+from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.machine_access import (
     MACHINE_CREATE_FIELDS,
     MachineSessionAccess,
@@ -20,10 +22,13 @@ from omnigent.server.machine_access import (
     spec_declares_bypass,
     spec_harness_id,
 )
+from omnigent.server.permissions import check_session_access
 
 if TYPE_CHECKING:
-    from omnigent.entities import Agent
+    from omnigent.entities import Agent, Conversation
     from omnigent.runtime.agent_cache import AgentCache
+    from omnigent.stores import ConversationStore
+    from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
 
@@ -40,6 +45,21 @@ def machine_access_for(request: Request, user_id: str | None) -> MachineSessionA
     if access is not None and access.applies_to(user_id):
         return access
     return None
+
+
+def require_not_machine(request: HTTPConnection, user_id: str | None, action: str) -> None:
+    """Refuse *action* when the caller is the machine principal.
+
+    For routes that start a process on a host or type into one: the machine
+    principal owns the sessions it creates, so their owner-level checks pass.
+
+    :param request: The HTTP request or WebSocket, for ``app.state``.
+    :param user_id: Authenticated caller, or ``None`` when auth is disabled.
+    :param action: What is refused, e.g. ``"open a terminal"``.
+    :raises OmnigentError: 403 when the caller is the machine principal.
+    """
+    if machine_access_for(request, user_id) is not None:  # type: ignore[arg-type]
+        refuse_machine_request(action)
 
 
 def require_machine_create_shape(access: MachineSessionAccess, fields_set: set[str]) -> None:
@@ -87,3 +107,74 @@ async def require_machine_agent_allowed(
         refuse_machine_request("start this agent")
     if launch_args_bypass_permissions(launch_args) or spec_declares_bypass(spec):
         refuse_machine_request("start a terminal that skips permission prompts")
+
+
+class MachineLaunchGuard:
+    """Re-check a machine-owned session each time a runner is launched for it.
+
+    Launches rebuild the terminal from the stored session row, which owner-level
+    writes can change after create, so the create-time check alone is not enough.
+    """
+
+    def __init__(
+        self,
+        access: MachineSessionAccess,
+        permission_store: PermissionStore | None,
+        conversation_store: ConversationStore,
+        agent_store: Any,
+        agent_cache: AgentCache | None,
+    ) -> None:
+        self._access = access
+        self._permission_store = permission_store
+        self._conversation_store = conversation_store
+        self._agent_store = agent_store
+        self._agent_cache = agent_cache
+
+    async def __call__(self, conv: Conversation) -> None:
+        """Refuse the launch when the machine principal owns *conv* and it is no longer allowed.
+
+        :param conv: The session a runner is about to launch for.
+        :raises OmnigentError: 403 when the session's agent is not permitted, or its
+            stored launch args skip permission prompts.
+        """
+        if self._permission_store is None:
+            return
+        owned = await asyncio.to_thread(
+            check_session_access,
+            self._access.machine_sub,
+            conv.id,
+            LEVEL_OWNER,
+            self._permission_store,
+            self._conversation_store,
+            conversation=conv,
+        )
+        if not owned:
+            return
+        agent = (
+            await asyncio.to_thread(self._agent_store.get, conv.agent_id)
+            if self._agent_store is not None and conv.agent_id is not None
+            else None
+        )
+        if agent is None:
+            refuse_machine_request("launch a session whose agent cannot be checked")
+        await require_machine_agent_allowed(
+            self._access, agent, self._agent_cache, launch_args=conv.terminal_launch_args
+        )
+
+
+def install_machine_launch_guard(app: FastAPI) -> None:
+    """Make every runner launch re-check a machine-owned session.
+
+    :param app: The app, whose ``state`` holds the grant and the stores. Does
+        nothing when no grant is configured.
+    """
+    access = getattr(app.state, "machine_session_access", None)
+    if access is None:
+        return
+    app.state.host_registry.machine_launch_guard = MachineLaunchGuard(
+        access,
+        app.state.permission_store,
+        app.state.conversation_store,
+        app.state.agent_store,
+        app.state.agent_cache,
+    )

@@ -142,9 +142,20 @@ With the grant, the machine principal may:
 - `POST /v1/hosts/{host_id}/runners` for a session it owns, on that host, when
   the session's agent passes the same checks.
 
-Nothing else widens. The other routes that take a `host_id` (skills, plugins,
-MCP servers, imports, filesystem, scheduled tasks ...) keep the owner-only host
+Nothing else widens for routes that take a `host_id` (skills, plugins, MCP
+servers, imports, filesystem, scheduled tasks ...): they keep the owner-only host
 check, and no other principal gets the grant.
+
+The machine principal also owns the sessions it creates, so the owner-level
+routes on those sessions that start a process on the host, type into one, or
+change what starts one are refused for it (`403 machine client may not ...`):
+opening or transferring a terminal, an interactive terminal attach, the
+environment shell, replacing the session's agent bundle, adding, changing or
+removing its MCP servers, a native shell message, and the
+`external_permission_mode_change` / `external_codex_approval_mode_change`
+events that rewrite stored launch args. Every runner launch for a session the
+machine principal owns also re-checks that its agent is still listed and its
+stored launch args do not skip permission prompts, whichever route wrote them.
 
 What stays refused, whatever the agent:
 

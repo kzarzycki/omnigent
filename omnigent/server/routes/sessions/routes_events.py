@@ -134,6 +134,7 @@ from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
     _APPROVAL_TYPE,
@@ -1494,6 +1495,8 @@ def register_events_routes(
             and shell_command_from_input(body.data.get("content")) is not None
             and native_harness == "codex-native"
         ):
+            if isinstance(request, Request):
+                require_not_machine(request, user_id, "run a shell command on a host")
             # Direct native shell bypasses tool policies, like the environment shell route.
             await _require_access_and_level(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
@@ -1512,6 +1515,12 @@ def register_events_routes(
                     **input_attributes({"input_stable_id": body.data.get("stable_id")}),
                 ),
             )
+        if body.type in {
+            _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
+            _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
+        } and isinstance(request, Request):
+            # These rewrite the stored launch args the next launch starts from.
+            require_not_machine(request, user_id, "change a session's permission mode")
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,

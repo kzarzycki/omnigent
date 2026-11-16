@@ -2503,6 +2503,8 @@ def create_app(
     )
     app.state.startup_inputs = startup_inputs
     app.state.permission_store = permission_store
+    app.state.conversation_store = conversation_store
+    app.state.agent_cache = agent_cache
     app.state.host_store = host_store
     from omnigent.runtime import _globals as runtime_globals
 
@@ -5571,6 +5573,11 @@ def create_app(
                     app.state.machine_session_access = MachineSessionAccess.from_env(
                         machine_client.sub
                     )
+                    from omnigent.server.routes._machine_start import (
+                        install_machine_launch_guard,
+                    )
+
+                    install_machine_launch_guard(app)
 
         # Device Authorization Grant (RFC 8628): opt-in, default-off via
         # OMNIGENT_DEVICE_GRANT_ENABLED. Supported in accounts and oidc
