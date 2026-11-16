@@ -51,6 +51,7 @@ from omnigent.server.schemas import (
     MCPServerSummary,
     SkillSummary,
 )
+from omnigent.server.session_defaults import spec_names_harness
 from omnigent.spec import AgentSpec
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
@@ -123,7 +124,8 @@ def _to_agent_object(agent: Agent, agent_cache: AgentCache) -> AgentObject:
         ]
         # Kind for the Add Agent picker (Codex vs Claude). Stays None
         # when the bundle can't be loaded (the except below).
-        harness = loaded.spec.executor.harness_kind
+        # A portable spec names no harness: report none rather than "omnigent".
+        harness = loaded.spec.executor.harness_kind if spec_names_harness(loaded.spec) else None
         loads_user_settings = loaded.spec.loads_user_settings
     except Exception:  # spec load failure must not break the list
         _logger.debug(

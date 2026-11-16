@@ -609,6 +609,11 @@ async def test_unpinned_spec_starts_on_the_requested_harness_and_model(
     assert resp.json()["harness"] == "pi"
     session = (await client.get(f"/v1/sessions/{resp.json()['id']}")).json()
     assert session["model_override"] == "model-a"
+    # Both agent views report no harness for the portable spec, not "omnigent".
+    catalog = (await client.get("/v1/agents", params={"scope": "user"})).json()["data"]
+    assert next(item for item in catalog if item["id"] == agent_id)["harness"] is None
+    bound = (await client.get(f"/v1/sessions/{resp.json()['id']}/agent")).json()
+    assert bound["harness"] is None
 
 
 @pytest.mark.parametrize(
