@@ -59,7 +59,10 @@ from omnigent.policies.types import FAIL_CLOSED_PHASES
 from omnigent.runtime.harnesses._scaffold import HarnessApp, PolicyVerdictPayload, TurnContext
 from omnigent.runtime.prompt import dedupe_tool_output_images
 from omnigent.runtime.tool_output import cap_tool_output
-from omnigent.server.ask_user_question import structured_ask_user_question
+from omnigent.server.ask_user_question import (
+    ASK_USER_QUESTION_ELICITATION_PREFIX,
+    structured_ask_user_question,
+)
 from omnigent.server.schemas import (
     CreateResponseRequest,
     ElicitationRequestParams,
@@ -1014,7 +1017,7 @@ class ExecutorAdapter(HarnessApp):
                 "AskUserQuestion input had no question with selectable options, so "
                 "nothing was shown to the user. Fix the input or ask in plain text."
             )
-        elicitation_id = f"elicit_{secrets.token_hex(16)}"
+        elicitation_id = f"{ASK_USER_QUESTION_ELICITATION_PREFIX}{secrets.token_hex(16)}"
         # Own phase so the REPL's "approve always" cache for tool calls never
         # auto-accepts a question (an accept with no answers).
         params = self._permission_card(
