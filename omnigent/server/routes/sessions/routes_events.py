@@ -1516,8 +1516,10 @@ def register_events_routes(
                     **input_attributes({"input_stable_id": body.data.get("stable_id")}),
                 ),
             )
-        if body.type in MACHINE_REFUSED_EVENT_TYPES and not _has_bound_runner_authority(
-            request, conv
+        if (
+            isinstance(request, Request)
+            and body.type in MACHINE_REFUSED_EVENT_TYPES
+            and not _has_bound_runner_authority(request, conv)
         ):
             require_not_machine(request, user_id, "answer approvals or change permission modes")
         if body.type in {
