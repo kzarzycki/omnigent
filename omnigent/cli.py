@@ -12659,7 +12659,8 @@ def _claude_code_agent_bundle_noting_tools(path: Path, root: Path | None = None)
     if agent.allowed_tools and not builtin and unenforced:
         raise _agent_cli_error(
             f"{_printable(agent.name)}'s `tools` has no built-in tool Claude's --tools can "
-            f"enforce, so importing it would leave the agent unrestricted. Not enforceable: "
+            f"enforce, so the agent would launch with no built-in tools and none of the "
+            f"listed tools could be used. Not enforceable: "
             f"{_printable(', '.join(unenforced))}."
         )
     if agent.allowed_tools or agent.disallowed_tools:

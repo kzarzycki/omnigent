@@ -8047,11 +8047,37 @@ async def _launch_claude_native_terminal(
     allowed = _claude_tools_arg(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
-    if allowed is not None and "--tools" not in spec.args:
-        spec = dataclasses.replace(spec, args=[*spec.args, "--tools", allowed])
+    if allowed is not None:
+        spec = dataclasses.replace(
+            spec, args=[*_strip_claude_tools_args(spec.args), "--tools", allowed]
+        )
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
+
+
+def _strip_claude_tools_args(args: Sequence[str]) -> list[str]:
+    """
+    Drop client ``--tools X`` and ``--tools=X`` so a stored restriction cannot be widened.
+
+    :param args: Claude launch args.
+    :returns: Args without any ``--tools`` flag or its value.
+    """
+    out: list[str] = []
+    skip_value = False
+    for arg in args:
+        if skip_value:
+            skip_value = False
+            # An empty value is legal (``--tools ""``); a following flag is not its value.
+            if not arg.startswith("-"):
+                continue
+        if arg == "--tools":
+            skip_value = True
+            continue
+        if arg.startswith("--tools="):
+            continue
+        out.append(arg)
+    return out
 
 
 def _native_startup_instructions_from_spec(

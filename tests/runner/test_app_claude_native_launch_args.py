@@ -2030,3 +2030,46 @@ async def test_an_imported_tools_list_with_no_builtin_launches_with_no_tools(
         assert "--tools" not in args
     else:
         assert args[args.index("--tools") + 1 :][:1] == expected
+
+
+@pytest.mark.parametrize(
+    ("client_args", "allowed", "expected_tools"),
+    [
+        (["--tools", "Bash,Edit"], ["Read"], ["Read"]),
+        (["--tools=Bash"], ["Read"], ["Read"]),
+        (["--tools", "Bash,Edit"], ["Task(x)"], [""]),
+        (["--tools=Bash"], ["Task(x)"], [""]),
+        (["--tools", "Bash", "--model", "m"], ["Read"], ["Read"]),
+        (["--tools", "Bash"], ["*"], ["Bash"]),
+        (["--tools=Bash"], None, ["Bash"]),
+    ],
+)
+async def test_client_tools_args_never_widen_the_stored_restriction(
+    client_args: list[str], allowed: list[str] | None, expected_tools: list[str]
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native.orchestration import _launch_claude_native_terminal
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal = AsyncMock()
+    config = {} if allowed is None else {"allowed_tools": allowed}
+
+    await _launch_claude_native_terminal(
+        registry,
+        agent_spec=AgentSpec(spec_version=1, executor=ExecutorSpec(config=config)),
+        spec=TerminalEnvSpec(command="claude", args=list(client_args)),
+    )
+
+    args = list(registry.launch_required_terminal.call_args.kwargs["spec"].args)
+    if allowed is None:
+        assert args == client_args
+        return
+    values = [args[i + 1] for i, a in enumerate(args) if a == "--tools"]
+    assert values == expected_tools
+    assert not any(a.startswith("--tools=") for a in args)
+    if "--model" in client_args:
+        assert args[args.index("--model") + 1] == "m"
