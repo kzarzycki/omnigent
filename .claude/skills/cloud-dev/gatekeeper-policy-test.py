@@ -57,6 +57,7 @@ OUTSIDE = [  # product code, upstream's own skills and the shared hooks stay wit
 def load(path: str):
     spec = importlib.util.spec_from_file_location("approvals", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # the shim reads gatekeeper names only while registered
     spec.loader.exec_module(module)
     module.writer = lambda login: login == "writer"  # no GitHub: one account can write
     return module
