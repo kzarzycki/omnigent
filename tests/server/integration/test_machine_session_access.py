@@ -200,9 +200,8 @@ async def test_machine_without_the_setting_still_gets_not_your_host(
         {"permission_mode": "bypassPermissions"},
         {"harness_override": "claude-native"},
         {"labels": {"x": "y"}},
-        {"initial_input": {"type": "message", "data": {"content": "hi"}}},
     ],
-    ids=["launch-args", "permission-mode", "harness-override", "labels", "initial-input"],
+    ids=["launch-args", "permission-mode", "harness-override", "labels"],
 )
 async def test_machine_refused_for_fields_beyond_a_plain_start(
     host_perm_app: FastAPI,
@@ -500,9 +499,7 @@ _OWNER_ONLY_REQUESTS = [
             "data": {"permission_mode": "bypassPermissions", "initial_observation": False},
         },
     ),
-    ("post", "/v1/sessions/{sid}/events", {"type": "approval", "data": {}}),
     ("post", "/v1/sessions/{sid}/events", {"type": "slash_command", "data": {}}),
-    ("post", "/v1/sessions/{sid}/elicitations/abc/resolve", {"action": "accept"}),
     (
         "post",
         "/v1/sessions/{sid}/resources/terminals",
@@ -514,7 +511,7 @@ _OWNER_ONLY_REQUESTS = [
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     _OWNER_ONLY_REQUESTS,
-    ids=["permission-mode-event", "approval-event", "slash-command", "elicitation", "terminal"],
+    ids=["permission-mode-event", "slash-command", "terminal"],
 )
 async def test_machine_cannot_drive_approvals_modes_or_terminals_of_its_session(
     host_perm_app: FastAPI,
@@ -525,7 +522,7 @@ async def test_machine_cannot_drive_approvals_modes_or_terminals_of_its_session(
     path: str,
     payload: dict[str, object],
 ) -> None:
-    """The machine principal owns its session but cannot answer approvals or open terminals."""
+    """The machine principal owns its session but cannot open terminals or change modes."""
     _grant(host_perm_app)
     created = await _create_as_machine(host_perm_client, agents["listed"], None)
     assert created.status_code == 201, created.text
@@ -767,18 +764,24 @@ async def test_machine_cannot_pick_or_unpick_a_registry_mcp_service(
     assert "machine client may not" in response.text
 
 
-async def test_machine_cannot_read_an_elicitation(
+async def test_machine_can_answer_approvals_and_elicitations_of_its_session(
     host_perm_app: FastAPI,
     host_perm_client: httpx.AsyncClient,
     agents: dict[str, str],
 ) -> None:
-    """The approval page's GET exposes the pending prompt, so it is refused as well."""
+    """The machine principal may answer prompts in a session it started."""
     _grant(host_perm_app)
     created = await _create_as_machine(host_perm_client, agents["listed"], None)
     assert created.status_code == 201, created.text
-    response = await host_perm_client.get(
-        f"/v1/sessions/{created.json()['id']}/elicitations/abc",
-        headers={"X-Forwarded-Email": _MACHINE},
+    base = f"/v1/sessions/{created.json()['id']}"
+    headers = {"X-Forwarded-Email": _MACHINE}
+    resolved = await host_perm_client.post(
+        f"{base}/elicitations/abc/resolve", json={"action": "accept"}, headers=headers
     )
-    assert response.status_code == 403, response.text
-    assert "machine client may not" in response.text
+    assert resolved.status_code == 202, resolved.text
+    fetched = await host_perm_client.get(f"{base}/elicitations/abc", headers=headers)
+    assert fetched.status_code == 200, fetched.text
+    approval = await host_perm_client.post(
+        f"{base}/events", json={"type": "approval", "data": {}}, headers=headers
+    )
+    assert approval.status_code != 403, approval.text

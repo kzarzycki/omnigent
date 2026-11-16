@@ -1529,7 +1529,7 @@ def register_events_routes(
             and body.type in MACHINE_REFUSED_EVENT_TYPES
             and not _has_bound_runner_authority(request, conv)
         ):
-            require_not_machine(request, user_id, "answer approvals or change permission modes")
+            require_not_machine(request, user_id, "change permission modes or run slash commands")
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,

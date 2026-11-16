@@ -35,7 +35,7 @@ _logger = logging.getLogger(__name__)
 
 
 def machine_access_for(
-    request: HTTPConnection, user_id: str | None
+    request: HTTPConnection | Any, user_id: str | None
 ) -> MachineSessionAccess | None:
     """Return the grant when *user_id* is the configured machine principal.
 
@@ -50,10 +50,9 @@ def machine_access_for(
     return None
 
 
-# Events that answer approvals or change what a session's terminal may do.
+# Events that change what a session's terminal may do.
 MACHINE_REFUSED_EVENT_TYPES = frozenset(
     {
-        "approval",
         "slash_command",
         "external_permission_mode_change",
         "external_codex_approval_mode_change",
@@ -62,12 +61,12 @@ MACHINE_REFUSED_EVENT_TYPES = frozenset(
 )
 
 
-def require_not_machine(request: HTTPConnection, user_id: str | None, action: str) -> None:
+def require_not_machine(request: HTTPConnection | Any, user_id: str | None, action: str) -> None:
     """Refuse *action* when the caller is the machine principal under a grant.
 
-    For owner-level routes whose effect reaches the user's host (a terminal, an
-    approval, a permission mode), which the machine principal now owns a session
-    for but must not drive.
+    For owner-level routes whose effect reaches the user's host (a terminal, a
+    permission mode), which the machine principal owns a session for but must
+    not drive.
 
     :param request: The request or WebSocket, for ``app.state``.
     :param user_id: Authenticated caller.

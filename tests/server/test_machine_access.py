@@ -105,3 +105,10 @@ def test_host_owner_check_only_widens_when_the_grant_is_passed() -> None:
             user_id="carol@example.test", host_id="mine", host_store=store, machine_access=access
         )
     assert other_caller.value.status_code == 403
+
+
+def test_initial_input_is_not_a_machine_create_field() -> None:
+    """A durable first input needs a managed host, which the machine principal cannot set."""
+    from omnigent.server.machine_access import MACHINE_CREATE_FIELDS
+
+    assert "initial_input" not in MACHINE_CREATE_FIELDS
