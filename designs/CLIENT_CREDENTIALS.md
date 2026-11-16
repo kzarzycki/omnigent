@@ -137,7 +137,7 @@ it; any other combination refuses to start.
 With the grant, the machine principal may:
 
 - `POST /v1/sessions` with a JSON body naming a listed agent, a `host_id` of the
-  named user's host and a `workspace`, plus only `title`, `initial_input`,
+  named user's host and a `workspace`, plus only `title`,
   `model_override` and `reasoning_effort`. Any other field is refused.
 - `POST /v1/hosts/{host_id}/runners` for a session it owns, on that host, when
   the session's agent passes the same checks.

@@ -17,6 +17,7 @@ from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.machine_access import (
     MACHINE_CREATE_FIELDS,
     MachineSessionAccess,
+    conversation_bypasses_permissions,
     launch_args_bypass_permissions,
     refuse_machine_request,
     spec_declares_bypass,
@@ -77,6 +78,28 @@ def require_not_machine(request: HTTPConnection, user_id: str | None, action: st
         refuse_machine_request(action)
 
 
+def require_machine_scheduled_mode_safe(
+    request: HTTPConnection, user_id: str | None, permission_mode: str | None
+) -> None:
+    """Refuse a scheduled task's permission mode that skips approval, for the machine principal.
+
+    :param request: The request, for ``app.state``.
+    :param user_id: Authenticated caller.
+    :param permission_mode: The task's requested mode, or ``None``.
+    :raises OmnigentError: 403 when the caller is the machine principal and the
+        mode, on any harness, starts a terminal without prompts.
+    """
+    if permission_mode is None or machine_access_for(request, user_id) is None:
+        return
+    from omnigent.native.permission_modes import PERMISSION_LAUNCH_ARGS
+    from omnigent.server.scheduled.harness_settings import permission_mode_launch_options
+
+    for harness in PERMISSION_LAUNCH_ARGS:
+        options = permission_mode_launch_options(harness, permission_mode)
+        if options is not None and (launch_args_bypass_permissions(options[0]) or options[1]):
+            refuse_machine_request("schedule a session that skips permission prompts")
+
+
 def require_machine_create_shape(access: MachineSessionAccess, fields_set: set[str]) -> None:
     """Refuse a create that sets anything beyond the fields a machine start needs.
 
@@ -96,6 +119,7 @@ async def require_machine_agent_allowed(
     agent_cache: AgentCache | None,
     *,
     launch_args: list[str] | None = None,
+    conversation: Conversation | None = None,
 ) -> None:
     """Refuse an agent the grant does not list, or one that starts in bypass.
 
@@ -104,6 +128,8 @@ async def require_machine_agent_allowed(
     :param agent_cache: Cache for loading the agent's spec.
     :param launch_args: A session's stored terminal launch args, when one exists
         already (the runner-launch route); ``None`` at create.
+    :param conversation: The stored session, when one exists; its bypass label
+        counts as well as its launch args.
     :raises OmnigentError: 403 when the agent is not permitted or would open a
         terminal in a bypass permission mode.
     """
@@ -120,7 +146,11 @@ async def require_machine_agent_allowed(
     spec: Any = loaded.spec
     if not access.agent_permitted(agent, spec_harness_id(spec)):
         refuse_machine_request("start this agent")
-    if launch_args_bypass_permissions(launch_args) or spec_declares_bypass(spec):
+    if (
+        launch_args_bypass_permissions(launch_args)
+        or (conversation is not None and conversation_bypasses_permissions(conversation))
+        or spec_declares_bypass(spec)
+    ):
         refuse_machine_request("start a terminal that skips permission prompts")
 
 
@@ -173,7 +203,7 @@ class MachineLaunchGuard:
         if agent is None:
             refuse_machine_request("launch a session whose agent cannot be checked")
         await require_machine_agent_allowed(
-            self._access, agent, self._agent_cache, launch_args=conv.terminal_launch_args
+            self._access, agent, self._agent_cache, conversation=conv
         )
 
 

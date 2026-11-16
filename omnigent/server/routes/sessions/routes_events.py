@@ -115,6 +115,7 @@ from omnigent.server.failed_status_diagnostics import (
     failed_status_intake_attributes,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
+from omnigent.server.machine_access import input_leads_with_terminal_command
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -1495,11 +1496,16 @@ def register_events_routes(
         native_shell_authorized = False
         if (
             body.type == "message"
+            and native_harness is not None
+            and input_leads_with_terminal_command(body.data.get("content"))
+        ):
+            # A native TUI runs a leading ! or / as a shell escape or slash command.
+            require_not_machine(request, user_id, "run a shell command or slash command on a host")
+        if (
+            body.type == "message"
             and shell_command_from_input(body.data.get("content")) is not None
             and native_harness == "codex-native"
         ):
-            if isinstance(request, Request):
-                require_not_machine(request, user_id, "run a shell command on a host")
             # Direct native shell bypasses tool policies, like the environment shell route.
             await _require_access_and_level(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store

@@ -143,6 +143,7 @@ from omnigent.server.routes._machine_start import (
     machine_access_for,
     require_machine_agent_allowed,
     require_machine_create_shape,
+    require_not_machine,
 )
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._session_create_validation import (
@@ -5170,6 +5171,7 @@ def register_core_routes(
             CLIENT_SURFACE_LABEL_KEY: resolve_client_surface(request.headers)
         }
         if body.codex_bypass_sandbox:
+            require_not_machine(request, user_id, "skip permission prompts on a host")
             target_native = await asyncio.to_thread(_native_coding_agent_for_agent, base_agent)
             if target_native is None or target_native.harness != "codex-native":
                 raise OmnigentError(

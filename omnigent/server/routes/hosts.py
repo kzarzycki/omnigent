@@ -1225,7 +1225,7 @@ def create_hosts_router(
                 machine_access,
                 machine_agent,
                 agent_cache,
-                launch_args=target.conv.terminal_launch_args,
+                conversation=target.conv,
             )
         conn = target.conn
         if target.conv.family_id is not None and flags.enabled(Feature.SIBLING_SESSIONS):

@@ -46,6 +46,7 @@ from omnigent.server.feature_flags import DeploymentGate, deployment_gate_enable
 from omnigent.server.managed_hosts import is_repo_workspace, parse_repo_workspace
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_owner
+from omnigent.server.routes._machine_start import require_machine_scheduled_mode_safe
 from omnigent.server.routes._session_create_validation import (
     validate_existing_host_workspace,
     validate_session_agent,
@@ -862,6 +863,7 @@ def create_scheduled_tasks_router(
         await _validate_rrule_or_400(body.rrule, body.session_mode, body.execution_target)
         _validate_timezone_or_400(body.timezone)
         permission_mode = validate_scheduled_permission_mode(body.permission_mode)
+        require_machine_scheduled_mode_safe(request, owner, permission_mode)
         agent, workspace, model_override, reasoning_effort = await _validate_launch_inputs(
             request,
             owner=owner,
@@ -1280,6 +1282,7 @@ def create_scheduled_tasks_router(
                 fields["reasoning_effort"] = reasoning_effort
         if "permission_mode" in fields:
             new_mode = validate_scheduled_permission_mode(fields["permission_mode"])
+            require_machine_scheduled_mode_safe(request, owner, new_mode)
             fields["permission_mode"] = new_mode
             # Gate the mode on the agent's harness. Clearing to null falls back to the
             # agent's own default, which must not skip approval; an agent switch

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC, env_var_is_truthy
 
 if TYPE_CHECKING:
-    from omnigent.entities import Agent
+    from omnigent.entities import Agent, Conversation
     from omnigent.spec import AgentSpec
 
 _logger = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ MACHINE_CREATE_FIELDS = frozenset(
         "title",
         "host_id",
         "workspace",
-        "initial_input",
         "model_override",
         "reasoning_effort",
     }
@@ -85,6 +84,42 @@ def launch_args_bypass_permissions(args: Iterable[str] | None) -> bool:
             return True
         previous_flag = arg
     return False
+
+
+def conversation_bypasses_permissions(conv: Conversation) -> bool:
+    """Whether a stored session starts its terminal without approval prompts.
+
+    Reads both places a bypass is recorded: the launch args, and the codex-native
+    full-bypass label (which maps to empty args).
+
+    :param conv: The stored session row.
+    :returns: ``True`` when either records a bypass.
+    """
+    from omnigent.stores.conversation_store import CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
+
+    if launch_args_bypass_permissions(conv.terminal_launch_args):
+        return True
+    return bool((conv.labels or {}).get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY))
+
+
+def input_leads_with_terminal_command(content: object) -> bool:
+    """Whether native-terminal input starts with ``!`` or ``/`` after whitespace.
+
+    A native TUI reads those as a shell escape or a slash command.
+
+    :param content: A message's ``content``: text, or a list of text blocks.
+    :returns: ``True`` when the first text starts with either character.
+    """
+    if isinstance(content, list):
+        content = next(
+            (
+                block.get("text")
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ),
+            None,
+        )
+    return isinstance(content, str) and content.lstrip()[:1] in ("!", "/")
 
 
 def spec_harness_id(spec: AgentSpec) -> str:
