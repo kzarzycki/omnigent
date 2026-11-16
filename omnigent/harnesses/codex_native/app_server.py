@@ -5834,7 +5834,9 @@ _CODEX_PERMISSION_CONFIG_KEYS = frozenset(
 
 
 def _is_codex_permission_config(assignment: str) -> bool:
-    key = assignment.partition("=")[0].strip()
+    raw_key = assignment.partition("=")[0].strip()
+    # TOML allows quoted key segments, e.g. ``"sandbox_mode"`` or ``permissions."x"``.
+    key = ".".join(part.strip().strip("\"'") for part in raw_key.split("."))
     return key in _CODEX_PERMISSION_CONFIG_KEYS or key.startswith("permissions.")
 
 

@@ -73,6 +73,9 @@ _WIDENING_OVERRIDES = [
     ["--config=approval_policy=never"],
     ["-c", 'permissions.custom.filesystem={":root"="write"}'],
     ["--full-auto"],
+    ["-c", '"sandbox_mode"="danger-full-access"'],
+    ["-c", '"default_permissions"=":danger-full-access"'],
+    ["-c", 'permissions."custom".filesystem={":root"="write"}'],
 ]
 
 
@@ -83,6 +86,27 @@ def test_a_client_config_override_cannot_widen_a_read_only_spec(override: list[s
     )
 
     assert config.terminal_launch_args == ["--model", "m", "--sandbox", "read-only"]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--", "fix the bug"], ["--sandbox", "read-only", "--", "fix the bug"]),
+        (
+            ["--model", "m", "--", "do x"],
+            ["--model", "m", "--sandbox", "read-only", "--", "do x"],
+        ),
+    ],
+)
+def test_the_read_only_pin_precedes_a_positional_separator(
+    args: list[str], expected: list[str]
+) -> None:
+    config = _codex_launch_config_for_spec(_launch_config(args), _spec(["Edit"]))
+
+    assert config.terminal_launch_args == expected
+    assert codex_app._codex_resume_permission_params(config.terminal_launch_args) == {
+        "sandbox": "read-only"
+    }
 
 
 def test_unrelated_config_overrides_survive_the_read_only_pin() -> None:

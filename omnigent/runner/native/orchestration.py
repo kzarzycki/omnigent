@@ -1440,9 +1440,11 @@ def _codex_launch_config_for_spec(
     kept = _strip_approval_sandbox_flags(
         tuple(launch_config.terminal_launch_args or ()), drop_permission_config=True
     )
+    # Pin before any ``--``: codex treats everything after it as positional text.
+    split = kept.index("--") if "--" in kept else len(kept)
     return dataclasses.replace(
         launch_config,
-        terminal_launch_args=[*kept, "--sandbox", "read-only"],
+        terminal_launch_args=[*kept[:split], "--sandbox", "read-only", *kept[split:]],
         bypass_sandbox=False,
     )
 
