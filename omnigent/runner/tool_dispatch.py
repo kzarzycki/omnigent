@@ -24,10 +24,12 @@ import base64
 import dataclasses
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
 import tempfile
+import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
@@ -240,6 +242,9 @@ _ASK_GATE_DELIVERY_TIMEOUT = httpx.Timeout(_ASK_GATE_DELIVERY_READ_TIMEOUT_S, co
 # only above the 120-second shell default. Keep the outer hop larger so the
 # AP→runner leg fails first with the more specific error when the proxy wedges.
 MCP_PROXY_FORWARD_TIMEOUT_S = _RUNNER_EXECUTION_TIMEOUT_S + 30.0
+# Read budget for an independent (orchestrated) session create; a loaded
+# server can take about a minute. Must stay below the proxy hops above.
+_ORCHESTRATED_CREATE_READ_TIMEOUT_S = 120.0
 MCP_PROXY_CALL_TIMEOUT_S = _RUNNER_EXECUTION_TIMEOUT_S + 60.0
 
 
@@ -1516,6 +1521,59 @@ async def _find_existing_child_session(
         if is_session_closed(labels, session_title):
             continue
         return child
+    return None
+
+
+async def _find_orchestrated_session_created_since(
+    server_client: httpx.AsyncClient,
+    *,
+    source_session_id: str,
+    agent_id: str,
+    title: object,
+    created_after: float,
+) -> _JsonObject | None:
+    """
+    Find the session an orchestrated create produced after its response was lost.
+
+    Matches the newest session created by ``source_session_id`` for ``agent_id``
+    (and ``title``, when given) at or after ``created_after``. With no title,
+    the newest matching session in the window wins. The server stamps whole
+    seconds, so the cutoff is floored to one; clock skew between the runner and
+    server beyond that is not compensated.
+
+    :param server_client: Omnigent server client.
+    :param source_session_id: Session that issued the create, e.g. ``"conv_src123"``.
+    :param agent_id: Requested agent id, e.g. ``"worker"``.
+    :param title: Requested title, or a non-string when none was given.
+    :param created_after: Unix epoch seconds (may be fractional) taken just before the
+        request was sent.
+    :returns: The session row, or ``None`` when absent or the lookup failed.
+    """
+    created_after = math.floor(created_after)
+    try:
+        resp = await server_client.get(
+            "/v1/sessions",
+            params={"limit": 50, "order": "desc", "visibility": "all"},
+            timeout=30.0,
+        )
+        if resp.status_code != 200:
+            return None
+        page = _parse_discovery_page(resp.json())
+    except Exception:  # noqa: BLE001 - the caller falls back to "could not be confirmed"
+        return None
+    for row in page.rows:
+        labels = _string_mapping(row.get("labels")) or {}
+        created_at = row.get("created_at")
+        if labels.get(CREATED_BY_SESSION_LABEL_KEY) != source_session_id:
+            continue
+        if not isinstance(created_at, int | float) or created_at < created_after:
+            continue
+        if isinstance(title, str):
+            if row.get("title") != title:
+                continue
+        elif agent_id not in (row.get("agent_id"), row.get("agent_name")):
+            continue
+        return row
     return None
 
 
@@ -3800,6 +3858,7 @@ async def _execute_session_create(
         "title": args.get("title"),
     }
     create_requested = False
+    requested_at = 0.0
     try:
         endpoint = "/v1/sessions" if placement == "child" else "/v1/sessions/orchestrated"
         if placement == "host":
@@ -3869,18 +3928,41 @@ async def _execute_session_create(
         if project_error is not None:
             return project_error
         create_requested = True
+        create_timeout = 30.0 if placement == "child" else _ORCHESTRATED_CREATE_READ_TIMEOUT_S
+        requested_at = time.time()
         if placement in ("managed", "host"):
             from omnigent.runner.session_requests import post_on_host
 
             resp = await post_on_host(
-                server_client, endpoint, host_id=host_id, json=body, headers=headers, timeout=30.0
+                server_client,
+                endpoint,
+                host_id=host_id,
+                json=body,
+                headers=headers,
+                timeout=create_timeout,
             )
         else:
-            resp = await server_client.post(endpoint, json=body, headers=headers, timeout=30.0)
+            resp = await server_client.post(
+                endpoint, json=body, headers=headers, timeout=create_timeout
+            )
     except Exception as exc:  # noqa: BLE001
         if placement != "child" and create_requested:
-            return json.dumps(unconfirmed_creation)
-        return json.dumps({"error": f"sys_session_create failed: {exc}"})
+            if isinstance(exc, httpx.ReadTimeout):
+                # The server may have committed the session; adopt it as the result.
+                found = await _find_orchestrated_session_created_since(
+                    server_client,
+                    source_session_id=conversation_id,
+                    agent_id=str(agent_id),
+                    title=args.get("title"),
+                    created_after=requested_at,
+                )
+                if found is None:
+                    return json.dumps(unconfirmed_creation)
+                resp = httpx.Response(201, json=found)
+            else:
+                return json.dumps(unconfirmed_creation)
+        else:
+            return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if placement != "child" and (resp.status_code >= 500 or resp.status_code in (408, 429)):
         return json.dumps(unconfirmed_creation)
     if placement in ("same_host", "host"):
