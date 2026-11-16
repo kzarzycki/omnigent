@@ -1428,7 +1428,7 @@ async def _pi_native_launch_config(
 
 def _insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[str]:
     """
-    Insert ``extra`` before the first ``--``, since the CLIs read everything after it as prompt text.
+    Insert ``extra`` before the first ``--``, which the CLIs read as the start of prompt text.
 
     :param args: Launch args, possibly containing a ``--`` separator.
     :param extra: Flags to place ahead of the separator (or at the end without one).
