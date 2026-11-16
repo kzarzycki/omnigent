@@ -74,6 +74,7 @@ from omnigent.server.routes._content_type import (
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._gzip_route import GZipFileContentRoute, skip_gzip
 from omnigent.server.routes._host_launch import resolve_host_owner
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._sessions.common import (
     _logger,
@@ -1588,6 +1589,9 @@ def register_resources_routes(
         """
         timings = StageTimings()
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        require_not_machine(
+            request, _get_user_id(request, auth_provider), "open a terminal on a host"
+        )
         body = await request.json()
         is_native_bootstrap = (
             bool(body.get("ensure_native_terminal") or body.get("bridge_inject_dir"))

@@ -134,6 +134,10 @@ from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
+from omnigent.server.routes._machine_start import (
+    MACHINE_REFUSED_EVENT_TYPES,
+    require_not_machine,
+)
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
     _APPROVAL_TYPE,
@@ -1512,6 +1516,10 @@ def register_events_routes(
                     **input_attributes({"input_stable_id": body.data.get("stable_id")}),
                 ),
             )
+        if body.type in MACHINE_REFUSED_EVENT_TYPES and not _has_bound_runner_authority(
+            request, conv
+        ):
+            require_not_machine(request, user_id, "answer approvals or change permission modes")
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,

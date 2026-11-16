@@ -37,6 +37,7 @@ from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.routes._sessions.common import (
     _logger,
     get_server_runner_router,
@@ -136,6 +137,7 @@ def register_elicitations_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         user_id = _get_user_id(request, auth_provider)
+        require_not_machine(request, user_id, "answer approvals")
         access = await _require_access_and_level(
             user_id, session_id, ELICITATION_RESOLVE_LEVEL, permission_store, conversation_store
         )
@@ -328,6 +330,7 @@ def register_elicitations_routes(
         :raises OmnigentError: 404 if the session does not exist.
         """
         user_id = _get_user_id(request, auth_provider)
+        require_not_machine(request, user_id, "answer approvals")
         access = await _require_access_and_level(
             user_id, session_id, ELICITATION_RESOLVE_LEVEL, permission_store, conversation_store
         )

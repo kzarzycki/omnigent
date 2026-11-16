@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Request
+from starlette.requests import HTTPConnection
 
 from omnigent.server.machine_access import (
     MACHINE_CREATE_FIELDS,
@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-def machine_access_for(request: Request, user_id: str | None) -> MachineSessionAccess | None:
+def machine_access_for(
+    request: HTTPConnection, user_id: str | None
+) -> MachineSessionAccess | None:
     """Return the grant when *user_id* is the configured machine principal.
 
     :param request: The request, for ``app.state``.
@@ -40,6 +42,34 @@ def machine_access_for(request: Request, user_id: str | None) -> MachineSessionA
     if access is not None and access.applies_to(user_id):
         return access
     return None
+
+
+# Events that answer approvals or change what a session's terminal may do.
+MACHINE_REFUSED_EVENT_TYPES = frozenset(
+    {
+        "approval",
+        "slash_command",
+        "external_permission_mode_change",
+        "external_codex_approval_mode_change",
+        "external_codex_collaboration_mode_change",
+    }
+)
+
+
+def require_not_machine(request: HTTPConnection, user_id: str | None, action: str) -> None:
+    """Refuse *action* when the caller is the machine principal under a grant.
+
+    For owner-level routes whose effect reaches the user's host (a terminal, an
+    approval, a permission mode), which the machine principal now owns a session
+    for but must not drive.
+
+    :param request: The request or WebSocket, for ``app.state``.
+    :param user_id: Authenticated caller.
+    :param action: What was refused, e.g. ``"open a terminal"``.
+    :raises OmnigentError: 403 when the caller is the machine principal.
+    """
+    if machine_access_for(request, user_id) is not None:
+        refuse_machine_request(action)
 
 
 def require_machine_create_shape(access: MachineSessionAccess, fields_set: set[str]) -> None:

@@ -22,6 +22,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.machine_access import MachineSessionAccess
 from omnigent.spec import extract_safe
 from omnigent.stores.artifact_store.local import LocalArtifactStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.budgets import budget
 from tests.server.helpers import build_agent_bundle
 from tests.server.helpers import websocket_scope as _websocket_scope
@@ -311,3 +312,72 @@ async def test_machine_runner_launch_rechecks_the_sessions_agent(
     )
     assert response.status_code == 403, response.text
     assert host_perm_app.state.host_registry.get(_NAMED_HOST).outbound_queue.empty()
+
+
+_OWNER_ONLY_REQUESTS = [
+    (
+        "post",
+        "/v1/sessions/{sid}/events",
+        {
+            "type": "external_permission_mode_change",
+            "data": {"permission_mode": "bypassPermissions", "initial_observation": False},
+        },
+    ),
+    ("post", "/v1/sessions/{sid}/events", {"type": "approval", "data": {}}),
+    ("post", "/v1/sessions/{sid}/events", {"type": "slash_command", "data": {}}),
+    ("post", "/v1/sessions/{sid}/elicitations/abc/resolve", {"action": "accept"}),
+    (
+        "post",
+        "/v1/sessions/{sid}/resources/terminals",
+        {"terminal": "bash", "session_key": "main"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    _OWNER_ONLY_REQUESTS,
+    ids=["permission-mode-event", "approval-event", "slash-command", "elicitation", "terminal"],
+)
+async def test_machine_cannot_drive_approvals_modes_or_terminals_of_its_session(
+    host_perm_app: FastAPI,
+    host_perm_client: httpx.AsyncClient,
+    agents: dict[str, str],
+    db_uri: str,
+    method: str,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    """The machine principal owns its session but cannot answer approvals or open terminals."""
+    _grant(host_perm_app)
+    created = await _create_as_machine(host_perm_client, agents["listed"], None)
+    assert created.status_code == 201, created.text
+    response = await host_perm_client.request(
+        method,
+        path.format(sid=created.json()["id"]),
+        json=payload,
+        headers={"X-Forwarded-Email": _MACHINE},
+    )
+    assert response.status_code == 403, response.text
+    assert "machine client may not" in response.text
+    stored = SqlAlchemyConversationStore(db_uri).get_conversation(created.json()["id"])
+    assert stored is not None and not stored.terminal_launch_args
+
+
+async def test_machine_cannot_attach_to_a_terminal_for_writing(
+    host_perm_app: FastAPI,
+    host_perm_client: httpx.AsyncClient,
+    agents: dict[str, str],
+) -> None:
+    """An interactive attach is refused for the machine principal before it is accepted."""
+    from asgiref.testing import ApplicationCommunicator
+
+    _grant(host_perm_app)
+    created = await _create_as_machine(host_perm_client, agents["listed"], None)
+    sid = created.json()["id"]
+    scope = _websocket_scope(f"/v1/sessions/{sid}/resources/terminals/terminal_x/attach")
+    scope["headers"] = [(b"x-forwarded-email", _MACHINE.encode())]
+    comm = ApplicationCommunicator(host_perm_app, scope)
+    await comm.send_input({"type": "websocket.connect"})
+    output = await comm.receive_output(timeout=budget(2.0))
+    assert output["type"] == "websocket.close"
