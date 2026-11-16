@@ -2887,7 +2887,7 @@ describe("Sidebar project sections", () => {
   it.each([
     ["a blank legacy label", { omni_project: "" }],
     ["no legacy label", {}],
-  ])("auto-expands the folder of a session filed by project_id with %s", (_shape, labels) => {
+  ])("holds a session filed by project_id with %s under its collapsed folder", (_shape, labels) => {
     projectsMock.push("Customer X");
     mockConversations([conv("conv_filed", "Claude Code", { project_id: "p_Customer X", labels })]);
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -2906,7 +2906,7 @@ describe("Sidebar project sections", () => {
     );
 
     const header = screen.getByRole("button", { name: /^Customer X/ });
-    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(header).toHaveAttribute("aria-expanded", "false");
     const projectSection = screen.getByText("Customer X").closest("section")!;
     expect(within(projectSection).getByText("conv_filed")).toBeInTheDocument();
   });
