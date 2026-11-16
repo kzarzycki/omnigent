@@ -1020,6 +1020,8 @@ async def _continue_session(
         )
         return
     assert conv is not None
+    if conv.archived:
+        await asyncio.to_thread(_reopen_quiet_session, deps, session_id)
     agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
     inherited = await _inherited_permission_problem(deps, task, agent, continued=True)
     if inherited is not None:
@@ -1080,6 +1082,18 @@ async def _continue_session(
         return
     await recorder.finish("succeeded", conversation_id=session_id)
     _logger.info("scheduled fire: task %s continued session %s", task.id, session_id)
+
+
+def _reopen_quiet_session(deps: FireDeps, session_id: str) -> None:
+    """Unarchive an archive_when_done session so the next run decides afresh.
+
+    An archived one holds nothing unread (its last run was quiet, or the owner
+    dismissed it), so its stale keep reason goes too.
+    """
+    from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY
+
+    deps.conversation_store.delete_label(session_id, KEEP_LABEL_KEY)
+    deps.conversation_store.update_conversation(session_id, archived=False)
 
 
 _NEW_SESSION_HINT = "edit the automation to start a new session on its next run"
@@ -1163,7 +1177,8 @@ async def continued_session_problem(
         permission_store.check_access, task.user_id or RESERVED_USER_LOCAL, conv.id, LEVEL_OWNER
     ):
         return "the automation's owner does not own the session", "continued_session_forbidden"
-    if conv.archived:
+    # An archive_when_done task archives its own quiet runs; the next run reopens the session.
+    if conv.archived and not task.archive_when_done:
         return "the session is archived", "continued_session_archived"
     if conv.parent_conversation_id is not None:
         return "the session is a sub-agent's session", "continued_session_incompatible"
