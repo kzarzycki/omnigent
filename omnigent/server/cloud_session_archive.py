@@ -1,4 +1,4 @@
-"""Archive a ``claude-cloud`` session's claude.ai cloud session when its Omnigent session is archived.
+"""Archive the claude.ai cloud session of a ``claude-cloud`` session when it is archived.
 
 The bridge (``integrations/claude-cloud-acp``) holds the claude.ai login and already
 implements the call, so this runs its ``--archive -`` command on the server host with the
@@ -23,7 +23,10 @@ _logger = logging.getLogger(__name__)
 # The first line of the bridge's first answer; same text as its ``MARKER``.
 CLOUD_SESSION_MARKER = "cloud session: https://claude.ai/code/"
 _BRIDGE_PATH = (
-    Path(__file__).resolve().parents[2] / "integrations" / "claude-cloud-acp" / "claude_cloud_acp.py"
+    Path(__file__).resolve().parents[2]
+    / "integrations"
+    / "claude-cloud-acp"
+    / "claude_cloud_acp.py"
 )
 _ARCHIVE_TIMEOUT_S = 60.0
 _TRANSCRIPT_ITEM_LIMIT = 200
@@ -75,9 +78,12 @@ def archive_claude_cloud_session(
             timeout=_ARCHIVE_TIMEOUT_S,
             check=False,
         )
-    except Exception:  # noqa: BLE001 — a failed cloud archive must not undo the Omnigent archive
+    except Exception:
         _logger.warning(
-            "Cloud session archive failed for %s", conv.id, exc_info=True, extra={"session_id": conv.id}
+            "Cloud session archive failed for %s",
+            conv.id,
+            exc_info=True,
+            extra={"session_id": conv.id},
         )
         return False
     if done.returncode != 0:

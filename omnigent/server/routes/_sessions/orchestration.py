@@ -173,13 +173,13 @@ from omnigent.server.background_session_titles import (
     background_session_titles_enabled,
     prepare_background_session_title,
 )
-from omnigent.server.cloud_session_archive import archive_claude_cloud_session_async
 from omnigent.server.bundles import (
     agent_for_user,
     bundle_location,
     uploaded_agent_for,
     validate_agent_bundle,
 )
+from omnigent.server.cloud_session_archive import archive_claude_cloud_session_async
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.failed_status_diagnostics import failed_status_intake_attributes
 from omnigent.server.harness_telemetry import (

@@ -1,4 +1,4 @@
-"""Archiving a claude-cloud session archives its claude.ai cloud session; other harnesses make no call."""
+"""Archiving a claude-cloud session archives its cloud session; other harnesses make no call."""
 
 from __future__ import annotations
 
@@ -8,8 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from omnigent.server import cloud_session_archive, session_live_state
+from omnigent.server.cloud_session_archive import (
+    CLOUD_SESSION_MARKER,
+    archive_claude_cloud_session,
+)
 from omnigent.server.routes._sessions import orchestration
-from omnigent.server.cloud_session_archive import CLOUD_SESSION_MARKER, archive_claude_cloud_session
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -17,7 +20,9 @@ CLOUD_ID = "session_ABCDEFGHIJKL"
 
 
 def _item(role: str, text: str):
-    return SimpleNamespace(data=SimpleNamespace(role=role, content=[{"type": "text", "text": text}]))
+    return SimpleNamespace(
+        data=SimpleNamespace(role=role, content=[{"type": "text", "text": text}])
+    )
 
 
 class _Store:
@@ -37,6 +42,7 @@ CONV = SimpleNamespace(id="s" * 32)
 @pytest.fixture
 def calls(monkeypatch):
     """Records each bridge run; ``result`` sets what it returns."""
+
     class Calls(list):
         state: dict
 
