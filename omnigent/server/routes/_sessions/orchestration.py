@@ -173,6 +173,7 @@ from omnigent.server.background_session_titles import (
     background_session_titles_enabled,
     prepare_background_session_title,
 )
+from omnigent.server.cloud_session_archive import archive_claude_cloud_session_async
 from omnigent.server.bundles import (
     agent_for_user,
     bundle_location,
@@ -1099,6 +1100,8 @@ async def _archive_stop(
     _pending_archive_stops.pop(session_id, None)
 
     await _facade._best_effort_stop(session_id, conversation_store, runner_router)
+    # The cloud session of a claude-cloud agent outlives its runner; end it too.
+    await archive_claude_cloud_session_async(conv, conversation_store)
     if conv.host_id and conv.runner_id:
         try:
             owns_runner = await _owns_host_runner(conv, conversation_store)

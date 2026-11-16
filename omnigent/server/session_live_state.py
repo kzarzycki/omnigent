@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 from omnigent.db.enum_codecs import SESSION_LIVE_STATUS
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.harness_aliases import is_native_harness
+from omnigent.server.cloud_session_archive import archive_claude_cloud_session
 from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY
 
 if TYPE_CHECKING:
@@ -329,6 +330,7 @@ def persist_scheduled_run_completion(
         if conv is not None and not conv.archived and KEEP_LABEL_KEY not in conv.labels:
             # The runner is left to the idle reaper; this only hides the run.
             _store.update_conversation(conversation_id, archived=True)
+            archive_claude_cloud_session(conv, _store)
 
     submit("scheduled_run_completion", _transition)
 
