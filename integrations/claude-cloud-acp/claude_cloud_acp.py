@@ -1709,6 +1709,22 @@ def check_lifetime() -> None:
             hello.stdin.flush()
             caps = json.loads(hello.stdout.readline())["result"]["agentCapabilities"]
             assert caps["omnigentIdleExit"] == {"status": IDLE_EXIT_STATUS}, caps
+            assert caps["omnigentSessionEnded"] == {"method": SESSION_ENDED_METHOD}, caps
+            # An ended session this bridge never held is answered, with nothing to archive.
+            hello.stdin.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": SESSION_ENDED_METHOD,
+                        "params": {"sessionId": "acp-unknown"},
+                    }
+                )
+                + "\n"
+            )
+            hello.stdin.flush()
+            reply = json.loads(hello.stdout.readline())
+            assert reply["id"] == 2 and reply["result"] == {}, reply
         finally:
             hello.kill()
             hello.wait()

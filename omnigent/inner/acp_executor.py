@@ -527,6 +527,8 @@ class AcpExecutor(Executor):
         self._resent_after_idle_exit = False
         self._idle_exit_status: int | None = None
         self._session_ended_method: str | None = None
+        # Survives a respawn, which clears the method: tells "agent never asked" apart.
+        self._advertised_session_ended = False
         self._queue: asyncio.Queue[_AcpJsonObject] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -927,6 +929,9 @@ class AcpExecutor(Executor):
         )
         method = ended.get("method") if isinstance(ended, dict) else None
         self._session_ended_method = method if isinstance(method, str) else None
+        self._advertised_session_ended = self._advertised_session_ended or (
+            self._session_ended_method is not None
+        )
         # Stash the advertised auth methods but do NOT authenticate here:
         # sending an unsolicited ``authenticate`` would change the handshake
         # for every agent that advertises methods informationally (or is
@@ -2207,6 +2212,12 @@ class AcpExecutor(Executor):
         """
         method, acp_session_id = self._session_ended_method, self._session_id
         if method is None or acp_session_id is None:
+            if self._advertised_session_ended:
+                logger.warning(
+                    "acp[%s] session %s ended with no session to tell (respawned, no turn since)",
+                    self._config.name,
+                    session_key,
+                )
             return
         try:
             if self._proc is None:

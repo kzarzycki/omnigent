@@ -135,3 +135,29 @@ async def test_a_scheduled_run_archived_when_done_tells_the_runner(
     finally:
         session_live_state.configure(None)
     assert told == [conv.id]
+
+
+def test_a_scheduled_run_archived_with_no_server_loop_is_logged(db_uri: str, caplog) -> None:
+    conversations = SqlAlchemyConversationStore(db_uri)
+    tasks = SqlAlchemyScheduledTaskStore(db_uri)
+    task = tasks.create(
+        scheduled_task_id=uuid.uuid4().hex,
+        name="check",
+        prompt="p",
+        rrule="FREQ=HOURLY",
+        user_id=None,
+        agent_id=uuid.uuid4().hex,
+        timezone="UTC",
+        archive_when_done=True,
+    )
+    conv = conversations.create_conversation(title="check")
+    tasks.create_run(uuid.uuid4().hex, task.id, "running", scheduled_at=0, conversation_id=conv.id)
+    session_live_state.configure(conversations, tasks)
+    try:
+        with caplog.at_level(logging.WARNING):
+            session_live_state.persist_scheduled_run_completion(conv.id, "succeeded")
+            session_live_state.submit("drain", lambda: None).result(10)
+    finally:
+        session_live_state.configure(None)
+    assert "no server loop to tell its runner" in caplog.text
+    assert conversations.get_conversation(conv.id).archived

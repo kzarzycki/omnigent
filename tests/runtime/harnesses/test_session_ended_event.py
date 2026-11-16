@@ -79,6 +79,27 @@ async def test_an_agent_that_did_not_ask_is_left_alone() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_respawned_agent_with_no_session_is_logged(caplog) -> None:
+    sent: list[dict] = []
+    executor = _acp_executor_with_agent("_omnigent/session_ended", sent)
+    executor._advertised_session_ended = True
+    executor._session_ended_method = None  # a respawn clears both until the next turn
+    executor._session_id = None
+    with caplog.at_level(logging.WARNING):
+        await executor.end_session("key")
+    assert sent == [] and "no session to tell" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_never_asked_is_not_logged(caplog) -> None:
+    executor = _acp_executor_with_agent(None, [])
+    executor._session_id = None
+    with caplog.at_level(logging.WARNING):
+        await executor.end_session("key")
+    assert "no session to tell" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_failed_notice_is_logged_and_not_raised(caplog) -> None:
     executor = _acp_executor_with_agent("_omnigent/session_ended", [])
 
@@ -111,6 +132,7 @@ async def test_the_handshake_records_the_method_the_agent_advertises() -> None:
     executor._rpc = rpc  # type: ignore[assignment]
     await executor._ensure_initialized()
     assert executor._session_ended_method == "_omnigent/session_ended"
+    assert executor._advertised_session_ended
 
 
 def _executor_after_exit(method: str | None, status: int) -> tuple[acp.AcpExecutor, list]:
