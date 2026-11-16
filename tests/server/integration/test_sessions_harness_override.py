@@ -166,6 +166,51 @@ async def test_create_without_harness_override_reports_spec_default(
     assert listed_by_id[override.json()["id"]]["harness"] == "pi"
 
 
+async def test_warm_session_list_resolves_no_cache_paths(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing sessions on a warm agent cache resolves no filesystem path.
+
+    The list loads each row's bound spec for its harness; path resolution per
+    row made server CPU scale with the rows listed.
+    """
+    import os
+
+    agent = await create_test_agent(client)
+    session_count = 8
+    session_ids = []
+    for _ in range(session_count):
+        created = await client.post(
+            "/v1/sessions", json={"agent_id": agent["id"], "initial_items": []}
+        )
+        assert created.status_code == 201, created.text
+        session_ids.append(created.json()["id"])
+    assert (await client.get("/v1/sessions")).status_code == 200  # warms the agent cache
+
+    resolve_calls: list[str] = []
+    original_resolve = Path.resolve
+    original_realpath = os.path.realpath
+
+    def counting_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
+        resolve_calls.append(f"Path.resolve({self})")
+        return original_resolve(self, *args, **kwargs)
+
+    def counting_realpath(path: Any, *args: Any, **kwargs: Any) -> Any:
+        resolve_calls.append(f"os.path.realpath({path})")
+        return original_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    monkeypatch.setattr(os.path, "realpath", counting_realpath)
+    response = await client.get("/v1/sessions")
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    harness_by_id = {item["id"]: item.get("harness") for item in response.json()["data"]}
+    assert all(harness_by_id[session_id] == "claude-sdk" for session_id in session_ids)
+    assert resolve_calls == []
+
+
 async def test_create_harness_override_alias_canonicalizes(
     client: httpx.AsyncClient,
 ) -> None:
