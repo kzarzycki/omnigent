@@ -106,7 +106,11 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
-from omnigent.spec.tool_restrictions import executor_tool_names, spec_forbids_edits
+from omnigent.spec.tool_restrictions import (
+    executor_tool_names,
+    map_claude_tools,
+    spec_forbids_edits,
+)
 from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger("omnigent.runner.app")
@@ -7998,20 +8002,14 @@ def _claude_tools_arg(names: tuple[str, ...]) -> str:
     """
     The ``--tools`` value for an imported agent's ``tools`` list, or ``""`` for none.
 
-    ``--tools`` takes built-in tool names only and silently drops the rest; ``*``
-    would leave no tools. So ``*`` means no restriction, ``Task(x)`` narrows to
-    ``Task``, and ``mcp__`` names (not governed by ``--tools``) are dropped.
+    Only built-in names are passed; entries ``--tools`` cannot express (``mcp__``
+    names, ``Task(x)``) are left out, never widened. ``agent add`` refuses a list
+    that maps to nothing.
     """
-    if "*" in names:
-        return ""
-    kept: list[str] = []
-    for name in names:
-        base = name.split("(", 1)[0].strip()
-        if base.startswith("mcp__") or not base:
-            _logger.warning("Claude --tools cannot restrict %r; leaving it unrestricted", name)
-        elif base not in kept:
-            kept.append(base)
-    return ",".join(kept)
+    builtin, unenforced = map_claude_tools(names)
+    for name in unenforced:
+        _logger.warning("Claude --tools cannot restrict %r; leaving it out", name)
+    return ",".join(builtin)
 
 
 async def _launch_claude_native_terminal(

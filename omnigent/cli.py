@@ -12652,12 +12652,26 @@ def _claude_code_agent_from_file(path: Path, root: Path | None = None) -> Any:  
 def _claude_code_agent_bundle_noting_tools(path: Path, root: Path | None = None) -> bytes:
     """Bundle a Claude Code agent file, noting when its tool limits apply only on claude-native."""
     from omnigent.claude_code_agent import claude_code_agent_bundle
+    from omnigent.spec.tool_restrictions import map_claude_tools
 
     agent = _claude_code_agent_from_file(path, root)
+    builtin, unenforced = map_claude_tools(agent.allowed_tools)
+    if agent.allowed_tools and not builtin and unenforced:
+        raise _agent_cli_error(
+            f"{_printable(agent.name)}'s `tools` has no built-in tool Claude's --tools can "
+            f"enforce, so importing it would leave the agent unrestricted. Not enforceable: "
+            f"{_printable(', '.join(unenforced))}."
+        )
     if agent.allowed_tools or agent.disallowed_tools:
         click.echo(
             f"Note: {_printable(agent.name)}'s tool restrictions are enforced "
             "on claude-native sessions only.",
+            err=True,
+        )
+    if unenforced:
+        click.echo(
+            f"Note: {_printable(agent.name)}'s `tools` entries not enforced: "
+            f"{_printable(', '.join(unenforced))}.",
             err=True,
         )
     return claude_code_agent_bundle(agent)

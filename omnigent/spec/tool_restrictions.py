@@ -31,3 +31,26 @@ def policy_denied_tools(spec: AgentSpec) -> tuple[str, ...]:
 def spec_forbids_edits(spec: AgentSpec) -> bool:
     """Whether the spec forbids any file-editing tool."""
     return any(name in EDIT_TOOL_NAMES for name in executor_tool_names(spec, "disallowed_tools"))
+
+
+def map_claude_tools(names: tuple[str, ...]) -> tuple[list[str], list[str]]:
+    """
+    Split an imported ``tools`` list into Claude ``--tools`` names and entries it cannot enforce.
+
+    ``--tools`` takes built-in tool names only. ``*`` means no restriction, so both
+    lists are empty. ``mcp__`` names and ``Task(x)`` patterns have no ``--tools``
+    form (the CLI drops ``Task(x)``), so they are returned as unenforced.
+
+    :param names: The agent's ``tools`` entries.
+    :returns: ``(built-in names, unenforced entries)``.
+    """
+    if "*" in names:
+        return [], []
+    builtin: list[str] = []
+    unenforced: list[str] = []
+    for name in names:
+        if name.startswith("mcp__") or "(" in name:
+            unenforced.append(name)
+        elif name not in builtin:
+            builtin.append(name)
+    return builtin, unenforced
