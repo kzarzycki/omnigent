@@ -77,3 +77,14 @@ def test_read_session_defaults_without_store_or_file(
         read_session_defaults(user_id=None, preference_store=None, preference_policy=None)
         == SessionDefaults()
     )
+
+
+def test_read_session_defaults_ignores_a_malformed_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("harness: [unclosed\n")
+    assert (
+        read_session_defaults(user_id=None, preference_store=None, preference_policy=None)
+        == SessionDefaults()
+    )

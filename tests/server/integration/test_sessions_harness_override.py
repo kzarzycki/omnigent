@@ -834,3 +834,58 @@ async def test_spec_claude_keys_follow_the_session_harness(
     assert resp.status_code == 201, resp.text
     conv = get_conversation_store().get_conversation(resp.json()["id"])
     assert conv.terminal_launch_args == expected_args
+
+
+async def test_routing_guards_see_the_users_default_harness_for_an_unpinned_spec(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Smart Routing's create-time guards run on the harness the session will run on."""
+    import yaml
+
+    from omnigent.server.routes._sessions import orchestration
+
+    seen: list[str | None] = []
+    real = orchestration._fixed_native_routing_harness
+
+    def spy(body: Any, agent: Any, agent_cache: Any) -> str | None:
+        seen.append(body.harness_override)
+        return real(body, agent, agent_cache)
+
+    monkeypatch.setattr(orchestration, "_fixed_native_routing_harness", spy)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({"harness": "codex-native"}))
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent_id,
+            "cost_control_mode_override": "on",
+            "smart_routing_message": "hello",
+        },
+    )
+    assert seen == ["codex-native"]
+
+
+async def test_default_model_yields_to_the_spec_and_the_request(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The user's default model fills a gap only; it never replaces a named model."""
+    import yaml
+
+    from omnigent.runtime import get_conversation_store
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"harness": "pi", "model": "model-default"})
+    )
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    resp = await client.post(
+        "/v1/sessions", json={"agent_id": agent_id, "model_override": "model-request"}
+    )
+    assert resp.status_code == 201, resp.text
+    conv = get_conversation_store().get_conversation(resp.json()["id"])
+    assert (conv.harness_override, conv.model_override) == ("pi", "model-request")
