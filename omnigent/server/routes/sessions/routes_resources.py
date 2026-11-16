@@ -1588,10 +1588,10 @@ def register_resources_routes(
             ``terminals:`` block at all).
         """
         timings = StageTimings()
+        conv = await _validate_session(session_id, request, LEVEL_EDIT)
         require_not_machine(
             request, _get_user_id(request, auth_provider), "open a terminal on a host"
         )
-        conv = await _validate_session(session_id, request, LEVEL_EDIT)
         body = await request.json()
         is_native_bootstrap = (
             bool(body.get("ensure_native_terminal") or body.get("bridge_inject_dir"))

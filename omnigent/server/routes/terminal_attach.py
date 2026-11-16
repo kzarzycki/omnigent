@@ -375,13 +375,13 @@ async def _authorize_terminal_attach(
             reason="authentication required",
         )
 
-    required_level = LEVEL_READ if read_only else LEVEL_OWNER
-    if not read_only and machine_access_for(websocket, user_id) is not None:  # type: ignore[arg-type]
-        # Keystrokes into the host's PTY run as the host's user.
+    if not read_only and machine_access_for(websocket, user_id) is not None:
+        # The machine principal never types into a terminal on the user's host.
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="not authorized",
         )
+    required_level = LEVEL_READ if read_only else LEVEL_OWNER
     try:
         await require_access(
             user_id,
