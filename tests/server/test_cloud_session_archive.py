@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -29,8 +30,14 @@ class _Store:
     def __init__(self, *items) -> None:
         self.items = list(items)
 
-    def list_items(self, session_id, limit, type):
-        return SimpleNamespace(data=self.items)
+    def list_items(self, session_id, limit, type, after=None):
+        start = 0 if after is None else int(after) + 1
+        page = self.items[start : start + limit]
+        return SimpleNamespace(
+            data=page,
+            last_id=str(start + len(page) - 1) if page else None,
+            has_more=start + limit < len(self.items),
+        )
 
 
 CLOUD_STORE = _Store(
@@ -68,6 +75,33 @@ def test_archives_the_cloud_session_the_transcript_names(calls):
     (call,) = calls
     assert call["argv"][-2:] == ["--archive", "-"]
     assert CLOUD_SESSION_MARKER + CLOUD_ID in call["input"]
+
+
+def test_a_quoted_marker_is_not_the_target(calls):
+    quoted = "worker said:\n" + CLOUD_SESSION_MARKER + "session_ZZZZZZZZZZZZ"
+    store = _Store(
+        _item("assistant", f"{CLOUD_SESSION_MARKER}{CLOUD_ID}\nworking"),
+        _item("assistant", quoted),
+        _item("assistant", f"> {CLOUD_SESSION_MARKER}session_YYYYYYYYYYYY"),
+    )
+    assert archive_claude_cloud_session(CONV, store) is True
+    assert calls[0]["input"] == CLOUD_SESSION_MARKER + CLOUD_ID
+
+
+def test_a_marker_past_the_first_page_is_found(calls, monkeypatch):
+    monkeypatch.setattr(cloud_session_archive, "_PAGE_SIZE", 2)
+    filler = [_item("assistant", "working")] * 5
+    store = _Store(*filler, _item("assistant", f"{CLOUD_SESSION_MARKER}{CLOUD_ID}"))
+    assert archive_claude_cloud_session(CONV, store) is True
+    assert calls[0]["input"] == CLOUD_SESSION_MARKER + CLOUD_ID
+
+
+def test_a_missing_login_is_warned_about_once(calls, caplog):
+    cloud_session_archive._login_warning_logged = False
+    calls.state["result"] = subprocess.CompletedProcess([], 1, "", "no Claude Code login found")
+    archive_claude_cloud_session(CONV, CLOUD_STORE)
+    archive_claude_cloud_session(CONV, CLOUD_STORE)
+    assert caplog.text.count("holds no claude.ai login") == 1
 
 
 def test_a_failed_cloud_archive_is_logged_and_reported_not_raised(calls, caplog):
@@ -122,4 +156,41 @@ def test_a_scheduled_run_archived_when_done_archives_the_cloud_session(calls, mo
     monkeypatch.setattr(session_live_state, "_scheduled_task_store", tasks)
     monkeypatch.setattr(session_live_state, "submit", lambda description, fn: fn())
     session_live_state.persist_scheduled_run_completion("s" * 32, "succeeded")
-    assert archived_ids == ["s" * 32] and len(calls) == 1
+    assert archived_ids == ["s" * 32]
+    for thread in threading.enumerate():
+        if thread.name == "cloud-session-archive":
+            thread.join(5)
+    assert len(calls) == 1
+
+
+def test_a_slow_cloud_archive_does_not_hold_up_the_live_state_executor(monkeypatch):
+    release = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(
+        session_live_state,
+        "archive_claude_cloud_session",
+        lambda conv, store: (started.set(), release.wait(10)),
+    )
+    conv = SimpleNamespace(id="s" * 32, archived=False, labels={})
+    store = SimpleNamespace(
+        get_conversation=lambda session_id: conv, update_conversation=lambda *a, **k: None
+    )
+    run = SimpleNamespace(id="run", scheduled_task_id="task")
+    tasks = SimpleNamespace(
+        get_running_run_by_conversation=lambda session_id: run,
+        update_run=lambda *a, **k: run,
+        get=lambda task_id: SimpleNamespace(archive_when_done=True),
+    )
+    monkeypatch.setattr(session_live_state, "_store", store)
+    monkeypatch.setattr(session_live_state, "_scheduled_task_store", tasks)
+    monkeypatch.setattr(session_live_state, "submit", lambda description, fn: fn())
+    caller = threading.Thread(
+        target=session_live_state.persist_scheduled_run_completion, args=("s" * 32, "succeeded")
+    )
+    try:
+        caller.start()
+        assert started.wait(5)
+        caller.join(2)
+        assert not caller.is_alive()  # the transition ended while the archive still runs
+    finally:
+        release.set()

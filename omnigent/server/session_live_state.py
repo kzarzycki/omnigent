@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import logging
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -330,7 +331,13 @@ def persist_scheduled_run_completion(
         if conv is not None and not conv.archived and KEEP_LABEL_KEY not in conv.labels:
             # The runner is left to the idle reaper; this only hides the run.
             _store.update_conversation(conversation_id, archived=True)
-            archive_claude_cloud_session(conv, _store)
+            # A slow claude.ai call must not hold up the shared live-state executor.
+            threading.Thread(
+                target=archive_claude_cloud_session,
+                args=(conv, _store),
+                name="cloud-session-archive",
+                daemon=True,
+            ).start()
 
     submit("scheduled_run_completion", _transition)
 
