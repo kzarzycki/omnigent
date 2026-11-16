@@ -76,6 +76,9 @@ _WIDENING_OVERRIDES = [
     ["-c", '"sandbox_mode"="danger-full-access"'],
     ["-c", '"default_permissions"=":danger-full-access"'],
     ["-c", 'permissions."custom".filesystem={":root"="write"}'],
+    ["-c", "'sandbox_mode'=\"danger-full-access\""],
+    ["-c", 'permissions . "custom".filesystem={":root"="write"}'],
+    ["-c", '"permissions"."custom".filesystem={":root"="write"}'],
 ]
 
 
@@ -96,6 +99,7 @@ def test_a_client_config_override_cannot_widen_a_read_only_spec(override: list[s
             ["--model", "m", "--", "do x"],
             ["--model", "m", "--sandbox", "read-only", "--", "do x"],
         ),
+        (["--model", "m", "--"], ["--model", "m", "--sandbox", "read-only", "--"]),
     ],
 )
 def test_the_read_only_pin_precedes_a_positional_separator(
