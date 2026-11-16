@@ -141,7 +141,7 @@ from omnigent.server.routes._host_launch import _deployment_is_sharded
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._session_create_validation import (
     file_session_by_workspace,
-    resolve_project_placement,
+    resolve_environment_placement,
 )
 from omnigent.server.routes._sessions.common import (
     _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
@@ -1567,14 +1567,18 @@ def register_core_routes(
                     )
                 body.initial_input = orchestration_message(source.id, content[0].get("text"))
             if body.host_type == "external":
-                project_placement = await resolve_project_placement(
-                    project_id=body.project_id,
+                if body.environment_id is not None and "project_id" in body.model_fields_set:
+                    raise OmnigentError(
+                        "Set project_id or environment_id, not both",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                project_placement = await resolve_environment_placement(
                     environment_id=body.environment_id,
                     user_id=user_id,
                     project_store=project_store,
                 )
                 if explicit_host:
-                    # An explicit host and workspace win over a project's pinned ones.
+                    # An explicit host and workspace win over an environment's pinned ones.
                     project_placement = None
                 placement = (
                     project_placement
@@ -1619,7 +1623,7 @@ def register_core_routes(
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
         agent_sibling = False
-        # A project's pinned placement puts the worker in that project, outside the
+        # An environment's pinned placement puts the worker in its project, outside the
         # source's family.
         if (
             source is not None
