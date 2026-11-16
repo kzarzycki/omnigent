@@ -12634,6 +12634,35 @@ def _agent_dir_name(agent_dir: Path) -> str:
     return name if isinstance(name, str) and name else agent_dir.name
 
 
+def _claude_code_agent_from_file(path: Path, root: Path | None = None) -> Any:  # type: ignore[explicit-any]  # ClaudeCodeAgent
+    """Parse a Claude Code agent Markdown file, refusing symlinks and bad files."""
+    from omnigent.claude_code_agent import ClaudeCodeAgentError, parse_claude_code_agent
+
+    shown = _printable((path.relative_to(root) if root else path).as_posix())
+    if path.is_symlink():
+        raise _agent_cli_error(f"{shown} is a symlink; refusing to read an agent through it.")
+    try:
+        return parse_claude_code_agent(path.read_text(encoding="utf-8"))
+    except (ClaudeCodeAgentError, OSError, ValueError) as exc:  # ValueError: bad UTF-8
+        raise _agent_cli_error(
+            f"{shown} is not a Claude Code agent: {_printable(str(exc))}"
+        ) from None
+
+
+def _claude_code_agent_bundle_noting_tools(path: Path, root: Path | None = None) -> bytes:
+    """Bundle a Claude Code agent file, noting when its tool limits apply only on claude-native."""
+    from omnigent.claude_code_agent import claude_code_agent_bundle
+
+    agent = _claude_code_agent_from_file(path, root)
+    if agent.allowed_tools or agent.disallowed_tools:
+        click.echo(
+            f"Note: {_printable(agent.name)}'s tool restrictions are enforced "
+            "on claude-native sessions only.",
+            err=True,
+        )
+    return claude_code_agent_bundle(agent)
+
+
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/"
 
 
@@ -12724,7 +12753,7 @@ def _upload_agent(client: Any, bundle_bytes: bytes) -> None:  # type: ignore[exp
 )
 @_AGENT_SERVER_OPTION
 def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> None:
-    """Install SOURCE: an agent directory, YAML file, .tar.gz bundle, or GitHub repo.
+    """Install SOURCE: an agent directory, YAML file, .tar.gz bundle, Claude Code agent, or repo.
 
     Re-adding an agent with the same name replaces your copy in place.
     Workers, skills, guardrails, and supporting files in the directory are
@@ -12736,9 +12765,16 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
     installed after you confirm. Its ``${VAR}`` references are not resolved
     from this shell. A ``/tree/<ref>`` must be a branch or tag without ``/``.
 
+    A Claude Code subagent (a ``.md`` file with ``name``, ``description``,
+    ``tools``, ``disallowedTools`` and ``skills`` frontmatter) is imported with
+    its tool restrictions; the body becomes the instructions. A GitHub repo also
+    installs the ``agents/*.md`` files of its Claude Code plugins, and running it
+    again updates them in place.
+
     \b
     Examples:
       omnigent agent add ./orion
+      omnigent agent add ./reviewer.md
       omnigent agent add ./orion.tar.gz --server https://myserver.com
       omnigent agent add acme/agents --list
       omnigent agent add acme/agents@orion
@@ -12753,8 +12789,12 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
             )
         if list_only:
             raise click.UsageError("--list only applies to a GitHub repo.")
+        if path.is_file() and path.suffix.lower() == ".md":
+            bundle_bytes = _claude_code_agent_bundle_noting_tools(path)
+        else:
+            bundle_bytes = _bundle(path)
         with _agent_api_client(server) as client:
-            _upload_agent(client, _bundle(path))
+            _upload_agent(client, bundle_bytes)
         return
 
     clone_url, ref, subpath, wanted = github
@@ -12779,9 +12819,18 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
             raise _agent_cli_error(f"{subpath!r} goes through a symlink in {clone_url}.")
         if not root.is_dir():
             raise _agent_cli_error(f"{subpath!r} is not a directory in {clone_url}.")
+        from omnigent.claude_code_agent import find_plugin_agent_files
+
         agents = [(_agent_dir_name(d), d) for d in _find_agent_dirs(root)]
+        agents += [
+            (_claude_code_agent_from_file(f, checkout).name, f)
+            for f in find_plugin_agent_files(root)
+        ]
         if not agents:
-            raise _agent_cli_error(f"No agent (a directory with config.yaml) in {source}.")
+            raise _agent_cli_error(
+                f"No agent (a directory with config.yaml, or a Claude Code plugin's "
+                f"agents/*.md file) in {source}."
+            )
         by_name: dict[str, list[Path]] = {}
         for n, d in agents:
             by_name.setdefault(n.lower(), []).append(d)
@@ -12804,7 +12853,14 @@ def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> No
             return
         if not yes:
             click.confirm("Install them? Only install agents from repos you trust", abort=True)
-        bundles = {n: _bundle_untrusted_dir(d) for n, d in agents}
+        bundles = {
+            n: (
+                _claude_code_agent_bundle_noting_tools(d, checkout)
+                if d.is_file()
+                else _bundle_untrusted_dir(d)
+            )
+            for n, d in agents
+        }
         failed: list[str] = []
         with _agent_api_client(server) as client:
             for n, bundle_bytes in bundles.items():
