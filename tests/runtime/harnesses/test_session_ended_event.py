@@ -51,6 +51,7 @@ def _acp_executor_with_agent(method: str | None, replies: list[dict]) -> acp.Acp
     executor = acp.AcpExecutor(acp.AcpAgentConfig(command="x", name="bridge"))
     executor._proc = SimpleNamespace(returncode=None)  # type: ignore[assignment]
     executor._session_ended_method = method
+    executor._session_id = "acp-1"
 
     async def rpc(rpc_method: str, params: dict, timeout: float = 30.0) -> dict:
         replies.append({"method": rpc_method, "params": params, "timeout": timeout})
@@ -65,7 +66,9 @@ async def test_the_acp_executor_sends_the_method_the_agent_named() -> None:
     sent: list[dict] = []
     executor = _acp_executor_with_agent("_omnigent/session_ended", sent)
     await executor.end_session("key")
-    assert [call["method"] for call in sent] == ["_omnigent/session_ended"]
+    assert [(call["method"], call["params"]) for call in sent] == [
+        ("_omnigent/session_ended", {"sessionId": "acp-1"})
+    ]
 
 
 @pytest.mark.asyncio
@@ -108,3 +111,63 @@ async def test_the_handshake_records_the_method_the_agent_advertises() -> None:
     executor._rpc = rpc  # type: ignore[assignment]
     await executor._ensure_initialized()
     assert executor._session_ended_method == "_omnigent/session_ended"
+
+
+def _executor_after_exit(method: str | None, status: int) -> tuple[acp.AcpExecutor, list]:
+    """An executor whose agent has left with *status*; idle exits use status 75."""
+    steps: list = []
+    executor = _acp_executor_with_agent(method, steps)
+    executor._proc = SimpleNamespace(returncode=status)  # type: ignore[assignment]
+    executor._idle_exit_status = 75
+
+    async def start() -> None:
+        steps.append("spawn")
+        executor._reset_session_state()  # a respawn forgets the old process's session
+
+    async def initialize() -> None:
+        steps.append("initialize")
+        executor._session_ended_method = "_omnigent/session_ended"
+
+    executor._start_process = start  # type: ignore[method-assign]
+    executor._ensure_initialized = initialize  # type: ignore[method-assign]
+    return executor, steps
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_left_idle_is_started_again_to_be_told() -> None:
+    executor, steps = _executor_after_exit("_omnigent/session_ended", 75)
+    await executor.end_session("key")
+    assert [s if isinstance(s, str) else s["method"] for s in steps] == [
+        "spawn",
+        "initialize",
+        "_omnigent/session_ended",
+    ]
+    assert steps[-1]["params"] == {"sessionId": "acp-1"}
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_never_advertised_the_notice_is_not_started() -> None:
+    executor, steps = _executor_after_exit(None, 75)
+    await executor.end_session("key")
+    assert steps == []
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_exited_for_another_reason_is_not_started(caplog) -> None:
+    executor, steps = _executor_after_exit("_omnigent/session_ended", 1)
+    with caplog.at_level(logging.WARNING):
+        await executor.end_session("key")
+    assert steps == [] and "exited (status 1)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_after_an_idle_exit_is_logged_not_raised(caplog) -> None:
+    executor, _ = _executor_after_exit("_omnigent/session_ended", 75)
+
+    async def broken() -> None:
+        raise OSError("no such file")
+
+    executor._start_process = broken  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING):
+        await executor.end_session("key")
+    assert "session-ended notice failed" in caplog.text

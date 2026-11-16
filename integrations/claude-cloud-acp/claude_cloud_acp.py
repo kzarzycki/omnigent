@@ -1479,7 +1479,15 @@ def archive_ended_sessions() -> None:
             log(f"archived {session.cloud_id}")
 
 
-def answer_session_ended(mid: object) -> None:
+def answer_session_ended(mid: object, params: dict | None = None) -> None:
+    """Archive what this bridge holds. A bridge started just for this, after an idle exit,
+    finds the cloud session of the Omnigent session named in *params* from what it recorded."""
+    acp_id = (params or {}).get("sessionId")
+    if isinstance(acp_id, str) and acp_id not in SESSIONS:
+        try:
+            session_for(acp_id)
+        except RuntimeError:
+            log(f"no cloud session recorded for {acp_id}; nothing to archive")
     archive_ended_sessions()
     if mid is not None:
         send({"jsonrpc": "2.0", "id": mid, "result": {}})
@@ -1579,7 +1587,7 @@ def read_requests() -> None:
             if accept_prompt():
                 threading.Thread(target=handle_accepted, args=(msg,), daemon=True).start()
         elif method == SESSION_ENDED_METHOD:
-            threading.Thread(target=answer_session_ended, args=(mid,), daemon=True).start()
+            threading.Thread(target=answer_session_ended, args=(mid, params), daemon=True).start()
         elif method == "session/cancel":
             log(f"cancel {params.get('sessionId')}")
             if session := SESSIONS.get(params.get("sessionId", "")):
@@ -2644,7 +2652,7 @@ def check_session_ended() -> None:
             raise urllib.error.URLError("no route to host")
         archived.append(cloud_id)
 
-    saved, real_archive = dict(SESSIONS), archive
+    saved, real_archive, real_state = dict(SESSIONS), archive, STATE_FILE
     SESSIONS.clear()
     globals()["archive"] = fake_archive
     sent: list[dict] = []
@@ -2667,8 +2675,19 @@ def check_session_ended() -> None:
         assert archived == ["session_a", "session_flaky"], archived
         answer_session_ended(8)
         assert archived == ["session_a", "session_flaky"], archived
+        # A bridge started after an idle exit holds no session: it finds the cloud session
+        # recorded for the one it is told about, and answers without archiving when it has none.
+        SESSIONS.clear()
+        sent.clear()
+        globals()["STATE_FILE"] = Path(tempfile.mkdtemp()) / "sessions.json"
+        remember("acp-recalled", "session_recalled")
+        answer_session_ended(9, {"sessionId": "acp-unknown"})
+        assert archived == ["session_a", "session_flaky"] and sent[-1]["id"] == 9, archived
+        answer_session_ended(10, {"sessionId": "acp-recalled"})
+        assert archived[-1] == "session_recalled" and sent[-1]["id"] == 10, archived
     finally:
         globals()["archive"], globals()["send"] = real_archive, real_send
+        globals()["STATE_FILE"] = real_state
         SESSIONS.clear()
         SESSIONS.update(saved)
 
