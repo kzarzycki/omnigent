@@ -756,6 +756,13 @@ class Executor:
         """Ask the executor to interrupt a currently running turn, if supported."""
         return False
 
+    async def end_session(self, session_key: str) -> None:  # noqa: ARG002 — default no-op; subclasses that can tell their agent override
+        """The Omnigent session was archived or deleted, as opposed to a cancel or a restart.
+
+        An executor whose agent holds state outside the runner (a hosted session) ends it here.
+        """
+        return
+
     def interrupt_on_abandon(self) -> bool:
         """Whether a turn the runtime gives up on (an error or a timeout) is interrupted
         before the executor is closed.
