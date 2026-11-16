@@ -106,7 +106,11 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
-from omnigent.spec.tool_restrictions import executor_tool_names, spec_forbids_edits
+from omnigent.spec.tool_restrictions import (
+    executor_tool_names,
+    map_claude_tools,
+    spec_forbids_edits,
+)
 from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger("omnigent.runner.app")
@@ -7994,24 +7998,22 @@ def _spec_tool_names(spec: AgentSpec, key: str) -> tuple[str, ...]:
     return executor_tool_names(spec, key)
 
 
-def _claude_tools_arg(names: tuple[str, ...]) -> str:
+def _claude_tools_arg(names: tuple[str, ...]) -> str | None:
     """
-    The ``--tools`` value for an imported agent's ``tools`` list, or ``""`` for none.
+    The ``--tools`` value for an imported agent's ``tools`` list, or ``None`` for no restriction.
 
-    ``--tools`` takes built-in tool names only and silently drops the rest; ``*``
-    would leave no tools. So ``*`` means no restriction, ``Task(x)`` narrows to
-    ``Task``, and ``mcp__`` names (not governed by ``--tools``) are dropped.
+    Only built-in names are passed; entries ``--tools`` cannot express (``mcp__``
+    names, ``Task(x)``) are left out, never widened. A non-empty list that maps to no
+    built-in fails closed as ``""``, which the CLI reads as "no built-in tools".
     """
+    if not names:
+        return None
+    builtin, unenforced = map_claude_tools(names)
+    for name in unenforced:
+        _logger.warning("Claude --tools cannot restrict %r; leaving it out", name)
     if "*" in names:
-        return ""
-    kept: list[str] = []
-    for name in names:
-        base = name.split("(", 1)[0].strip()
-        if base.startswith("mcp__") or not base:
-            _logger.warning("Claude --tools cannot restrict %r; leaving it unrestricted", name)
-        elif base not in kept:
-            kept.append(base)
-    return ",".join(kept)
+        return None
+    return ",".join(builtin)
 
 
 async def _launch_claude_native_terminal(
@@ -8045,11 +8047,37 @@ async def _launch_claude_native_terminal(
     allowed = _claude_tools_arg(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
-    if allowed and "--tools" not in spec.args:
-        spec = dataclasses.replace(spec, args=[*spec.args, "--tools", allowed])
+    if allowed is not None:
+        spec = dataclasses.replace(
+            spec, args=[*_strip_claude_tools_args(spec.args), "--tools", allowed]
+        )
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
+
+
+def _strip_claude_tools_args(args: Sequence[str]) -> list[str]:
+    """
+    Drop client ``--tools X`` and ``--tools=X`` so a stored restriction cannot be widened.
+
+    :param args: Claude launch args.
+    :returns: Args without any ``--tools`` flag or its value.
+    """
+    out: list[str] = []
+    skip_value = False
+    for arg in args:
+        if skip_value:
+            skip_value = False
+            # An empty value is legal (``--tools ""``); a following flag is not its value.
+            if not arg.startswith("-"):
+                continue
+        if arg == "--tools":
+            skip_value = True
+            continue
+        if arg.startswith("--tools="):
+            continue
+        out.append(arg)
+    return out
 
 
 def _native_startup_instructions_from_spec(

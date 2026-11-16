@@ -769,3 +769,105 @@ def test_find_plugin_agent_files_skips_git_dirs(tmp_path: Path) -> None:
         (base / "agents").mkdir()
         (base / "agents" / "a.md").write_text("x")
     assert find_plugin_agent_files(tmp_path) == [tmp_path / "kit" / "agents" / "a.md"]
+
+
+def test_find_plugin_agent_files_lists_a_nested_plugin_agent_once(tmp_path: Path) -> None:
+    from omnigent.claude_code_agent import find_plugin_agent_files
+
+    outer = tmp_path / "outer"
+    inner = outer / "agents" / "sub"
+    for base in (outer, inner):
+        (base / ".claude-plugin").mkdir(parents=True)
+        (base / ".claude-plugin" / "plugin.json").write_text("{}")
+    (inner / "agents").mkdir()
+    (inner / "agents" / "b.md").write_text("x")
+
+    assert find_plugin_agent_files(tmp_path) == [inner / "agents" / "b.md"]
+
+
+def test_add_notes_restrictions_for_a_disallowed_tools_only_file(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "guard.md"
+    source.write_text("---\nname: guard\ndisallowedTools: Bash\n---\nGuard.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert "tool restrictions are enforced on claude-native sessions only" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        "mcp__fixture__lookup",
+        "Task(helper), mcp__fixture__lookup",
+        "Task(helper)",
+        "Agent(x)",
+        "Bash(git:*)",
+    ],
+)
+def test_add_refuses_tools_that_map_to_no_builtin_and_names_them(
+    tmp_path: Path, server: _FakeServer, tools: str
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text(f"---\nname: scoped\ntools: {tools}\n---\nBody.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code != 0
+    assert "Not enforceable:" in result.stderr
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+@pytest.mark.parametrize("tools_line", ['tools: ""', 'tools: " , "', "tools: []"])
+def test_add_refuses_a_present_but_empty_tools_key(
+    tmp_path: Path, server: _FakeServer, tools_line: str
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text(f"---\nname: scoped\n{tools_line}\n---\nBody.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code != 0
+    assert "present but empty" in result.stderr
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+def test_add_refuses_unenforceable_tools_even_with_disallowed_tools(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text("---\nname: scoped\ntools: Task(helper)\ndisallowedTools: Bash\n---\nB.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code != 0
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+def test_add_imports_a_star_list_unrestricted_by_design(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "open.md"
+    source.write_text("---\nname: open\ntools: '*, mcp__fixture__lookup'\n---\nBody.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert "not enforced" not in result.stderr
+
+
+def test_add_notes_the_tools_entries_it_cannot_enforce(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text(
+        "---\nname: scoped\ntools: Read, Task(helper), mcp__fixture__lookup\n---\nB.\n"
+    )
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert "`tools` entries not enforced: Task(helper), mcp__fixture__lookup" in result.stderr
+    assert result.stderr.count("Note:") == 1

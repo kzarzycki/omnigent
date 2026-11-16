@@ -54,6 +54,17 @@ def _name_list(raw: object, key: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(i.strip() for i in items if i.strip()))
 
 
+def _restricting_tools(meta: dict[object, object]) -> tuple[str, ...]:
+    """The ``tools`` list; a present-but-empty one is refused rather than read as unrestricted."""
+    tools = _name_list(meta.get("tools"), "tools")
+    if "tools" in meta and meta["tools"] is not None and not tools:
+        raise ClaudeCodeAgentError(
+            "`tools` is present but empty; list the tools to allow, or remove the key "
+            "for no restriction."
+        )
+    return tools
+
+
 def parse_claude_code_agent(text: str) -> ClaudeCodeAgent:
     """Parse a Claude Code agent Markdown file.
 
@@ -89,7 +100,7 @@ def parse_claude_code_agent(text: str) -> ClaudeCodeAgent:
         name=name,
         description=description.strip() if isinstance(description, str) else "",
         instructions="\n".join(lines[end + 1 :]).strip(),
-        allowed_tools=_name_list(meta.get("tools"), "tools"),
+        allowed_tools=_restricting_tools(meta),
         disallowed_tools=_name_list(meta.get("disallowedTools"), "disallowedTools"),
         skills=_name_list(meta.get("skills"), "skills"),
     )
