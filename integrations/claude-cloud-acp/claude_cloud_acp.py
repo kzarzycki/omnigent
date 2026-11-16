@@ -367,7 +367,9 @@ NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
 def create_cloud_session(
     text: str, cwd: str, model: str | None = None, effort: str | None = None
 ) -> str:
-    """Start ``claude --cloud "<text>" --settings <no-attribution> [--model m] [--effort e]``; return the new session id.
+    """Start ``claude --cloud "<text>"`` with attribution off; return the new session id.
+
+    Extra flags: ``--settings <no-attribution> [--model m] [--effort e]``.
 
     Creating a cloud session is interactive-only in the CLI (``--cloud`` refuses
     ``--print``), so run it on a pseudo-terminal, read the id it prints, and
