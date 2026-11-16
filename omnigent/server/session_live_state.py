@@ -38,10 +38,10 @@ unaffected.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import logging
-import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 from omnigent.db.enum_codecs import SESSION_LIVE_STATUS
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.harness_aliases import is_native_harness
-from omnigent.server.cloud_session_archive import archive_claude_cloud_session
+from omnigent.server.session_ended import notify_session_ended
 from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY
 
 if TYPE_CHECKING:
@@ -302,6 +302,10 @@ def persist_scheduled_run_completion(
     store = _scheduled_task_store
     if store is None:
         return
+    try:
+        server_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        server_loop = None
 
     def _transition() -> None:
         run = store.get_running_run_by_conversation(conversation_id)
@@ -331,13 +335,14 @@ def persist_scheduled_run_completion(
         if conv is not None and not conv.archived and KEEP_LABEL_KEY not in conv.labels:
             # The runner is left to the idle reaper; this only hides the run.
             _store.update_conversation(conversation_id, archived=True)
-            # A slow claude.ai call must not hold up the shared live-state executor.
-            threading.Thread(
-                target=archive_claude_cloud_session,
-                args=(conv, _store),
-                name="cloud-session-archive",
-                daemon=True,
-            ).start()
+            # The runner's bridge ends the cloud session; a slow call must not hold up
+            # this shared executor, so it runs on the server's loop.
+            if server_loop is None:
+                _logger.warning(
+                    "Session %s archived with no server loop to tell its runner", conversation_id
+                )
+            else:
+                asyncio.run_coroutine_threadsafe(notify_session_ended(conv), server_loop)
 
     submit("scheduled_run_completion", _transition)
 

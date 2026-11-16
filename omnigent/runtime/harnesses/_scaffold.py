@@ -322,6 +322,19 @@ class InterruptEvent(BaseModel):
     type: Literal["interrupt"]
 
 
+class SessionEndedEvent(BaseModel):
+    """
+    Downward ``session_ended`` event: the Omnigent session was archived or deleted.
+
+    Unlike ``interrupt`` and a runner restart, this says the session will not run again,
+    so a harness whose agent holds state outside the runner may end it.
+
+    :param type: Event discriminator; always ``"session_ended"``.
+    """
+
+    type: Literal["session_ended"]
+
+
 class ToolResultEvent(BaseModel):
     """
     Downward ``tool_result`` event — deliver a server-dispatched
@@ -423,7 +436,12 @@ class PolicyVerdictEvent(BaseModel):
 # unknown values raise 422 (fail-loud per
 # ``designs/DESIGN_PRINCIPLES.md``).
 InboundEventRequest = Annotated[
-    MessageEvent | InterruptEvent | ToolResultEvent | ApprovalEvent | PolicyVerdictEvent,
+    MessageEvent
+    | InterruptEvent
+    | SessionEndedEvent
+    | ToolResultEvent
+    | ApprovalEvent
+    | PolicyVerdictEvent,
     Field(discriminator="type"),
 ]
 
@@ -953,6 +971,11 @@ class HarnessApp:
         # shutdown started.
         self._shutting_down = asyncio.Event()
 
+    async def on_session_ended(self) -> None:
+        """
+        Subclass hook for a ``session_ended`` event; the base implementation is a no-op.
+        """
+
     async def on_shutdown(self) -> None:
         """
         Subclass hook invoked during lifespan teardown.
@@ -1396,6 +1419,9 @@ class HarnessApp:
             )
         if isinstance(body, InterruptEvent):
             return await self._handle_interrupt_event()
+        if isinstance(body, SessionEndedEvent):
+            await self.on_session_ended()
+            return Response(status_code=204)
         if isinstance(body, ToolResultEvent):
             return await self._handle_tool_result_event(body)
         if isinstance(body, ApprovalEvent):
