@@ -35,13 +35,29 @@ def _accounts(active: str, *logins: str, state: str = "success") -> list[dict[st
 class FakeGh:
     """Answers ``gh`` from fixtures, as whoever the call authenticates as, and counts calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, config_dir: Path) -> None:
         self.calls: Counter[str] = Counter()
+        self.config_dir = config_dir
+        self._writes = 0
         self.accounts = _accounts("reader")
         self.tokens: dict[str, str] = {}  # login -> token ``gh auth token`` hands out
         self.preference: str | None = None
         self.states: dict[int, str] = {}
         self.delay = 0.0
+
+    @property
+    def accounts(self) -> list[dict[str, Any]]:
+        return self._accounts
+
+    @accounts.setter
+    def accounts(self, accounts: list[dict[str, Any]]) -> None:
+        """Set the accounts as ``gh auth switch`` / ``login`` does: rewrite ``hosts.yml``."""
+        self._accounts = accounts
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        hosts_file = self.config_dir / "hosts.yml"
+        hosts_file.write_text(json.dumps(accounts))
+        self._writes += 1
+        os.utime(hosts_file, ns=(self._writes * 10**9, self._writes * 10**9))
 
     def reader(self, token: str | None) -> str:
         """Who a call authenticates as: its token, an ambient token, or the active account."""
@@ -89,8 +105,9 @@ class FakeGh:
 
 
 @pytest.fixture
-def fake_gh(monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    gh = FakeGh()
+def fake_gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeGh:
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-config"))
+    gh = FakeGh(tmp_path / "gh-config")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(github, "_gh", gh)
@@ -128,15 +145,14 @@ def test_sessions_without_a_viewer_share_one_listing_per_repository(fake_gh: Fak
     for _ in range(3):  # three refresh rounds inside one window
         for number in OPEN_NUMBERS:
             assert _read(number, background=True)["pr"]["number"] == number
-    # One identity check per refresh: the active account is read fresh, never from a cache.
-    assert fake_gh.calls == {"auth status": 15, "pr list": 1}
+    assert fake_gh.calls == {"auth status": 1, "pr list": 1}
 
 
 def test_five_sessions_viewing_their_prs_make_one_read_each_per_window(fake_gh: FakeGh) -> None:
     for _ in range(3):
         for number in OPEN_NUMBERS:
             assert _read(number, background=False)["pr"]["number"] == number
-    assert fake_gh.calls == {"auth status": 15, "pr view": 5, "api --hostname": 5}
+    assert fake_gh.calls == {"auth status": 1, "pr view": 5, "api --hostname": 5}
 
 
 def test_open_pr_listing_is_read_again_after_the_window(
@@ -215,6 +231,37 @@ def test_switching_the_active_account_is_seen_at_once(fake_gh: FakeGh) -> None:
     assert _title() == "read as carol"
     fake_gh.accounts = _accounts("dave", "carol")  # `gh auth switch`, inside the accounts window
     assert _title() == "read as dave"
+
+
+def test_a_refresh_with_an_unchanged_accounts_file_lists_no_accounts(fake_gh: FakeGh) -> None:
+    for _ in range(3):
+        _read(1, background=False)
+    assert fake_gh.calls["auth status"] == 1
+
+
+def test_runners_with_different_gh_config_dirs_do_not_share_accounts(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Files on different filesystems can share a stat; the key must still tell them apart.
+    monkeypatch.setattr(github, "_accounts_file_stat", lambda _dir: [1, 1, 1])
+    fake_gh.accounts = _accounts("carol")
+    assert _title() == "read as carol"
+    other = FakeGh(tmp_path / "other-config")
+    other.accounts = _accounts("dave")
+    monkeypatch.setattr(github, "_gh", other)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(other.config_dir))
+    assert _title() == "read as dave"
+
+
+def test_the_gh_config_dir_follows_ghs_own_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/xdg")
+    assert github._gh_config_dir() == Path("/xdg/gh")
+    monkeypatch.setenv("GH_CONFIG_DIR", "/explicit")
+    assert github._gh_config_dir() == Path("/explicit")
+    monkeypatch.delenv("GH_CONFIG_DIR")
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert github._gh_config_dir() == Path.home() / ".config" / "gh"
 
 
 @pytest.mark.parametrize("background", [False, True])

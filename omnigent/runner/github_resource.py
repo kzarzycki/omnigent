@@ -1177,23 +1177,49 @@ def background_reads(enabled: object) -> Iterator[None]:
         _background_read.reset(token)
 
 
-def _cached_accounts(root: str, *, fresh: bool = False) -> tuple[bool, list[dict[str, Any]]]:
-    """:func:`_list_accounts`, shared by the host's runners for a short while.
+def _gh_config_dir() -> Path:
+    """Where ``gh`` keeps ``hosts.yml``, resolved in ``gh``'s own order."""
+    configured = os.environ.get("GH_CONFIG_DIR")
+    if configured:
+        return Path(configured)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "gh"
 
-    ``fresh`` reads ``gh`` again and refreshes the shared copy.
+
+def _accounts_file_stat(config_dir: Path) -> list[int] | None:
+    """Identify the accounts file's content cheaply; ``None`` when it is missing.
+
+    ``gh auth switch`` / ``login`` / ``logout`` rewrite it, so any of them changes this.
     """
-    key = ("accounts",)
-    if not fresh:
+    try:
+        status = (config_dir / "hosts.yml").stat()
+    except OSError:
+        return None
+    return [status.st_mtime_ns, status.st_size, status.st_ino]
+
+
+def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
+    """:func:`_list_accounts`, shared by the host's runners while ``hosts.yml`` is unchanged.
+
+    An entry is used only inside its window and while the accounts file still has the
+    stat stored with it, so a switch is seen at once. A missing file is never cached.
+    The window still bounds a token that expires without the file changing.
+    """
+    config_dir = _gh_config_dir()
+    key = ("accounts", str(config_dir))
+    stat = _accounts_file_stat(config_dir)
+    if stat is not None:
         hit, cached = _cache_get(key, shared=True)
-        if hit and isinstance(cached, dict):
+        if hit and isinstance(cached, dict) and cached.get("stat") == stat:
             return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
     authenticated, accounts = _list_accounts(root)
-    _cache_put(
-        key,
-        {"authenticated": authenticated, "accounts": accounts},
-        _ACCOUNTS_TTL_SECONDS,
-        shared=True,
-    )
+    if stat is not None:
+        _cache_put(
+            key,
+            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
+            _ACCOUNTS_TTL_SECONDS,
+            shared=True,
+        )
     return authenticated, accounts
 
 
@@ -1230,7 +1256,7 @@ def _pr_read(root: str, reference: PullRequestRef) -> tuple[str | None, str | No
     return _resolve_read(
         _pr_token(root, reference),
         reference.host,
-        lambda: _cached_accounts(root, fresh=True)[1],
+        lambda: _cached_accounts(root)[1],
     )
 
 
