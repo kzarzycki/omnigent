@@ -1435,6 +1435,42 @@ async def test_an_agent_that_turns_off_native_questions_launches_claude_without_
         assert args[args.index("--disallowedTools") + 1].split(",") == disallowed
 
 
+async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+    config = {"allowed_tools": ["Read", "Grep"], "disallowed_tools": ["Bash"]}
+
+    with pytest.raises(RuntimeError, match="stop after launch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_imported_restrictions",
+            workspace=bridge_dir,
+            registry=registry,
+            agent_spec=AgentSpec(spec_version=1, executor=ExecutorSpec(config=config)),
+        )
+
+    args = launched[0]
+    assert "Bash" in args[args.index("--disallowedTools") + 1].split(",")
+    assert args[args.index("--tools") + 1] == "Read,Grep"
+
+
 async def test_configured_claude_settings_merge_into_the_invocation_settings(
     bridge_dir: Path,
     tmp_path: Path,

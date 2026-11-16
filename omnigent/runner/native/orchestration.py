@@ -7949,10 +7949,23 @@ def _claude_native_disallowed_tools_from_spec(
     :returns: ``("AskUserQuestion",)`` when turned off, else ``()``.
     """
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    value = spec.executor.config.get("native_ask_user_question") if spec is not None else None
-    if value is False or (isinstance(value, str) and value.strip().lower() == "false"):
-        return ("AskUserQuestion",)
-    return ()
+    if spec is None:
+        return ()
+    value = spec.executor.config.get("native_ask_user_question")
+    ask_off = ("AskUserQuestion",) if _is_false(value) else ()
+    return (*ask_off, *_spec_tool_names(spec, "disallowed_tools"))
+
+
+def _is_false(value: object) -> bool:
+    return value is False or (isinstance(value, str) and value.strip().lower() == "false")
+
+
+def _spec_tool_names(spec: AgentSpec, key: str) -> tuple[str, ...]:
+    """Tool names listed under ``executor.config.<key>`` (an imported agent's restrictions)."""
+    value = spec.executor.config.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(name for name in value if isinstance(name, str) and name)
 
 
 async def _launch_claude_native_terminal(
@@ -7965,9 +7978,7 @@ async def _launch_claude_native_terminal(
     """
     Launch a session's Claude Code terminal with its agent's tool switches.
 
-    Every claude-native launch (runner auto-create, and the CLI's explicit
-    terminal spec on fresh start or cold resume) goes through here, so an
-    agent's ``native_ask_user_question: false`` holds however Claude starts.
+    Every claude-native launch (runner auto-create, and XX however Claude starts.
 
     :param resource_registry: Registry that launches the terminal.
     :param agent_spec: The session's agent spec, or ``None`` when unknown.
@@ -7981,6 +7992,10 @@ async def _launch_claude_native_terminal(
     disallowed = _claude_native_disallowed_tools_from_spec(agent_spec)
     if disallowed:
         spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
+    inner_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    allowed = _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
+    if allowed and "--tools" not in spec.args:
+        spec = dataclasses.replace(spec, args=[*spec.args, "--tools", ",".join(allowed)])
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
