@@ -2108,3 +2108,60 @@ async def test_stored_tools_restriction_precedes_the_prompt_separator(
 
     args = list(registry.launch_required_terminal.call_args.kwargs["spec"].args)
     assert args == expected_args
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "client_args", "config", "expected_args"),
+    [
+        (
+            ["--"],
+            ["--model", "m", "--tools", "Bash"],
+            {"allowed_tools": ["Read"]},
+            ["--", "--model", "m", "--tools", "Read"],
+        ),
+        (
+            ["--"],
+            ["--", "hello"],
+            {"allowed_tools": ["Read"]},
+            ["--", "--tools", "Read", "--", "hello"],
+        ),
+        ([], ["--", "hello"], {"allowed_tools": ["Read"]}, ["--tools", "Read", "--", "hello"]),
+        (
+            [],
+            ["--", "hello"],
+            {"native_ask_user_question": False},
+            ["--disallowedTools", "AskUserQuestion", "--", "hello"],
+        ),
+        (
+            ["--"],
+            ["--", "hello"],
+            {"native_ask_user_question": False},
+            ["--", "--disallowedTools", "AskUserQuestion", "--", "hello"],
+        ),
+    ],
+)
+async def test_stored_tool_flags_stay_in_claudes_args_after_a_wrapper_prefix(
+    wrapper: list[str],
+    client_args: list[str],
+    config: dict[str, object],
+    expected_args: list[str],
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native.orchestration import _launch_claude_native_terminal
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal = AsyncMock()
+
+    await _launch_claude_native_terminal(
+        registry,
+        agent_spec=AgentSpec(spec_version=1, executor=ExecutorSpec(config=config)),
+        spec=TerminalEnvSpec(command="claude", args=[*wrapper, *client_args]),
+        wrapper_args=wrapper,
+    )
+
+    args = list(registry.launch_required_terminal.call_args.kwargs["spec"].args)
+    assert args == expected_args

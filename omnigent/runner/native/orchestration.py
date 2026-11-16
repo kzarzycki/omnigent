@@ -8031,6 +8031,7 @@ async def _launch_claude_native_terminal(
     *,
     agent_spec: AgentSpec | ResolvedSpec | None,
     spec: TerminalEnvSpec,
+    wrapper_args: Sequence[str] = (),
     **launch_kwargs: Any,
 ) -> SessionResourceView:
     """
@@ -8044,26 +8045,28 @@ async def _launch_claude_native_terminal(
     :param resource_registry: Registry that launches the terminal.
     :param agent_spec: The session's agent spec, or ``None`` when unknown.
     :param spec: Terminal spec whose ``args`` end with Claude's own args.
+    :param wrapper_args: Configured wrapper args leading ``spec.args``, e.g. ``["--"]``;
+        they belong to the wrapper, so the stored flags go only in what follows them.
     :param launch_kwargs: Remaining
         :meth:`SessionResourceRegistry.launch_required_terminal` arguments.
     :returns: The launched terminal's resource view.
     """
     from omnigent.harnesses.claude_native.bridge import _merge_disallowed_tools
 
+    prefix = list(spec.args[: len(wrapper_args)])
+    claude_args = list(spec.args[len(wrapper_args) :])
     disallowed = _claude_native_disallowed_tools_from_spec(agent_spec)
     if disallowed:
-        spec = dataclasses.replace(spec, args=_merge_disallowed_tools(list(spec.args), disallowed))
+        claude_args = _merge_disallowed_tools(claude_args, disallowed)
     inner_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     allowed = _claude_tools_arg(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
     if allowed is not None:
-        spec = dataclasses.replace(
-            spec,
-            args=_insert_before_separator(
-                _strip_claude_tools_args(spec.args), ["--tools", allowed]
-            ),
+        claude_args = _insert_before_separator(
+            _strip_claude_tools_args(claude_args), ["--tools", allowed]
         )
+    spec = dataclasses.replace(spec, args=[*prefix, *claude_args])
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
     )
@@ -10325,6 +10328,7 @@ async def _auto_create_claude_terminal(
             terminal_name="claude",
             session_key="main",
             spec=env_spec,
+            wrapper_args=configured_args,
             parent_os_env=agent_os_env,
         )
     except (Exception, asyncio.CancelledError) as launch_error:
