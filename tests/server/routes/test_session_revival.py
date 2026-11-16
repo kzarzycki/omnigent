@@ -349,12 +349,21 @@ async def test_a_turn_the_person_cancelled_is_not_resumed(
 class _Host(dict[str, Any]):
     """A host registry that launches nothing: it records each launch frame it is sent."""
 
+    machine_launch_guard = None
+
     def __init__(self, on_admit: Any = None) -> None:
         super().__init__(
-            {_HOST: SimpleNamespace(pending_launches={}, hello=SimpleNamespace(capabilities=[]))}
+            {
+                _HOST: SimpleNamespace(
+                    host_id=_HOST, pending_launches={}, hello=SimpleNamespace(capabilities=[])
+                )
+            }
         )
         self.on_admit = on_admit
         self.sent: list[str] = []
+
+    def mcp_disabled_servers_active_harnesses(self) -> None:
+        return None
 
     async def admit_launch(self, conn: Any, session_id: str) -> None:
         if self.on_admit is not None:
@@ -370,10 +379,6 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
     """The real host-launch body down to the frame, with nothing launched."""
     from omnigent.server.routes._sessions import helpers
 
-    async def _not_shared(*_: Any) -> bool:
-        return True
-
-    monkeypatch.setattr(helpers, "_ancestor_shares_runner", _not_shared)
     monkeypatch.setattr(helpers, "_resolve_harness", lambda conv: None)
     return _Host()
 
