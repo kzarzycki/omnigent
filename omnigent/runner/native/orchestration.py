@@ -106,6 +106,7 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
+from omnigent.spec.tool_restrictions import executor_tool_names, spec_forbids_edits
 from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger("omnigent.runner.app")
@@ -1418,6 +1419,33 @@ async def _pi_native_launch_config(
         if isinstance(reasoning_effort, str) and reasoning_effort
         else None,
         native_usage_baseline=native_usage_baseline,
+    )
+
+
+def _codex_launch_config_for_spec(
+    launch_config: _CodexNativeLaunchConfig,
+    agent_spec: AgentSpec | ResolvedSpec | None,
+) -> _CodexNativeLaunchConfig:
+    """
+    Start a codex-native session read-only when its spec forbids edits.
+
+    The spec's restriction replaces any ``--sandbox`` or permission ``-c`` override
+    the user passed and the full-bypass opt-in, so neither can widen it.
+    """
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    if spec is None or not spec_forbids_edits(spec):
+        return launch_config
+    from omnigent.harnesses.codex_native.app_server import _strip_approval_sandbox_flags
+
+    kept = _strip_approval_sandbox_flags(
+        tuple(launch_config.terminal_launch_args or ()), drop_permission_config=True
+    )
+    # Pin before any ``--``: codex treats everything after it as positional text.
+    split = kept.index("--") if "--" in kept else len(kept)
+    return dataclasses.replace(
+        launch_config,
+        terminal_launch_args=[*kept[:split], "--sandbox", "read-only", *kept[split:]],
+        bypass_sandbox=False,
     )
 
 
@@ -5434,6 +5462,7 @@ async def _auto_create_codex_terminal(
         server_client=server_client,
         session_init=session_init,
     )
+    launch_config = _codex_launch_config_for_spec(launch_config, agent_spec)
     original_external_session_id = launch_config.external_session_id
     workspace = str(launch_config.workspace)
     bridge_dir = prepare_bridge_dir(launch_config.bridge_id or session_id)
@@ -7962,10 +7991,7 @@ def _is_false(value: object) -> bool:
 
 def _spec_tool_names(spec: AgentSpec, key: str) -> tuple[str, ...]:
     """Tool names listed under ``executor.config.<key>`` (an imported agent's restrictions)."""
-    value = spec.executor.config.get(key)
-    if not isinstance(value, list):
-        return ()
-    return tuple(name for name in value if isinstance(name, str) and name)
+    return executor_tool_names(spec, key)
 
 
 def _claude_tools_arg(names: tuple[str, ...]) -> str:

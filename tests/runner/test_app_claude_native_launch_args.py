@@ -1435,8 +1435,9 @@ async def test_an_agent_that_turns_off_native_questions_launches_claude_without_
         assert args[args.index("--disallowedTools") + 1].split(",") == disallowed
 
 
+@pytest.mark.parametrize("forbidden", ["Bash", "Edit"])
 async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
-    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
+    forbidden: str, bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from unittest.mock import Mock
 
@@ -1455,7 +1456,7 @@ async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
         "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
         lambda *_a, **_k: None,
     )
-    config = {"allowed_tools": ["Read", "Grep"], "disallowed_tools": ["Bash"]}
+    config = {"allowed_tools": ["Read", "Grep"], "disallowed_tools": [forbidden]}
 
     with pytest.raises(RuntimeError, match="stop after launch"):
         await _auto_create_claude_terminal_for_test(
@@ -1467,7 +1468,7 @@ async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
         )
 
     args = launched[0]
-    assert "Bash" in args[args.index("--disallowedTools") + 1].split(",")
+    assert forbidden in args[args.index("--disallowedTools") + 1].split(",")
     assert args[args.index("--tools") + 1] == "Read,Grep"
 
 

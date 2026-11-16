@@ -716,6 +716,29 @@ def block_skills(blocked: list[str]) -> PolicyCallable:
     return evaluate
 
 
+# ── Tool denylist ──────────────────────────────────────────────────────────
+
+
+def deny_tools(blocked: list[str]) -> PolicyCallable:
+    """Factory: deny calls to the named tools, whatever harness issued them.
+
+    :param blocked: Exact tool names, e.g. ``["Edit", "Write"]``.
+    :returns: A policy callable that DENYs a ``tool_call`` to a blocked tool.
+    """
+    blocked_names = frozenset(blocked)
+
+    def evaluate(event: PolicyEvent) -> PolicyResponse:
+        if event.get("type") != "tool_call":
+            return _ALLOW
+        data = event.get("data")
+        tool = data.get("name") if isinstance(data, dict) else None
+        if isinstance(tool, str) and tool in blocked_names:
+            return {"result": "DENY", "reason": f"Tool '{tool}' is forbidden by the agent spec"}
+        return _ALLOW
+
+    return evaluate
+
+
 # ── Sandbox enforcement ────────────────────────────────────────────────────
 
 _AGENT_START_TOOL = "sys_agent_start"
@@ -951,6 +974,23 @@ def deny_pii_in_llm_request(
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 POLICY_REGISTRY: list[dict[str, object]] = [
+    {
+        "handler": "omnigent.policies.builtins.safety.deny_tools",
+        "kind": "factory",
+        "name": "Deny Tools",
+        "description": "Denies calls to the named tools",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "blocked": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact tool names to deny, e.g. Edit",
+                },
+            },
+            "required": ["blocked"],
+        },
+    },
     {
         "handler": "omnigent.policies.builtins.safety.max_tool_calls_per_session",
         "kind": "factory",
