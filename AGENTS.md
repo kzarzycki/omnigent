@@ -216,6 +216,19 @@ instructions:
 - If framework instructions grow beyond a small ordered list, introduce a
   structured `FrameworkInstructions` value at the prompt-composition boundary.
 
+## This fork: build on upstream
+
+`mine` builds on upstream and never against it. It is a temporary landing space
+for improvements that should eventually reach upstream, from us or from others.
+
+- A fork change adds to upstream's behaviour: a new argument, flag or hook. It
+  never gives something upstream already has a different meaning, so every sync
+  stays small and the change could be offered upstream as is.
+- When upstream ships its own version of a fork feature, move to upstream's and
+  drop ours. Where ours is better, send the difference upstream as a proposal
+  instead of keeping it here.
+- A sync conflict follows the same rule: the fork-sync skill says how.
+
 ## This fork: landing PRs into `mine`
 
 Open PRs against `mine`, the fork's default branch; `main` only mirrors upstream.
@@ -229,8 +242,10 @@ it), and `mise run check:all` runs it too.
 
 Land a PR with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
 land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
-the PR through GitHub, pinned to the head the gates checked; `docs/agents/gatekeeper.md`
-has no `land` section, so nothing is signed or checked against a signer list.
+the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
+(head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
+other PR as a squash (`land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
+Nothing is signed or checked against a signer list.
 The fork runs no GitHub Actions (`loop.ci: false`), so first record `mise run
 check:all` passing on the head with `approvals.py local-ci <pr>` (run `mise trust`
 once in a new checkout).
