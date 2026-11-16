@@ -268,6 +268,14 @@ describe("mergeItemsIntoPages", () => {
     ).toBe(false);
   });
 
+  it("refetches when only project_id moves a row between project folders", () => {
+    const before = data([conv("a", { project_id: "pid_alpha" })]);
+    const items = new Map<string, SessionListWireItem>([
+      ["a", { id: "a", project_id: "pid_beta" }],
+    ]);
+    expect(mergeItemsIntoPages(before, items, DEFAULT_FILTERS).needsRefetch).toBe(true);
+  });
+
   it("patches an updated_at bump in place without a refetch", () => {
     const before = data([conv("a", { updated_at: 1 }), conv("b", { updated_at: 1 })]);
     const items = new Map<string, SessionListWireItem>([["b", { id: "b", updated_at: 2 }]]);
