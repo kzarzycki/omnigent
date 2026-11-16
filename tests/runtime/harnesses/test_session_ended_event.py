@@ -135,6 +135,32 @@ async def test_the_handshake_records_the_method_the_agent_advertises() -> None:
     assert executor._advertised_session_ended
 
 
+@pytest.mark.asyncio
+async def test_the_advertised_flag_survives_a_respawn_that_omits_the_capability(caplog) -> None:
+    executor = acp.AcpExecutor(acp.AcpAgentConfig(command="x", name="bridge"))
+    capabilities: dict = {"omnigentSessionEnded": {"method": "_omnigent/session_ended"}}
+
+    async def rpc(method: str, params: dict, timeout: float = 30.0) -> dict:
+        return {"result": {"agentCapabilities": capabilities}}
+
+    executor._rpc = rpc  # type: ignore[assignment]
+    await executor._ensure_initialized()
+    assert executor._advertised_session_ended
+
+    # What _start_process resets on a respawn, then a handshake without the capability.
+    executor._initialized = False
+    executor._session_ended_method = None
+    executor._reset_session_state()
+    capabilities.clear()
+    await executor._ensure_initialized()
+    assert executor._session_ended_method is None
+    assert executor._advertised_session_ended
+
+    with caplog.at_level(logging.WARNING):
+        await executor.end_session("key")
+    assert "no session to tell" in caplog.text
+
+
 def _executor_after_exit(method: str | None, status: int) -> tuple[acp.AcpExecutor, list]:
     """An executor whose agent has left with *status*; idle exits use status 75."""
     steps: list = []
