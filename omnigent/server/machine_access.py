@@ -110,16 +110,12 @@ def native_input_runs_on_host(content: object) -> bool:
 
     Decides on what the harness receives: anything but plain text or a list of
     ``input_text`` / attachment blocks is refused (other shapes are read
-    differently by each harness), as is a direct codex shell command, and a
-    ``!`` or ``/`` that leads the joined text, which a native TUI runs.
+    differently by each harness), and a ``!`` or ``/`` that leads the joined
+    text, which a native TUI runs.
 
     :param content: A message's ``content``.
     :returns: ``True`` when the machine principal must not send it.
     """
-    from omnigent.harnesses.codex_native.shell_input import shell_command_from_input
-
-    if shell_command_from_input(content) is not None:
-        return True
     if isinstance(content, list):
         texts: list[str] = []
         for block in content:

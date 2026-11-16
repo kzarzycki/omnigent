@@ -697,6 +697,8 @@ async def _machine_session_in_native_harness(
         ("claude-native", "!id"),
         ("claude-native", "  /compact"),
         ("claude-native", [{"type": "input_text", "text": "/login"}]),
+        ("kiro-native", [{"type": "text", "text": "/login"}]),
+        ("cursor-native", [{"type": "text", "text": "/login"}]),
         (
             "codex-native",
             [{"type": "message", "role": "user", "content": "!printf from-machine"}],
@@ -715,6 +717,8 @@ async def _machine_session_in_native_harness(
         "claude-bash-mode",
         "claude-slash-command",
         "claude-slash-block",
+        "kiro-text-block",
+        "cursor-text-block",
         "codex-role-keyed-item",
         "claude-output-text-block",
         "claude-empty-first-block",
@@ -734,7 +738,7 @@ async def test_machine_message_that_a_native_terminal_would_run_is_refused(
     response = await _refused_quickly(
         host_perm_client.post(
             f"/v1/sessions/{session_id}/events",
-            json={"type": "message", "data": {"content": content}},
+            json={"type": "message", "data": {"role": "user", "content": content}},
             headers={"X-Forwarded-Email": _MACHINE},
         )
     )
