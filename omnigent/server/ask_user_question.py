@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
+# Prefix of a harness's parked AskUserQuestion card. Declining it answers the
+# question, so the runner delivers the deny without interrupting the turn.
+ASK_USER_QUESTION_ELICITATION_PREFIX = "elicit_question_"
+
 
 def structured_ask_user_question(tool_input: Any) -> dict[str, Any] | None:
     """Build a structured AskUserQuestion payload for elicitation extras.
