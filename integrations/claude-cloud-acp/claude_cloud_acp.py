@@ -360,10 +360,14 @@ EFFORT = os.environ.get("CLAUDE_CLOUD_EFFORT", "").strip()
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
+# Cloud workers commit and open PRs without Claude Code attribution lines.
+NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
+
+
 def create_cloud_session(
     text: str, cwd: str, model: str | None = None, effort: str | None = None
 ) -> str:
-    """Start ``claude --cloud "<text>" [--model m] [--effort e]``; return the new session id.
+    """Start ``claude --cloud "<text>" --settings <no-attribution> [--model m] [--effort e]``; return the new session id.
 
     Creating a cloud session is interactive-only in the CLI (``--cloud`` refuses
     ``--print``), so run it on a pseudo-terminal, read the id it prints, and
@@ -380,7 +384,7 @@ def create_cloud_session(
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     proc = subprocess.Popen(
-        [CLAUDE_CLI, "--cloud", text]
+        [CLAUDE_CLI, "--cloud", text, "--settings", NO_ATTRIBUTION_SETTINGS]
         + (["--model", model] if model else [])
         + (["--effort", effort or EFFORT] if effort or EFFORT else []),
         cwd=cwd,
@@ -1789,7 +1793,8 @@ def self_check() -> None:
     except RuntimeError as exc:
         assert "is not a git repository" in str(exc), exc
     assert not (not_repo / "ran").exists()
-    # The picked model and effort reach the CLI as flags; none picked adds none.
+    # Every launch carries the attribution-off settings; the picked model and effort add flags.
+    no_attribution = f"--cloud hi --settings {NO_ATTRIBUTION_SETTINGS}"
     subprocess.run(["git", "init", "-q", str(not_repo)], check=True)
     stub.write_text(
         f'#!/bin/sh\necho "$@" > {not_repo}/args\necho session_01ArgsArgsArgs; sleep 2\n'
@@ -1797,11 +1802,11 @@ def self_check() -> None:
     for model, effort, flags in ((None, "", ""), ("haiku", "low", " --model haiku --effort low")):
         globals()["EFFORT"] = effort
         assert create_cloud_session("hi", str(not_repo), model) == "session_01ArgsArgsArgs"
-        assert (not_repo / "args").read_text().strip() == "--cloud hi" + flags
+        assert (not_repo / "args").read_text().strip() == no_attribution + flags
     globals()["EFFORT"] = ""
     # A per-session pick wins over the bridge-wide default.
     assert create_cloud_session("hi", str(not_repo), None, "max")
-    assert (not_repo / "args").read_text().strip() == "--cloud hi --effort max"
+    assert (not_repo / "args").read_text().strip() == f"{no_attribution} --effort max"
     init_upd, _ = to_updates({"type": "system", "subtype": "init", "model": "test-model-1"})
     assert "model: test-model-1" in init_upd[0]["content"]["text"], init_upd
     globals()["CLAUDE_CLI"] = real_cli
