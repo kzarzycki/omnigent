@@ -408,19 +408,24 @@ def test_evict_noop_for_uncached_agent(
     agent_cache.evict("never-loaded")
 
 
+@pytest.mark.parametrize("linked_after_construction", [False, True])
 def test_cache_operations_allow_symlinked_cache_root(
     artifact_store: LocalArtifactStore,
     cache_dir: Path,
     tmp_path: Path,
+    linked_after_construction: bool,
 ) -> None:
-    """The configured root may be a symlink; individual entries may not."""
+    """The configured root may be a symlink, even one made after the cache; entries may not."""
     target = tmp_path / "real-cache"
     target.mkdir()
+    if linked_after_construction:
+        agent_cache = AgentCache(artifact_store, cache_dir)
     try:
         cache_dir.symlink_to(target, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks are unavailable")
-    agent_cache = AgentCache(artifact_store, cache_dir)
+    if not linked_after_construction:
+        agent_cache = AgentCache(artifact_store, cache_dir)
     bundle_location = "agent-1/abc123"
     bundle_bytes = _store_bundle(artifact_store, bundle_location)
 
@@ -1019,3 +1024,32 @@ def test_cleanup_warning_preserves_original_validation_error(
     assert "Could not clean agent cache staging directory" in caplog.text
     assert "cleanup denied" in caplog.text
     assert not (cache_dir / "agent").exists()
+
+
+def test_loads_resolve_no_root_and_warm_loads_resolve_nothing(
+    artifact_store: LocalArtifactStore,
+    cache_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The root is resolved at construction; a load served from memory resolves no path."""
+    bundle_location = "agent-warm/abc123"
+    _store_bundle(artifact_store, bundle_location, {"config.yaml": _MINIMAL_CONFIG})
+    cache = AgentCache(artifact_store=artifact_store, cache_dir=cache_dir)
+    resolved: list[Path] = []
+    original_resolve = Path.resolve
+
+    def recording_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        resolved.append(self)
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", recording_resolve)
+    first = cache.load("agent-warm", bundle_location)
+    assert cache_dir not in resolved
+
+    resolved.clear()
+    for _ in range(50):
+        again = cache.load("agent-warm", bundle_location)
+
+    assert resolved == []
+    assert again.spec is first.spec
+    assert again.workdir == first.workdir

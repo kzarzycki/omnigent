@@ -7,6 +7,7 @@ import errno
 import logging
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,6 +33,25 @@ def _cleanup_staging_dir(path: Path) -> None:
         pass  # Successful publication moved this staging directory into the cache.
     except OSError as exc:
         _logger.warning("Could not clean agent cache staging directory %s: %s", path, exc)
+
+
+def _is_symlink(path: Path) -> bool:
+    """Return whether *path* is a symlink; a missing path is not one."""
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _checked_child(cache_root: Path, component: str) -> Path | None:
+    """Return *cache_root*/*component* if it resolves to itself, else ``None``."""
+    normalized_path = os.path.normpath(cache_root / component)
+    if not normalized_path.startswith(os.path.join(cache_root, "")):
+        return None
+    path = Path(normalized_path)
+    if path.parent != cache_root or path.resolve(strict=False) != path:
+        return None
+    return path
 
 
 def _published_location(workdir: Path) -> str | None:
@@ -80,7 +100,10 @@ class AgentCache:
         """
         self._artifact_store = artifact_store
         self._cache_dir = cache_dir
-        self._specs: dict[str, tuple[str, AgentSpec]] = {}  # agent_id → (location, spec)
+        # The root may itself be a symlink; resolve it once, and again only on a mismatch.
+        self._cache_root = cache_dir.resolve(strict=False)
+        # agent_id → (location, spec, workdir); the workdir was path-checked when stored.
+        self._specs: dict[str, tuple[str, AgentSpec, Path]] = {}
 
     def _cache_path(self, agent_id: str) -> Path:
         """Return a direct child of the cache root for an agent id."""
@@ -94,14 +117,20 @@ class AgentCache:
             or "\x00" in component
         ):
             raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
-        cache_root = self._cache_dir.resolve(strict=False)
-        normalized_path = os.path.normpath(cache_root / component)
-        if not normalized_path.startswith(os.path.join(cache_root, "")):
-            raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
-        path = Path(normalized_path)
-        if path.parent != cache_root or path.resolve(strict=False) != path:
+        path = _checked_child(self._cache_root, component)
+        if path is None and self._refresh_cache_root():
+            path = _checked_child(self._cache_root, component)
+        if path is None:
             raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
         return path
+
+    def _refresh_cache_root(self) -> bool:
+        """Re-resolve the root after a mismatch, e.g. one symlinked after construction."""
+        current_root = self._cache_dir.resolve(strict=False)
+        if current_root == self._cache_root:
+            return False
+        self._cache_root = current_root
+        return True
 
     def load(
         self,
@@ -134,16 +163,19 @@ class AgentCache:
         :returns: A LoadedAgent with the parsed spec and the
             on-disk working directory.
         """
-        workdir = self._cache_path(agent_id)
-
         # Tier 1: in-memory spec. The cached spec was parsed with the
         # *expand_env* value of whichever caller populated it first.
         # That is consistent across callers because *expand_env* is
         # derived from the agent's immutable provenance, which never
         # changes for a given ``agent_id``.
+        # A hit re-checks only that the entry's directory is not a symlink: the full
+        # path resolution costs a syscall per component, and session lists load one
+        # spec per row.
         cached = self._specs.get(agent_id)
-        if cached is not None and cached[0] == bundle_location:
-            return LoadedAgent(spec=cached[1], workdir=workdir)
+        if cached is not None and cached[0] == bundle_location and not _is_symlink(cached[2]):
+            return LoadedAgent(spec=cached[1], workdir=cached[2])
+
+        workdir = self._cache_path(agent_id)
 
         # Tier 2: rebuild stale, missing, or corrupt extracted specs from the stored bundle.
         if workdir.is_dir():
@@ -154,7 +186,7 @@ class AgentCache:
             except Exception:
                 return self._recover_disk_entry(agent_id, bundle_location, expand_env=expand_env)
             else:
-                self._specs[agent_id] = (bundle_location, spec)
+                self._specs[agent_id] = (bundle_location, spec, workdir)
                 return LoadedAgent(spec=spec, workdir=workdir)
 
         # Cache miss — validate privately before publishing the disk entry.
@@ -186,7 +218,7 @@ class AgentCache:
                     ),
                 )
             else:
-                self._specs[agent_id] = (bundle_location, spec)
+                self._specs[agent_id] = (bundle_location, spec, workdir)
                 return LoadedAgent(spec=spec, workdir=workdir)
 
             try:
@@ -283,7 +315,7 @@ class AgentCache:
                     published or not (backup_dir / "previous").exists()
                 ):
                     _cleanup_staging_dir(backup_dir)
-        self._specs[agent_id] = (bundle_location, spec)
+        self._specs[agent_id] = (bundle_location, spec, workdir)
         return LoadedAgent(spec=spec, workdir=workdir)
 
     def evict(self, agent_id: str) -> None:
@@ -301,9 +333,10 @@ class AgentCache:
 
     def _staging_root(self) -> Path:
         """Return the reserved staging namespace on the cache filesystem."""
-        cache_root = self._cache_dir.resolve(strict=False)
-        cache_root.mkdir(parents=True, exist_ok=True)
-        staging_root = cache_root / ".staging"
+        self._cache_root.mkdir(parents=True, exist_ok=True)
+        staging_root = self._cache_root / ".staging"
+        if staging_root.resolve(strict=False) != staging_root and self._refresh_cache_root():
+            staging_root = self._cache_root / ".staging"
         if staging_root.resolve(strict=False) != staging_root:
             raise ValueError(f"unsafe staging root: {staging_root}")
         staging_root.mkdir(mode=0o700, exist_ok=True)
@@ -372,5 +405,5 @@ class AgentCache:
                     expand_env=expand_env,
                     prune_invalid_sub_agents=True,
                 )
-        self._specs[agent_id] = (bundle_location, spec)
+        self._specs[agent_id] = (bundle_location, spec, workdir)
         return LoadedAgent(spec=spec, workdir=workdir)
