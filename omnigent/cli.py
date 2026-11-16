@@ -12644,7 +12644,7 @@ def _claude_code_agent_from_file(path: Path, root: Path | None = None) -> Any:  
     try:
         return parse_claude_code_agent(path.read_text(encoding="utf-8"))
     except (ClaudeCodeAgentError, OSError, ValueError) as exc:  # ValueError: bad UTF-8
-        raise _agent_cli_error(f"{shown} is not a Claude Code agent: {_printable(str(exc))}")
+        raise _agent_cli_error(f"{shown} is not a Claude Code agent: {_printable(str(exc))}") from None
 
 
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/"
