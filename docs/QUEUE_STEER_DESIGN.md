@@ -147,8 +147,8 @@ snapshot on bind (correct after refresh, across tabs).
 
 ```python
 _can_forward = (
-    not _native  # native uses paste / turn-steer, not this path
-    and not _awaiting_approval  # don't steer a turn parked on a human gate
+    not _native                             # native uses paste / turn-steer, not this path
+    and not _awaiting_approval              # don't steer a turn parked on a human gate
     and conversation_id in _live_response_id  # a response is actually streaming
 )
 ```

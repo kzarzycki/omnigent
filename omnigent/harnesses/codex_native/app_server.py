@@ -5826,9 +5826,21 @@ _CODEX_BYPASS_HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
 # both the space-separated (``-a never``) and joined (``-a=never``) spellings
 # by :func:`_strip_approval_sandbox_flags`.
 _CODEX_APPROVAL_SANDBOX_FLAGS = frozenset({"--sandbox", "-s", "--ask-for-approval", "-a"})
+# Config keys that set the sandbox or approval stance; a caller that pins the
+# stance drops these ``-c`` overrides too (and ``--full-auto``, which implies one).
+_CODEX_PERMISSION_CONFIG_KEYS = frozenset(
+    {"sandbox_mode", "default_permissions", "approval_policy", "permissions"}
+)
 
 
-def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
+def _is_codex_permission_config(assignment: str) -> bool:
+    key = assignment.partition("=")[0].strip()
+    return key in _CODEX_PERMISSION_CONFIG_KEYS or key.startswith("permissions.")
+
+
+def _strip_approval_sandbox_flags(
+    codex_args: tuple[str, ...], *, drop_permission_config: bool = False
+) -> list[str]:
     """
     Drop granular approval/sandbox flags (and values) when bypass is on.
 
@@ -5853,6 +5865,8 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
 
     :param codex_args: Raw Codex CLI args, e.g.
         ``("--sandbox", "read-only", "--model", "gpt-5.4-mini")``.
+    :param drop_permission_config: Also drop ``-c``/``--config`` overrides of
+        the sandbox and approval keys, and ``--full-auto``.
     :returns: ``codex_args`` with the conflicting flags removed, e.g.
         ``["--model", "gpt-5.4-mini"]``.
     """
@@ -5865,6 +5879,22 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
         if arg == "--":
             cleaned.extend(codex_args[i:])
             break
+        if drop_permission_config:
+            if arg == "--full-auto":
+                i += 1
+                continue
+            if (
+                arg in {"-c", "--config"}
+                and i + 1 < n
+                and _is_codex_permission_config(codex_args[i + 1])
+            ):
+                i += 2
+                continue
+            if arg.startswith(("-c=", "--config=")) and _is_codex_permission_config(
+                arg.split("=", 1)[1]
+            ):
+                i += 1
+                continue
         if arg in _CODEX_APPROVAL_SANDBOX_FLAGS:
             # ``--flag value``: drop the flag, and consume the NEXT token as
             # its value ONLY when that token is a real value — it exists and

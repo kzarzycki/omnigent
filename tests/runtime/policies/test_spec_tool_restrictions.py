@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from omnigent.policies.builtins.safety import deny_tools
 from omnigent.policies.types import EvaluationContext
 from omnigent.runtime.policies.builder import any_policies_apply, build_policy_engine
 from omnigent.spec.types import AgentSpec, ExecutorSpec, Phase, PolicyAction
@@ -65,3 +66,11 @@ def test_the_policy_fast_path_does_not_skip_a_spec_that_forbids_tools(
 
     assert applies(_spec(["Edit"]))
     assert not applies(_spec([]))
+
+
+@pytest.mark.parametrize("event_type", ["request", "response", "tool_result"])
+def test_only_a_tool_call_event_is_denied_by_the_tool_denylist(event_type: str) -> None:
+    evaluate = deny_tools(["Edit"])
+
+    assert evaluate({"type": event_type, "data": {"name": "Edit"}})["result"] == "ALLOW"
+    assert evaluate({"type": "tool_call", "data": {"name": "Edit"}})["result"] == "DENY"

@@ -1429,15 +1429,17 @@ def _codex_launch_config_for_spec(
     """
     Start a codex-native session read-only when its spec forbids edits.
 
-    The spec's restriction replaces any ``--sandbox`` the user passed and the
-    full-bypass opt-in, so neither can widen it.
+    The spec's restriction replaces any ``--sandbox`` or permission ``-c`` override
+    the user passed and the full-bypass opt-in, so neither can widen it.
     """
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     if spec is None or not spec_forbids_edits(spec):
         return launch_config
     from omnigent.harnesses.codex_native.app_server import _strip_approval_sandbox_flags
 
-    kept = _strip_approval_sandbox_flags(tuple(launch_config.terminal_launch_args or ()))
+    kept = _strip_approval_sandbox_flags(
+        tuple(launch_config.terminal_launch_args or ()), drop_permission_config=True
+    )
     return dataclasses.replace(
         launch_config,
         terminal_launch_args=[*kept, "--sandbox", "read-only"],

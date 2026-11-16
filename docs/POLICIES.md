@@ -532,7 +532,6 @@ A policy function receives an event dict and returns a response dict (or `None` 
 ```python
 from omnigent.policies.schema import PolicyEvent, PolicyResponse
 
-
 def my_policy(event: PolicyEvent) -> PolicyResponse | None:
     if event["type"] != "tool_call":
         return None  # abstain on non-tool phases
@@ -561,7 +560,6 @@ completion. For example:
 
 ```python
 from omnigent.policies.schema import PolicyEvent, PolicyResponse
-
 
 def count_responses(event: PolicyEvent) -> PolicyResponse | None:
     if event["type"] != "response":
@@ -660,11 +658,11 @@ POLICY_REGISTRY = [
                 "blocked_domains": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Domains to block",
+                    "description": "Domains to block"
                 }
             },
-            "required": ["blocked_domains"],
-        },
+            "required": ["blocked_domains"]
+        }
     }
 ]
 ```
