@@ -797,7 +797,16 @@ def test_add_notes_restrictions_for_a_disallowed_tools_only_file(
     assert "tool restrictions are enforced on claude-native sessions only" in result.stderr
 
 
-@pytest.mark.parametrize("tools", ["mcp__fixture__lookup", "Task(helper), mcp__fixture__lookup"])
+@pytest.mark.parametrize(
+    "tools",
+    [
+        "mcp__fixture__lookup",
+        "Task(helper), mcp__fixture__lookup",
+        "Task(helper)",
+        "Agent(x)",
+        "Bash(git:*)",
+    ],
+)
 def test_add_refuses_tools_that_map_to_no_builtin_and_names_them(
     tmp_path: Path, server: _FakeServer, tools: str
 ) -> None:
@@ -807,8 +816,46 @@ def test_add_refuses_tools_that_map_to_no_builtin_and_names_them(
     result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
 
     assert result.exit_code != 0
-    assert "mcp__fixture__lookup" in result.stderr
+    assert "Not enforceable:" in result.stderr
     assert not [r for r in server.seen if r.method == "POST"]
+
+
+@pytest.mark.parametrize("tools_line", ['tools: ""', 'tools: " , "', "tools: []"])
+def test_add_refuses_a_present_but_empty_tools_key(
+    tmp_path: Path, server: _FakeServer, tools_line: str
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text(f"---\nname: scoped\n{tools_line}\n---\nBody.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code != 0
+    assert "present but empty" in result.stderr
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+def test_add_refuses_unenforceable_tools_even_with_disallowed_tools(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "scoped.md"
+    source.write_text("---\nname: scoped\ntools: Task(helper)\ndisallowedTools: Bash\n---\nB.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code != 0
+    assert not [r for r in server.seen if r.method == "POST"]
+
+
+def test_add_imports_a_star_list_unrestricted_by_design(
+    tmp_path: Path, server: _FakeServer
+) -> None:
+    source = tmp_path / "open.md"
+    source.write_text("---\nname: open\ntools: '*, mcp__fixture__lookup'\n---\nBody.\n")
+
+    result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert "not enforced" not in result.stderr
 
 
 def test_add_notes_the_tools_entries_it_cannot_enforce(
@@ -822,4 +869,5 @@ def test_add_notes_the_tools_entries_it_cannot_enforce(
     result = CliRunner().invoke(cli_mod.cli, ["agent", "add", str(source)])
 
     assert result.exit_code == 0, result.output
-    assert "not enforced: Task(helper), mcp__fixture__lookup" in result.stderr
+    assert "`tools` entries not enforced: Task(helper), mcp__fixture__lookup" in result.stderr
+    assert result.stderr.count("Note:") == 1

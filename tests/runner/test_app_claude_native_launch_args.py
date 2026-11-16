@@ -1962,16 +1962,71 @@ def test_claude_terminal_env_keeps_a_user_api_timeout(
 @pytest.mark.parametrize(
     ("names", "expected"),
     [
+        ((), None),
         (("Read", "Grep"), "Read,Grep"),
-        (("*",), ""),
-        (("Read", "*"), ""),
+        (("*",), None),
+        (("Read", "*"), None),
+        (("*", "mcp__x__y"), None),
         (("Read", "Task(foo)", "Task(bar)"), "Read"),
         (("Read", "Task"), "Read,Task"),
+        (("Agent",), "Agent"),
         (("Read", "mcp__x__y"), "Read"),
+        # A non-empty list with no built-in fails closed: "" disables every built-in tool.
         (("mcp__x__y",), ""),
+        (("Task(foo)",), ""),
+        (("Agent(x)",), ""),
+        (("Bash(git:*)",), ""),
     ],
 )
-def test_claude_tools_arg_maps_imported_tool_names(names: tuple[str, ...], expected: str) -> None:
+def test_claude_tools_arg_maps_imported_tool_names(
+    names: tuple[str, ...], expected: str | None
+) -> None:
     from omnigent.runner.native.orchestration import _claude_tools_arg
 
     assert _claude_tools_arg(names) == expected
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [(["Task(x)"], [""]), (["Bash(git:*)"], [""]), (["Read"], ["Read"]), (["*"], None)],
+)
+async def test_an_imported_tools_list_with_no_builtin_launches_with_no_tools(
+    allowed: list[str],
+    expected: list[str] | None,
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after launch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_no_builtin_tools",
+            workspace=bridge_dir,
+            registry=registry,
+            agent_spec=AgentSpec(
+                spec_version=1, executor=ExecutorSpec(config={"allowed_tools": allowed})
+            ),
+        )
+
+    args = launched[0]
+    if expected is None:
+        assert "--tools" not in args
+    else:
+        assert args[args.index("--tools") + 1 :][:1] == expected

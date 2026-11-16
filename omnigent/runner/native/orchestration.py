@@ -7998,17 +7998,21 @@ def _spec_tool_names(spec: AgentSpec, key: str) -> tuple[str, ...]:
     return executor_tool_names(spec, key)
 
 
-def _claude_tools_arg(names: tuple[str, ...]) -> str:
+def _claude_tools_arg(names: tuple[str, ...]) -> str | None:
     """
-    The ``--tools`` value for an imported agent's ``tools`` list, or ``""`` for none.
+    The ``--tools`` value for an imported agent's ``tools`` list, or ``None`` for no restriction.
 
     Only built-in names are passed; entries ``--tools`` cannot express (``mcp__``
-    names, ``Task(x)``) are left out, never widened. ``agent add`` refuses a list
-    that maps to nothing.
+    names, ``Task(x)``) are left out, never widened. A non-empty list that maps to no
+    built-in fails closed as ``""``, which the CLI reads as "no built-in tools".
     """
+    if not names:
+        return None
     builtin, unenforced = map_claude_tools(names)
     for name in unenforced:
         _logger.warning("Claude --tools cannot restrict %r; leaving it out", name)
+    if "*" in names:
+        return None
     return ",".join(builtin)
 
 
@@ -8043,7 +8047,7 @@ async def _launch_claude_native_terminal(
     allowed = _claude_tools_arg(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
-    if allowed and "--tools" not in spec.args:
+    if allowed is not None and "--tools" not in spec.args:
         spec = dataclasses.replace(spec, args=[*spec.args, "--tools", allowed])
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs

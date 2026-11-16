@@ -12663,15 +12663,14 @@ def _claude_code_agent_bundle_noting_tools(path: Path, root: Path | None = None)
             f"{_printable(', '.join(unenforced))}."
         )
     if agent.allowed_tools or agent.disallowed_tools:
+        detail = (
+            f"; `tools` entries not enforced: {_printable(', '.join(unenforced))}"
+            if unenforced
+            else ""
+        )
         click.echo(
             f"Note: {_printable(agent.name)}'s tool restrictions are enforced "
-            "on claude-native sessions only.",
-            err=True,
-        )
-    if unenforced:
-        click.echo(
-            f"Note: {_printable(agent.name)}'s `tools` entries not enforced: "
-            f"{_printable(', '.join(unenforced))}.",
+            f"on claude-native sessions only{detail}.",
             err=True,
         )
     return claude_code_agent_bundle(agent)

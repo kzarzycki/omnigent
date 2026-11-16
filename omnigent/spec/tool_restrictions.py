@@ -37,11 +37,14 @@ def map_claude_tools(names: tuple[str, ...]) -> tuple[list[str], list[str]]:
     """
     Split an imported ``tools`` list into Claude ``--tools`` names and entries it cannot enforce.
 
-    ``--tools`` takes built-in tool names only. ``*`` means no restriction, so both
-    lists are empty. ``mcp__`` names and ``Task(x)`` patterns have no ``--tools``
-    form (the CLI drops ``Task(x)``), so they are returned as unenforced.
+    ``--tools`` takes built-in tool names only; a bare ``Agent`` passes through as the
+    CLI's alias. ``*`` means no restriction, so both lists are empty. ``mcp__`` names
+    and ``name(...)`` patterns have no ``--tools`` form, so they are returned as
+    unenforced and left out. Dropping them only narrows the tool set; the CLI evidence
+    covers ``Task(foo)`` and is unproven for other patterns. A list that maps to no
+    built-in is the caller's to fail closed on.
 
-    :param names: The agent's ``tools`` entries.
+    :param names: The agent's ``tools`` entries (already deduplicated).
     :returns: ``(built-in names, unenforced entries)``.
     """
     if "*" in names:
@@ -51,6 +54,6 @@ def map_claude_tools(names: tuple[str, ...]) -> tuple[list[str], list[str]]:
     for name in names:
         if name.startswith("mcp__") or "(" in name:
             unenforced.append(name)
-        elif name not in builtin:
+        else:
             builtin.append(name)
     return builtin, unenforced
