@@ -273,7 +273,11 @@ export function markWorkspaceFileLinks() {
       if (node.tagName !== "a") return;
       const href = node.properties?.href;
       if (typeof href !== "string" || !href) return;
-      if (NON_FILE_HREF.test(href) || href.includes("?") || isAppSessionRoute(href)) return;
+      if (NON_FILE_HREF.test(href) || href.includes("?")) return;
+      // Continuation notices link to another chat, not a workspace file.
+      if (/^\/c\/[A-Za-z0-9_-]+\/?$/.test(href)) return;
+      // The same, under a base path or with any session-id spelling.
+      if (isAppSessionRoute(href)) return;
       const cited = splitWorkspaceFileCitation(href);
       if (href.includes("#") && !cited.hasPosition) return;
       node.properties = {
