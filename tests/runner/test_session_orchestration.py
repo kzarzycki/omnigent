@@ -572,6 +572,72 @@ async def test_create_read_timeout_without_a_matching_session_stays_unconfirmed(
 
 
 @pytest.mark.asyncio
+async def test_create_read_timeout_adopts_a_session_stamped_in_the_request_second(monkeypatch):
+    monkeypatch.setattr("omnigent.runner.tool_dispatch.time.time", lambda: 1000.7)
+
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [_created_row(created_at=1000)], "has_more": False, "last_id": None},
+            )
+        raise httpx.ReadTimeout("Response lost after creation")
+
+    result = await _create_with_server(respond)
+    assert result["conversation_id"] == "conv_created"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [httpx.ConnectError("refused"), httpx.WriteTimeout("send stalled")]
+)
+async def test_create_failure_other_than_read_timeout_is_not_adopted(failure):
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"data": [_created_row()], "has_more": False, "last_id": None}
+            )
+        raise failure
+
+    result = await _create_with_server(respond)
+    assert "creation could not be confirmed" in result["error"]
+    assert "conversation_id" not in result
+
+
+async def _create_untitled_with_rows(rows):
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": rows, "has_more": False, "last_id": None})
+        raise httpx.ReadTimeout("Response lost")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        return json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "worker", "placement": "same_host"}),
+                server_client=client,
+                conversation_id=_SOURCE_SESSION,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_read_timeout_without_title_adopts_the_matching_agent():
+    other = _created_row(id="conv_other", agent_id="ag_other", agent_name="other")
+    result = await _create_untitled_with_rows([other, _created_row()])
+    assert result["conversation_id"] == "conv_created"
+
+
+@pytest.mark.asyncio
+async def test_create_read_timeout_without_title_ignores_a_different_agent():
+    other = _created_row(id="conv_other", agent_id="ag_other", agent_name="other")
+    result = await _create_untitled_with_rows([other])
+    assert "creation could not be confirmed" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_create_that_answers_after_sixty_seconds_succeeds():
     seen = {}
 

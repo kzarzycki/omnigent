@@ -24,6 +24,7 @@ import base64
 import dataclasses
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -1535,15 +1536,20 @@ async def _find_orchestrated_session_created_since(
     Find the session an orchestrated create produced after its response was lost.
 
     Matches the newest session created by ``source_session_id`` for ``agent_id``
-    (and ``title``, when given) at or after ``created_after``.
+    (and ``title``, when given) at or after ``created_after``. With no title,
+    the newest matching session in the window wins. The server stamps whole
+    seconds, so the cutoff is floored to one; clock skew between the runner and
+    server beyond that is not compensated.
 
     :param server_client: Omnigent server client.
     :param source_session_id: Session that issued the create, e.g. ``"conv_src123"``.
     :param agent_id: Requested agent id, e.g. ``"worker"``.
     :param title: Requested title, or a non-string when none was given.
-    :param created_after: Unix epoch seconds taken just before the request was sent.
+    :param created_after: Unix epoch seconds (may be fractional) taken just before the
+        request was sent.
     :returns: The session row, or ``None`` when absent or the lookup failed.
     """
+    created_after = math.floor(created_after)
     try:
         resp = await server_client.get(
             "/v1/sessions",
