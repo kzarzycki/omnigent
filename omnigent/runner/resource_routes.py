@@ -1449,11 +1449,16 @@ def register_resource_routes(
         function = getattr(pr_resource, operation)
 
         def call() -> dict[str, Any]:
-            with (
-                pr_resource.server_tracking(server_tracked, default_pr_url),
-                github_resource.background_reads(background),
-            ):
-                return function(root, session_id=session_id, **kwargs)
+            try:
+                with (
+                    pr_resource.server_tracking(server_tracked, default_pr_url),
+                    github_resource.background_reads(background),
+                ):
+                    return function(root, session_id=session_id, **kwargs)
+            finally:
+                # Even a failed write may have changed the PR before it failed.
+                if operation in pr_resource.PR_WRITE_OPERATIONS:
+                    github_resource.invalidate_pr_reads(kwargs.get("pr_url"))
 
         try:
             result = await run_provider_cli(call)

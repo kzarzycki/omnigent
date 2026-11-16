@@ -759,6 +759,22 @@ def pr_labels(
     return facet.repo_labels(root, reference)
 
 
+# Operations that change a PR on GitHub; the shared PR read cache is dropped after each.
+PR_WRITE_OPERATIONS = frozenset(
+    {
+        "update_pr_labels",
+        "merge_pr",
+        "merge_pr_as",
+        "disable_pr_auto_merge",
+        "update_pr_reviewers",
+        "reply_to_pr_review_thread",
+        "create_pr_review_thread",
+        "create_pr_comment",
+        "update_pr_details",
+    }
+)
+
+
 def update_pr_labels(
     root: str,
     *,

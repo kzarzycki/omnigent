@@ -16,7 +16,7 @@ from fastapi import FastAPI
 
 from omnigent.harnesses.claude_native import main as claude_native
 from omnigent.harnesses.codex_native import app_server as codex_native_app_server
-from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
+from omnigent.process_logging import DATA_DIR_ENV_VAR, PROCESS_LOG_FILE_ENV_VAR
 from omnigent.runner import app as _runner_app
 from omnigent.runner import create_runner_app, github_resource
 from omnigent.runner import native as _runner_native
@@ -111,7 +111,7 @@ def _isolated_model_catalog_store(
 def _isolated_github_read_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Give each test an empty GitHub read cache, in memory and on disk."""
     github_resource._preview_cache.clear()
-    monkeypatch.setattr(github_resource, "data_dir", lambda: tmp_path)
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
 
 
 @pytest.fixture(autouse=True)
