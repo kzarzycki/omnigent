@@ -119,9 +119,11 @@ def test_host_failed_readiness_reaps_child_and_retains_isolated_diagnostics(
                 pytest.fail("owned environment must be rejected before starting a host")
         assert not (tmp_path / "home").exists()
 
-    with pytest.raises(ValueError, match="host identity"):
-        with isolated_host(tmp_path, "http://127.0.0.1:1", config={"host": {}}):
-            pytest.fail("caller must not override the host identity")
+    # Other host: settings are allowed; the identity keys are not.
+    for key in ("host_id", "name"):
+        with pytest.raises(ValueError, match="host identity"):
+            with isolated_host(tmp_path, "http://127.0.0.1:1", config={"host": {key: "x"}}):
+                pytest.fail("caller must not override the host identity")
 
     handles = []
 

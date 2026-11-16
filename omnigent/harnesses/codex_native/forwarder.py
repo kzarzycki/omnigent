@@ -5527,6 +5527,12 @@ async def _handle_terminal_turn_boundary_inner(
         raise
     if preparation_error is not None:
         raise preparation_error
+    # Read before the background-terminal poll starts, so its file I/O never
+    # interleaves with that poll's first listing.
+    if handled and bridge_dir is not None and bridge_dir != Path():
+        rate_limits = await asyncio.to_thread(_rollout_rate_limits, bridge_dir)
+        if rate_limits is not None:
+            usage_coalescer.record_rate_limits(rate_limits)
     terminal_thread_id = _thread_id_from_params(params)
     if (
         handled
@@ -5565,10 +5571,6 @@ async def _handle_terminal_turn_boundary_inner(
             forwarder_state=forwarder_state,
         )
     if handled:
-        if bridge_dir is not None and bridge_dir != Path():
-            rate_limits = await asyncio.to_thread(_rollout_rate_limits, bridge_dir)
-            if rate_limits is not None:
-                usage_coalescer.record_rate_limits(rate_limits)
         await usage_coalescer.flush()
 
 

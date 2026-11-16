@@ -2072,9 +2072,14 @@ def test_host_stop_stops_sessions_before_daemon(
 
     monkeypatch.setattr(cli, "_host_http_json", _fake_http_json)
 
-    def _fake_terminate(record: cli._HostDaemonRecord, *, force: bool) -> None:
+    def _fake_terminate(
+        record: cli._HostDaemonRecord,
+        *,
+        force: bool,
+        sessions: tuple[set[int], float] | None = None,
+    ) -> None:
         """Record daemon termination without signaling a real process."""
-        del force
+        del force, sessions
         events.append(("TERM", record.target))
 
     monkeypatch.setattr(cli, "_terminate_daemon", _fake_terminate)
@@ -2193,7 +2198,7 @@ def test_host_stop_failure_leaves_daemon_running(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: pytest.fail("daemon terminated after a failed session stop"),
+        lambda record, **_kwargs: pytest.fail("daemon terminated after a failed session stop"),
     )
 
     result = CliRunner().invoke(
@@ -2227,7 +2232,7 @@ def test_host_stop_daemon_only_skips_session_stop(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: terminated.append(record.target),
+        lambda record, **_kwargs: terminated.append(record.target),
     )
 
     result = CliRunner().invoke(
@@ -2267,7 +2272,7 @@ def test_host_stop_session_list_timeout_points_at_force(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: pytest.fail("daemon terminated despite the failure"),
+        lambda record, **_kwargs: pytest.fail("daemon terminated despite the failure"),
     )
 
     result = CliRunner().invoke(
@@ -2302,7 +2307,7 @@ def test_host_stop_force_skips_session_stop(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: terminated.append(record.target),
+        lambda record, **_kwargs: terminated.append(record.target),
     )
 
     result = CliRunner().invoke(
@@ -2349,7 +2354,7 @@ def test_host_stop_unreachable_server_degrades_to_daemon_only(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: terminated.append(record.target),
+        lambda record, **_kwargs: terminated.append(record.target),
     )
 
     result = CliRunner().invoke(
@@ -2392,7 +2397,7 @@ def test_host_stop_undiscoverable_local_server_degrades_to_daemon_only(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: terminated.append(record.target),
+        lambda record, **_kwargs: terminated.append(record.target),
     )
 
     result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
@@ -2429,7 +2434,7 @@ def test_host_stop_local_daemon_points_at_full_stop(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: cli._STOP_TERMINATED,
+        lambda record, **_kwargs: cli._STOP_TERMINATED,
     )
 
     result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
@@ -2459,7 +2464,7 @@ def test_host_stop_remote_daemon_omits_local_server_hint(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: cli._STOP_TERMINATED,
+        lambda record, **_kwargs: cli._STOP_TERMINATED,
     )
 
     result = CliRunner().invoke(
@@ -2499,7 +2504,7 @@ def test_host_stop_server_url_matches_local_daemon_serving_it(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: terminated.append(record.target) or cli._STOP_TERMINATED,
+        lambda record, **_kwargs: terminated.append(record.target) or cli._STOP_TERMINATED,
     )
 
     result = CliRunner().invoke(
@@ -2701,7 +2706,7 @@ def test_host_stop_slow_local_server_with_live_pid_keeps_force_guidance(
     monkeypatch.setattr(
         cli,
         "_terminate_daemon",
-        lambda record, *, force: pytest.fail("daemon terminated despite a live server process"),
+        lambda record, **_kwargs: pytest.fail("daemon terminated despite a live server process"),
     )
 
     result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
