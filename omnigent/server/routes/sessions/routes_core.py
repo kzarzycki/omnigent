@@ -104,6 +104,7 @@ from omnigent.server.creation_logging import creation_metadata, creation_stage, 
 from omnigent.server.feature_flags import Feature
 from omnigent.server.harness_telemetry import harness_telemetry_launch
 from omnigent.server.host_registry import HostLaunchResult, HostRegistry, RunnerExitReports
+from omnigent.server.machine_access import refuse_machine_request
 from omnigent.server.model_block_list import (
     current_model_block_list,
     refuse_blocked_start_defaults,
@@ -138,10 +139,16 @@ from omnigent.server.routes._errors import (
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._host_launch import _deployment_is_sharded
+from omnigent.server.routes._machine_start import (
+    machine_access_for,
+    require_machine_agent_allowed,
+    require_machine_create_shape,
+)
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._session_create_validation import (
     file_session_by_workspace,
     resolve_environment_placement,
+    validate_session_agent,
 )
 from omnigent.server.routes._sessions.common import (
     _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
@@ -1233,6 +1240,7 @@ def register_core_routes(
                 permission_store=permission_store,
                 conversation=conversation,
                 sandbox_profiles=getattr(request.app.state, "sandbox_profiles", None),
+                machine_access=getattr(request.app.state, "machine_session_access", None),
             )
         conn = target.conn
         harness_telemetry = await asyncio.to_thread(
@@ -1445,7 +1453,11 @@ def register_core_routes(
                 "Independent sessions require agent_id", code=ErrorCode.INVALID_INPUT
             )
         form = await request.form(max_files=21) if content_type == "multipart/form-data" else None
+        machine_access = machine_access_for(request, user_id)
         if form is not None and (form.get("bundle") is not None or "initial_files" not in form):
+            if machine_access is not None:
+                # An uploaded bundle is an arbitrary agent, never a listed one.
+                refuse_machine_request("upload an agent bundle when starting a session")
             result = await _create_bundled_session_from_multipart(request, user_id)
             await file_session_by_workspace(conversation_store, result.session_id, user_id)
             # Surface the freshly-minted session id (the request path has no
@@ -1490,6 +1502,19 @@ def register_core_routes(
             # on this route 500'd as internal_error. The human-readable
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+
+        if machine_access is not None:
+            require_machine_create_shape(machine_access, set(body.model_fields_set))
+            if ORCHESTRATION_SOURCE_HEADER in request.headers or body.agent_id is None:
+                refuse_machine_request("start a session on behalf of another session")
+            machine_agent = await validate_session_agent(
+                user_id=user_id,
+                agent_id=body.agent_id,
+                agent_store=agent_store,
+                permission_store=permission_store,
+                conversation_store=conversation_store,
+            )
+            await require_machine_agent_allowed(machine_access, machine_agent, agent_cache)
 
         explicit_host = request.url.path.endswith("/sessions/orchestrated/host")
         if explicit_host and (
@@ -3658,6 +3683,10 @@ def register_core_routes(
             or body.approval_mode is not None
             or _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY in (body.labels or {})
         )
+        if set_launch_args or body.runner_id is not None:
+            if machine_access_for(request, user_id) is not None:
+                # Launch args and runner binding decide what runs on the host.
+                refuse_machine_request("change a session's launch settings or runner")
         set_share_workspace = "share_workspace_files" in body.model_fields_set
         pin_only = body.model_fields_set == {"labels"} and set(body.labels or {}) == {
             PINNED_LABEL_KEY

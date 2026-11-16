@@ -5562,6 +5562,15 @@ def create_app(
                 handle_client_credentials = create_client_credentials_handler(
                     auth_provider, permission_store
                 )
+                machine_client = MachineClientConfig.from_env()
+                if handle_client_credentials is not None and machine_client is not None:
+                    # Opt-in grant for the machine principal's session starts;
+                    # unset leaves it with no host (see machine_access.py).
+                    from omnigent.server.machine_access import MachineSessionAccess
+
+                    app.state.machine_session_access = MachineSessionAccess.from_env(
+                        machine_client.sub
+                    )
 
         # Device Authorization Grant (RFC 8628): opt-in, default-off via
         # OMNIGENT_DEVICE_GRANT_ENABLED. Supported in accounts and oidc

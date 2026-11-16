@@ -6414,6 +6414,7 @@ async def _validate_session_workspace(
         agent_cache=agent_cache,
         host_store=getattr(request.app.state, "host_store", None),
         host_registry=getattr(request.app.state, "host_registry", None),
+        machine_access=getattr(request.app.state, "machine_session_access", None),
     )
 
 

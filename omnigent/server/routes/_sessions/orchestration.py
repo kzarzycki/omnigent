@@ -12364,6 +12364,7 @@ async def _routing_host_for_create(
         user_id=user_id,
         host_id=body.host_id,
         host_store=host_store,
+        machine_access=getattr(request.app.state, "machine_session_access", None),
     )
 
 
@@ -13171,6 +13172,7 @@ async def _create_session_from_existing_agent(
         conversation_store=conversation_store,
         host_store=getattr(request.app.state, "host_store", None),
         parent=_parent_for_routing,
+        machine_access=getattr(request.app.state, "machine_session_access", None),
     )
     require_codex_plan_launch_support(
         harness=selected_harness,
