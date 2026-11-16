@@ -62,6 +62,7 @@ from omnigent.server.schemas import (
     PolicySummary,
     SkillSummary,
 )
+from omnigent.server.session_defaults import spec_names_harness
 from omnigent.server.session_sharing import (
     require_public_grant_allowed,
     require_sharing_mode_allows_grant,
@@ -398,7 +399,10 @@ def _to_agent_object(
             loaded = cache.load(
                 agent.id, agent.bundle_location, expand_env=agent.operator_authored
             )
-            harness = loaded.spec.executor.harness_kind
+            # A portable spec names no harness: report none rather than "omnigent".
+            harness = (
+                loaded.spec.executor.harness_kind if spec_names_harness(loaded.spec) else None
+            )
             if description is None:
                 description = loaded.spec.description
             # Declared terminal names, in spec order — the Web UI

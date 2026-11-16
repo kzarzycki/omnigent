@@ -291,6 +291,46 @@ async def test_bundled_create_persists_server_created_worktree(
     assert session.git_branch == "feature/bundled"
 
 
+async def test_harness_less_bundle_is_refused_before_a_worktree_is_created(
+    register_worktree_host: RegisterHost,
+    client: httpx.AsyncClient,
+) -> None:
+    import yaml
+
+    from tests._helpers.session import bundle_files
+
+    cap = register_worktree_host()
+    config = {
+        "spec_version": 1,
+        "name": "portable",
+        "executor": {"type": "omnigent", "config": {}},
+    }
+    response = await client.post(
+        "/v1/sessions",
+        data={
+            "metadata": json.dumps(
+                {
+                    "host_id": _HOST_ID,
+                    "workspace": _SOURCE_REPO,
+                    "git": {"branch_name": "feature/portable", "base_branch": "main"},
+                }
+            )
+        },
+        files={
+            "bundle": (
+                "agent.tar.gz",
+                bundle_files({"config.yaml": yaml.safe_dump(config).encode()}),
+                "application/gzip",
+            )
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "names no harness" in response.text
+    assert cap.create == []
+    assert cap.remove == []
+
+
 async def test_create_without_base_branch_sends_none(
     register_worktree_host: RegisterHost,
     client: httpx.AsyncClient,

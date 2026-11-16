@@ -238,6 +238,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _persist_model_change_note,
     _publish_runner_recovered_status,
     _read_session_snapshot_inputs,
+    _require_bundle_names_harness,
     _run_managed_launch,
     _session_is_moving,
     _session_is_starting,
@@ -1981,6 +1982,7 @@ def register_core_routes(
             bundle_bytes,
             enforce_handler_allowlist=True,
         )
+        _require_bundle_names_harness(spec)
 
         if parsed_metadata.mcp_registry_services:
             from omnigent.mcp_selection import registry_selection_labels, selected_mcp_spec

@@ -186,6 +186,20 @@ def test_redaction_retains_non_omnigent_executor_type() -> None:
     assert validate_agent_bundle(redacted).executor.harness_kind == "claude_sdk"
 
 
+def test_redaction_keeps_a_spec_without_harness_portable() -> None:
+    source = _source_bundle(
+        "portable", "private credential", executor={"type": "omnigent", "config": {}}
+    )
+
+    redacted = redacted_agent_bundle("portable", source)
+
+    with tarfile.open(fileobj=io.BytesIO(redacted), mode="r:gz") as archive:
+        config = archive.extractfile("config.yaml")
+        assert config is not None
+        assert json.load(config)["executor"] == {"type": "omnigent", "config": {}}
+    assert not validate_agent_bundle(redacted).executor.config.get("harness")
+
+
 @pytest.mark.parametrize("level", [LEVEL_READ, LEVEL_EDIT])
 def test_fork_agent_copy_is_redacted_only_for_read(tmp_path: Path, level: int) -> None:
     """A READ fork gets a redacted agent copy; an EDIT fork keeps the full bundle."""

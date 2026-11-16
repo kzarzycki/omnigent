@@ -11088,7 +11088,7 @@ def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
 
 
 def _derive_terminal_launch_args_from_spec(
-    spec: AgentSpec, *, headless_defaults: bool = True
+    spec: AgentSpec, *, headless_defaults: bool = True, harness: str | None = None
 ) -> list[str] | None:
     """
     Derive native-terminal YOLO pass-through args from a trusted sub-spec.
@@ -11165,12 +11165,18 @@ def _derive_terminal_launch_args_from_spec(
         cursor-native spec falls back to the headless full-bypass default.
         ``True`` for headless worker creates; ``False`` for top-level /
         self-resolved creates, where only explicit opt-ins translate.
+    :param harness: The session's effective harness, e.g. ``"codex-native"``
+        from a ``harness_override``. ``None`` reads the spec's own harness. A
+        harness-specific key such as ``permission_mode`` translates only for the
+        harness the session actually runs, never the one the spec names.
     :returns: A flat CLI-arg list to store as the child session's
         ``terminal_launch_args``, or ``None`` when nothing should be set.
     :raises ValueError: If a spec-derived argument violates the same
         bounds enforced for request-supplied ``terminal_launch_args``.
     """
-    harness = _spec_harness(spec)
+    from omnigent.harness_aliases import canonicalize_harness
+
+    harness = (canonicalize_harness(harness) or harness) if harness else _spec_harness(spec)
     if harness == _CLAUDE_NATIVE_HARNESS:
         permission_mode = spec.executor.config.get("permission_mode")
         if permission_mode:
@@ -11248,16 +11254,22 @@ def _derive_terminal_launch_args_from_spec(
     return None
 
 
-def _native_subagent_wrapper_labels_from_spec(sub_spec: AgentSpec) -> dict[str, str]:
+def _native_subagent_wrapper_labels_from_spec(
+    sub_spec: AgentSpec, harness: str | None = None
+) -> dict[str, str]:
     """
     Resolve terminal-first wrapper labels from an already-loaded sub-spec.
 
     :param sub_spec: Trusted child sub-agent spec resolved from the
         parent bundle.
+    :param harness: The session's effective harness, e.g. from a
+        ``harness_override``; ``None`` reads the sub-spec's own harness.
     :returns: ``{wrapper_key: value, ui_key: "terminal"}`` for a native
         sub-agent, or ``{}`` when the sub-agent is not native.
     """
-    harness = _spec_harness(sub_spec)
+    from omnigent.harness_aliases import canonicalize_harness
+
+    harness = (canonicalize_harness(harness) or harness) if harness else _spec_harness(sub_spec)
     native_agent = native_coding_agent_for_harness(harness)
     if native_agent is not None:
         return {
