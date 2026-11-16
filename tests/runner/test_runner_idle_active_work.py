@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -608,7 +609,8 @@ async def test_permission_hook_wait_is_bounded_per_hook(
     async with _claude_native_pane_app(tmp_path, monkeypatch, conv_id) as (app, _instance):
         first_hook = bridge.approval_wait_marker_path(conv_id)
         assert first_hook.parent == tmp_path / "approval-waits"
-        second_hook = first_hook.with_name(f"{first_hook.name.split('.')[0]}.999999.wait")
+        # A marker counts only while its hook process lives; the parent stands in for it.
+        second_hook = first_hook.with_name(f"{first_hook.name.split('.')[0]}.{os.getppid()}.wait")
         _publish_native_status(app, conv_id, "running", None)
         bridge.touch_approval_wait_marker(first_hook)
         assert app.state.has_active_work() is True

@@ -746,7 +746,15 @@ async def test_every_advertised_field_reaches_the_request(
     fields = [name for name in properties if name not in skipped]
     arguments = {**dict.fromkeys(fields, "x"), **_REVIEW_FIELDS}
     arguments["scheduled_task_id"] = _TASK_ID
-    client = _RecordingClient()
+    # A server that admits every gated field, so none is refused before the write.
+    info = _Resp(
+        body={
+            "scheduled_task_projects": True,
+            "scheduled_task_session_modes": True,
+            "scheduled_task_mcp_services": True,
+        }
+    )
+    client = _RecordingClient(info=info)
     await _execute_scheduled_task_tool(tool_name, json.dumps(arguments), server_client=client)
     # The session-mode fields are checked against /v1/info first; the write comes last.
     body = client.calls[-1][2]
