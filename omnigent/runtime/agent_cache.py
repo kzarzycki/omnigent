@@ -43,6 +43,17 @@ def _is_symlink(path: Path) -> bool:
         return False
 
 
+def _checked_child(cache_root: Path, component: str) -> Path | None:
+    """Return *cache_root*/*component* if it resolves to itself, else ``None``."""
+    normalized_path = os.path.normpath(cache_root / component)
+    if not normalized_path.startswith(os.path.join(cache_root, "")):
+        return None
+    path = Path(normalized_path)
+    if path.parent != cache_root or path.resolve(strict=False) != path:
+        return None
+    return path
+
+
 def _published_location(workdir: Path) -> str | None:
     """Return the bundle location a cache directory holds, or ``None`` if unknown."""
     try:
@@ -89,7 +100,7 @@ class AgentCache:
         """
         self._artifact_store = artifact_store
         self._cache_dir = cache_dir
-        # The root may itself be a symlink; resolve it once rather than per lookup.
+        # The root may itself be a symlink; resolve it once, and again only on a mismatch.
         self._cache_root = cache_dir.resolve(strict=False)
         # agent_id → (location, spec, workdir); the workdir was path-checked when stored.
         self._specs: dict[str, tuple[str, AgentSpec, Path]] = {}
@@ -106,14 +117,20 @@ class AgentCache:
             or "\x00" in component
         ):
             raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
-        cache_root = self._cache_root
-        normalized_path = os.path.normpath(cache_root / component)
-        if not normalized_path.startswith(os.path.join(cache_root, "")):
-            raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
-        path = Path(normalized_path)
-        if path.parent != cache_root or path.resolve(strict=False) != path:
+        path = _checked_child(self._cache_root, component)
+        if path is None and self._refresh_cache_root():
+            path = _checked_child(self._cache_root, component)
+        if path is None:
             raise ValueError(f"unsafe agent id for cache path: {agent_id!r}")
         return path
+
+    def _refresh_cache_root(self) -> bool:
+        """Re-resolve the root after a mismatch, e.g. one symlinked after construction."""
+        current_root = self._cache_dir.resolve(strict=False)
+        if current_root == self._cache_root:
+            return False
+        self._cache_root = current_root
+        return True
 
     def load(
         self,
@@ -316,9 +333,10 @@ class AgentCache:
 
     def _staging_root(self) -> Path:
         """Return the reserved staging namespace on the cache filesystem."""
-        cache_root = self._cache_root
-        cache_root.mkdir(parents=True, exist_ok=True)
-        staging_root = cache_root / ".staging"
+        self._cache_root.mkdir(parents=True, exist_ok=True)
+        staging_root = self._cache_root / ".staging"
+        if staging_root.resolve(strict=False) != staging_root and self._refresh_cache_root():
+            staging_root = self._cache_root / ".staging"
         if staging_root.resolve(strict=False) != staging_root:
             raise ValueError(f"unsafe staging root: {staging_root}")
         staging_root.mkdir(mode=0o700, exist_ok=True)

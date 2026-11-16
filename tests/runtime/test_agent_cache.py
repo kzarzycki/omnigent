@@ -408,19 +408,24 @@ def test_evict_noop_for_uncached_agent(
     agent_cache.evict("never-loaded")
 
 
+@pytest.mark.parametrize("linked_after_construction", [False, True])
 def test_cache_operations_allow_symlinked_cache_root(
     artifact_store: LocalArtifactStore,
     cache_dir: Path,
     tmp_path: Path,
+    linked_after_construction: bool,
 ) -> None:
-    """The configured root may be a symlink; individual entries may not."""
+    """The configured root may be a symlink, even one made after the cache; entries may not."""
     target = tmp_path / "real-cache"
     target.mkdir()
+    if linked_after_construction:
+        agent_cache = AgentCache(artifact_store, cache_dir)
     try:
         cache_dir.symlink_to(target, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks are unavailable")
-    agent_cache = AgentCache(artifact_store, cache_dir)
+    if not linked_after_construction:
+        agent_cache = AgentCache(artifact_store, cache_dir)
     bundle_location = "agent-1/abc123"
     bundle_bytes = _store_bundle(artifact_store, bundle_location)
 
