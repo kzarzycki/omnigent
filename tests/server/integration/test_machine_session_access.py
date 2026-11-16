@@ -29,7 +29,7 @@ from tests.budgets import budget
 from tests.server.helpers import build_agent_bundle
 from tests.server.helpers import websocket_scope as _websocket_scope
 from tests.server.integration.test_session_host_launch import _serve_one_launch
-from tests.server.integration.test_sessions_permissions import host_perm_app as host_perm_app
+from tests.server.integration.test_sessions_permissions import build_host_perm_app
 from tests.server.integration.test_sessions_permissions import (
     host_perm_client as host_perm_client,
 )
@@ -67,6 +67,12 @@ def agents(host_perm_app: FastAPI, tmp_path: Path) -> dict[str, str]:
             "cloud-agent",
             {"type": "omnigent", "config": {"harness": "acp:claude-cloud"}},
         ),
+        "codex": _register_agent(
+            host_perm_app,
+            tmp_path,
+            "codex-agent",
+            {"type": "omnigent", "config": {"harness": "codex-native"}},
+        ),
         "bypass": _register_agent(
             host_perm_app,
             tmp_path,
@@ -83,7 +89,7 @@ def _grant(app: FastAPI, *, cloud: bool = True) -> None:
     app.state.machine_session_access = MachineSessionAccess(
         machine_sub=_MACHINE,
         acts_for=_NAMED_USER,
-        allowed_agents=frozenset({"listed-agent", "bypass-agent"}),
+        allowed_agents=frozenset({"listed-agent", "bypass-agent", "codex-agent"}),
         allow_cloud_sessions=cloud,
     )
     install_machine_launch_guard(app)
@@ -628,35 +634,35 @@ async def test_machine_cannot_fork_with_codex_bypass(
 
 
 @pytest.fixture()
-def scheduled_app(host_perm_app: FastAPI, db_uri: str) -> FastAPI:
-    """The host-enabled app with the scheduled-task routes mounted."""
+def host_perm_app(db_uri: str, tmp_path: Path) -> FastAPI:
+    """The host-enabled app, with the scheduled-task routes mounted by ``create_app``."""
     from omnigent.server.auth import create_auth_provider
     from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 
-    host_perm_app.include_router(
-        create_scheduled_tasks_router(
-            SqlAlchemyScheduledTaskStore(db_uri),
-            agent_store=host_perm_app.state.agent_store,
-            conversation_store=host_perm_app.state.conversation_store,
-            permission_store=host_perm_app.state.permission_store,
-            agent_cache=host_perm_app.state.agent_cache,
-            auth_provider=create_auth_provider(),
-        ),
-        prefix="/v1",
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    router = create_scheduled_tasks_router(
+        SqlAlchemyScheduledTaskStore(db_uri),
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        permission_store=SqlAlchemyPermissionStore(db_uri),
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        auth_provider=create_auth_provider(),
     )
-    return host_perm_app
+    return build_host_perm_app(db_uri, tmp_path, extra_routers=[(router, "/v1", [])])
 
 
 @pytest.mark.parametrize("mode", ["bypass", "bypassPermissions"])
 async def test_machine_cannot_schedule_a_bypass_permission_mode(
-    scheduled_app: FastAPI,
+    host_perm_app: FastAPI,
     host_perm_client: httpx.AsyncClient,
     agents: dict[str, str],
     mode: str,
 ) -> None:
     """A scheduled task's bypass mode, which stamps the codex label on fire, is refused."""
-    _grant(scheduled_app)
+    _grant(host_perm_app)
     response = await host_perm_client.post(
         "/v1/scheduled-tasks",
         json={
@@ -691,8 +697,28 @@ async def _machine_session_in_native_harness(
         ("claude-native", "!id"),
         ("claude-native", "  /compact"),
         ("claude-native", [{"type": "input_text", "text": "/login"}]),
+        (
+            "codex-native",
+            [{"type": "message", "role": "user", "content": "!printf from-machine"}],
+        ),
+        (
+            "claude-native",
+            [{"type": "output_text", "text": "hi"}, {"type": "input_text", "text": "/login"}],
+        ),
+        (
+            "claude-native",
+            [{"type": "input_text", "text": ""}, {"type": "input_text", "text": "!id"}],
+        ),
     ],
-    ids=["codex-shell", "claude-bash-mode", "claude-slash-command", "claude-slash-block"],
+    ids=[
+        "codex-shell",
+        "claude-bash-mode",
+        "claude-slash-command",
+        "claude-slash-block",
+        "codex-role-keyed-item",
+        "claude-output-text-block",
+        "claude-empty-first-block",
+    ],
 )
 async def test_machine_message_that_a_native_terminal_would_run_is_refused(
     host_perm_app: FastAPI,
@@ -727,6 +753,47 @@ async def test_machine_startup_input_with_a_shell_escape_is_refused(
     )
     with pytest.raises(OmnigentError, match="machine client may not"):
         await host_perm_app.state.post_server_message(session_id, _MACHINE, "!id")
+
+
+async def test_machine_startup_input_with_leading_newline_shell_escape_is_refused(
+    host_perm_app: FastAPI,
+    host_perm_client: httpx.AsyncClient,
+    agents: dict[str, str],
+) -> None:
+    """The startup dispatch applies the same text rule, ignoring leading newlines."""
+    session_id = await _machine_session_in_native_harness(
+        host_perm_app, host_perm_client, agents["listed"], "claude-native"
+    )
+    with pytest.raises(OmnigentError, match="machine client may not"):
+        await host_perm_app.state.post_server_message(session_id, _MACHINE, "\n\n!id")
+
+
+async def test_machine_cannot_patch_a_native_scheduled_task_to_bypass(
+    host_perm_app: FastAPI,
+    host_perm_client: httpx.AsyncClient,
+    agents: dict[str, str],
+) -> None:
+    """A task created without a mode must not be switched to bypass by a later PATCH."""
+    _grant(host_perm_app)
+    headers = {"X-Forwarded-Email": _MACHINE}
+    created = await host_perm_client.post(
+        "/v1/scheduled-tasks",
+        json={
+            "name": "nightly",
+            "prompt": "run",
+            "rrule": "FREQ=DAILY",
+            "agent_id": agents["codex"],
+        },
+        headers=headers,
+    )
+    assert created.status_code in (200, 201), created.text
+    response = await host_perm_client.patch(
+        f"/v1/scheduled-tasks/{created.json()['id']}",
+        json={"permission_mode": "bypass"},
+        headers=headers,
+    )
+    assert response.status_code == 403, response.text
+    assert "machine client may not" in response.text
 
 
 async def test_machine_cannot_pick_or_unpick_a_registry_mcp_service(
@@ -784,4 +851,34 @@ async def test_machine_can_answer_approvals_and_elicitations_of_its_session(
     approval = await host_perm_client.post(
         f"{base}/events", json={"type": "approval", "data": {}}, headers=headers
     )
-    assert approval.status_code != 403, approval.text
+    assert approval.status_code == 202, approval.text
+    assert approval.json() == {"queued": False}
+
+
+async def test_machine_gets_not_found_for_prompts_in_another_users_session(
+    host_perm_app: FastAPI,
+    host_perm_client: httpx.AsyncClient,
+    agents: dict[str, str],
+) -> None:
+    """The prompt routes stay scoped to sessions the machine principal can access."""
+    _grant(host_perm_app)
+    created = await host_perm_client.post(
+        "/v1/sessions",
+        json={"agent_id": agents["listed"]},
+        headers={"X-Forwarded-Email": _OTHER_USER},
+    )
+    assert created.status_code == 201, created.text
+    base = f"/v1/sessions/{created.json()['id']}"
+    headers = {"X-Forwarded-Email": _MACHINE}
+    responses = [
+        await host_perm_client.post(
+            f"{base}/events", json={"type": "approval", "data": {}}, headers=headers
+        ),
+        await host_perm_client.post(
+            f"{base}/elicitations/abc/resolve", json={"action": "accept"}, headers=headers
+        ),
+        await host_perm_client.get(f"{base}/elicitations/abc", headers=headers),
+    ]
+    assert [response.status_code for response in responses] == [404, 404, 404], [
+        response.text for response in responses
+    ]

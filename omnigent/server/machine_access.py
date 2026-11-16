@@ -102,24 +102,38 @@ def conversation_bypasses_permissions(conv: Conversation) -> bool:
     return bool((conv.labels or {}).get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY))
 
 
-def input_leads_with_terminal_command(content: object) -> bool:
-    """Whether native-terminal input starts with ``!`` or ``/`` after whitespace.
+_PLAIN_BLOCK_TYPES = frozenset({"input_text", "input_image", "input_file"})
 
-    A native TUI reads those as a shell escape or a slash command.
 
-    :param content: A message's ``content``: text, or a list of text blocks.
-    :returns: ``True`` when the first text starts with either character.
+def native_input_runs_on_host(content: object) -> bool:
+    """Whether native-terminal input could run as a host command for the machine principal.
+
+    Decides on what the harness receives: anything but plain text or a list of
+    ``input_text`` / attachment blocks is refused (other shapes are read
+    differently by each harness), as is a direct codex shell command, and a
+    ``!`` or ``/`` that leads the joined text, which a native TUI runs.
+
+    :param content: A message's ``content``.
+    :returns: ``True`` when the machine principal must not send it.
     """
+    from omnigent.harnesses.codex_native.shell_input import shell_command_from_input
+
+    if shell_command_from_input(content) is not None:
+        return True
     if isinstance(content, list):
-        content = next(
-            (
-                block.get("text")
-                for block in content
-                if isinstance(block, dict) and isinstance(block.get("text"), str)
-            ),
-            None,
-        )
-    return isinstance(content, str) and content.lstrip()[:1] in ("!", "/")
+        texts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") not in _PLAIN_BLOCK_TYPES:
+                return True
+            if block["type"] == "input_text":
+                text = block.get("text")
+                if not isinstance(text, str):
+                    return True
+                texts.append(text)
+        content = "\n".join(texts)
+    if not isinstance(content, str):
+        return True
+    return content.lstrip()[:1] in ("!", "/")
 
 
 def spec_harness_id(spec: AgentSpec) -> str:

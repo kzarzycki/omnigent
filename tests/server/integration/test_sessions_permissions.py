@@ -178,15 +178,16 @@ async def local_auth_client(
     await pm.shutdown()
 
 
-@pytest.fixture()
-def host_perm_app(
+def build_host_perm_app(
     db_uri: str,
     tmp_path: Path,
+    extra_routers: list[tuple[Any, str, list[str]]] | None = None,
 ) -> FastAPI:
     """Auth-enabled app that also wires a host store.
 
     Same shape as :func:`auth_app` but passes ``host_store`` so the
     host-launch authorization path in ``POST /v1/sessions`` is live.
+    ``extra_routers`` mount before the SPA catch-all, as ``create_app`` orders them.
     """
     from omnigent.server.auth import create_auth_provider
 
@@ -204,7 +205,14 @@ def host_perm_app(
         permission_store=SqlAlchemyPermissionStore(db_uri),
         auth_provider=create_auth_provider(),
         host_store=HostStore(db_uri),
+        extra_routers=extra_routers,
     )
+
+
+@pytest.fixture()
+def host_perm_app(db_uri: str, tmp_path: Path) -> FastAPI:
+    """Auth-enabled app that also wires a host store."""
+    return build_host_perm_app(db_uri, tmp_path)
 
 
 @pytest_asyncio.fixture()
