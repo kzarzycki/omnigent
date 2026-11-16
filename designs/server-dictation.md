@@ -47,13 +47,14 @@ transcription API) don't need the native dependency:
 ```python
 class DictationStreamHandle(Protocol):
     def feed_pcm16(self, data: bytes) -> DictationUpdate: ...  # decode a chunk
-    def finish(self) -> str: ...                              # flush tail, final text
-    def close(self) -> None: ...                              # release (client vanished)
+    def finish(self) -> str: ...  # flush tail, final text
+    def close(self) -> None: ...  # release (client vanished)
+
 
 @dataclass(frozen=True)
 class DictationUpdate:
-    partial: str          # current in-progress utterance, display-ready (revisable)
-    finalized: str | None # utterance completed by endpointing, if any
+    partial: str  # current in-progress utterance, display-ready (revisable)
+    finalized: str | None  # utterance completed by endpointing, if any
 ```
 
 Emitted text is **display-ready** — an engine that needs punctuation/casing

@@ -68,7 +68,9 @@ in the PK so a future "connect two GitHub orgs" needs no migration.
 ```python
 class SecretCipher(Protocol):
     def encrypt(self, plaintext: str, *, context: Mapping[str, str]) -> str: ...
-    def decrypt(self, ciphertext: str, *, context: Mapping[str, str]) -> str | None: ...  # None on mismatch
+    def decrypt(
+        self, ciphertext: str, *, context: Mapping[str, str]
+    ) -> str | None: ...  # None on mismatch
 ```
 
 `context` is the row's identity (`workspace`/`user`/`provider`/`account`) and is

@@ -41,6 +41,7 @@ from omnigent.policies.schema import (
 from omnigent.policies.types import PolicyLLMClient
 from omnigent.runtime.credentials.databricks import resolve_databricks_workspace
 from omnigent.runtime.policies.engine import PolicyEngine
+from omnigent.spec.tool_restrictions import policy_denied_tools
 from omnigent.spec.types import (
     DEFAULT_ASK_TIMEOUT,
     AgentSpec,
@@ -85,6 +86,24 @@ _ASK_ON_ADD_POLICY_SPEC = FunctionPolicySpec(
         arguments=None,
     ),
 )
+
+
+def _spec_tool_restriction_specs(spec: AgentSpec) -> list[PolicySpec]:
+    """The deny policy for the tools an agent spec forbids (the harness flag's backstop)."""
+    denied = policy_denied_tools(spec)
+    if not denied:
+        return []
+    return [
+        FunctionPolicySpec(
+            name="__spec_disallowed_tools",
+            on=None,
+            function=FunctionRef(
+                path="omnigent.policies.builtins.safety.deny_tools",
+                arguments={"blocked": list(denied)},
+            ),
+        )
+    ]
+
 
 # Same posture for the scheduled-task tools in SCHEDULED_TASK_APPROVAL_TOOLS:
 # an agent cannot create or update unattended work without user approval.
@@ -458,6 +477,8 @@ def any_policies_apply(
         return True
     if spec.guardrails and spec.guardrails.policies:
         return True
+    if phase == Phase.TOOL_CALL and policy_denied_tools(spec):
+        return True
     child_spec = _resolve_sub_agent_spec(spec, conversation)
     if child_spec is not None and child_spec.guardrails and child_spec.guardrails.policies:
         return True
@@ -612,7 +633,10 @@ def build_policy_engine(
     :returns: A :class:`PolicyEngine` ready for evaluation.
     """
     guardrails = spec.guardrails
-    agent_policy_specs: list[PolicySpec] = list(guardrails.policies or []) if guardrails else []
+    agent_policy_specs: list[PolicySpec] = [
+        *((guardrails.policies or []) if guardrails else []),
+        *_spec_tool_restriction_specs(spec),
+    ]
     session_policy_specs = _load_session_policy_specs(conversation_id, policy_store)
     if conversation is not None and conversation.id != conversation_id:
         # A misrouted preload would mix one session's labels, state, usage

@@ -401,10 +401,11 @@ Gateway config included `usage_tracking_config.enabled=true` and a
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url=f'{DATABRICKS_HOST}/serving-endpoints', api_key=DATABRICKS_TOKEN)
+
+client = OpenAI(base_url=f"{DATABRICKS_HOST}/serving-endpoints", api_key=DATABRICKS_TOKEN)
 resp = client.chat.completions.create(
-    model='omnigent-docs-test-gateway',   # the Gateway endpoint, not the backing model
-    messages=[{'role':'user','content':'Reply with exactly two words: PROXY OK'}],
+    model="omnigent-docs-test-gateway",  # the Gateway endpoint, not the backing model
+    messages=[{"role": "user", "content": "Reply with exactly two words: PROXY OK"}],
     max_tokens=10,
 )
 ```
@@ -654,7 +655,7 @@ The OpenAI SDK needs an explicit `api_key` argument, not just the
 explicitly:
 
 ```python
-client = OpenAI(base_url=os.environ['OPENAI_BASE_URL'], api_key=os.environ['DATABRICKS_TOKEN'])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["DATABRICKS_TOKEN"])
 ```
 
 ### Traces not appearing in MLflow UI

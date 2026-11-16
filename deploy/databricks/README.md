@@ -67,6 +67,7 @@ branch = "projects/omnigent/branches/production"
 endpoint = f"{branch}/endpoints/primary"
 
 import time
+
 for _ in range(120):
     ep = wc.postgres.get_endpoint(name=endpoint)
     if ep.status and ep.status.current_state == "ACTIVE":

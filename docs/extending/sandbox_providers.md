@@ -166,6 +166,7 @@ from omnigent.onboarding.sandboxes.registry import (
     SandboxProviderMetadata,
 )
 
+
 def get_contribution() -> SandboxProviderContribution:
     return SandboxProviderContribution(
         name="omnigent-acme",

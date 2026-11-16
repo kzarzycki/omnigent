@@ -149,11 +149,15 @@ scoping via a `*_user_id` column, epoch-seconds timestamps.
 ```python
 class SqlProject(OmnigentBase):
     """A user-defined, owner-private container that groups sessions."""
+
     __tablename__ = "projects"
 
     workspace_id: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, nullable=False,
-        server_default="0", default=current_workspace_id,
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
     )
     # "proj_"-prefixed string id (not Uuid16) so it reads as a sibling of
     # conversation ids and lives naturally in the metadata String column.
@@ -186,7 +190,7 @@ Membership is one nullable column on the existing metadata table
 # Relates to projects.id; no DB FK (Rule R032). NULL = unfiled.
 project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 # In __table_args__ — "list sessions in project X" + counts (GROUP BY project_id):
-Index("ix_conversation_metadata_project_id", "workspace_id", "project_id", "id"),
+(Index("ix_conversation_metadata_project_id", "workspace_id", "project_id", "id"),)
 ```
 
 **Column decisions worth sign-off:**

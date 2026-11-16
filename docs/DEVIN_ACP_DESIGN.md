@@ -139,10 +139,11 @@ class AcpExtension:
     subagent_sources: tuple[AcpSubAgentSource, ...] = ()
 
     @property
-    def surfaces_subagents(self) -> bool:      # capability, derived — never hand-set
+    def surfaces_subagents(self) -> bool:  # capability, derived — never hand-set
         return bool(self.subagent_sources)
 
-NO_ACP_EXTENSION = AcpExtension(name="acp")     # the generic default; reads no vendor field
+
+NO_ACP_EXTENSION = AcpExtension(name="acp")  # the generic default; reads no vendor field
 ```
 
 Devin plugs in — `omnigent/inner/devin/`:
@@ -150,13 +151,15 @@ Devin plugs in — `omnigent/inner/devin/`:
 ```python
 # subagents.py — the ~30 lines that are genuinely Devin's
 class DevinSubAgentSource:
-    def read(self, update):                     # self-gates on cognition.ai/*
+    def read(self, update):  # self-gates on cognition.ai/*
         meta = update.get("_meta") or {}
         started = meta.get("cognition.ai/subagent_started")
         # ... → SubAgentStart(child_key=agentId, title=..., task=...)
 
+
 # __init__.py — the composition root
 DEVIN_ACP_EXTENSION = AcpExtension(name="devin", subagent_sources=(DevinSubAgentSource(),))
+
 
 # harness.py — the whole wrap; harness_modules["devin"] resolves here
 def create_app():
@@ -168,8 +171,9 @@ The generic executor consumes it with no vendor name in sight —
 
 ```python
 for sub in read_subagent_events(update, self._extension.subagent_sources):
-    events.append(SubAgentStarted(...) if isinstance(sub, SubAgentStart)
-                  else SubAgentCompleted(...))
+    events.append(
+        SubAgentStarted(...) if isinstance(sub, SubAgentStart) else SubAgentCompleted(...)
+    )
 ```
 
 ---

@@ -33,9 +33,12 @@ pin that release as the minimum SDK version when distributing your plugin.
 from typing import ClassVar
 from omnigent.onboarding.sandboxes.base import SandboxHostLauncher
 from omnigent.onboarding.sandboxes.profiles import (
-    ProviderSandboxProfile, SandboxProfileContext,
-    SandboxProfileAccessDenied, SandboxProfileChanged,
+    ProviderSandboxProfile,
+    SandboxProfileContext,
+    SandboxProfileAccessDenied,
+    SandboxProfileChanged,
 )
+
 
 class CustomerLauncher(SandboxHostLauncher):
     manages_profiles: ClassVar[bool] = True
@@ -50,7 +53,9 @@ class CustomerLauncher(SandboxHostLauncher):
             return [sandbox.public_profile]
         return self.controller.authorized_profiles(context)
 
-    def select_profile(self, context: SandboxProfileContext, profile: ProviderSandboxProfile) -> None:
+    def select_profile(
+        self, context: SandboxProfileContext, profile: ProviderSandboxProfile
+    ) -> None:
         # Reauthorize exact ID/revision, and verify the resource assignment when scoped.
         self.selected = self.controller.authorize_exact(profile, context)
         # prepare/provision/resume/start_host use this launcher's selected configuration.

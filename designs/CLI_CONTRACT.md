@@ -56,11 +56,11 @@ The `scripts/install_oss.sh` installer mirrors the same accent
 Status lines — consistent glyph + color, correct stream:
 
 ```python
-ui.step("Installing Omnigent")     # ==>  accent   (stdout)
-ui.success("Verified omnigent")    #  ✓   green    (stdout)
-ui.info("Using ~/.omnigent")       #  ·   dim      (stdout)
-ui.warn("tmux not found")          #  !   yellow   (stderr)
-ui.error("uv is required")         #  ✗   red      (stderr)
+ui.step("Installing Omnigent")  # ==>  accent   (stdout)
+ui.success("Verified omnigent")  #  ✓   green    (stdout)
+ui.info("Using ~/.omnigent")  #  ·   dim      (stdout)
+ui.warn("tmux not found")  #  !   yellow   (stderr)
+ui.error("uv is required")  #  ✗   red      (stderr)
 ```
 
 Messages are emitted verbatim (never reparsed as rich markup), so a
@@ -69,11 +69,13 @@ message containing `[...]` is safe.
 Structure:
 
 ```python
-ui.header("Configured credentials")     # bold accent section header
-ui.kv("Session", "New session")         # aligned label / value row
-ui.rule("Setup")                        # horizontal accent rule
-tbl = ui.table(title="Hosts"); ...; ui.console.print(tbl)   # branded Table
-ui.console.print(ui.panel(body, title="Note"))              # branded Panel
+ui.header("Configured credentials")  # bold accent section header
+ui.kv("Session", "New session")  # aligned label / value row
+ui.rule("Setup")  # horizontal accent rule
+tbl = ui.table(title="Hosts")
+...
+ui.console.print(tbl)  # branded Table
+ui.console.print(ui.panel(body, title="Note"))  # branded Panel
 ```
 
 Raw streams when you need them: `ui.console` (stdout), `ui.err_console`

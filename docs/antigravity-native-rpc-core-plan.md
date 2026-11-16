@@ -66,17 +66,25 @@
 ```python
 def test_get_trajectory_steps_posts_cascade_id_and_returns_steps(monkeypatch):
     seen = {}
+
     def handler(req):
-        seen["url"] = str(req.url); seen["body"] = req.content
-        return httpx.Response(200, json={"steps": [{"stepIndex": 0, "status": "CORTEX_STEP_STATUS_DONE"}]})
+        seen["url"] = str(req.url)
+        seen["body"] = req.content
+        return httpx.Response(
+            200, json={"steps": [{"stepIndex": 0, "status": "CORTEX_STEP_STATUS_DONE"}]}
+        )
+
     monkeypatch.setattr(rpc, "_HTTP_TRANSPORT", httpx.MockTransport(handler))
     steps = rpc.get_trajectory_steps(52548, "conv-uuid")
     assert seen["url"].endswith("/LanguageServerService/GetCascadeTrajectorySteps")
     assert json.loads(seen["body"]) == {"cascadeId": "conv-uuid"}
     assert steps[0]["stepIndex"] == 0
 
+
 def test_cancel_cascade_steps_true_on_200(monkeypatch):
-    monkeypatch.setattr(rpc, "_HTTP_TRANSPORT", httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+    monkeypatch.setattr(
+        rpc, "_HTTP_TRANSPORT", httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+    )
     assert rpc.cancel_cascade_steps(52548, "conv-uuid") is True
 ```
 
@@ -99,19 +107,34 @@ def test_cancel_cascade_steps_true_on_200(monkeypatch):
 ```python
 def test_handle_user_interaction_nests_traj_and_step_inside_interaction(monkeypatch):
     seen = {}
-    monkeypatch.setattr(rpc, "_HTTP_TRANSPORT", httpx.MockTransport(
-        lambda r: seen.setdefault("body", r.content) and None or httpx.Response(200, json={})))
-    rpc.handle_user_interaction(52548, "c", trajectory_id="t", step_index=14,
-                                payload={"permission": {"allow": True}})
+    monkeypatch.setattr(
+        rpc,
+        "_HTTP_TRANSPORT",
+        httpx.MockTransport(
+            lambda r: seen.setdefault("body", r.content) and None or httpx.Response(200, json={})
+        ),
+    )
+    rpc.handle_user_interaction(
+        52548, "c", trajectory_id="t", step_index=14, payload={"permission": {"allow": True}}
+    )
     assert json.loads(seen["body"]) == {
         "cascadeId": "c",
-        "interaction": {"trajectoryId": "t", "stepIndex": 14, "permission": {"allow": True}}}
+        "interaction": {"trajectoryId": "t", "stepIndex": 14, "permission": {"allow": True}},
+    }
+
 
 def test_handle_user_interaction_raises_on_500(monkeypatch):
-    monkeypatch.setattr(rpc, "_HTTP_TRANSPORT", httpx.MockTransport(
-        lambda r: httpx.Response(500, json={"message": "input not registered for step 14"})))
+    monkeypatch.setattr(
+        rpc,
+        "_HTTP_TRANSPORT",
+        httpx.MockTransport(
+            lambda r: httpx.Response(500, json={"message": "input not registered for step 14"})
+        ),
+    )
     with pytest.raises(rpc.AntigravityRpcError) as ei:
-        rpc.handle_user_interaction(52548, "c", trajectory_id="t", step_index=14, payload={"permission": {"allow": True}})
+        rpc.handle_user_interaction(
+            52548, "c", trajectory_id="t", step_index=14, payload={"permission": {"allow": True}}
+        )
     assert "input not registered" in str(ei.value)
 ```
 

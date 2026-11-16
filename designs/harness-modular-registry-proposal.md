@@ -149,14 +149,15 @@ class NativeHarnessProvider:
     Every value is a dotted path resolved lazily at dispatch time, so
     get_contribution() never imports the runner/CLI/provider stack.
     """
-    key: str                       # matches NativeCodingAgent.key
-    run_native: str                # "...:run_<x>_native"  (CLI + resume launch)
-    auto_create_terminal: str      # "...:auto_create_<x>_terminal"  (runner)
-    spawn_env_builder: str | None = None   # "...:build_<x>_native_spawn_env"
-    interrupt_handler: str | None = None   # "...:handle_<x>_native_interrupt"
-    stop_handler: str | None = None        # "...:handle_<x>_native_stop"
+
+    key: str  # matches NativeCodingAgent.key
+    run_native: str  # "...:run_<x>_native"  (CLI + resume launch)
+    auto_create_terminal: str  # "...:auto_create_<x>_terminal"  (runner)
+    spawn_env_builder: str | None = None  # "...:build_<x>_native_spawn_env"
+    interrupt_handler: str | None = None  # "...:handle_<x>_native_interrupt"
+    stop_handler: str | None = None  # "...:handle_<x>_native_stop"
     materialize_agent_spec: str | None = None  # "...:_materialize_<x>_agent_spec"
-    bridge_dir: str | None = None          # "...:bridge_dir_for_session" (cost popup)
+    bridge_dir: str | None = None  # "...:bridge_dir_for_session" (cost popup)
 ```
 
 Add to `HarnessContribution`:
