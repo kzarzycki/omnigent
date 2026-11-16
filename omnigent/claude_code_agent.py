@@ -144,6 +144,8 @@ def find_plugin_agent_files(root: Path) -> list[Path]:
             continue
         agents_dir = manifest.parent.parent / "agents"
         found.extend(
-            f for f in sorted(agents_dir.rglob("*.md")) if f.resolve().is_relative_to(resolved_root)
+            f
+            for f in sorted(agents_dir.rglob("*.md"))
+            if f.resolve().is_relative_to(resolved_root)
         )
     return list(dict.fromkeys(found))
