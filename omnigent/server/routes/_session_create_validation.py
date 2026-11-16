@@ -131,41 +131,20 @@ class ProjectPlacement:
     workspace: str
 
 
-async def resolve_project_placement(
+async def resolve_environment_placement(
     *,
-    project_id: str | None,
     environment_id: str | None,
     user_id: str | None,
     project_store: ProjectStore | None,
 ) -> ProjectPlacement | None:
-    """Resolve the host and workspace a named project or environment pins.
+    """Resolve the host and workspace pinned by the project an ``environment_id`` names.
 
-    ``environment_id`` finds the caller's project whose config carries that
-    ``environment_id``; one that is unknown, ambiguous or lacks a ``host_id`` and
-    ``workspace`` fails rather than falling back to the sender's placement. A
-    ``project_id`` that pins no host and workspace returns ``None``, so the create
-    keeps the sender's placement and is only filed in that project. Returns
-    ``None`` when neither is named.
+    ``environment_id`` finds the caller's project whose config carries it; one that
+    is unknown, ambiguous or lacks a ``host_id`` and ``workspace`` fails rather than
+    falling back to the sender's placement. Returns ``None`` when none is named.
     """
-    if project_id is None and environment_id is None:
+    if environment_id is None:
         return None
-    if project_id is not None and environment_id is not None:
-        raise OmnigentError(
-            "Set project_id or environment_id, not both", code=ErrorCode.INVALID_INPUT
-        )
-    if project_id is not None:
-        project = (
-            None
-            if project_store is None
-            else await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
-        )
-        if project is None:
-            return None
-        host_id = project.config.get("host_id")
-        workspace = project.config.get("workspace")
-        if not _pinned(host_id) or not _pinned(workspace):
-            return None
-        return ProjectPlacement(project_id=project.id, host_id=host_id, workspace=workspace)
     if project_store is None:
         raise OmnigentError("Environment not found", code=ErrorCode.NOT_FOUND)
     matches = [

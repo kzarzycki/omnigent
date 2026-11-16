@@ -29,6 +29,7 @@ POLICY = {
     "spec": {"auto": [{"paths": GLOBS}]},
     "ci": False,
     "delegate": "all",
+    "land": {"merge_commit_heads": ["sync/*"]},
 }
 INSIDE = [
     "mise.toml",
@@ -115,7 +116,11 @@ def main() -> int:
     expect("spec.auto is not true", approvals.spec_auto(read), False)
     expect("delegate", approvals.delegation(read), "all")
 
-    expect("no land section: PRs land as GitHub merges", "land" in settings, False)
+    expect(
+        "land section: sync heads land as merge commits, the rest as squashes",
+        settings.get("land"),
+        {"merge_commit_heads": ["sync/*"]},
+    )
     expect("the whole policy", settings, POLICY)
 
     expect("check build, inside the globs", approvals.scoped(pull(*INSIDE), issue(), read), None)

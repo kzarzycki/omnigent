@@ -959,9 +959,9 @@ class SysSessionCreateTool(Tool):
             "placement='managed' creates one on a new sandbox "
             "using the server's configured default provider. These sessions are grouped as "
             "nested agents when enabled on the server; otherwise they appear at the top level. "
-            "With placement='same_host', a project_id whose project pins a host and workspace, "
-            "or an environment_id, starts the session there, top-level in that project, "
-            "outside this session's family. "
+            "With placement='same_host', an environment_id starts the session on the host "
+            "and workspace its project pins, top-level in that project, outside this "
+            "session's family. "
             "Managed creation requires a "
             "configured sandbox provider; use same_host for an existing connected host. "
             "These placements require orchestration enabled "
@@ -1006,9 +1006,8 @@ class SysSessionCreateTool(Tool):
                             "description": (
                                 "Default child; same_host, host or managed launches a private "
                                 "independent session (agent_id only), grouped in this family "
-                                "when nested agents are enabled, unless project_name or "
-                                "project_id names another project or a pinned placement "
-                                "is used (then top-level)."
+                                "when nested agents are enabled, unless project_name names "
+                                "another project or environment_id is used (then top-level)."
                             ),
                         },
                         "host_id": {
@@ -1038,9 +1037,7 @@ class SysSessionCreateTool(Tool):
                             "description": (
                                 "Existing owned project ID for an independent session. "
                                 "Use project_id or project_name, not both. "
-                                "Project defaults do not apply, except that with "
-                                "placement='same_host' a project pinning a host and "
-                                "workspace starts the session there."
+                                "Project defaults do not apply."
                             ),
                         },
                         "environment_id": {

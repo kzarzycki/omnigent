@@ -67,23 +67,15 @@ async def _orchestrate(auth_client, source, **fields):
     )
 
 
-@pytest.mark.parametrize("named_by", ["project_id", "environment_id"])
-async def test_create_takes_host_and_workspace_from_the_named_project(
-    auth_client, stack, named_by
-):
+async def test_create_takes_host_and_workspace_from_the_named_environment(auth_client, stack):
     source, pinned_host, store = stack
     project_id = await _project(
         auth_client,
         "Cloud",
         {"host_id": pinned_host, "workspace": PINNED_WORKSPACE, "environment_id": ENVIRONMENT_ID},
     )
-    named = (
-        {"project_id": project_id}
-        if named_by == "project_id"
-        else {"environment_id": ENVIRONMENT_ID}
-    )
 
-    response = await _orchestrate(auth_client, source, **named)
+    response = await _orchestrate(auth_client, source, environment_id=ENVIRONMENT_ID)
 
     assert response.status_code == 201, response.text
     created = store.get_conversation(response.json()["id"])
@@ -94,12 +86,11 @@ async def test_create_takes_host_and_workspace_from_the_named_project(
 @pytest.mark.parametrize(
     ("fields", "status"),
     [
-        ({"project_id": "missing"}, 404),
         ({"environment_id": "env_unknown"}, 404),
         ({"project_id": "x", "environment_id": ENVIRONMENT_ID}, 400),
     ],
 )
-async def test_unknown_project_or_environment_never_falls_back_to_the_sender(
+async def test_unknown_environment_never_falls_back_to_the_sender(
     auth_client, stack, db_uri, fields, status
 ):
     source, pinned_host, store = stack
@@ -116,9 +107,12 @@ async def test_unknown_project_or_environment_never_falls_back_to_the_sender(
     assert {c.id for c in store.list_conversations().data} == before
 
 
-async def test_project_without_a_host_and_workspace_keeps_the_sender_placement(auth_client, stack):
-    source, _, store = stack
-    project_id = await _project(auth_client, "Bare", {"environment_id": ENVIRONMENT_ID})
+async def test_project_id_files_the_session_on_the_sender_placement(auth_client, stack):
+    """``project_id`` keeps upstream's meaning: the project's pinned host does not apply."""
+    source, pinned_host, store = stack
+    project_id = await _project(
+        auth_client, "Cloud", {"host_id": pinned_host, "workspace": PINNED_WORKSPACE}
+    )
 
     response = await _orchestrate(auth_client, source, project_id=project_id)
 
@@ -190,12 +184,14 @@ async def test_sys_session_create_passes_the_environment_to_the_server(auth_clie
 
 
 @pytest.mark.parametrize("source_project", ["unfiled", "same", "other"])
-async def test_named_project_wins_over_the_source_project(
+async def test_named_environment_wins_over_the_source_project(
     auth_client, db_uri, stack, source_project
 ):
     source, pinned_host, store = stack
     project_id = await _project(
-        auth_client, "Cloud", {"host_id": pinned_host, "workspace": PINNED_WORKSPACE}
+        auth_client,
+        "Cloud",
+        {"host_id": pinned_host, "workspace": PINNED_WORKSPACE, "environment_id": ENVIRONMENT_ID},
     )
     if source_project != "unfiled":
         filed_in = project_id if source_project == "same" else await _project(auth_client, "Other")
@@ -204,7 +200,7 @@ async def test_named_project_wins_over_the_source_project(
         )
         assert response.status_code == 200, response.text
 
-    response = await _orchestrate(auth_client, source, project_id=project_id)
+    response = await _orchestrate(auth_client, source, environment_id=ENVIRONMENT_ID)
 
     assert response.status_code == 201, response.text
     created = store.get_conversation(response.json()["id"])
