@@ -73,6 +73,7 @@ def test_read_session_defaults_without_store_or_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
-    assert read_session_defaults(
-        user_id=None, preference_store=None, preference_policy=None
-    ) == SessionDefaults()
+    assert (
+        read_session_defaults(user_id=None, preference_store=None, preference_policy=None)
+        == SessionDefaults()
+    )
