@@ -453,6 +453,8 @@ async def test_independent_creation_uncertain_result_is_not_retried(
                 200,
                 json={"request_managed_sandbox_host_id": reserves_host, "sibling_sessions": True},
             )
+        if request.method == "GET" and request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"data": [], "has_more": False, "last_id": None})
         requests.append(request)
         assert request.url.path == "/v1/sessions/orchestrated"
         if isinstance(failure, int):
@@ -499,6 +501,98 @@ async def test_independent_creation_uncertain_result_is_not_retried(
         assert "host_id" not in result
     assert "conversation_id" not in result
     assert len(requests) == 1
+
+
+_SOURCE_SESSION = "conv_source"
+
+
+async def _create_with_server(respond, *, title="Review worker"):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        return json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {"agent_id": "worker", "placement": "same_host", "title": title}
+                ),
+                server_client=client,
+                conversation_id=_SOURCE_SESSION,
+            )
+        )
+
+
+def _created_row(**overrides):
+    row = {
+        "id": "conv_created",
+        "agent_id": "ag_worker",
+        "agent_name": "worker",
+        "title": "Review worker",
+        "status": "idle",
+        "created_at": time.time() + 5,
+        "labels": {"omnigent.created_by_session_id": _SOURCE_SESSION},
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_create_read_timeout_returns_the_session_the_server_made():
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"data": [_created_row()], "has_more": False, "last_id": None}
+            )
+        raise httpx.ReadTimeout("Response lost after creation")
+
+    result = await _create_with_server(respond)
+    assert "error" not in result
+    assert result["conversation_id"] == "conv_created"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [_created_row(title="Other")],
+        [_created_row(created_at=1.0)],
+        [_created_row(labels={"omnigent.created_by_session_id": "conv_elsewhere"})],
+    ],
+)
+async def test_create_read_timeout_without_a_matching_session_stays_unconfirmed(rows):
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": rows, "has_more": False, "last_id": None})
+        raise httpx.ReadTimeout("Response lost")
+
+    result = await _create_with_server(respond)
+    assert "creation could not be confirmed" in result["error"]
+    assert "conversation_id" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_that_answers_after_sixty_seconds_succeeds():
+    seen = {}
+
+    def respond(request):
+        seen["read"] = request.extensions["timeout"]["read"]
+        return httpx.Response(201, json=_created_row())
+
+    result = await _create_with_server(respond)
+    assert result["conversation_id"] == "conv_created"
+    assert seen["read"] > 60.0
+
+
+def test_orchestrated_create_budget_sits_below_the_proxy_hops():
+    from omnigent.runner.tool_dispatch import (
+        _ORCHESTRATED_CREATE_READ_TIMEOUT_S,
+        MCP_PROXY_CALL_TIMEOUT_S,
+        MCP_PROXY_FORWARD_TIMEOUT_S,
+    )
+
+    assert 60.0 < _ORCHESTRATED_CREATE_READ_TIMEOUT_S < MCP_PROXY_FORWARD_TIMEOUT_S
+    assert MCP_PROXY_FORWARD_TIMEOUT_S < MCP_PROXY_CALL_TIMEOUT_S
 
 
 @pytest.mark.asyncio
