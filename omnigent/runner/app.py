@@ -230,6 +230,7 @@ _logger = logging.getLogger(__name__)
 _BRIDGE_NOTIFICATIONS = DedicatedExecutor(max_workers=2, thread_name_prefix="runner-bridge-notify")
 
 # Allow process termination and forwarder cleanup to finish before DELETE proceeds.
+_SESSION_ENDED_FORWARD_TIMEOUT_S = 25.0
 _SESSION_INIT_CANCEL_TIMEOUT_S = 20.0
 
 
@@ -4716,6 +4717,42 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
 
+    async def _forward_session_ended(conv_id: str) -> None:
+        """Best-effort POST ``{"type":"session_ended"}`` to a conversation's harness.
+
+        The session was archived or deleted; a harness whose agent holds state outside
+        this runner ends it. No live harness, or a failed post, is logged and swallowed.
+        """
+        if process_manager is None:
+            return
+        try:
+            harness_client = await process_manager.get_client(conv_id, "any")
+            resp = await harness_client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={"type": "session_ended"},
+                timeout=_SESSION_ENDED_FORWARD_TIMEOUT_S,
+            )
+            if resp.status_code >= 400:
+                _logger.warning(
+                    "Harness refused session_ended for %s (status %s)",
+                    conv_id,
+                    resp.status_code,
+                    extra={"session_id": conv_id},
+                )
+        except NoLiveHarnessError:
+            _logger.warning(
+                "Session %s ended with no live harness to tell",
+                conv_id,
+                extra={"session_id": conv_id},
+            )
+        except Exception:
+            _logger.warning(
+                "session_ended forward to harness failed for %s",
+                conv_id,
+                exc_info=True,
+                extra={"session_id": conv_id},
+            )
+
     async def _cancel_inprocess_turn(conv_id: str) -> None:
         # Distinguish "no live turn" (absent) from a stream-mode turn (present as
         # the None sentinel — driven by the AP request's consumption of
@@ -8182,6 +8219,10 @@ def create_runner_app(
                         _interrupted_sessions.discard(conversation_id)
                 return _stop_resp
             await _cancel_inprocess_turn(conversation_id)
+            return Response(status_code=204)
+
+        if body_type == "session_ended":
+            await _forward_session_ended(conversation_id)
             return Response(status_code=204)
 
         if body_type == "effort_change":

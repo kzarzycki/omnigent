@@ -781,6 +781,7 @@ class Session:
         self.cwd = cwd
         self.acp_id = acp_id
         self.cloud_id: str | None = None
+        self.archived = False  # Omnigent ended the session and its cloud session was archived
         # Picked through ``session/set_model``; it applies when the cloud session is created.
         self.model: str | None = None
         # Picked through ``session/set_config_option``; applies at creation like the model.
@@ -1457,6 +1458,33 @@ def end_children() -> None:
             proc.kill()
 
 
+SESSION_ENDED_METHOD = "_omnigent/session_ended"
+
+
+def archive_ended_sessions() -> None:
+    """Omnigent says its session ended: archive each cloud session this bridge holds, once.
+
+    A failed call is logged and never stops the bridge; a cloud session that is already
+    archived counts as done (:func:`archive`).
+    """
+    for session in list(SESSIONS.values()):
+        if session.cloud_id is None or session.archived:
+            continue
+        try:
+            archive(session.cloud_id)
+        except Exception as exc:  # noqa: BLE001 — a failed archive never stops the bridge
+            log(f"archive of {session.cloud_id} failed: {exc}")
+        else:
+            session.archived = True
+            log(f"archived {session.cloud_id}")
+
+
+def answer_session_ended(mid: object) -> None:
+    archive_ended_sessions()
+    if mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+
+
 def leave() -> None:
     """End the children, then hand a cancel on its way to the cloud session.
 
@@ -1521,6 +1549,7 @@ def read_requests() -> None:
                             "loadSession": False,
                             "promptCapabilities": {"image": False},
                             "omnigentIdleExit": {"status": IDLE_EXIT_STATUS},
+                            "omnigentSessionEnded": {"method": SESSION_ENDED_METHOD},
                         },
                         "authMethods": [],
                     },
@@ -1549,6 +1578,8 @@ def read_requests() -> None:
         elif method == "session/prompt":
             if accept_prompt():
                 threading.Thread(target=handle_accepted, args=(msg,), daemon=True).start()
+        elif method == SESSION_ENDED_METHOD:
+            threading.Thread(target=answer_session_ended, args=(mid,), daemon=True).start()
         elif method == "session/cancel":
             log(f"cancel {params.get('sessionId')}")
             if session := SESSIONS.get(params.get("sessionId", "")):
@@ -2598,7 +2629,48 @@ def self_check() -> None:
     check_lifetime()
     check_sigterm()
     check_archive_and_title()
+    check_session_ended()
     print("self-check ok")
+
+
+def check_session_ended() -> None:
+    """``_omnigent/session_ended`` archives each cloud session once; a stop does not."""
+    archived: list[str] = []
+    failures = [True]
+
+    def fake_archive(cloud_id: str) -> None:
+        if failures and cloud_id == "session_flaky":
+            failures.pop()
+            raise urllib.error.URLError("no route to host")
+        archived.append(cloud_id)
+
+    saved, real_archive = dict(SESSIONS), archive
+    SESSIONS.clear()
+    globals()["archive"] = fake_archive
+    sent: list[dict] = []
+    real_send, globals()["send"] = send, sent.append
+    try:
+        for name, cloud_id in (
+            ("acp-a", "session_a"),
+            ("acp-none", None),
+            ("acp-f", "session_flaky"),
+        ):
+            SESSIONS[name] = Session("/", name)
+            SESSIONS[name].cloud_id = cloud_id
+        with contextlib.suppress(SystemExit):
+            stop()  # SIGTERM and stdin EOF end the bridge and leave the cloud sessions alone
+        assert archived == [], archived
+        answer_session_ended(7)
+        assert archived == ["session_a"], archived  # the failed one is logged, not raised
+        assert sent == [{"jsonrpc": "2.0", "id": 7, "result": {}}], sent
+        answer_session_ended(None)  # a retry archives only what is left
+        assert archived == ["session_a", "session_flaky"], archived
+        answer_session_ended(8)
+        assert archived == ["session_a", "session_flaky"], archived
+    finally:
+        globals()["archive"], globals()["send"] = real_archive, real_send
+        SESSIONS.clear()
+        SESSIONS.update(saved)
 
 
 def check_archive_and_title() -> None:

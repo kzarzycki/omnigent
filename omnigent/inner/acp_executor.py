@@ -102,6 +102,10 @@ _ACP_TERMINATION_TIMEOUT_SECONDS = 5.0
 # ``initialize`` capabilities: ``{"omnigentIdleExit": {"status": N}}``. A prompt such an
 # agent left unanswered, when it exited with N, never ran and goes to the next process.
 _IDLE_EXIT_CAPABILITY = "omnigentIdleExit"
+# An agent that wants to hear that its Omnigent session ended (the claude-cloud bridge archives
+# its cloud session then) names the request in ``{"omnigentSessionEnded": {"method": ...}}``.
+_SESSION_ENDED_CAPABILITY = "omnigentSessionEnded"
+_SESSION_ENDED_TIMEOUT_SECONDS = 20.0
 _ACP_CLEANUP_HEADROOM_SECONDS = 1.0
 ACP_REAP_TIMEOUT_SECONDS = (
     ACP_CANCEL_GRACE_SECONDS + _ACP_TERMINATION_TIMEOUT_SECONDS + _ACP_CLEANUP_HEADROOM_SECONDS
@@ -522,6 +526,7 @@ class AcpExecutor(Executor):
         self._proc: asyncio.subprocess.Process | None = None
         self._resent_after_idle_exit = False
         self._idle_exit_status: int | None = None
+        self._session_ended_method: str | None = None
         self._queue: asyncio.Queue[_AcpJsonObject] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -608,6 +613,7 @@ class AcpExecutor(Executor):
         self._initialized = False
         self._image_supported = False
         self._idle_exit_status = None
+        self._session_ended_method = None
         self._authenticated = False
         self._auth_advertisement = {}
         if self._proc is not None:
@@ -914,6 +920,13 @@ class AcpExecutor(Executor):
         )
         status = idle_exit.get("status") if isinstance(idle_exit, dict) else None
         self._idle_exit_status = status if isinstance(status, int) else None
+        ended = (
+            result.get("agentCapabilities", {}).get(_SESSION_ENDED_CAPABILITY)
+            if isinstance(result, dict)
+            else None
+        )
+        method = ended.get("method") if isinstance(ended, dict) else None
+        self._session_ended_method = method if isinstance(method, str) else None
         # Stash the advertised auth methods but do NOT authenticate here:
         # sending an unsolicited ``authenticate`` would change the handshake
         # for every agent that advertises methods informationally (or is
@@ -2185,6 +2198,30 @@ class AcpExecutor(Executor):
 
     async def close_session(self, session_key: str) -> None:
         """Close a named session (no-op; the ACP session is per-process)."""
+
+    async def end_session(self, session_key: str) -> None:
+        """Tell an agent that asked to hear it that its Omnigent session ended.
+
+        A failure, or an agent that already left, is logged and never raised.
+        """
+        method = self._session_ended_method
+        if self._proc is None or method is None:
+            if method is not None or self._idle_exit_status is not None:
+                logger.warning(
+                    "acp[%s] session %s ended with no live agent to tell",
+                    self._config.name,
+                    session_key,
+                )
+            return
+        try:
+            await self._rpc(method, {}, timeout=_SESSION_ENDED_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning(
+                "acp[%s] session-ended notice failed for %s",
+                self._config.name,
+                session_key,
+                exc_info=True,
+            )
 
     def close_timeout(self) -> float:
         return ACP_REAP_TIMEOUT_SECONDS
