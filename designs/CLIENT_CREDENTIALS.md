@@ -119,6 +119,62 @@ secret-hash comparison and the signature on issued tokens. Rotating it
 therefore invalidates the configured hash **and** every live machine token —
 the startup log says so where an operator will see it.
 
+## Starting sessions on a user's hosts
+
+By default the machine principal owns no host, so every host-bound start answers
+`403 not your host`. An operator can grant it a narrow start capability with
+three more settings, read at mount (only when the grant above is enabled):
+
+| Variable | Meaning |
+|----------|---------|
+| `OMNIGENT_MACHINE_ACTS_FOR` | The user whose hosts the machine principal may start sessions on. Unset (the default) leaves everything as above. Must be a real user other than the machine principal. |
+| `OMNIGENT_MACHINE_ALLOWED_AGENTS` | Comma-separated names of operator-registered agents (`server --agent`, built-ins) it may start. |
+| `OMNIGENT_MACHINE_ALLOW_CLOUD_SESSIONS` | `1` also allows operator-registered agents on the `acp:claude-cloud` harness. |
+
+`OMNIGENT_MACHINE_ACTS_FOR` needs at least one of the other two, and they need
+it; any other combination refuses to start.
+
+With the grant, the machine principal may:
+
+- `POST /v1/sessions` with a JSON body naming a listed agent, a `host_id` of the
+  named user's host and a `workspace`, plus only `title`,
+  `model_override` and `reasoning_effort`. Any other field is refused.
+- `POST /v1/hosts/{host_id}/runners` for a session it owns, on that host, when
+  the session's agent passes the same checks.
+
+Nothing else widens for routes that take a `host_id` (skills, plugins, MCP
+servers, imports, filesystem, scheduled tasks ...): they keep the owner-only host
+check, and no other principal gets the grant.
+
+The machine principal also owns the sessions it creates, so the owner-level
+routes on those sessions that start a process on the host, type into one, or
+change what starts one are refused for it (`403 machine client may not ...`):
+opening or transferring a terminal, an interactive terminal attach, the
+environment shell, replacing the session's agent bundle, adding, changing or
+removing its MCP servers, a native shell message, and the
+`external_permission_mode_change` / `external_codex_approval_mode_change`
+events that rewrite stored launch args. Every runner launch for a session the
+machine principal owns also re-checks that its agent is still listed and its
+stored launch args do not skip permission prompts, whichever route wrote them.
+
+What stays refused, whatever the agent:
+
+- **A terminal in a bypass permission mode.** A start whose agent spec, or stored
+  launch args, skip approval (`--dangerously-skip-permissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, a `bypassPermissions`
+  or `danger-full-access` mode, `yolo: true`) is refused, and so is a later
+  `PATCH` of the session's launch args, permission mode or runner. Without this,
+  anyone who can trigger the automation that holds the machine secret would run
+  arbitrary commands on the host as its user.
+- **An agent not on the list.** Only operator-registered agents match, so an agent
+  the machine principal uploads can never take a listed name. An uploaded bundle
+  (`multipart/form-data` create) is refused outright.
+- **Another user's host.** The host's owner must be exactly
+  `OMNIGENT_MACHINE_ACTS_FOR`.
+
+The token lifetime is unchanged (capped at 3600s); a client mints a new token on a
+`401`.
+
 ## Flow
 
 ```

@@ -24,11 +24,11 @@ import logging
 import secrets
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 from cachetools import TTLCache
 
@@ -57,6 +57,9 @@ from omnigent.host.frames import (
 from omnigent.host.harness_startup import HarnessStartup
 from omnigent.runner.transports.ws_tunnel.diagnostics import OutboundFrame, TunnelDiagnostics
 from omnigent.server.feature_flags import FeatureFlags, McpDisabledServersGate, active_harnesses
+
+if TYPE_CHECKING:
+    from omnigent.entities import Conversation
 
 _logger = logging.getLogger(__name__)
 
@@ -647,6 +650,9 @@ class HostRegistry:
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
+        # Re-checks a machine-owned session before any runner launch; see
+        # ``omnigent.server.routes._machine_start.MachineLaunchGuard``.
+        self.machine_launch_guard: Callable[[Conversation], Awaitable[None]] | None = None
 
     def mcp_disabled_servers_active_harnesses(self) -> list[str] | None:
         """Resolve launch activation; omit the wire field when no harness is active."""

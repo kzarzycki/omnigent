@@ -18,6 +18,7 @@ from omnigent.util.tmux_compat import MIN_TMUX_VERSION_HINT
 
 if TYPE_CHECKING:
     from omnigent.server.host_registry import HostRegistry
+    from omnigent.server.machine_access import MachineSessionAccess
 
 
 async def validate_create_harness_readiness(
@@ -30,6 +31,7 @@ async def validate_create_harness_readiness(
     conversation_store: ConversationStore,
     host_store: HostStore | None,
     parent: Conversation | None = None,
+    machine_access: MachineSessionAccess | None = None,
 ) -> None:
     """Check resolved placement after parent authorization and before persistence.
 
@@ -57,7 +59,11 @@ async def validate_create_harness_readiness(
         host = await asyncio.to_thread(host_store.get_host, host_id) if host_id else None
     elif host_id:
         host = await asyncio.to_thread(
-            resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            machine_access=machine_access,
         )
     else:
         host = None

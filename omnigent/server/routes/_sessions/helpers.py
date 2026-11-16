@@ -6414,6 +6414,7 @@ async def _validate_session_workspace(
         agent_cache=agent_cache,
         host_store=getattr(request.app.state, "host_store", None),
         host_registry=getattr(request.app.state, "host_registry", None),
+        machine_access=getattr(request.app.state, "machine_session_access", None),
     )
 
 
@@ -6664,6 +6665,11 @@ async def _launch_runner_on_host_impl(
     :returns: The :class:`_HostLaunchAttempt` — the new runner id plus any
         structured refusal from the host.
     """
+    machine_guard = host_registry.machine_launch_guard
+    if machine_guard is not None:
+        # Every launch path relaunches from the stored row, so refuse here
+        # whatever wrote the row's launch args.
+        await machine_guard(conv)
     lock = _relaunch_locks.setdefault(conv.id, asyncio.Lock())
     previous_attempt = _relaunch_last_attempt.get(conv.id)
     async with lock:

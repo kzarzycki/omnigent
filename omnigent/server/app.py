@@ -2503,6 +2503,8 @@ def create_app(
     )
     app.state.startup_inputs = startup_inputs
     app.state.permission_store = permission_store
+    app.state.conversation_store = conversation_store
+    app.state.agent_cache = agent_cache
     app.state.host_store = host_store
     # Session create reads a user's saved defaults for a spec that names no harness.
     app.state.preference_store = preference_store
@@ -5565,6 +5567,20 @@ def create_app(
                 handle_client_credentials = create_client_credentials_handler(
                     auth_provider, permission_store
                 )
+                machine_client = MachineClientConfig.from_env()
+                if handle_client_credentials is not None and machine_client is not None:
+                    # Opt-in grant for the machine principal's session starts;
+                    # unset leaves it with no host (see machine_access.py).
+                    from omnigent.server.machine_access import MachineSessionAccess
+
+                    app.state.machine_session_access = MachineSessionAccess.from_env(
+                        machine_client.sub
+                    )
+                    from omnigent.server.routes._machine_start import (
+                        install_machine_launch_guard,
+                    )
+
+                    install_machine_launch_guard(app)
 
         # Device Authorization Grant (RFC 8628): opt-in, default-off via
         # OMNIGENT_DEVICE_GRANT_ENABLED. Supported in accounts and oidc

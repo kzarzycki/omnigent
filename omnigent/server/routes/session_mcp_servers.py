@@ -38,6 +38,7 @@ from omnigent.server.routes._auth_helpers import (
     require_agent_owner,
 )
 from omnigent.server.routes._errors import session_not_found
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.schemas import (
     LiveMCPServerStatus,
     MCPServerSummary,
@@ -344,6 +345,9 @@ def create_session_mcp_servers_router(
         server_name: str,
     ) -> Response:
         """Delete one MCP server declaration from a session-scoped agent."""
+        require_not_machine(
+            request, get_user_id(request, auth_provider), "change a session's MCP servers"
+        )
         agent = await _bound_agent(request, session_id, LEVEL_OWNER)
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
@@ -402,6 +406,9 @@ def create_session_mcp_servers_router(
         mode: str,
         target_name: str | None = None,
     ) -> MCPServerSummary:
+        require_not_machine(
+            request, get_user_id(request, auth_provider), "change a session's MCP servers"
+        )
         agent = await _bound_agent(request, session_id, LEVEL_OWNER)
         user_id = get_user_id(request, auth_provider)
         _require_registry_service(request, body.name, user_id)
@@ -459,6 +466,9 @@ def create_session_mcp_servers_router(
         the mutation persists as the agent's owner (claim-on-write) for
         legacy rows that predate the ``created_by`` column.
         """
+        require_not_machine(
+            request, get_user_id(request, auth_provider), "change a session's MCP servers"
+        )
         agent = await _bound_agent(request, session_id, LEVEL_OWNER)
         if agent.session_id is None:
             raise OmnigentError(

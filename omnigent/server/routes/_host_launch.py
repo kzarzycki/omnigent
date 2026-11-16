@@ -30,6 +30,7 @@ from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.host_registry import HostConnection, HostRegistry
+from omnigent.server.machine_access import MachineSessionAccess
 from omnigent.server.permissions import check_session_access
 from omnigent.stores import ConversationStore
 from omnigent.stores.host_store import Host, HostStore, host_is_live
@@ -124,6 +125,7 @@ def resolve_host_owner(
     user_id: str | None,
     host_id: str,
     host_store: HostStore,
+    machine_access: MachineSessionAccess | None = None,
 ) -> Host:
     """
     Authorize that the caller owns a known host.
@@ -140,6 +142,10 @@ def resolve_host_owner(
         or ``None`` when auth is disabled.
     :param host_id: Target host id, e.g. ``"host_a1b2c3d4..."``.
     :param host_store: Persistent host registrations.
+    :param machine_access: The operator's grant to the machine principal.
+        Only the session-create and runner-launch callers pass it; every
+        other caller keeps the owner-only check. With it, the machine
+        principal may also use a host owned by the user it acts for.
     :returns: The host record owned by the caller.
     :raises HTTPException: 404 if the host is unknown; 403 if it is
         owned by a different user.
@@ -148,7 +154,8 @@ def resolve_host_owner(
     if host is None:
         raise HTTPException(status_code=404, detail="host not found")
     if user_id is not None and host.user_id != user_id:
-        raise HTTPException(status_code=403, detail="not your host")
+        if machine_access is None or not machine_access.may_use_host(user_id, host.user_id):
+            raise HTTPException(status_code=403, detail="not your host")
     return host
 
 
@@ -221,6 +228,7 @@ def resolve_host_launch(
     permission_store: PermissionStore | None,
     conversation: Conversation | None = None,
     sandbox_profiles: SandboxProfileCatalog | None = None,
+    machine_access: MachineSessionAccess | None = None,
 ) -> HostLaunchTarget:
     """
     Resolve and authorize a host runner launch.
@@ -245,6 +253,7 @@ def resolve_host_launch(
         skip the session-owner check (auth disabled).
     :param conversation: Optional authoritative row already loaded for the
         target session. Its id must match ``session_id``.
+    :param machine_access: Passed to :func:`resolve_host_owner`.
     :returns: A :class:`HostLaunchTarget` with the validated host,
         connection, and conversation.
     :raises HTTPException: 404 if the host or session is missing (or the
@@ -259,6 +268,7 @@ def resolve_host_launch(
         user_id=user_id,
         host_id=host_id,
         host_store=host_store,
+        machine_access=machine_access,
     )
 
     conn = host_registry.get(host_id)

@@ -74,6 +74,7 @@ from omnigent.server.routes._content_type import (
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._gzip_route import GZipFileContentRoute, skip_gzip
 from omnigent.server.routes._host_launch import resolve_host_owner
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._sessions.common import (
     _logger,
@@ -1588,6 +1589,9 @@ def register_resources_routes(
         """
         timings = StageTimings()
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        require_not_machine(
+            request, _get_user_id(request, auth_provider), "open a terminal on a host"
+        )
         body = await request.json()
         is_native_bootstrap = (
             bool(body.get("ensure_native_terminal") or body.get("bridge_inject_dir"))
@@ -1748,6 +1752,9 @@ def register_resources_routes(
             e.g. ``"terminal_claude_main"``.
         :returns: The terminal resource object under the target session.
         """
+        require_not_machine(
+            request, _get_user_id(request, auth_provider), "transfer a host terminal"
+        )
         conv = await _validate_session(session_id, request, LEVEL_OWNER)
         body = await request.json()
         target_session_id = body.get("target_session_id") if isinstance(body, dict) else None
@@ -3355,6 +3362,9 @@ def register_resources_routes(
             ``timeout``.
         :returns: Shell result.
         """
+        require_not_machine(
+            request, _get_user_id(request, auth_provider), "run a shell command on a host"
+        )
         body = await request.json()
         path = (
             f"/v1/sessions/{session_id}/resources/environments"

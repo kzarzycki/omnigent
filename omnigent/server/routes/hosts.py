@@ -89,6 +89,7 @@ from omnigent.server.host_registry import (
     HostRegistry,
     update_harness_accounts,
 )
+from omnigent.server.machine_access import refuse_machine_request
 from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
@@ -96,6 +97,10 @@ from omnigent.server.routes._host_launch import (
     host_absent_error,
     resolve_host_launch,
     resolve_launch_timeout_s,
+)
+from omnigent.server.routes._machine_start import (
+    machine_access_for,
+    require_machine_agent_allowed,
 )
 from omnigent.server.routes._session_create_validation import file_session_by_workspace
 from omnigent.server.routes._workspace_validation import (
@@ -1207,7 +1212,24 @@ def create_hosts_router(
             conversation_store=conversation_store,
             permission_store=permission_store,
             sandbox_profiles=getattr(request.app.state, "sandbox_profiles", None),
+            machine_access=getattr(request.app.state, "machine_session_access", None),
         )
+        machine_access = machine_access_for(request, user_id)
+        if machine_access is not None:
+            # A session the machine principal made earlier may name any agent.
+            machine_agent = (
+                await asyncio.to_thread(agent_store.get, target.conv.agent_id)
+                if agent_store is not None and target.conv.agent_id is not None
+                else None
+            )
+            if machine_agent is None:
+                refuse_machine_request("launch a session whose agent cannot be checked")
+            await require_machine_agent_allowed(
+                machine_access,
+                machine_agent,
+                agent_cache,
+                conversation=target.conv,
+            )
         conn = target.conn
         if target.conv.family_id is not None and flags.enabled(Feature.SIBLING_SESSIONS):
             from omnigent.server.session_families import require_sibling_destination

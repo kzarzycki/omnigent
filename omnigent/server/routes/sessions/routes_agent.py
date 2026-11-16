@@ -63,6 +63,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._content_type import (
     require_json_content_type,
 )
+from omnigent.server.routes._machine_start import require_not_machine
 from omnigent.server.routes._sessions.common import (
     _TURN_ACTOR_LABEL,
     _logger,
@@ -340,6 +341,7 @@ def register_agent_routes(
             the bundle is invalid, or the spec name doesn't match.
         """
         user_id = _require_user(request, auth_provider)
+        require_not_machine(request, user_id, "replace a session's agent bundle")
         access = await _require_access_and_level(
             user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
         )

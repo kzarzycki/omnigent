@@ -19,6 +19,7 @@ from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_EDIT, RESERVED_USER_LOCAL, local_single_user_enabled
+from omnigent.server.machine_access import MachineSessionAccess
 from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.server.routes._workspace_validation import _is_subpath_of
@@ -411,6 +412,7 @@ async def _authorize_host_for_workspace(
     host_id: str,
     host_store: Any | None,
     host_registry: Any,
+    machine_access: MachineSessionAccess | None = None,
 ) -> str | None:
     """
     Authorize host ownership and classify a wrong-replica landing.
@@ -426,6 +428,8 @@ async def _authorize_host_for_workspace(
     :param host_store: Persistent host registrations; ``None`` skips
         the ownership check (minimal test wirings).
     :param host_registry: Live host tunnels on this replica.
+    :param machine_access: The machine principal's grant, passed to the
+        owner check by the existing-agent create only.
     :returns: The host's display name for error messages, or ``None``.
     :raises WrongReplicaError: When the host is live but its tunnel is on
         another replica.
@@ -439,6 +443,7 @@ async def _authorize_host_for_workspace(
         user_id=user_id,
         host_id=host_id,
         host_store=host_store,
+        machine_access=machine_access,
     )
     # Wrong-replica classification, same as the /v1/hosts/* endpoints and
     # RunnerRouter: validate_workspace does a local host_registry miss
@@ -495,6 +500,7 @@ async def validate_existing_host_workspace(
     agent_cache: AgentCache | None,
     host_store: Any | None,
     host_registry: Any | None,
+    machine_access: MachineSessionAccess | None = None,
 ) -> str:
     """Validate a connected-host workspace against the agent's os_env boundary."""
     workspace = _require_absolute_host_workspace(workspace)
@@ -517,6 +523,7 @@ async def validate_existing_host_workspace(
         host_id=host_id,
         host_store=host_store,
         host_registry=host_registry,
+        machine_access=machine_access,
     )
 
     # Read the agent's os_env.cwd — None when the spec has no os_env block

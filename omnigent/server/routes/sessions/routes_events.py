@@ -115,6 +115,7 @@ from omnigent.server.failed_status_diagnostics import (
     failed_status_intake_attributes,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
+from omnigent.server.machine_access import native_input_runs_on_host
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -134,6 +135,10 @@ from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
 from omnigent.server.routes._errors import session_not_found as _session_not_found
+from omnigent.server.routes._machine_start import (
+    MACHINE_REFUSED_EVENT_TYPES,
+    require_not_machine,
+)
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
     _APPROVAL_TYPE,
@@ -1491,6 +1496,13 @@ def register_events_routes(
         native_shell_authorized = False
         if (
             body.type == "message"
+            and native_harness is not None
+            and native_input_runs_on_host(body.data.get("content"))
+        ):
+            # A native TUI runs a leading ! or / as a shell escape or slash command.
+            require_not_machine(request, user_id, "run a shell command or slash command on a host")
+        if (
+            body.type == "message"
             and shell_command_from_input(body.data.get("content")) is not None
             and native_harness == "codex-native"
         ):
@@ -1512,6 +1524,12 @@ def register_events_routes(
                     **input_attributes({"input_stable_id": body.data.get("stable_id")}),
                 ),
             )
+        if (
+            isinstance(request, Request)
+            and body.type in MACHINE_REFUSED_EVENT_TYPES
+            and not _has_bound_runner_authority(request, conv)
+        ):
+            require_not_machine(request, user_id, "change permission modes or run slash commands")
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
