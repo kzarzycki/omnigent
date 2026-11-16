@@ -1426,6 +1426,18 @@ async def _pi_native_launch_config(
     )
 
 
+def _insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[str]:
+    """
+    Insert ``extra`` before the first ``--``, since the CLIs read everything after it as prompt text.
+
+    :param args: Launch args, possibly containing a ``--`` separator.
+    :param extra: Flags to place ahead of the separator (or at the end without one).
+    :returns: The combined args.
+    """
+    split = args.index("--") if "--" in args else len(args)
+    return [*args[:split], *extra, *args[split:]]
+
+
 def _codex_launch_config_for_spec(
     launch_config: _CodexNativeLaunchConfig,
     agent_spec: AgentSpec | ResolvedSpec | None,
@@ -1444,11 +1456,9 @@ def _codex_launch_config_for_spec(
     kept = _strip_approval_sandbox_flags(
         tuple(launch_config.terminal_launch_args or ()), drop_permission_config=True
     )
-    # Pin before any ``--``: codex treats everything after it as positional text.
-    split = kept.index("--") if "--" in kept else len(kept)
     return dataclasses.replace(
         launch_config,
-        terminal_launch_args=[*kept[:split], "--sandbox", "read-only", *kept[split:]],
+        terminal_launch_args=_insert_before_separator(kept, ["--sandbox", "read-only"]),
         bypass_sandbox=False,
     )
 
@@ -8049,7 +8059,10 @@ async def _launch_claude_native_terminal(
     )
     if allowed is not None:
         spec = dataclasses.replace(
-            spec, args=[*_strip_claude_tools_args(spec.args), "--tools", allowed]
+            spec,
+            args=_insert_before_separator(
+                _strip_claude_tools_args(spec.args), ["--tools", allowed]
+            ),
         )
     return await resource_registry.launch_required_terminal(
         spec=spec, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE, **launch_kwargs
@@ -8060,12 +8073,17 @@ def _strip_claude_tools_args(args: Sequence[str]) -> list[str]:
     """
     Drop client ``--tools X`` and ``--tools=X`` so a stored restriction cannot be widened.
 
+    Args from the first ``--`` on are prompt text and pass through unchanged.
+
     :param args: Claude launch args.
-    :returns: Args without any ``--tools`` flag or its value.
+    :returns: Args without any ``--tools`` flag or its value before the separator.
     """
     out: list[str] = []
     skip_value = False
-    for arg in args:
+    for index, arg in enumerate(args):
+        if arg == "--":
+            out.extend(args[index:])
+            break
         if skip_value:
             skip_value = False
             # An empty value is legal (``--tools ""``); a following flag is not its value.

@@ -2073,3 +2073,38 @@ async def test_client_tools_args_never_widen_the_stored_restriction(
     assert not any(a.startswith("--tools=") for a in args)
     if "--model" in client_args:
         assert args[args.index("--model") + 1] == "m"
+
+
+@pytest.mark.parametrize(
+    ("client_args", "expected_args"),
+    [
+        ([], ["--tools", "Read"]),
+        (["--model", "m"], ["--model", "m", "--tools", "Read"]),
+        (["--", "hello"], ["--tools", "Read", "--", "hello"]),
+        (["--", "--tools", "x"], ["--tools", "Read", "--", "--tools", "x"]),
+        (["--tools=A", "--", "p"], ["--tools", "Read", "--", "p"]),
+    ],
+)
+async def test_stored_tools_restriction_precedes_the_prompt_separator(
+    client_args: list[str], expected_args: list[str]
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from omnigent.inner.datamodel import TerminalEnvSpec
+    from omnigent.runner.native.orchestration import _launch_claude_native_terminal
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal = AsyncMock()
+
+    await _launch_claude_native_terminal(
+        registry,
+        agent_spec=AgentSpec(
+            spec_version=1, executor=ExecutorSpec(config={"allowed_tools": ["Read"]})
+        ),
+        spec=TerminalEnvSpec(command="claude", args=list(client_args)),
+    )
+
+    args = list(registry.launch_required_terminal.call_args.kwargs["spec"].args)
+    assert args == expected_args
