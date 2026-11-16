@@ -856,8 +856,11 @@ async def _resolve_agent_harness(
     :param agent_cache: Cache to load the agent's parsed spec.
     :returns: The canonical harness id, e.g. ``"claude-sdk"``, or
         ``None`` when the session has no agent or no bundle (the host
-        then skips the configuration check — fail open).
+        then skips the configuration check — fail open). A session's own
+        ``harness_override`` wins: it is what the runner launches.
     """
+    if conv.harness_override and conv.harness_override != "auto":
+        return canonicalize_harness(conv.harness_override) or conv.harness_override
     if conv.agent_id is None:
         return None
     agent = await asyncio.to_thread(agent_store.get, conv.agent_id)

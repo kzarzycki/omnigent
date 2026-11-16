@@ -12691,43 +12691,89 @@ async def _resolve_native_smart_routing(
     return native_agent.agent_name, model, verdict, None
 
 
-async def _session_defaults_for_unpinned_spec(
+def _unpinned_selection_spec(
+    agent: Agent, sub_agent_name: str | None, agent_cache: AgentCache | None
+) -> AgentSpec | None:
+    """
+    Return the spec a create runs when it names no harness, else ``None``.
+
+    :param agent: The bound agent row.
+    :param sub_agent_name: The named sub-agent the create starts, if any.
+    :param agent_cache: Cache for loading the agent's parsed spec.
+    :returns: The agent's (or named sub-agent's) spec when it leaves its harness
+        to the session; ``None`` when it names one or cannot be loaded (the
+        create's own validation reports a load failure).
+    """
+    from omnigent.runtime.workflow import _find_spec_by_name
+
+    if agent_cache is None or agent.bundle_location is None:
+        return None
+    try:
+        spec: AgentSpec | None = agent_cache.load(
+            agent.id, agent.bundle_location, expand_env=agent.operator_authored
+        ).spec
+    except (KeyError, AttributeError, ValueError, ImportError, OSError):
+        return None
+    if spec is not None and sub_agent_name:
+        spec = _find_spec_by_name(spec, sub_agent_name)
+    return spec if spec is not None and not spec_names_harness(spec) else None
+
+
+async def _apply_unpinned_harness_default(
+    body: SessionCreateInput,
     request: Request,
     user_id: str | None,
     agent: Agent,
-    spec: AgentSpec,
-    model_override: str | None,
-) -> tuple[str, str | None]:
+    agent_cache: AgentCache | None,
+    conversation_store: ConversationStore,
+) -> tuple[SessionCreateInput, str | None]:
     """
-    Pick the harness and model for a spec that names no harness.
+    Give a create whose spec names no harness the user's default harness.
 
-    The request named no harness, so the user's default harness applies. Their
-    default model rides along only when neither the request nor the spec names
-    one, since it was chosen for that default harness.
+    Applied before any create-time check, so routing, family and readiness
+    checks all see the harness the session will run, as if the request named
+    it. The user's default model is returned rather than applied: it fills in
+    only when nothing else (request, spec, router) picks a model.
 
+    :param body: The validated create request.
     :param request: The create request, for the server's preference store.
     :param user_id: Authenticated user id, or ``None`` in single-user mode.
-    :param agent: The agent being started.
-    :param spec: The agent's (or named sub-agent's) parsed spec.
-    :param model_override: The request's validated model, if any.
-    :returns: ``(harness_override, model_override)`` for the new session.
+    :param agent: The bound agent row.
+    :param agent_cache: Cache for loading the agent's parsed spec.
+    :param conversation_store: Store for reading the parent session, if any.
+    :returns: ``(body, default_model)``; *body* is unchanged when the request
+        names a harness, the spec names one, or Smart Routing picks the harness
+        (the spec opts in, or the parent routes the subagents it spawns).
     :raises OmnigentError: ``invalid_input`` when the user has no default harness.
     """
+    if body.harness_override is not None:
+        return body, None
+    spec = await asyncio.to_thread(
+        _unpinned_selection_spec, agent, body.sub_agent_name, agent_cache
+    )
+    if spec is None or await asyncio.to_thread(
+        _spec_routes_its_own_harness, body, agent, agent_cache
+    ):
+        return body, None
+    if body.parent_session_id is not None:
+        parent = await asyncio.to_thread(
+            conversation_store.get_conversation, body.parent_session_id
+        )
+        if (
+            parent is not None
+            and subagent_routing_enabled(parent.subagent_routing_override)
+            and auto_harness_session(parent)
+        ):
+            return body, None
     defaults = await asyncio.to_thread(
         read_session_defaults,
         user_id=user_id,
         preference_store=getattr(request.app.state, "preference_store", None),
         preference_policy=getattr(request.app.state, "preference_policy", None),
     )
-    harness = await asyncio.to_thread(
-        _validated_harness_override, require_default_harness(defaults, agent.name), agent
-    )
-    assert harness is not None
-    if model_override is None and not spec.executor.model and defaults.model:
-        model_override, _ = validate_session_model_metadata(
-            model_override=defaults.model, reasoning_effort=None
-        )
-    return harness, model_override
+    harness = require_default_harness(defaults, agent.name)
+    body = body.model_copy(update={"harness_override": harness})
+    return body, None if spec.executor.model else defaults.model
 
 
 async def _create_session_from_existing_agent(
@@ -12827,6 +12873,9 @@ async def _create_session_from_existing_agent(
         agent_store=agent_store,
         permission_store=permission_store,
         conversation_store=conversation_store,
+    )
+    body, unpinned_default_model = await _apply_unpinned_harness_default(
+        body, request, user_id, agent, agent_cache, conversation_store
     )
 
     # Top-level Smart Routing: "auto" on a native wrapper agent means the client
@@ -12953,6 +13002,10 @@ async def _create_session_from_existing_agent(
         ),
         reasoning_effort=body.reasoning_effort,
     )
+    if model_override is None and unpinned_default_model:
+        model_override, _ = validate_session_model_metadata(
+            model_override=unpinned_default_model, reasoning_effort=None
+        )
 
     # Validated before any row exists so a bad value never creates an
     # orphan session; None (unset) defers to the spec default.
@@ -13106,15 +13159,6 @@ async def _create_session_from_existing_agent(
         selected_registry_services.update(registry_services(selection_spec))
         if selection_spec is not None and body.sub_agent_name:
             selection_spec = _find_spec_by_name(selection_spec, body.sub_agent_name)
-        if (
-            harness_override is None
-            and not _native_smart_routing
-            and selection_spec is not None
-            and not spec_names_harness(selection_spec)
-        ):
-            harness_override, model_override = await _session_defaults_for_unpinned_spec(
-                request, user_id, agent, selection_spec, model_override
-            )
         from omnigent.server.routes.sandbox_inference import (
             configured_snapshot,
             prepare_create_inference,
@@ -13463,7 +13507,11 @@ async def _create_session_from_existing_agent(
         body.sub_agent_name
         and sub_spec is not None
         and not _force_auto_for_child
-        and (_subagent_labels := _native_subagent_wrapper_labels_from_spec(sub_spec))
+        and (
+            _subagent_labels := _native_subagent_wrapper_labels_from_spec(
+                sub_spec, harness=selected_harness
+            )
+        )
     ):
         initial_labels.update(_subagent_labels)
     elif (
@@ -13792,6 +13840,24 @@ async def _create_session_from_existing_agent(
     return response, conv
 
 
+def _require_bundle_names_harness(spec: AgentSpec) -> None:
+    """
+    Refuse an uploaded bundle that leaves its harness to the session.
+
+    An upload carries no ``harness_override``; the CLI writes ``--harness`` or
+    the configured default into the bundle before uploading.
+
+    :param spec: The uploaded bundle's validated spec.
+    :raises OmnigentError: ``invalid_input`` when the spec names no harness.
+    """
+    if not spec_names_harness(spec):
+        raise OmnigentError(
+            f"agent bundle {spec.name!r} names no harness: set executor.config.harness, "
+            "pass --harness, or set a default harness in your Omnigent config",
+            code=ErrorCode.INVALID_INPUT,
+        )
+
+
 def _create_session_from_bundle(
     conversation_store: ConversationStore,
     artifact_store: ArtifactStore,
@@ -13848,14 +13914,7 @@ def _create_session_from_bundle(
             enforce_handler_allowlist=True,
         )
     assert spec.name is not None
-    if not spec_names_harness(spec):
-        # An upload carries no harness_override; the CLI writes ``--harness``
-        # or the configured default into the bundle before uploading.
-        raise OmnigentError(
-            f"agent bundle {spec.name!r} names no harness: set executor.config.harness, "
-            "pass --harness, or set a default harness in your Omnigent config",
-            code=ErrorCode.INVALID_INPUT,
-        )
+    _require_bundle_names_harness(spec)
 
     from omnigent.server.routes.sandbox_inference import configured_snapshot
 
@@ -15446,6 +15505,7 @@ __all__ = [
     "_recover_subagent_status_forward_via_parent",
     "_register_policy_elicitation",
     "_relay_runner_stream",
+    "_require_bundle_names_harness",
     "_resolve_elicitation",
     "_run_managed_launch",
     "_run_managed_wake",

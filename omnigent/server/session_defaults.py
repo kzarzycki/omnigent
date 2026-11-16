@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import yaml
+
 from omnigent.configuration_profile import PortableConfiguration
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import RESERVED_USER_LOCAL
@@ -30,10 +32,11 @@ class SessionDefaults:
 
 def spec_names_harness(spec: AgentSpec) -> bool:
     """
-    Return whether an ``executor.type: omnigent`` spec leaves its harness to the session.
+    Return whether a spec fixes the harness its sessions run on.
 
     :param spec: A parsed agent or sub-agent spec.
-    :returns: ``True`` when the spec runs on a harness but names none.
+    :returns: ``False`` only for an ``executor.type: omnigent`` spec that names
+        no harness, leaving it to the session.
     """
     from omnigent.spec._omnigent_compat import OMNIGENT_EXECUTOR_TYPE
 
@@ -83,7 +86,7 @@ def read_session_defaults(
 
     try:
         return _configured_defaults(PortableConfiguration.from_config(load_global_config()))
-    except (OSError, ValueError):
+    except (OSError, ValueError, yaml.YAMLError):
         _logger.warning("session defaults: user config unreadable", exc_info=True)
         return SessionDefaults()
 

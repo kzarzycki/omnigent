@@ -182,3 +182,18 @@ async def test_inventory_waiters_on_worker_loop_fail_from_foreign_teardown(
     for result in results:
         assert isinstance(result, HTTPException)
         assert result.status_code == 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "expected"), [("codex-native", "codex-native"), ("acp:goose", "acp")]
+)
+async def test_launch_frame_harness_is_the_sessions_override(override: str, expected: str) -> None:
+    """A host checks the harness the session runs, not the one its spec names (or omits)."""
+    from types import SimpleNamespace
+
+    from omnigent.server.routes.hosts import _resolve_agent_harness
+
+    conv = SimpleNamespace(harness_override=override, agent_id="unused")
+    # The override answers before any store is read.
+    assert await _resolve_agent_harness(conv, None, None) == expected  # type: ignore[arg-type]

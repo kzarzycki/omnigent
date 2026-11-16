@@ -210,7 +210,7 @@ def validate_omnigent_executor(
                 "pi-native system_prompt_mode='replace' requires non-empty authored instructions",
             )
     # A spec without a harness is portable: session create picks one from the
-    # request or the user's configuration (see ``resolve_unpinned_harness``).
+    # request or the user's configuration (``omnigent/server/session_defaults.py``).
     if harness and canonicalize_harness(harness) not in OMNIGENT_HARNESSES:
         package = missing_install_packages().get(harness) or missing_install_packages().get(
             canonicalize_harness(harness) or harness

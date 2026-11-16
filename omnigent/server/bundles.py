@@ -200,7 +200,9 @@ def redacted_agent_bundle(
 
     executor: dict[str, object] = {"type": spec.executor.type}
     if spec.executor.type == "omnigent":
-        executor["config"] = {"harness": spec.executor.config["harness"]}
+        # A portable spec names no harness; its sessions carry their own.
+        harness = spec.executor.config.get("harness")
+        executor["config"] = {"harness": harness} if harness else {}
     config = json.dumps(
         {
             "spec_version": 1,

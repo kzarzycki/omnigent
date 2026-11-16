@@ -612,10 +612,12 @@ async def test_unpinned_spec_starts_on_the_requested_harness_and_model(
 
 
 @pytest.mark.parametrize(
-    ("user_config", "expected"),
+    ("user_config", "request_model", "expected"),
     [
-        ({"harness": {"default": "pi"}, "model": "model-b"}, ("pi", "model-b")),
-        ({"harness": "codex-native"}, ("codex-native", None)),
+        ({"harness": {"default": "pi"}, "model": "model-b"}, None, ("pi", "model-b")),
+        ({"harness": "codex-native"}, None, ("codex-native", None)),
+        # The request's model outranks the user's default model.
+        ({"harness": "pi", "model": "model-b"}, "model-req", ("pi", "model-req")),
     ],
 )
 async def test_unpinned_spec_falls_back_to_the_users_configured_defaults(
@@ -623,20 +625,165 @@ async def test_unpinned_spec_falls_back_to_the_users_configured_defaults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     user_config: dict[str, Any],
+    request_model: str | None,
     expected: tuple[str, str | None],
 ) -> None:
-    """With no override, a single-user server starts on the user's config defaults."""
+    """With no override, a single-user server starts on the user's config defaults.
+
+    Every create-time check sees that default, as if the request had named it.
+    """
     import yaml
 
     from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes._sessions import orchestration
 
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(user_config))
     agent_id = await _install_unpinned_agent(client, monkeypatch)
-    resp = await client.post("/v1/sessions", json={"agent_id": agent_id})
+    checked: list[str | None] = []
+    first_check = orchestration._reject_ungatewayed_model_routing
+
+    async def _record_first_check(body: Any, *args: Any) -> None:
+        checked.append(body.harness_override)
+        await first_check(body, *args)
+
+    monkeypatch.setattr(orchestration, "_reject_ungatewayed_model_routing", _record_first_check)
+    requested = {"agent_id": agent_id}
+    if request_model is not None:
+        requested["model_override"] = request_model
+    resp = await client.post("/v1/sessions", json=requested)
     assert resp.status_code == 201, resp.text
     conv = get_conversation_store().get_conversation(resp.json()["id"])
     assert (conv.harness_override, conv.model_override) == expected
+    assert checked == [expected[0]]
+
+
+async def test_unpinned_spec_uses_the_configuration_saved_to_the_server(
+    app: Any,
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A saved configuration reaches session create through the app's preference store."""
+    import yaml
+
+    from omnigent.configuration_profile import ConfigurationSnapshot, PortableConfiguration
+    from omnigent.preference_sync import PreferenceNamespace
+    from omnigent.runtime import get_conversation_store
+
+    class _SavedConfiguration:
+        def read_configuration(self, *, user_id: str | None) -> ConfigurationSnapshot:
+            return ConfigurationSnapshot(
+                identity=PreferenceNamespace(authority_id="a", user_id="u", workspace_id="1"),
+                configuration=PortableConfiguration(default_harness="codex-native", model="m"),
+            )
+
+    # The server's own config names another harness; the saved one wins.
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({"harness": "pi"}))
+    monkeypatch.setattr(app.state, "preference_store", _SavedConfiguration())
+    agent_id = await _install_unpinned_agent(client, monkeypatch)
+    resp = await client.post("/v1/sessions", json={"agent_id": agent_id})
+    assert resp.status_code == 201, resp.text
+    conv = get_conversation_store().get_conversation(resp.json()["id"])
+    assert (conv.harness_override, conv.model_override) == ("codex-native", "m")
+
+
+async def test_create_app_hands_session_create_its_preference_store(
+    runtime_init: None, db_uri: str, tmp_path: Path
+) -> None:
+    from omnigent.runtime.agent_cache import AgentCache
+    from omnigent.server.app import create_app
+    from omnigent.server.preference_requests import PreferencePolicy
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+    from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    store, policy = object(), PreferencePolicy()
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        preference_store=store,  # type: ignore[arg-type]
+        preference_policy=policy,
+    )
+    assert (app.state.preference_store, app.state.preference_policy) == (store, policy)
+
+
+async def test_unpinned_named_sub_agent_takes_the_session_harness(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A harness-less sub-agent started on claude-native gets the native terminal labels."""
+    import yaml
+
+    from omnigent.runtime import get_conversation_store
+    from tests._helpers.session import bundle_files
+
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    parent = {
+        "spec_version": 1,
+        "name": "lead",
+        "instructions": "Lead.",
+        "executor": {"config": {"harness": "claude-sdk"}},
+        "tools": {"agents": ["worker"]},
+    }
+    worker = {"spec_version": 1, "name": "worker", "executor": {"type": "omnigent", "config": {}}}
+    bundle = bundle_files(
+        {
+            "config.yaml": yaml.safe_dump(parent).encode(),
+            "agents/worker/config.yaml": yaml.safe_dump(worker).encode(),
+        }
+    )
+    installed = await client.post(
+        "/v1/agents", files={"bundle": ("agent.tar.gz", bundle, "application/gzip")}
+    )
+    assert installed.status_code == 200, installed.text
+    agent_id = installed.json()["id"]
+    lead = await client.post("/v1/sessions", json={"agent_id": agent_id})
+    assert lead.status_code == 201, lead.text
+    child = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent_id,
+            "parent_session_id": lead.json()["id"],
+            "sub_agent_name": "worker",
+            "harness_override": "claude-native",
+        },
+    )
+    assert child.status_code == 201, child.text
+    conv = get_conversation_store().get_conversation(child.json()["id"])
+    assert conv.harness_override == "claude-native"
+    assert conv.labels.get("omnigent.ui") == "terminal"
+
+
+async def test_uploaded_bundle_without_harness_is_refused(client: httpx.AsyncClient) -> None:
+    """An upload has no override field, so a harness-less bundle is refused up front."""
+    import json
+
+    import yaml
+
+    from omnigent.runtime import get_conversation_store
+    from tests._helpers.session import bundle_files
+
+    config = {"spec_version": 1, "name": "portable", "executor": {"config": {}}}
+    bundle = bundle_files({"config.yaml": yaml.safe_dump(config).encode()})
+    store = get_conversation_store()
+    before = {conv.id for conv in store.list_conversations().data}
+    resp = await client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({})},
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "names no harness" in resp.text
+    assert {conv.id for conv in store.list_conversations().data} == before
 
 
 async def test_unpinned_spec_without_any_default_is_refused(

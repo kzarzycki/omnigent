@@ -11254,16 +11254,22 @@ def _derive_terminal_launch_args_from_spec(
     return None
 
 
-def _native_subagent_wrapper_labels_from_spec(sub_spec: AgentSpec) -> dict[str, str]:
+def _native_subagent_wrapper_labels_from_spec(
+    sub_spec: AgentSpec, harness: str | None = None
+) -> dict[str, str]:
     """
     Resolve terminal-first wrapper labels from an already-loaded sub-spec.
 
     :param sub_spec: Trusted child sub-agent spec resolved from the
         parent bundle.
+    :param harness: The session's effective harness, e.g. from a
+        ``harness_override``; ``None`` reads the sub-spec's own harness.
     :returns: ``{wrapper_key: value, ui_key: "terminal"}`` for a native
         sub-agent, or ``{}`` when the sub-agent is not native.
     """
-    harness = _spec_harness(sub_spec)
+    from omnigent.harness_aliases import canonicalize_harness
+
+    harness = (canonicalize_harness(harness) or harness) if harness else _spec_harness(sub_spec)
     native_agent = native_coding_agent_for_harness(harness)
     if native_agent is not None:
         return {
