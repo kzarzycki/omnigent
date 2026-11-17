@@ -337,6 +337,30 @@ def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _ignore_ambient_claude_launch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Keep an outer Claude Code session's launch variables out of launch-env assertions.
+
+    The launch path reads ``CLAUDE_ENV_FILE``, the gateway base URL and custom headers,
+    and the transport flags from the process environment; tests that need one set it
+    themselves.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    # Imported here: some lanes block omnigent imports outside the tests that need them.
+    from omnigent.harnesses.claude_native import main as claude_native_main
+
+    for name in (
+        "CLAUDE_ENV_FILE",
+        "ANTHROPIC_BASE_URL",
+        claude_native_main._CLAUDE_CODE_CUSTOM_HEADERS_ENV,
+        *claude_native_main._CLAUDE_TRANSPORT_FLAGS,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def frozen_recurrence_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a slow runner from tripping the RRULE search's CPU-time limit.
