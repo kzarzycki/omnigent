@@ -1516,18 +1516,68 @@ def _gh_installed() -> bool:
     return shutil.which("gh") is not None
 
 
+# A title rarely changes, so a lookup is remembered as long as the per-session copy is.
+_OPEN_PR_TITLE_TTL_SECONDS = 300.0
+
+
+def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
+    """The PR's entry in a fresh full, background or repository-listing read, if any."""
+    repository, number = _repo_argument(reference).lower(), str(reference.number)
+    for kind in ("full", "background"):
+        hit, data = _cache_get(("pr", identity, repository, number, kind), shared=True)
+        if hit and isinstance(data, dict):
+            return data
+    hit, listing = _cache_get(("pr-list", identity, repository), shared=True)
+    for entry in listing if hit and isinstance(listing, list) else []:
+        if isinstance(entry, dict) and entry.get("number") == reference.number:
+            return entry
+    return None
+
+
 def _pr_title_before(
     root: str, reference: PullRequestRef, deadline: float
 ) -> tuple[str | None, bool]:
     """Look up one PR's title, with every ``gh`` call ending by ``deadline``.
+
+    A fresh shared read of the PR answers it; otherwise one title entry per identity
+    and PR is shared across sessions, a failed or timed-out lookup included. The entry
+    is dropped with the PR's other entries when a write changes the PR.
 
     :param deadline: A ``time.monotonic()`` value.
     :returns: ``(title, timed_out)``; ``timed_out`` is true only when the
         deadline ended the lookup.
     """
     with _gh_deadline_scope(deadline):
-        data = _pr_json(root, reference, "title")
-        return _pr_title(data), data is None and _gh_timed_out.get()
+        token, identity = _pr_read(root, reference)
+        if identity is None:
+            data = _pr_json(root, reference, "title", token)
+            return _pr_title(data), data is None and _gh_timed_out.get()
+        shared = _title_from_shared_pr_data(identity, reference)
+        if shared is not None:
+            return _pr_title(shared), False
+        key = (
+            "pr",
+            identity,
+            _repo_argument(reference).lower(),
+            str(reference.number),
+            "title",
+        )
+        hit, answer = _cache_get(key, shared=True)
+        if not hit:
+            with _single_flight(key):
+                hit, answer = _cache_get(key, shared=True)
+                if not hit:
+                    started = time.time()
+                    data = _pr_json(root, reference, "title,state", token)
+                    if data is None:
+                        answer = {"title": None, "timed_out": _gh_timed_out.get()}
+                        ttl = _FAILED_READ_TTL_SECONDS
+                    else:
+                        answer = {"title": _pr_title(data), "timed_out": False}
+                        merged = data.get("state") == "MERGED"
+                        ttl = _FINISHED_PR_TTL_SECONDS if merged else _OPEN_PR_TITLE_TTL_SECONDS
+                    _cache_put(key, answer, ttl, shared=True, started=started)
+        return answer["title"], answer["timed_out"]
 
 
 def _verify_pr_access(root: str, reference: PullRequestRef) -> None:

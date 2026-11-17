@@ -50,6 +50,8 @@ class FakeGh:
         self.states: dict[int, str] = {}
         self.delay = 0.0
         self.fail = False  # pr reads fail after their delay
+        self.titles: dict[int, str] = {}  # overrides of a PR's title
+        self.time_out = False  # pr reads are cut off by the caller's deadline
 
     @property
     def accounts(self) -> list[dict[str, Any]]:
@@ -77,7 +79,7 @@ class FakeGh:
     def _pr(self, number: int, token: str | None) -> dict[str, Any]:
         return {
             "number": number,
-            "title": f"read as {self.reader(token)}",
+            "title": self.titles.get(number, f"read as {self.reader(token)}"),
             "state": self.states.get(number, "OPEN"),
             "url": f"{REPO}/pull/{number}",
             "isDraft": False,
@@ -108,6 +110,9 @@ class FakeGh:
             return 0, json.dumps([self._pr(number, token) for number in numbers]), ""
         if argv[:2] == ["pr", "view"]:
             time.sleep(self.delay)
+            if self.time_out:
+                github._gh_timed_out.set(True)
+                return None, "", "timed out"
             if self.fail:
                 return 1, "", "github is down"
             return 0, json.dumps(self._pr(int(argv[2]), token)), ""
@@ -641,3 +646,112 @@ def test_a_stamp_keeps_the_later_time(fake_gh: FakeGh, monkeypatch: pytest.Monke
     _later(monkeypatch, -100)  # a runner whose clock is behind
     github.invalidate_pr_reads(f"{REPO}/pull/1")
     assert json.loads(stamp.read_text())["at"] == first
+
+
+TRACKED_NUMBERS = (1, 2, 3)
+
+
+def _lookup_title(number: int) -> tuple[str | None, bool]:
+    """One session's title lookup, in a runner process that starts with an empty memory cache."""
+    github._preview_cache.clear()
+    reference = PullRequestRef.from_url(f"{REPO}/pull/{number}")
+    return github._pr_title_before("/work", reference, time.monotonic() + 5)
+
+
+def test_sessions_tracking_the_same_prs_make_one_title_read_per_pr(fake_gh: FakeGh) -> None:
+    for _session in range(5):
+        for _refresh in range(3):
+            for number in TRACKED_NUMBERS:
+                assert _lookup_title(number) == ("read as reader", False)
+    assert fake_gh.calls["pr view"] == len(TRACKED_NUMBERS)
+
+
+@pytest.mark.parametrize("kind", ["full", "background", "listing"])
+def test_a_fresh_read_of_the_pr_answers_the_title_without_gh(fake_gh: FakeGh, kind: str) -> None:
+    if kind == "listing":
+        _read(2, background=True)  # one pr list, which holds every open PR
+    else:
+        _fetch(2, background=kind == "background")
+    calls_before = dict(fake_gh.calls)
+    assert _lookup_title(2) == ("read as reader", False)
+    assert fake_gh.calls == calls_before
+
+
+def test_a_title_lookup_that_timed_out_is_not_retried_by_other_sessions(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.time_out = True
+    assert _lookup_title(1) == (None, True)
+    assert _lookup_title(1) == (None, True)  # another session, inside the failed-read window
+    assert fake_gh.calls["pr view"] == 1
+    fake_gh.time_out = False
+    _later(monkeypatch, github._FAILED_READ_TTL_SECONDS + 1)
+    assert _lookup_title(1) == ("read as reader", False)
+    assert fake_gh.calls["pr view"] == 2
+
+
+def test_a_failed_title_lookup_that_did_not_time_out_is_not_flagged_as_one(
+    fake_gh: FakeGh,
+) -> None:
+    fake_gh.fail = True
+    assert _lookup_title(1) == (None, False)
+    assert _lookup_title(1) == (None, False)
+    assert fake_gh.calls["pr view"] == 1
+
+
+def test_a_title_edit_shows_on_the_next_lookup_and_spares_other_prs(fake_gh: FakeGh) -> None:
+    assert _lookup_title(1)[0] == "read as reader"
+    assert _lookup_title(2)[0] == "read as reader"
+    fake_gh.titles = {1: "edited", 2: "edited"}
+    assert _lookup_title(1)[0] == "read as reader"  # still inside the title window
+    github.invalidate_pr_reads(f"{REPO}/pull/1")  # what every details write does
+    assert _lookup_title(1)[0] == "edited"
+    assert _lookup_title(2)[0] == "read as reader"
+    assert fake_gh.calls["pr view"] == 3
+
+
+def test_a_merged_pr_title_is_kept_longer_than_an_open_ones(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.states[MERGED_NUMBER] = "MERGED"
+    _lookup_title(MERGED_NUMBER)
+    _lookup_title(1)
+    _later(monkeypatch, github._OPEN_PR_TITLE_TTL_SECONDS + 1)
+    _lookup_title(MERGED_NUMBER)
+    _lookup_title(1)
+    assert fake_gh.calls["pr view"] == 3
+
+
+def test_an_unknown_identity_title_is_read_every_time_and_never_cached(fake_gh: FakeGh) -> None:
+    fake_gh.accounts = _accounts("carol", state="error")
+    assert _lookup_title(1) == ("read as carol", False)
+    assert _lookup_title(1) == ("read as carol", False)
+    assert fake_gh.calls["pr view"] == 2
+    assert not [key for key in _cached_keys() if key[0] == "pr"]
+
+
+def test_each_identity_reads_its_own_title(fake_gh: FakeGh) -> None:
+    fake_gh.accounts = _accounts("carol", "alice")
+    fake_gh.tokens = {"alice": "alice-token"}
+    fake_gh.preference = "alice"
+    assert _lookup_title(1)[0] == "read as alice"
+    fake_gh.preference = None
+    assert _lookup_title(1)[0] == "read as carol"
+
+
+def test_a_title_read_in_flight_across_a_write_is_not_cached(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.4
+    reader = threading.Thread(target=_lookup_title, args=(1,))
+    reader.start()
+    poll_until(lambda: fake_gh.calls["pr view"], timeout_s=5, interval_s=0.01)  # read is in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    reader.join()
+    assert not [key for key in _cached_keys() if key[0] == "pr"]
+
+
+def test_concurrent_title_misses_share_one_read(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.3
+    github._preview_cache.clear()
+    reference = PullRequestRef.from_url(f"{REPO}/pull/1")
+    _in_threads(4, lambda _: github._pr_title_before("/work", reference, time.monotonic() + 5))
+    assert fake_gh.calls["pr view"] == 1
