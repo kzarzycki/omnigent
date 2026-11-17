@@ -5083,11 +5083,25 @@ def test_augment_claude_args_appends_caller_system_prompt(
     assert omnigent_args.count("--append-system-prompt") == 1
     assert omnigent_args[prompt_index + 1] == _FRAMEWORK_PROMPT
     if merged_args is None:
-        assert args == [*user_args, *omnigent_args]
+        # Tool-list flags Omnigent adds precede the caller's ``--`` separator. The
+        # ``--settings``/``--mcp-config``/``--append-system-prompt`` placement
+        # below is known-wrong (they land after it); see issue #436.
+        allowed_index = omnigent_args.index("--allowedTools")
+        allowed_pair = omnigent_args[allowed_index : allowed_index + 2]
+        del omnigent_args[allowed_index : allowed_index + 2]
+        assert args == [*allowed_pair, *user_args, *omnigent_args]
     else:
         # The caller's prompt is sent once, so the launch command does not grow by its size.
         del omnigent_args[prompt_index : prompt_index + 2]
         assert args == [*merged_args, *omnigent_args]
+
+
+@pytest.mark.parametrize("flag", ["--allowedTools", "--disallowedTools"])
+def test_merge_tool_list_flag_ignores_flag_text_after_separator(flag: str) -> None:
+    """A tool-list flag after ``--`` is prompt text; a new flag lands before ``--``."""
+    merged = claude_native_bridge._merge_tool_list_flag(["--", flag, "Read"], flag, ("Bash",))
+
+    assert merged == [flag, "Bash", "--", flag, "Read"]
 
 
 @pytest.mark.parametrize(
@@ -5193,6 +5207,21 @@ def test_augment_claude_args_merges_caller_allowed_tools(tmp_path: Path) -> None
         "mcp__omnigent__sys_read_answer",
         "mcp__omnigent__sys_session_rename",
     ]
+
+
+def test_augment_claude_args_puts_allowed_tools_before_client_separator(tmp_path: Path) -> None:
+    """A new ``--allowedTools`` lands before a client ``--``, where Claude reads flags."""
+    args = augment_claude_args(
+        ("--", "fix the bug"),
+        bridge_dir=tmp_path,
+        python_executable="/venv/bin/python",
+        allowed_tools=("mcp__omnigent__sys_session_rename",),
+    )
+
+    separator = args.index("--")
+    assert args.index("--allowedTools") < separator
+    assert "--allowedTools" not in args[separator:]
+    assert args[separator : separator + 2] == ["--", "fix the bug"]
 
 
 @pytest.mark.parametrize("user_args", [(), ("--append-system-prompt-file", "missing.md")])

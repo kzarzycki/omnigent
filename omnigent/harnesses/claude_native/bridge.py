@@ -3464,19 +3464,26 @@ def _args_request_bypass_permissions(args: tuple[str, ...]) -> bool:
     )
 
 
-def _merge_allowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str]:
-    """Merge framework-approved tools into Claude's ``--allowedTools`` flag.
+def _merge_tool_list_flag(args: list[str], flag: str, extra: tuple[str, ...]) -> list[str]:
+    """
+    Merge ``extra`` into a comma-separated tool-list ``flag`` in ``args``.
+
+    Merges into an existing flag if present (deduping while preserving
+    order); otherwise adds a new flag before any ``--`` prompt separator.
 
     :param args: Claude CLI argument list to mutate-and-return.
-    :param extra: Tool names Omnigent may call without an interactive prompt.
-    :returns: ``args`` with a deduplicated, order-preserving allowlist.
+    :param flag: Tool-list flag, e.g. ``--allowedTools``.
+    :param extra: Tool names to add.
+    :returns: ``args`` with the merged flag.
     """
     if not extra:
         return args
+    split = args.index("--") if "--" in args else len(args)
     try:
-        idx = args.index("--allowedTools")
+        idx = args.index(flag, 0, split)
     except ValueError:
-        args.extend(["--allowedTools", ",".join(extra)])
+        # Before the ``--`` prompt separator, after which Claude reads flags as text.
+        args[split:split] = [flag, ",".join(extra)]
         return args
     value_idx = idx + 1
     if value_idx >= len(args):
@@ -3484,6 +3491,16 @@ def _merge_allowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str]:
     existing = [tool for tool in args[value_idx].split(",") if tool]
     args[value_idx] = ",".join(dict.fromkeys([*existing, *extra]))
     return args
+
+
+def _merge_allowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str]:
+    """Merge framework-approved tools into Claude's ``--allowedTools`` flag.
+
+    :param args: Claude CLI argument list to mutate-and-return.
+    :param extra: Tool names Omnigent may call without an interactive prompt.
+    :returns: ``args`` with a deduplicated, order-preserving allowlist.
+    """
+    return _merge_tool_list_flag(args, "--allowedTools", extra)
 
 
 def _merge_append_system_prompt(
@@ -3539,29 +3556,13 @@ def _merge_disallowed_tools(args: list[str], extra: tuple[str, ...]) -> list[str
     """
     Add ``extra`` tool names to a ``--disallowedTools`` flag in ``args``.
 
-    Merges into an existing flag if present (deduping while preserving
-    order) so a user-supplied ``--disallowedTools`` is not silently
-    overridden; otherwise adds a new flag before any ``--`` prompt separator.
+    A user-supplied ``--disallowedTools`` is merged into, not overridden.
 
     :param args: Claude CLI argument list to mutate-and-return.
     :param extra: Tool names Omnigent wants disabled.
     :returns: ``args`` with the merged flag.
     """
-    if not extra:
-        return args
-    split = args.index("--") if "--" in args else len(args)
-    try:
-        idx = args.index("--disallowedTools", 0, split)
-    except ValueError:
-        # Before the ``--`` prompt separator, after which Claude reads flags as text.
-        args[split:split] = ["--disallowedTools", ",".join(extra)]
-        return args
-    value_idx = idx + 1
-    if value_idx >= len(args):
-        return args
-    existing = [t for t in args[value_idx].split(",") if t]
-    args[value_idx] = ",".join(dict.fromkeys([*existing, *extra]))
-    return args
+    return _merge_tool_list_flag(args, "--disallowedTools", extra)
 
 
 def record_hook_event(bridge_dir: Path, payload: _JsonObject) -> None:
