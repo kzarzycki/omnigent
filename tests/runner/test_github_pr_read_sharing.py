@@ -165,8 +165,11 @@ def _cached_keys() -> list[list[str]]:
     return [json.loads(path.read_text())["key"] for path in directory.glob("*.json")]
 
 
+_REAL_TIME = time.time  # the unpatched clock, so repeated _later calls are absolute offsets
+
+
 def _later(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
-    clock = time.time()
+    clock = _REAL_TIME()
     monkeypatch.setattr(github.time, "time", lambda: clock + seconds)
 
 
@@ -928,11 +931,15 @@ def test_a_background_read_whose_own_listing_hits_the_limit_stops_there(fake_gh:
     assert fake_gh.calls["api rate_limit"] == 1
 
 
+@pytest.mark.parametrize("copied_from_disk", [False, True], ids=["written", "copied-from-disk"])
 @pytest.mark.parametrize("number", [1, 50], ids=["listed", "beyond-listing"])
 def test_another_process_stops_serving_a_pr_after_a_write_within_the_viewer_window(
-    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, number: int
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, number: int, copied_from_disk: bool
 ) -> None:
     _read(number, background=True)
+    if copied_from_disk:  # the second process starts empty and copies the first one's read
+        github._preview_cache.clear()
+        _read(number, background=True)
     other_process_memory = dict(github._preview_cache)  # what a second process still holds
     fake_gh.titles[number] = "after the write"
     github.invalidate_pr_reads(f"{REPO}/pull/{number}")
