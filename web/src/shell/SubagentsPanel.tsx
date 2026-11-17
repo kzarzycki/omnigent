@@ -45,7 +45,6 @@ import { Button } from "@/components/ui/button";
 import { RunningDot } from "@/components/RunningDot";
 import { shortModelName } from "@/components/CostRoutingControl";
 import { MAX_TREE_DEPTH, useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSessions";
-import { useAgentCosts, type AgentCost, type AgentCosts } from "@/hooks/useAgentCosts";
 import { useSession } from "@/hooks/useSession";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import type { SessionItem } from "@/lib/types";
@@ -60,7 +59,6 @@ import {
   nativeCodingAgentForWrapper,
   WRAPPER_LABEL_KEY,
 } from "@/lib/nativeCodingAgents";
-import { AgentCostTag } from "./AgentCostTag";
 import { childPrimaryLabel } from "./subagentLabel";
 import { childStatus, type AgentActivity, type AgentStatus } from "./subagentStatus";
 import { AddAgentDialog } from "./AddAgentDialog";
@@ -84,8 +82,6 @@ type ViewMode = "list" | "graph";
 
 export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanelProps) {
   const { children, isLoading, error } = useChildSessions(rootSessionId);
-  // Loaded only with the session overview feature on.
-  const costs = useAgentCosts(rootSessionId).data ?? undefined;
   const [addOpen, setAddOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [collapsedRows, setCollapsedRows] = useState<Record<string, boolean>>({});
@@ -127,11 +123,7 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
             </div>
           }
         >
-          <SubagentsGraphView
-            conversationId={conversationId}
-            rootSessionId={rootSessionId}
-            costs={costs}
-          />
+          <SubagentsGraphView conversationId={conversationId} rootSessionId={rootSessionId} />
         </Suspense>
       </div>
     );
@@ -150,11 +142,7 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
         Add agent
       </button>
       <ul className="relative flex min-h-0 flex-1 flex-col gap-px overflow-y-auto px-2 pb-2 pt-2">
-        <MainRow
-          rootSessionId={rootSessionId}
-          isActive={conversationId === rootSessionId}
-          cost={costs?.get(rootSessionId)}
-        />
+        <MainRow rootSessionId={rootSessionId} isActive={conversationId === rootSessionId} />
         {children.map((child, index) => (
           <SubagentRow
             key={child.id}
@@ -164,7 +152,6 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
             conversationId={conversationId}
             collapsedRows={collapsedRows}
             onToggleCollapsed={toggleCollapsedRow}
-            costs={costs}
           />
         ))}
       </ul>
@@ -387,15 +374,7 @@ function mainMessagePreview(items: SessionItem[] | undefined): string | null {
   return null;
 }
 
-function MainRow({
-  rootSessionId,
-  isActive,
-  cost,
-}: {
-  rootSessionId: string;
-  isActive: boolean;
-  cost: AgentCost | undefined;
-}) {
+function MainRow({ rootSessionId, isActive }: { rootSessionId: string; isActive: boolean }) {
   const { session } = useSession(rootSessionId);
   const search = sessionNavigationSearch(useLocation().search);
   // Same wrapper-label probe used by the sidebar (Sidebar.tsx) and
@@ -449,7 +428,6 @@ function MainRow({
                 />
               </span>
               <span className="min-w-0 truncate text-base font-semibold">{label}</span>
-              <AgentCostTag cost={cost} className="ml-auto" />
             </div>
             {preview && (
               <p
@@ -490,7 +468,6 @@ function SubagentRow({
   conversationId,
   collapsedRows,
   onToggleCollapsed,
-  costs,
 }: {
   child: ChildSessionInfo;
   /** Levels below the root, 1 = direct child of "main". */
@@ -501,7 +478,6 @@ function SubagentRow({
   conversationId: string;
   collapsedRows: Record<string, boolean>;
   onToggleCollapsed: (id: string) => void;
-  costs: AgentCosts | undefined;
 }) {
   const collapsed = collapsedRows[child.id] ?? false;
   const status = childStatus(child);
@@ -635,7 +611,6 @@ function SubagentRow({
                     {shortModelName(child.routed_model)}
                   </span>
                 ) : null}
-                <AgentCostTag cost={costs?.get(child.id)} />
               </div>
               {child.last_message_preview && (
                 <p className="mt-0.5 truncate text-sm text-muted-foreground">
@@ -656,7 +631,6 @@ function SubagentRow({
             conversationId={conversationId}
             collapsedRows={collapsedRows}
             onToggleCollapsed={onToggleCollapsed}
-            costs={costs}
           />
         ))}
     </>

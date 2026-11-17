@@ -1599,48 +1599,6 @@ def _subagent_message_from_args(args: _JsonObject) -> str | None:
     return None
 
 
-async def _get_session_metadata(
-    server_client: httpx.AsyncClient,
-    session_id: str,
-    *,
-    timeout: float,
-    include_items: bool = False,
-    include_usage: bool = False,
-    include_liveness: bool = False,
-    include_live_status: bool = False,
-) -> httpx.Response:
-    """
-    Read a session snapshot via ``GET /v1/sessions/{id}``, light by default.
-
-    The defaults skip every costly optional part of the snapshot: the
-    transcript page, the spawn-tree usage aggregate, the runner/host
-    liveness lookup, and the live-status probe of the bound runner (so
-    ``status`` comes from the server's cached or persisted value). Opt in
-    only to the parts the caller reads.
-
-    :param server_client: HTTP client pointed at the Omnigent server.
-    :param session_id: Session to read, e.g. ``"conv_abc123"``.
-    :param timeout: Request timeout in seconds.
-    :param include_items: Return the latest committed ``items``.
-    :param include_usage: Return ``total_cost_usd`` / ``usage_by_model``.
-    :param include_liveness: Return ``runner_online`` / ``host_online``.
-    :param include_live_status: Probe the bound runner for ``status`` on a
-        server status-cache miss.
-    :returns: The raw server response; callers map its status code.
-    """
-    flags = {
-        "include_items": include_items,
-        "include_usage": include_usage,
-        "include_liveness": include_liveness,
-        "include_live_status": include_live_status,
-    }
-    return await server_client.get(
-        _session_url(session_id),
-        params={name: "true" if enabled else "false" for name, enabled in flags.items()},
-        timeout=timeout,
-    )
-
-
 async def _session_turn_actor(
     *,
     server_client: httpx.AsyncClient,
@@ -1648,7 +1606,7 @@ async def _session_turn_actor(
 ) -> str | None:
     """Return the parent turn actor label for runner-originated callbacks."""
     try:
-        resp = await _get_session_metadata(server_client, conversation_id, timeout=10.0)
+        resp = await server_client.get(f"{_session_url(conversation_id)}", timeout=10.0)
     except (httpx.HTTPError, ValueError, RuntimeError):
         return None
     if resp.status_code != 200:
@@ -1981,7 +1939,7 @@ async def _inherited_parent_model(
     if not harness_supports_model_override(child_harness):
         return None
     try:
-        resp = await _get_session_metadata(server_client, conversation_id, timeout=10.0)
+        resp = await server_client.get(f"{_session_url(conversation_id)}", timeout=10.0)
     except (httpx.HTTPError, ValueError, RuntimeError):
         return None
     if resp.status_code != 200:
@@ -2774,7 +2732,10 @@ async def _execute_subagent_tool(
     parent_agent_id = _runner_app.get_session_agent_id(conversation_id)
     if parent_agent_id is None:
         try:
-            sess_resp = await _get_session_metadata(server_client, conversation_id, timeout=10.0)
+            sess_resp = await server_client.get(
+                f"{_session_url(conversation_id)}",
+                timeout=10.0,
+            )
             if sess_resp.status_code == 200:
                 parent_agent_id = sess_resp.json().get("agent_id")
         except (httpx.HTTPError, RuntimeError):
@@ -3338,7 +3299,7 @@ async def _send_to_existing_session(
     from omnigent.runner import subagent_work as _subagent_work
 
     try:
-        snap = await _get_session_metadata(server_client, target_session_id, timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_session_id)}", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return f"Error: sys_session_send failed to look up session: {exc}"
     if snap.status_code == 404:
@@ -3957,11 +3918,8 @@ async def _execute_session_create(
                             "no session was created."
                         }
                     )
-            # Sent only when /v1/info reports the server accepts host_id; older servers reject it.
             host_id = (
-                uuid.uuid4().hex
-                if info_data.get("request_managed_sandbox_host_id") is True
-                else None
+                uuid.uuid4().hex if info_data.get("request_managed_sandbox_host_id") else None
             )
             if host_id is not None:
                 body["host_id"] = host_id
@@ -5204,7 +5162,6 @@ _SCHEDULED_TASK_CREATE_FIELDS = (
     "reasoning_effort",
     "permission_mode",
     "max_cost_usd",
-    "mcp_services",
     "session_mode",
     "session_id",
     "archive_when_done",
@@ -5225,7 +5182,6 @@ _SCHEDULED_TASK_UPDATE_FIELDS = (
     "reasoning_effort",
     "permission_mode",
     "archive_when_done",
-    "mcp_services",
     "max_cost_usd",
     "session_mode",
     "session_id",
@@ -5236,45 +5192,30 @@ _SCHEDULED_TASK_UPDATE_FIELDS = (
     "project_id",
 )
 _SCHEDULED_TASK_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
-# Optional fields an older server forbids, the ``/v1/info`` flag that admits
-# them, and how to retry without them.
-_SCHEDULED_TASK_GATED_FIELDS = (
-    (
-        ("session_mode", "session_id"),
-        "scheduled_task_session_modes",
-        "does not support session_mode or session_id; omit them to start a new "
-        "session on every run",
-    ),
-    (
-        ("mcp_services",),
-        "scheduled_task_mcp_services",
-        "does not support mcp_services; omit it to start runs without MCP services",
-    ),
-)
+# Fields a server accepts only once it advertises ``scheduled_task_session_modes``.
+_SCHEDULED_TASK_SESSION_FIELDS = ("session_mode", "session_id")
 
 
 async def _scheduled_task_session_fields_refusal(
     server_client: httpx.AsyncClient, tool_name: str, payload: _JsonObject
 ) -> str | None:
-    """An error for optional fields this server would reject, or ``None`` to send them.
+    """An error for session fields this server would reject, or ``None`` to send them.
 
     An older server forbids unknown fields, so the payload would fail with a 422
     that does not say why. Asked only when the call carries one of the fields; an
     unreadable ``/v1/info`` counts as unsupported, as for task projects.
     """
-    gated = [
-        (capability, reason)
-        for fields, capability, reason in _SCHEDULED_TASK_GATED_FIELDS
-        if any(field in payload for field in fields)
-    ]
-    if not gated:
+    if not any(field in payload for field in _SCHEDULED_TASK_SESSION_FIELDS):
         return None
     info = await server_client.get("/v1/info", timeout=30.0)
-    advertised = info.json() if info.status_code < 400 else {}
-    for capability, reason in gated:
-        if advertised.get(capability) is not True:
-            return json.dumps({"error": f"{tool_name}: this Omnigent server {reason}"})
-    return None
+    if info.status_code < 400 and info.json().get("scheduled_task_session_modes") is True:
+        return None
+    return json.dumps(
+        {
+            "error": f"{tool_name}: this Omnigent server does not support session_mode or "
+            "session_id; omit them to start a new session on every run"
+        }
+    )
 
 
 def _scheduled_task_url(task_id: object) -> str | None:
@@ -5771,9 +5712,10 @@ async def _session_get_info_via_rest(
             {"error": "sys_session_get_info requires a non-empty 'session_id' string"}
         )
     try:
-        # ``status`` is projected, so keep the live-status probe on a cache miss.
-        resp = await _get_session_metadata(
-            server_client, raw_target, timeout=30.0, include_live_status=True
+        resp = await server_client.get(
+            f"{_session_url(raw_target)}",
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=30.0,
         )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_get_info failed: {exc}"})
@@ -6350,8 +6292,12 @@ async def _spawn_family(
     if conversation_id in _spawn_family_cache:
         return _spawn_family_cache[conversation_id]
     try:
-        resp = await _get_session_metadata(
-            server_client, conversation_id, timeout=_SPAWN_FAMILY_TIMEOUT_S
+        resp = await server_client.get(
+            f"{_session_url(conversation_id)}",
+            # Only the routing fields are read, so skip the history and
+            # runner-liveness work the full snapshot would do.
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=_SPAWN_FAMILY_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 — discovery must not fail on this read
         return None
@@ -6426,8 +6372,10 @@ async def _agent_list_host_readiness(
                 if len(seen) >= _AGENT_READINESS_MAX_DEPTH:
                     return None
                 seen.add(conversation_id)
-                response = await _get_session_metadata(
-                    server_client, conversation_id, timeout=_AGENT_READINESS_TIMEOUT_S
+                response = await server_client.get(
+                    f"{_session_url(conversation_id)}",
+                    params={"include_items": "false", "include_liveness": "false"},
+                    timeout=_AGENT_READINESS_TIMEOUT_S,
                 )
                 if response.status_code != 200:
                     return None
@@ -6928,7 +6876,13 @@ async def _rename_current_session_via_rest(
     # rename would corrupt sibling addressing. Refuse explicitly, matching
     # the old seed-gated endpoint's response for child sessions.
     try:
-        info_response = await _get_session_metadata(server_client, conversation_id, timeout=30.0)
+        info_response = await server_client.get(
+            f"{_session_url(conversation_id)}",
+            # Skip the transcript and the runner/host liveness lookup — the
+            # probe only needs parent_session_id.
+            params={"include_items": "false", "include_liveness": "false"},
+            timeout=30.0,
+        )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_rename failed: {exc}"})
     if info_response.status_code >= 400:
@@ -7315,7 +7269,7 @@ async def _session_parent_id(
     :returns: The parent session id, or ``None``.
     """
     try:
-        snap = await _get_session_metadata(server_client, conversation_id, timeout=30.0)
+        snap = await server_client.get(f"{_session_url(conversation_id)}", timeout=30.0)
     except Exception:  # noqa: BLE001
         return None
     if snap.status_code != 200:
@@ -7422,7 +7376,7 @@ async def _fetch_close_target(
         otherwise) suitable for returning verbatim to the LLM.
     """
     try:
-        snap = await _get_session_metadata(server_client, target_id, timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_id)}", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_close failed: {exc}"})
     if snap.status_code == 404:
@@ -7467,8 +7421,8 @@ async def _close_tree_scope_error(
         ``session_not_a_sub_agent``).
     """
     try:
-        caller_snap = await _get_session_metadata(
-            server_client, caller_conversation_id, timeout=30.0
+        caller_snap = await server_client.get(
+            f"{_session_url(caller_conversation_id)}", timeout=30.0
         )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_close failed: {exc}"})
@@ -7615,7 +7569,7 @@ async def _fetch_peek_meta(
         payloads (all empty/``None`` on any miss).
     """
     try:
-        snap = await _get_session_metadata(server_client, target_id, timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_id)}", timeout=30.0)
     except Exception:  # noqa: BLE001
         return _PeekMeta(agent=None, title=None, pending_elicitations=[])
     if snap.status_code != 200:
@@ -8541,8 +8495,9 @@ async def _execute_rest_tool(
             # Bind to the parent's runner so event forwarding works.
             if conversation_id is not None:
                 try:
-                    parent_resp = await _get_session_metadata(
-                        server_client, conversation_id, timeout=10.0
+                    parent_resp = await server_client.get(
+                        f"{_session_url(conversation_id)}",
+                        timeout=10.0,
                     )
                     if parent_resp.status_code == 200:
                         parent_runner = parent_resp.json().get("runner_id")
@@ -9961,7 +9916,7 @@ async def _cancel_evicted_native_subagent(
     if server_client is None:
         return "Error: sys_cancel_task requires server access for sub-agent tasks"
     try:
-        resp = await _get_session_metadata(server_client, task_id, timeout=10.0)
+        resp = await server_client.get(f"{_session_url(task_id)}", timeout=10.0)
     except (httpx.HTTPError, ValueError) as exc:
         return f"Error: sys_cancel_task lookup failed: {type(exc).__name__}: {exc}"
     if resp.status_code != 200:

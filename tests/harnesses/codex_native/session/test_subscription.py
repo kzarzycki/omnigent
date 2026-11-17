@@ -131,7 +131,6 @@ def test_codex_app_server_client_uses_codex_remote_handshake(
         "uri": "ws://localhost/rpc",
         "max_size": 128 << 20,
         "compression": None,
-        "ping_interval": None,
     }
     assert [json.loads(payload) for payload in fake_websocket.sent] == [
         {

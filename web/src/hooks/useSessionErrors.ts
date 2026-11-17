@@ -101,16 +101,9 @@ function liveError(conversation: ErrorConversation): LatestSessionError | null |
   );
 }
 
-/**
- * Reuse live transcripts; unopened rows share a cached, bounded tail read.
- *
- * :param conversations: Rows to report error states for.
- * :param options.startReads: ``false`` only reuses tail reads other callers
- *     already cached, e.g. for a collapsed folder's marker over hidden rows.
- */
+/** Reuse live transcripts; unopened rows share a cached, bounded tail read. */
 export function useSessionErrorStates(
   conversations: readonly ErrorConversation[],
-  { startReads = true }: { startReads?: boolean } = {},
 ): (LatestSessionError | null)[] {
   const queryClient = useQueryClient();
   const subscribe = useCallback(
@@ -155,22 +148,14 @@ export function useSessionErrorStates(
     [conversations],
   );
   const live = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  // updated_at is the same freshness signal used by the unread dot and
-  // refreshed by the shared session-updates socket/list reconciliation.
-  const queryKeys = conversations.map((c) => [
-    "session-latest-error",
-    c.id,
-    c.updated_at,
-    c.status,
-    c.host_online,
-  ]);
   const queries = useQueries({
     queries: conversations.map((c, i) => ({
-      queryKey: queryKeys[i]!,
+      // updated_at is the same freshness signal used by the unread dot and
+      // refreshed by the shared session-updates socket/list reconciliation.
+      queryKey: ["session-latest-error", c.id, c.updated_at, c.status, c.host_online],
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         fetchLatestError(c.id, c.host_online, signal),
       enabled:
-        startReads &&
         live[i] === "?" &&
         !isTempConvId(c.id) &&
         !c.provisional &&
@@ -182,11 +167,7 @@ export function useSessionErrorStates(
     })),
   });
   return queries.map((query, i) => {
-    if (live[i] === "?") {
-      // A marker cannot revalidate an invalidated tail itself, so it waits for a reader.
-      if (!startReads && queryClient.getQueryState(queryKeys[i]!)?.isInvalidated) return null;
-      return query.data ?? null;
-    }
+    if (live[i] === "?") return query.data ?? null;
     if (live[i] === "e") return "error";
     if (live[i] === "d") return "disconnected";
     if (live[i] === "r") return "recovered_disconnect";

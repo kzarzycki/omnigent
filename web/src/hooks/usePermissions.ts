@@ -70,18 +70,8 @@ function invalidateAfterShareChange(qc: QueryClient, sessionId: string): void {
 export function useGrantPermission(sessionId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      userId,
-      level,
-      ensureMinimum,
-    }: {
-      userId: string;
-      level: number;
-      ensureMinimum?: boolean;
-    }) =>
-      ensureMinimum
-        ? grantPermission(sessionId, userId, level, true)
-        : grantPermission(sessionId, userId, level),
+    mutationFn: ({ userId, level }: { userId: string; level: number }) =>
+      grantPermission(sessionId, userId, level),
     onSuccess: () => invalidateAfterShareChange(qc, sessionId),
   });
 }

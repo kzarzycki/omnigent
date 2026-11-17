@@ -1,14 +1,13 @@
 // Coalesces and paces the session-list reconciles the updates stream asks for.
-// A reconcile refetches either every mounted list (both scopes and every
-// expanded project folder) or only the lists a frame named, so letting frames
-// start them freely stacks rounds against a slow server. Requests that arrive
-// before or during a round collapse into one round over the union of the lists
-// they named, and rounds are spaced further apart the longer they take; a round
-// that never settles is released after a timeout.
+// Each reconcile refetches every mounted list (both scopes and every expanded
+// project folder), so letting frames start them freely stacks rounds against a
+// slow server. Requests that arrive during a round collapse into one trailing
+// round, and rounds are spaced further apart the longer they take; a round that
+// never settles is released after a timeout.
 //
 // Frames also starve the lists' own polls: TanStack Query restarts a query's
 // refetchInterval on every cache write, and each frame writes the list caches.
-// So while frames keep arriving, a round over every list still runs every
+// So while frames keep arriving, a round still runs every
 // RECONCILE_WHILE_ACTIVE_MS to pick up sessions no frame covers (new, or
 // outside the loaded window).
 
@@ -27,54 +26,40 @@ export const RECONCILE_ROUND_TIMEOUT_MS = 60_000;
 /** Longest the lists go without a round while frames keep arriving; the Mine poll's interval. */
 export const RECONCILE_WHILE_ACTIVE_MS = 60_000;
 
-/** What one round refetches: every list, or the lists with these query hashes. */
-export type ReconcileScope = "all" | ReadonlySet<string>;
-
-function mergeScopes(a: ReconcileScope | null, b: ReconcileScope): ReconcileScope {
-  if (a === null) return b;
-  if (a === "all" || b === "all") return "all";
-  return new Set([...a, ...b]);
-}
-
 export interface ListReconcileScheduler {
-  /** Ask for a reconcile (every list by default); coalesced with any pending or running one. */
-  schedule: (scope?: ReconcileScope) => void;
-  /** Record a frame; asks for a full reconcile if none started in RECONCILE_WHILE_ACTIVE_MS. */
+  /** Ask for a reconcile; coalesced with any pending or running one. */
+  schedule: () => void;
+  /** Record a frame; asks for a reconcile if none started in RECONCILE_WHILE_ACTIVE_MS. */
   noteActivity: () => void;
   /** Drop a pending reconcile and stop scheduling new ones. */
   dispose: () => void;
 }
 
 /**
- * @param run - Runs one reconcile round over the merged scope; resolves once its
- *   refetches settle.
+ * @param run - Runs one reconcile round; resolves once its refetches settle.
  * @param now - Clock, injectable for tests.
  */
 export function createListReconcileScheduler(
-  run: (scope: ReconcileScope) => Promise<unknown>,
+  run: () => Promise<unknown>,
   now: () => number = Date.now,
 ): ListReconcileScheduler {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
-  // Lists asked for since the last round started; null when none were.
-  let requested: ReconcileScope | null = null;
+  let pending = false;
   let disposed = false;
   let lastEnd = Number.NEGATIVE_INFINITY;
   let lastDuration = 0;
-  // The lists were just loaded when the stream starts, so that counts as a round
-  // over every list. Rounds over named lists don't refresh the others.
-  let lastFullStart = now();
+  // The lists were just loaded when the stream starts, so that counts as a round.
+  let lastStart = now();
 
   const fire = async (): Promise<void> => {
-    const scope = requested ?? "all";
-    requested = null;
     running = true;
     const started = now();
-    if (scope === "all") lastFullStart = started;
+    lastStart = started;
     let roundTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        run(scope),
+        run(),
         new Promise<void>((resolve) => {
           roundTimer = setTimeout(resolve, RECONCILE_ROUND_TIMEOUT_MS);
         }),
@@ -86,12 +71,20 @@ export function createListReconcileScheduler(
       lastEnd = now();
       lastDuration = lastEnd - started;
       running = false;
-      if (requested !== null && !disposed) arm();
+      if (pending && !disposed) {
+        pending = false;
+        schedule();
+      }
     }
   };
 
-  const arm = (): void => {
-    if (running || timer !== null) return;
+  const schedule = (): void => {
+    if (disposed) return;
+    if (running) {
+      pending = true;
+      return;
+    }
+    if (timer !== null) return;
     // A server that took long to answer gets proportionally fewer rounds.
     const gap = Math.min(RECONCILE_MAX_GAP_MS, Math.max(RECONCILE_MIN_GAP_MS, 2 * lastDuration));
     const delay = Math.max(RECONCILE_DEBOUNCE_MS, lastEnd + gap - now());
@@ -101,20 +94,14 @@ export function createListReconcileScheduler(
     }, delay);
   };
 
-  const schedule = (scope: ReconcileScope = "all"): void => {
-    if (disposed || (scope !== "all" && scope.size === 0)) return;
-    requested = mergeScopes(requested, scope);
-    arm();
-  };
-
   return {
     schedule,
     noteActivity() {
-      if (now() - lastFullStart >= RECONCILE_WHILE_ACTIVE_MS) schedule();
+      if (now() - lastStart >= RECONCILE_WHILE_ACTIVE_MS) schedule();
     },
     dispose() {
       disposed = true;
-      requested = null;
+      pending = false;
       if (timer !== null) clearTimeout(timer);
       timer = null;
     },

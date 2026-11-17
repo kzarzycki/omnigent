@@ -417,16 +417,6 @@ class GitSshBinding:
     allow_loopback: bool = False
 
 
-@dataclass(frozen=True)
-class TcpEgressRoute:
-    """One named, exact TCP destination with optional address restrictions."""
-
-    name: str
-    host: str
-    port: int
-    allowed_cidrs: tuple[str, ...] = ()
-
-
 @dataclass
 class CredentialProxyEntry:
     """One normalized host binding for the secretless credential proxy.
@@ -908,11 +898,10 @@ class OSEnvSandboxSpec:
     # Memory and CPU limits for the session's whole process tree, applied
     # through a user-systemd slice rather than the sandbox backend.
     resources: SandboxResourcesSpec | None = None
-    tcp_egress: list[TcpEgressRoute] | None = None
 
     @property
     def requires_network_enforcement(self) -> bool:
-        return bool(self.egress_rules or self.git_ssh or self.tcp_egress)
+        return bool(self.egress_rules or self.git_ssh)
 
     @property
     def write_path_specs(self) -> list[WritePathSpec]:

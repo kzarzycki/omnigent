@@ -65,7 +65,6 @@
         box-shadow: 0 3px 8px rgb(0 0 0 / 18%);
       }
       header {
-        flex-shrink: 0;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -113,11 +112,9 @@
       }
       section {
         flex: 1;
-        min-height: 0;
-        overflow-y: auto;
         display: flex;
         flex-direction: column;
-        justify-content: safe center;
+        justify-content: center;
       }
       h1 {
         margin: 0 0 8px;
@@ -131,14 +128,12 @@
         font-size: 13px;
         line-height: 19px;
       }
-      #reload,
-      #cookie-hint {
+      #reload {
         margin-top: 6px;
         font-size: 11px;
         line-height: 16px;
       }
       footer {
-        flex-shrink: 0;
         display: flex;
         gap: 8px;
       }
@@ -149,14 +144,12 @@
         font-size: 12px;
         font-weight: 500;
       }
-      #once,
-      #open-in-browser {
+      #once {
         border-color: transparent;
         background: var(--accent);
         color: var(--surface);
       }
-      #once:hover,
-      #open-in-browser:hover {
+      #once:hover {
         background: var(--accent-hover);
       }
       #always {
@@ -173,7 +166,7 @@
     </style>
   </head>
   <body>
-    <main id="prompt" role="dialog" aria-labelledby="heading" aria-describedby="description" hidden>
+    <main role="dialog" aria-labelledby="heading" aria-describedby="description">
       <header>
         <svg
           width="15"
@@ -206,11 +199,8 @@
         <h1 id="heading">Allow local network access?</h1>
         <p id="description">Connect to nearby devices and apps on this computer.</p>
         <p id="reload" hidden>Allowing will reload this page.</p>
-        <p id="cookie-hint" hidden>
-          Signed in with Chrome? Use the cookie button in the address bar to sign in here too.
-        </p>
       </section>
-      <footer id="permission-choices">
+      <footer>
         <button
           id="once"
           type="button"
@@ -229,16 +219,6 @@
         </button>
         <button id="deny" type="button" title="Block this site across all conversations" disabled>
           Deny
-        </button>
-      </footer>
-      <footer id="security-key-choices" hidden>
-        <button
-          id="open-in-browser"
-          type="button"
-          title="Continue on this page in your default browser"
-          disabled
-        >
-          Open in browser
         </button>
       </footer>
     </main>

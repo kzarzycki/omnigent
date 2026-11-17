@@ -123,15 +123,6 @@ class SysScheduledTaskCreateTool(Tool):
                                 "sys_session_keep. Say in the prompt what is worth keeping."
                             ),
                         },
-                        "mcp_services": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Optional MCP services every run starts with, as the "
-                                "deployment's service names. The owner must already be "
-                                "connected to each one. Omit for none."
-                            ),
-                        },
                         "max_cost_usd": {
                             "type": "number",
                             "description": (
@@ -318,14 +309,6 @@ class SysScheduledTaskUpdateTool(Tool):
                         "archive_when_done": {
                             "type": "boolean",
                             "description": "Archive a run that succeeds unless it kept itself.",
-                        },
-                        "mcp_services": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Replaces the MCP services every run starts with. "
-                                "An empty list clears them."
-                            ),
                         },
                         "max_cost_usd": {
                             "type": "number",

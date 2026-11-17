@@ -53,11 +53,9 @@ from pathlib import Path
 import httpx
 import yaml
 
-from omnigent.git_providers.github import gh_config_dir
 from omnigent.host.identity import HOST_TOKEN_ENV_VAR as _HOST_TOKEN_ENV_VAR
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
 from omnigent.host.identity_env import in_managed_sandbox
-from omnigent.telemetry.request_headers import client_identity_headers
 
 _TIMEOUT_S = 15.0
 
@@ -100,7 +98,7 @@ def _fetch(server: str, host_id: str, host_token: str) -> dict | None:
     try:
         resp = httpx.get(
             _credential_url(server, host_id),
-            headers={**client_identity_headers(), MANAGED_HOST_TOKEN_HEADER: host_token},
+            headers={MANAGED_HOST_TOKEN_HEADER: host_token},
             timeout=_TIMEOUT_S,
         )
     except httpx.HTTPError:
@@ -211,6 +209,14 @@ def configure_host_git(server_url: str, host_id: str) -> None:
         _git_config("user.name", str(login) if login else owner.split("@", 1)[0])
 
 
+def _gh_config_dir() -> Path:
+    """The gh CLI config dir (``GH_CONFIG_DIR`` override, else ``~/.config/gh``)."""
+    override = (os.environ.get("GH_CONFIG_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "gh"
+
+
 def _write_gh_hosts(login: str, token: str) -> bool:
     """Materialize the owner's ``github.com`` auth into gh's ``hosts.yml``.
 
@@ -238,7 +244,7 @@ def _write_gh_hosts(login: str, token: str) -> bool:
 
     :returns: ``True`` when written; ``False`` on any filesystem error.
     """
-    hosts_path = Path(gh_config_dir()) / "hosts.yml"
+    hosts_path = _gh_config_dir() / "hosts.yml"
     # Merge into the existing document so other hosts / accounts are preserved. A
     # missing, unreadable, or non-mapping file is treated as empty (never a
     # failure) — the worst case is starting a fresh map.

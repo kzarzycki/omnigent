@@ -9,17 +9,11 @@ export const COMPOSER_HARNESS_MENU_SIZE = "w-[17.5rem]";
 export const HARNESS_MENU_ROW_CLASS_NAME =
   "composer-agent-row group/agent relative flex min-h-8 w-full items-center rounded-lg";
 
-export function PickerSectionHeader({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
+export function PickerSectionHeader({ children }: { children: ReactNode }) {
   return (
     <div
       data-harness-menu-section-label=""
-      className={cn("px-2 py-1 text-xs leading-5 font-normal text-muted-foreground", className)}
+      className="px-2 py-1 text-xs leading-5 font-normal text-muted-foreground"
     >
       {children}
     </div>

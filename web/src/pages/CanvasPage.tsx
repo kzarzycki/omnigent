@@ -630,7 +630,6 @@ function CanvasSurface({ selectedSessionId }: { selectedSessionId?: string | nul
         </div>
         <NewProjectButton
           hostId={defaultProjectHostId}
-          hosts={hosts}
           hostsLoading={hostsLoading}
           onCreated={(name) => {
             pendingProjectNameRef.current = name;

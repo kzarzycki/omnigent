@@ -21,7 +21,6 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // click through the router and observe the resulting rail-tab state.
 
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
-import type * as UseWorkspaceChangedFilesModule from "@/hooks/useWorkspaceChangedFiles";
 import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
 import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseConversationsModule from "@/hooks/useConversations";
@@ -50,8 +49,7 @@ vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
   ...(await importOriginal<typeof UseTerminalsModule>()),
   useTerminals: vi.fn(() => ({ terminals: [], isLoading: false, error: null })),
 }));
-vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => ({
-  ...(await importOriginal<typeof UseWorkspaceChangedFilesModule>()),
+vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: vi.fn(() => ({
     data: { available: true, root: null },
     isLoading: false,

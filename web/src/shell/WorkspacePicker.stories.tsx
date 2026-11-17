@@ -43,7 +43,6 @@ const meta = {
     (Story, context) => (
       <StoryQueryRouter
         seed={(queryClient) => {
-          const twoYearsAgo = Math.floor(Date.now() / 1000) - 2 * 365 * 24 * 60 * 60;
           seedFilesystem(queryClient, workspaceStoryProjects, projectEntries);
           seedFilesystem(queryClient, "", [
             storyDirectory(`${workspaceStoryHome}/projects`),
@@ -68,21 +67,21 @@ const meta = {
                           branch: "agentic/layouts",
                           is_main: false,
                           detached: false,
-                          updated_at: twoYearsAgo,
+                          updated_at: 1_700_000_000,
                         },
                         {
                           path: `${workspaceStoryHome}/worktrees/command-palette`,
                           branch: "feature/command-palette",
                           is_main: false,
                           detached: false,
-                          updated_at: twoYearsAgo - 2 * 60 * 60,
+                          updated_at: 1_699_992_800,
                         },
                         {
                           path: `${workspaceStoryHome}/worktrees/streaming-status`,
                           branch: "feature/streaming-status",
                           is_main: false,
                           detached: false,
-                          updated_at: twoYearsAgo - 24 * 60 * 60,
+                          updated_at: 1_699_913_600,
                         },
                       ]),
                 ],

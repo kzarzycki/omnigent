@@ -65,25 +65,17 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-try:
-    import fcntl
-except ImportError:  # Windows: reads are not single-flighted
-    fcntl = None  # type: ignore[assignment]
-
 from omnigent import config as _config
 from omnigent.git_providers import host_of
-from omnigent.git_providers.github import gh_config_dir
 from omnigent.host.identity_env import in_managed_sandbox
-from omnigent.process_logging import data_dir
 from omnigent.runner import pr_resource
 from omnigent.runner.git_providers import (
     COMMIT_OBJECT,
@@ -821,15 +813,15 @@ def _refused_pr_fields(stderr: str) -> set[str]:
     }
 
 
-def _gh_pr_read(
-    verb: list[str], fields: str, *, cwd: str, token: str | None = None
-) -> tuple[Any, str] | None:
-    """Return ``gh pr <verb> --json <fields>`` parsed, with the fields it answered, or ``None``.
+def _gh_pr_view(
+    args: list[str], fields: str, *, cwd: str, token: str | None = None
+) -> dict[str, Any] | None:
+    """Return ``gh pr view <args> --json <fields>`` as a dict, or ``None``.
 
     Retry without optional checks, reviewer, or merge fields only when the error
     names them. Each retry removes fields, so unrelated failures never retry here.
     """
-    rc, out, err = _gh(["pr", *verb, "--json", fields], cwd=cwd, token=token)
+    rc, out, err = _gh(["pr", "view", *args, "--json", fields], cwd=cwd, token=token)
     while rc != 0:
         refused = _refused_pr_fields(err) & set(fields.split(","))
         refused &= _PR_REVIEW_FIELDS | _PR_MERGE_FIELDS | {_PR_CHECKS_FIELD, _PR_COMMENTS_FIELD}
@@ -839,22 +831,14 @@ def _gh_pr_read(
         if not remaining or remaining == fields:
             return None
         fields = remaining
-        rc, out, err = _gh(["pr", *verb, "--json", fields], cwd=cwd, token=token)
+        rc, out, err = _gh(["pr", "view", *args, "--json", fields], cwd=cwd, token=token)
     try:
-        return json.loads(out), fields
+        data = json.loads(out)
     except ValueError:
         return None
-
-
-def _gh_pr_view(
-    args: list[str], fields: str, *, cwd: str, token: str | None = None
-) -> dict[str, Any] | None:
-    """Return ``gh pr view <args> --json <fields>`` as a dict, or ``None``."""
-    read = _gh_pr_read(["view", *args], fields, cwd=cwd, token=token)
-    if read is None or not isinstance(read[0], dict):
+    if not isinstance(data, dict):
         return None
-    data, answered = read
-    if "comments" in answered.split(","):
+    if "comments" in fields.split(","):
         _refresh_conversation(data, cwd=cwd, token=token)
     return data
 
@@ -1132,13 +1116,7 @@ def _pr_token(root: str, reference: PullRequestRef) -> str | None:
     return _repo_token(root, _repo_argument(reference))
 
 
-_DERIVE_TOKEN: Any = object()
-
-
-def _pr_json(
-    root: str, reference: PullRequestRef, fields: str, token: Any = _DERIVE_TOKEN
-) -> dict[str, Any] | None:
-    """``gh pr view`` of ``reference``, as ``token`` or, by default, its preferred account."""
+def _pr_json(root: str, reference: PullRequestRef, fields: str) -> dict[str, Any] | None:
     if reference.host != "github.com":
         _, accounts = _list_accounts(root)
         if reference.host not in {account.get("host") for account in accounts}:
@@ -1147,299 +1125,8 @@ def _pr_json(
         [str(reference.number), "-R", _repo_argument(reference)],
         fields,
         cwd=root,
-        token=_pr_token(root, reference) if token is _DERIVE_TOKEN else token,
+        token=_pr_token(root, reference),
     )
-
-
-_REFERENCE_EXTRA_FIELDS = ",headRefOid,baseRefOid,headRepository,headRepositoryOwner"
-# ``comments`` and the timeline are per-PR reads; the open-PR listing leaves them out.
-_LISTING_FIELDS = (
-    ",".join(field for field in _PR_VIEW_FIELDS.split(",") if field != "comments")
-    + _REFERENCE_EXTRA_FIELDS
-)
-_LISTING_LIMIT = 100
-# An open PR's CI and reviews change within the poll cadence. A merged PR doesn't change
-# back; a closed one can be reopened, so only the server's refresher skips re-reading it.
-_OPEN_PR_TTL_SECONDS = 10.0
-_FINISHED_PR_TTL_SECONDS = 6 * 3600.0
-_ACCOUNTS_TTL_SECONDS = 30.0
-# A failed read is remembered briefly so waiters on one lock don't each retry ``gh``.
-_FAILED_READ_TTL_SECONDS = 5.0
-
-# Set for the server's own refreshes, which need no conversation (comments, timeline).
-_background_read: ContextVar[bool] = ContextVar("github_background_read", default=False)
-
-
-@contextmanager
-def background_reads(enabled: object) -> Iterator[None]:
-    """Mark PR reads inside the block as background refreshes (``"1"`` in a query string)."""
-    token = _background_read.set(enabled is True or enabled in ("1", "true"))
-    try:
-        yield
-    finally:
-        _background_read.reset(token)
-
-
-def _accounts_file_stat(config_dir: Path) -> list[int] | None:
-    """Identify the accounts file's content cheaply; ``None`` when it is missing.
-
-    ``gh auth switch`` / ``login`` / ``logout`` rewrite it, so any of them changes this.
-    """
-    try:
-        status = (config_dir / "hosts.yml").stat()
-    except OSError:
-        return None
-    return [status.st_mtime_ns, status.st_size, status.st_ino]
-
-
-def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
-    """:func:`_list_accounts`, shared by the host's runners while ``hosts.yml`` is unchanged.
-
-    An entry is used only inside its window and while the accounts file still has the
-    stat stored with it, so a switch is seen at once. A missing file is never cached.
-    The window still bounds a token that expires without the file changing.
-    """
-    config_dir = Path(gh_config_dir())
-    key = ("accounts", str(config_dir))
-    stat = _accounts_file_stat(config_dir)
-    if stat is not None:
-        hit, cached = _cache_get(key, shared=True)
-        if hit and isinstance(cached, dict) and cached.get("stat") == stat:
-            return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
-    authenticated, accounts = _list_accounts(root)
-    if stat is not None:
-        _cache_put(
-            key,
-            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-            _ACCOUNTS_TTL_SECONDS,
-            shared=True,
-        )
-    return authenticated, accounts
-
-
-def _resolve_read(
-    token: str | None, host: str, accounts: Callable[[], list[dict[str, Any]]]
-) -> tuple[str | None, str | None]:
-    """Decide once who a read is made as: ``(token, cache_identity)``.
-
-    The read and its cache key both come from this, so they cannot disagree. ``token``,
-    the preferred account's (``None`` when it has none readable), is passed to ``gh`` as
-    given and keyed by its hash. Without one ``gh``
-    uses an ambient ``GH_TOKEN`` / ``GITHUB_TOKEN`` (a sandbox scrubs them), keyed by its
-    hash, and otherwise its active account, keyed by that login, read from ``accounts()``.
-    A preferred account whose token can't be read falls through to those, as ``gh``
-    does. When the active account can't be named the identity is ``None``: don't cache.
-    """
-    if token:
-        return token, "token:" + hashlib.sha256(token.encode()).hexdigest()
-    ambient = (
-        None if _in_sandbox() else os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    )
-    if ambient:
-        return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
-    # gh reads as the active account even when its auth check failed; only a
-    # working active account names the identity.
-    active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
-    if active is None or active.get("state") != "success":
-        return None, None
-    return None, f"active:{host}:{active.get('login')}"
-
-
-def _pr_read(root: str, reference: PullRequestRef) -> tuple[str | None, str | None]:
-    """``(token, cache_identity)`` for a PR read, with the accounts read fresh."""
-    return _resolve_read(
-        _pr_token(root, reference),
-        reference.host,
-        lambda: _cached_accounts(root)[1],
-    )
-
-
-@contextmanager
-def _single_flight(key: tuple[str, ...]) -> Iterator[None]:
-    """Let one process at a time fill ``key``; the others wait, then find it cached."""
-    descriptor = None
-    try:
-        lock_path = _cache_path(key).with_suffix(".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        if fcntl is not None:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-    except OSError:
-        _logger.debug("github_resource: could not lock a cached read", exc_info=True)
-    try:
-        yield
-    finally:
-        if descriptor is not None:
-            with suppress(OSError):
-                os.close(descriptor)
-
-
-def _open_pr_listing(
-    root: str, reference: PullRequestRef, identity: str, token: str | None
-) -> list[dict[str, Any]] | None:
-    """The repository's open PRs from one ``gh pr list``, shared by every session reading it."""
-    key = ("pr-list", identity, _repo_argument(reference).lower())
-    hit, listing = _cache_get(key, shared=True)
-    if hit:
-        return listing
-    with _single_flight(key):
-        hit, listing = _cache_get(key, shared=True)
-        if hit:
-            return listing
-        started = time.time()
-        read = _gh_pr_read(
-            [
-                "list",
-                "-R",
-                _repo_argument(reference),
-                "--state",
-                "open",
-                "--limit",
-                str(_LISTING_LIMIT),
-            ],
-            _LISTING_FIELDS,
-            cwd=root,
-            token=token,
-        )
-        if read is None or not isinstance(read[0], list):
-            _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
-            return None
-        _cache_put(key, read[0], _OPEN_PR_TTL_SECONDS, shared=True, started=started)
-        return read[0]
-
-
-def _reference_pr_data(
-    root: str, reference: PullRequestRef, *, background: bool
-) -> dict[str, Any] | None:
-    """One tracked PR's ``gh`` data for the panel, shared across sessions and refreshes.
-
-    A background refresh reads open PRs from the repository's shared listing, which
-    has no conversation. A viewer reads the PR itself, cached for the poll window.
-    A merged PR is cached for long, as is a closed one a background refresh read.
-    """
-    fields = _LISTING_FIELDS if background else _PR_VIEW_FIELDS + _REFERENCE_EXTRA_FIELDS
-    token, identity = _pr_read(root, reference)
-    if identity is None:
-        return _pr_json(root, reference, fields, token)
-    key = (
-        "pr",
-        identity,
-        _repo_argument(reference).lower(),
-        str(reference.number),
-        "background" if background else "full",
-    )
-    hit, data = _cache_get(key, shared=True)
-    if hit:
-        return data
-    with _single_flight(key):
-        hit, data = _cache_get(key, shared=True)
-        if hit:
-            return data
-        if background and reference.host == "github.com":
-            listing = _open_pr_listing(root, reference, identity, token)
-            for entry in listing or []:
-                if isinstance(entry, dict) and entry.get("number") == reference.number:
-                    return entry
-        started = time.time()
-        data = _pr_json(root, reference, fields, token)
-        if data is None:
-            _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
-            return None
-        state = data.get("state")
-        finished = state == "MERGED" or (background and state == "CLOSED")
-        _cache_put(
-            key,
-            data,
-            _FINISHED_PR_TTL_SECONDS if finished else _OPEN_PR_TTL_SECONDS,
-            shared=True,
-            started=started,
-        )
-        return data
-
-
-def _scope_of(key: Sequence[str]) -> tuple[str, str | None] | None:
-    """``(repository, number)`` a PR cache key covers (``None`` number: the listing)."""
-    if key[0] == "pr":
-        return key[2], key[3]
-    if key[0] == "pr-list":
-        return key[2], None
-    return None
-
-
-def _invalidation_directory() -> Path:
-    return _cache_directory() / "invalidated"
-
-
-def _invalidated_since(key: Sequence[str]) -> float:
-    """When a write last invalidated ``key``'s PR (0 when none did), as other runners see it."""
-    scope = _scope_of(key)
-    latest = 0.0
-    if scope is None:
-        return latest
-    for path in _invalidation_directory().glob("*.json"):
-        try:
-            marker = json.loads(path.read_text(encoding="utf-8"))
-            repository, number, at = marker["repository"], marker["number"], float(marker["at"])
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-        if repository in ("*", scope[0]) and (number == "*" or scope[1] in (None, number)):
-            latest = max(latest, at)
-    return latest
-
-
-def _record_invalidation(repository: str, number: str) -> None:
-    """Stamp the PR (``*`` for all) as written now, so reads begun earlier aren't cached."""
-    directory = _invalidation_directory()
-    digest = hashlib.sha256(f"{repository}\0{number}".encode()).hexdigest()
-    stamp = directory / f"{digest}.json"
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        try:
-            earlier = float(json.loads(stamp.read_text(encoding="utf-8"))["at"])
-        except (OSError, ValueError, KeyError, TypeError):
-            earlier = 0.0
-        descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(
-                {"repository": repository, "number": number, "at": max(earlier, time.time())},
-                handle,
-            )
-        os.replace(temporary, stamp)
-    except OSError:
-        _logger.debug("github_resource: could not record an invalidation", exc_info=True)
-
-
-def invalidate_pr_reads(pr_url: str | None) -> None:
-    """Drop the shared PR entries a write made stale: the PR's, and its repository's listing.
-
-    Without a ``pr_url`` (a write to the checkout's own PR) every PR entry goes. The write
-    is also stamped on disk, so a read already in flight is not cached when it returns.
-    """
-    scope: tuple[str, str] | None = None
-    if pr_url:
-        try:
-            reference = PullRequestRef.from_url(pr_url)
-            scope = (_repo_argument(reference).lower(), str(reference.number))
-        except ValueError:
-            pass
-    _record_invalidation(*(scope or ("*", "*")))
-
-    def stale(key: Sequence[str]) -> bool:
-        if key[0] == "pr":
-            return scope is None or tuple(key[2:4]) == scope
-        return key[0] == "pr-list" and (scope is None or key[2] == scope[0])
-
-    with _preview_lock:
-        for key in [key for key in _preview_cache if stale(key)]:
-            del _preview_cache[key]
-    for path in _cache_directory().glob("*.json"):
-        try:
-            key = json.loads(path.read_text(encoding="utf-8")).get("key")
-        except (OSError, ValueError, AttributeError):
-            continue
-        if isinstance(key, list) and key and stale(key):
-            with suppress(OSError):
-                path.unlink()
 
 
 def _head_repository_url(reference: PullRequestRef, head: object, owner: object) -> str | None:
@@ -1464,13 +1151,16 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
     }
     if not info["gh_available"]:
         return info
-    # The PR read lists the accounts fresh, which the shared copy below then serves.
-    data = _reference_pr_data(root, reference, background=_background_read.get())
-    _, accounts = _cached_accounts(root)
+    _, accounts = _list_accounts(root)
     info["accounts"] = [a for a in accounts if a.get("host") == reference.host]
     preferred = _config.github_account_preference(_repo_argument(reference))
     info["selected_account"] = preferred or next(
         (a["login"] for a in info["accounts"] if a.get("active")), None
+    )
+    data = _pr_json(
+        root,
+        reference,
+        _PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository,headRepositoryOwner",
     )
     if data is None:
         return info
@@ -2917,7 +2607,6 @@ _PREVIEW_TTL_SECONDS = 60.0
 _PUBLIC_PREVIEW_TTL_SECONDS = 15 * 60.0
 _PUBLIC_RATE_LIMIT_BACKOFF_SECONDS = 15 * 60.0
 _PREVIEW_CACHE_MAX = 512
-_STALE_FILE_SECONDS = 3600.0
 _PUBLIC_API = "https://api.github.com"
 _UNREADABLE_STATUSES = frozenset({403, 404, 410, 422})
 _PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
@@ -2926,121 +2615,6 @@ _PREVIEW_PR_FIELDS = "title,state,isDraft,labels,statusCheckRollup"
 _preview_lock = threading.Lock()
 _preview_cache: dict[tuple[str, ...], tuple[float, dict[str, Any] | None]] = {}
 _public_blocked_until = 0.0
-
-
-def _cache_directory() -> Path:
-    return data_dir() / "github" / "read-cache"
-
-
-def _cache_path(key: tuple[str, ...]) -> Path:
-    digest = hashlib.sha256("\0".join(key).encode()).hexdigest()
-    return _cache_directory() / f"{digest}.json"
-
-
-def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any]:
-    """Look ``key`` up in the runner's read cache: ``(hit, value)``.
-
-    A ``shared`` entry also lives in a file under the data directory, since every
-    session runs in its own runner process and only the disk is common to them.
-    """
-    now = time.monotonic()
-    with _preview_lock:
-        cached = _preview_cache.get(key)
-    if cached is not None and cached[0] > now:
-        return True, cached[1]
-    if not shared:
-        return False, None
-    try:
-        entry = json.loads(_cache_path(key).read_text(encoding="utf-8"))
-        remaining = float(entry["expires"]) - time.time()
-        value = entry["value"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return False, None
-    if remaining <= 0:
-        with suppress(OSError):
-            _cache_path(key).unlink()
-        return False, None
-    with _preview_lock:
-        _preview_cache[key] = (now + remaining, value)
-    return True, value
-
-
-def _remove_unheld_lock(path: Path) -> None:
-    """Delete a lock file only if nobody holds it (``flock`` doesn't touch its mtime)."""
-    if fcntl is None:
-        path.unlink()
-        return
-    descriptor = os.open(path, os.O_RDWR)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        path.unlink()
-    except BlockingIOError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
-def _sweep_cache_directory(directory: Path) -> None:
-    """Remove expired entries and files a crashed writer or finished lock left behind."""
-    now = time.time()
-    entries = list(directory.glob("*.json"))
-    for path in entries:
-        try:
-            if float(json.loads(path.read_text(encoding="utf-8"))["expires"]) <= now:
-                path.unlink()
-                continue
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-    for path in (*directory.glob("*.tmp"), *(directory / "invalidated").glob("*")):
-        with suppress(OSError):
-            if now - path.stat().st_mtime > _STALE_FILE_SECONDS:
-                path.unlink()
-    for path in directory.glob("*.lock"):
-        with suppress(OSError):
-            if now - path.stat().st_mtime > _STALE_FILE_SECONDS:
-                _remove_unheld_lock(path)
-    remaining = list(directory.glob("*.json"))
-    if len(remaining) >= _PREVIEW_CACHE_MAX:
-        for path in remaining:
-            with suppress(OSError):
-                path.unlink()
-
-
-def _cache_put(
-    key: tuple[str, ...],
-    value: Any,
-    ttl: float,
-    *,
-    shared: bool = False,
-    started: float | None = None,
-) -> None:
-    """Remember ``value`` for ``ttl`` seconds, in memory and, if ``shared``, on disk.
-
-    A PR read that ``started`` before a write to that PR is not remembered: it may
-    predate the write.
-    """
-    if started is not None and _invalidated_since(key) >= started:
-        return
-    with _preview_lock:
-        if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
-            _preview_cache.clear()
-        _preview_cache[key] = (time.monotonic() + ttl, value)
-    if not shared:
-        return
-    path = _cache_path(key)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _sweep_cache_directory(path.parent)
-        descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"expires": time.time() + ttl, "key": list(key), "value": value}, handle)
-        os.replace(temporary, path)
-        if started is not None and _invalidated_since(key) >= started:
-            path.unlink(missing_ok=True)
-            with _preview_lock:
-                _preview_cache.pop(key, None)
-    except (OSError, TypeError, ValueError):
-        _logger.debug("github_resource: could not share a cached read", exc_info=True)
 
 
 class _PreviewReadError(Exception):
@@ -3214,9 +2788,13 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
 def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, str | None]:
     """Decide once who a link preview reads as: ``(signed_in, token, cache_identity)``.
 
-    :func:`_resolve_read` names the identity from the accounts read fresh here. When the
-    accounts can't be listed (an older ``gh``) and no token names it, or the active one
-    isn't signed in properly, ``cache_identity`` is ``None``: don't cache.
+    The read and the cache key both come from this, so they cannot disagree. A token
+    selects the account itself and is keyed by its hash. Without one ``gh`` uses its
+    active account, keyed by that login; when the accounts can't be listed (an older
+    ``gh``) or the active one isn't signed in properly, the identity is unknown and
+    ``cache_identity`` is ``None``: don't cache. ``gh`` ranks an ambient ``GH_TOKEN`` /
+    ``GITHUB_TOKEN`` above its stored accounts (a sandbox scrubs them), so that token
+    names the identity when it is set.
     """
     authenticated, accounts = _list_accounts(root)
     logins = [
@@ -3226,10 +2804,22 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     ]
     if (accounts and not logins) or (not authenticated and not accounts):
         return False, None, ""
-    token, identity = _resolve_read(
-        _repo_token(root, f"github.com/{owner}/{repo}"), "github.com", lambda: accounts
+    token = _repo_token(root, f"github.com/{owner}/{repo}")
+    if token:
+        return True, token, "token:" + hashlib.sha256(token.encode()).hexdigest()
+    ambient = (
+        None if _in_sandbox() else os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     )
-    return True, token, identity
+    if ambient:
+        return True, None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
+    if not accounts:
+        return True, None, None
+    # gh reads as the active account even when its auth check failed; only a
+    # working active account names the identity, else don't cache.
+    active = next((a for a in accounts if a.get("host") == "github.com" and a.get("active")), None)
+    if active is None or active.get("state") != "success":
+        return True, None, None
+    return True, None, f"active:{active.get('login')}"
 
 
 def _read_link_preview(
@@ -3270,10 +2860,12 @@ def github_link_preview(
         return None
     signed_in, token, identity = _read_identity(root, owner, repo)
     key = (identity or "", owner.lower(), repo.lower(), kind, ref.lower())
+    now = time.monotonic()
     if identity is not None:
-        hit, cached = _cache_get(key)
-        if hit:
-            return cached
+        with _preview_lock:
+            cached = _preview_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
     try:
         preview = _read_link_preview(
             root, owner, repo, kind, ref, signed_in=signed_in, token=token
@@ -3285,5 +2877,8 @@ def github_link_preview(
     # An account switched during the read may have answered it: remember it only if
     # the identity is the same after.
     if identity is not None and _read_identity(root, owner, repo)[2] == identity:
-        _cache_put(key, preview, ttl)
+        with _preview_lock:
+            if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+                _preview_cache.clear()
+            _preview_cache[key] = (now + ttl, preview)
     return preview

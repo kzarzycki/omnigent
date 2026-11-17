@@ -26,28 +26,56 @@ import { WorkspacePickerDialog } from "./WorkspacePickerDialog";
 import { WorkspacePathField } from "./WorkspacePathField";
 import { HostLabel } from "./HostLabel";
 import { normalizeWorkspacePath } from "./NewChatDialog";
-import { fetchHosts, useHosts } from "@/hooks/useHosts";
+import { useHosts } from "@/hooks/useHosts";
 import { useSession } from "@/hooks/useSession";
 import { useHostFilesystem } from "@/hooks/useHostFilesystem";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { sandboxOptionLabel, sandboxProviderOptions } from "@/lib/capabilities";
 import { sandboxHostChoice, sandboxHostChoiceProvider } from "@/lib/hostPreferences";
-import { managedSandboxHostId } from "@/lib/managedSandboxHost";
+import { randomUUID } from "@/lib/randomUUID";
 import { composeSandboxWorkspace, sandboxRepoProblem } from "@/lib/sandboxRepositories";
-import {
-  getSessionSlim,
-  launchManagedHost,
-  launchRunner,
-  stopSession,
-  updateSession,
-} from "@/lib/sessionsApi";
+import { launchManagedHost, launchRunner, updateSession } from "@/lib/sessionsApi";
 import { terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import { captureLaunchStatus, useChatStore } from "@/store/chatStore";
 
 /**
- * Refresh the binding, stop unless its host is freshly confirmed offline, then release and launch.
- * Generic unbind remains nondestructive.
+ * Move an existing session onto a different host, from the composer's
+ * host badge (see ``HostBadge``).
+ *
+ * There is no single "switch host" endpoint — the move is the same two
+ * calls the CLI's daemon-launch path already makes:
+ *
+ * 1. ``PATCH /v1/sessions/{id}`` with ``runner_id: ""`` releases the
+ *    current runner binding. The launch endpoint binds atomically with
+ *    ``UPDATE … WHERE runner_id IS NULL``, so a bound session is
+ *    rejected until this clears it. The same call clears the model
+ *    override, which is bound to the old host's catalog.
+ * 2. ``POST /v1/hosts/{new}/runners`` validates the directory against
+ *    the agent's sandbox boundary, binds the runner, and repoints the
+ *    session's ``host_id``.
+ *
+ * A directory is always required: workspaces are per-machine, so the
+ * old path means nothing on the new host even when it reads the same.
+ *
+ * Sandbox targets use the managed-host endpoint; the session page tracks
+ * provisioning.
+ *
+ * The first available host is selected on open and its directory
+ * defaulted, so the common "just move it over there" case is one click.
+ * A sandbox costs a fresh provision, so it is the default only when no
+ * other host is online.
+ *
+ * Step 1 landing without step 2 (a dropped connection between them)
+ * leaves the session bound to nothing. The dialog stays open on that
+ * failure and puts the origin host back in the picker, so recovering —
+ * onward to the new host, or back to the old one — is the same click.
+ *
+ * @param open - Whether the dialog is visible.
+ * @param onOpenChange - Radix-controlled visibility setter.
+ * @param sessionId - The session to move, e.g. ``"conv_abc"``.
+ * @param currentHostId - The host it is bound to now; excluded from the
+ *   picker and used for the "different machine" warning.
  */
 export function SwitchHostDialog(props: Parameters<typeof SupportedSwitchHostDialog>[0]) {
   const { switchHostDisabledReason } = useSessionActionRestrictions(props.sessionId, {
@@ -108,9 +136,10 @@ function SupportedSwitchHostDialog({
   const [browsing, setBrowsing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [originAvailable, setOriginAvailable] = useState(false);
-  const [moveState, setMoveState] = useState<"initial" | "stopped" | "released">("initial");
-  const stranded = moveState !== "initial";
+  // Set when step 1 succeeded but step 2 failed: the session is now
+  // unbound, so the retry copy has to say so rather than implying the
+  // old host is still serving it.
+  const [stranded, setStranded] = useState(false);
 
   // Sandbox rows appear only when the server can launch a sandbox and move a
   // session onto it; "loading" keeps them hidden until the boot probe resolves.
@@ -141,13 +170,16 @@ function SupportedSwitchHostDialog({
   // submit and blank the select, which renders the chosen item's label.
   const [originHostId] = useState(currentHostId);
 
-  // A completed stop or release makes the online origin a recovery target too.
+  // Only online hosts can accept a runner, and moving to the host the
+  // session is already on is a no-op — until a half-finished switch
+  // leaves it unbound, when the origin is a target like any other and
+  // moving back is the quickest way out.
   const targetHosts = useMemo(
     () =>
       (hosts ?? []).filter(
-        (h) => h.status === "online" && (originAvailable || h.host_id !== originHostId),
+        (h) => h.status === "online" && (stranded || h.host_id !== originHostId),
       ),
-    [hosts, originHostId, originAvailable],
+    [hosts, originHostId, stranded],
   );
 
   // Land on a usable selection instead of an empty form: take the first
@@ -216,8 +248,7 @@ function SupportedSwitchHostDialog({
       setWorkspace("");
       setBrowsing(false);
       setError(null);
-      setOriginAvailable(false);
-      setMoveState("initial");
+      setStranded(false);
       setSubmitting(false);
       prevHostId.current = null;
       userEditedRef.current = false;
@@ -263,53 +294,8 @@ function SupportedSwitchHostDialog({
     if (!canSwitch) return;
     setSubmitting(true);
     setError(null);
-    setMoveState("initial");
-    let stopped = false;
     let released = false;
     try {
-      // A launch can land before its response or cache refresh. Resolve the
-      // current binding and routing affinity before Stop or an offline exemption.
-      let boundHostId: string | null;
-      try {
-        boundHostId = (await getSessionSlim(sessionId)).hostId ?? null;
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : "Session lookup failed.";
-        throw new Error(
-          `Couldn't refresh the session's current host. Check your connection and try again. ${detail}`,
-          { cause: e },
-        );
-      }
-      const currentHost = hosts?.find((host) => host.host_id === boundHostId);
-      let confirmedOffline = false;
-      if (currentHost?.status === "offline") {
-        try {
-          confirmedOffline = (await fetchHosts(true)).some(
-            (host) => host.host_id === boundHostId && host.status === "offline",
-          );
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : "Host lookup failed.";
-          throw new Error(
-            `Couldn't refresh the current host's status. Check your connection and try again. ${detail}`,
-            { cause: e },
-          );
-        } finally {
-          void queryClient.invalidateQueries({ queryKey: ["hosts"] });
-        }
-      }
-      if (!confirmedOffline) {
-        try {
-          await stopSession(sessionId);
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : "Couldn't stop the old session.";
-          throw new Error(
-            `${detail} Check the current host and stop the session there, then try again.`,
-            { cause: e },
-          );
-        }
-        stopped = true;
-        setOriginAvailable(true);
-        setMoveState("stopped");
-      }
       // Drop the model override alongside the runner binding. A model id is
       // host-bound — the catalog depends on that machine's credentials — so
       // carrying it over lands the next turn on "model may not exist or you
@@ -319,18 +305,18 @@ function SupportedSwitchHostDialog({
       await updateSession(sessionId, { runnerId: "", modelOverride: null, silent: true });
       // From here the session is unbound until the launch lands.
       released = true;
-      setOriginAvailable(true);
-      setMoveState("released");
+      setStranded(true);
       if (sandboxSelected) {
         // The launch's own events report progress from here, but its first ones
         // may go to another replica's stream; the response shows where it is.
         const showLaunch = captureLaunchStatus(sessionId);
-        // Route the launch by the new sandbox's host id.
-        const sandboxHostId = await managedSandboxHostId(info);
         const moved = await launchManagedHost(sessionId, {
           provider: sandboxProvider,
           workspace: composeSandboxWorkspace(sandboxRepoUrl, sandboxRepoBranch) ?? null,
-          ...(sandboxHostId ? { hostId: sandboxHostId } : {}),
+          // Route the launch by the new sandbox's host id.
+          ...(info !== "loading" && info.request_managed_sandbox_host_id
+            ? { hostId: randomUUID().replace(/-/g, "") }
+            : {}),
         });
         showLaunch(moved);
       } else if (selectedHostId !== null) {
@@ -358,9 +344,9 @@ function SupportedSwitchHostDialog({
       void queryClient.invalidateQueries({ queryKey: terminalsQueryKey(sessionId) });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't switch hosts. Try again.");
-      // Stop or launch may have changed the session before a later request failed.
-      if (stopped || released)
-        void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      // A failed launch may have repointed or cleared the host; refetch so the
+      // picker reflects where the session is bound now.
+      if (released) void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     } finally {
       setSubmitting(false);
     }
@@ -552,10 +538,9 @@ function SupportedSwitchHostDialog({
                 {stranded ? (
                   <>
                     <span className="text-destructive">
-                      {moveState === "stopped"
-                        ? "The session stopped, but the move didn't finish. "
-                        : "The session left its old host, but we could not confirm the move completed. Check its current host before retrying. "}
-                      Pick a host — including the one it came from — and try again.
+                      The session left its old host but didn't start on the new one, so it isn't
+                      running anywhere. Pick a host — including the one it came from — and try
+                      again.
                     </span>
                     <span className="text-muted-foreground">{error}</span>
                   </>

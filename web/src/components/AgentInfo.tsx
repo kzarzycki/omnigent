@@ -58,7 +58,6 @@ import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { copyText } from "@/lib/clipboard";
 import { useChatStore } from "@/store/chatStore";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
-import { isFeatureEnabled } from "@/lib/capabilities";
 import { useSessionHostVersion } from "@/hooks/RunnerHealthProvider";
 
 const MCP_SERVERS_UPDATED_TOAST = (
@@ -180,11 +179,7 @@ const MODEL_TOKEN_ROWS: readonly { key: keyof ModelUsage; label: string }[] = [
  *
  * @param usageByModel - Map of raw harness model id to its cumulative usage.
  */
-export function ModelUsageBreakdown({
-  usageByModel,
-}: {
-  usageByModel: Record<string, ModelUsage>;
-}) {
+function ModelUsageBreakdown({ usageByModel }: { usageByModel: Record<string, ModelUsage> }) {
   const [isOpen, setIsOpen] = useState(false);
   // Stable display order: most total tokens first, so the dominant model
   // leads. Falls back to 0 for models that haven't recorded a total yet.
@@ -1314,8 +1309,6 @@ interface AgentInfoProps {
   mcpDirty?: boolean;
   /** Update the controlled MCP restart-warning state. */
   onMcpDirtyChange?: (dirty: boolean) => void;
-  /** Leave out the cost block when the session overview shows it instead. */
-  hideSessionCost?: boolean;
 }
 
 /**
@@ -1339,7 +1332,6 @@ export function AgentInfoContent({
   onSubdialogOpenChange,
   mcpDirty,
   onMcpDirtyChange,
-  hideSessionCost = false,
 }: AgentInfoProps) {
   const servers = agent?.mcp_servers ?? [];
   const mcpEditable = agent?.mcp_servers_editable === true && isOwnerLevel(permissionLevel);
@@ -1460,7 +1452,6 @@ export function AgentInfoContent({
         </div>
       )}
       {sessionId &&
-        !hideSessionCost &&
         (sessionCostUsd != null ||
           (usageByModel != null && Object.keys(usageByModel).length > 0)) && (
           <div className="flex flex-col gap-2 py-3">
@@ -1551,9 +1542,6 @@ export function AgentInfoButton({ agent, sessionId, permissionLevel }: AgentInfo
   // the same gesture (pointer arrival + click) and would otherwise toggle the
   // just-hover-opened panel straight back shut. See HOVER_CLICK_GRACE_MS.
   const hoverOpenedAtRef = useRef(0);
-  // WIP(session_overview): desktop cost moves to the session overview; the mobile
-  // Agent info dialog keeps it.
-  const sessionOverview = isFeatureEnabled(useServerInfo(), "session_overview");
 
   useEffect(() => {
     return () => {
@@ -1687,7 +1675,6 @@ export function AgentInfoButton({ agent, sessionId, permissionLevel }: AgentInfo
           permissionLevel={permissionLevel}
           mcpDirty={mcpDirty}
           onMcpDirtyChange={setMcpDirty}
-          hideSessionCost={sessionOverview}
           onSubdialogOpenChange={(isOpen) => {
             subdialogOpenRef.current = isOpen;
           }}

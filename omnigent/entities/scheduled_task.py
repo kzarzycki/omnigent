@@ -66,10 +66,6 @@ class ScheduledTask:
         ``None`` means use the agent's configured default.
     :param archive_when_done: Archive a run's session when its turn ends
         ``succeeded`` and it has no ``omnigent.keep`` label.
-    :param mcp_services: MCP services every fired session starts with, as the
-        deployment's service names, e.g. ``("github", "linear")``. The server's
-        session MCP selection turns them into session labels at fire time.
-        Empty means fired sessions get no MCP selection.
     :param max_cost_usd: Optional per-firing cost budget in USD. When set, the
         fire path attaches a ``cost_budget`` policy to each spawned session that
         blocks all models once cumulative spend reaches this limit. ``None``
@@ -115,7 +111,6 @@ class ScheduledTask:
     reasoning_effort: str | None = None
     permission_mode: str | None = None
     archive_when_done: bool = False
-    mcp_services: tuple[str, ...] = ()
     max_cost_usd: float | None = None
     session_mode: str = "new"
     session_id: str | None = None

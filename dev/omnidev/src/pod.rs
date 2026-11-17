@@ -256,7 +256,11 @@ fn seed_config_file(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::lock_test_env;
+    use std::sync::Mutex;
+
+    // `real_config_path` reads process-global env; serialize the tests that
+    // set it so parallel runs don't observe each other's overrides.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tempdir() -> PathBuf {
         let unique = format!(
@@ -288,9 +292,9 @@ mod tests {
 
     /// Point `OMNIGENT_CONFIG_HOME` at `home` for the duration of `f`, restoring
     /// the previous value afterwards. Serialized against other env-touching
-    /// tests via `lock_test_env`.
+    /// tests via `ENV_LOCK`.
     fn with_config_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = lock_test_env();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("OMNIGENT_CONFIG_HOME");
         std::env::set_var("OMNIGENT_CONFIG_HOME", home);
         let out = f();
@@ -364,7 +368,7 @@ mod tests {
     fn real_config_path_falls_back_to_home_dot_omnigent() {
         // With no OMNIGENT_CONFIG_HOME, the real config resolves under
         // `$HOME/.omnigent/` — the path a normal pod run seeds from.
-        let _guard = lock_test_env();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_cfg = std::env::var_os("OMNIGENT_CONFIG_HOME");
         let prev_home = std::env::var_os("HOME");
 

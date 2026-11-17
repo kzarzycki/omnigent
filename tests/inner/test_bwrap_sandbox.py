@@ -469,22 +469,24 @@ def test_wrap_launcher_argv_binds_etc_alternatives(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "allow_network,broker_socket,should_unshare",
-    [(True, False, False), (False, False, True), (True, True, True)],
-    ids=["network_shared", "network_isolated", "tcp_broker"],
+    "allow_network,should_unshare",
+    [(True, False), (False, True)],
+    ids=["network_shared", "network_isolated"],
 )
 def test_wrap_launcher_argv_unshare_net_follows_allow_network(
-    tmp_path: Path, allow_network: bool, broker_socket: bool, should_unshare: bool
+    tmp_path: Path, allow_network: bool, should_unshare: bool
 ) -> None:
     """
-    Direct networking is isolated when disallowed or when a TCP broker owns it.
+    ``--unshare-net`` is emitted iff ``policy.allow_network`` is
+    False. With ``allow_network=True`` the helper sees the host
+    network namespace; with ``False`` bwrap creates a fresh empty
+    namespace (no host interfaces).
 
     Direction of the flag matters — flipping it would silently
     invert network policy for every spec.
     """
     backend = _make_backend()
     policy = _make_policy(tmp_path, allow_network=allow_network)
-    policy.tcp_egress_socket_path = str(tmp_path / "broker.sock") if broker_socket else None
     argv = backend.wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
     assert ("--unshare-net" in argv) is should_unshare
 

@@ -4,7 +4,6 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // rather than hiding the tab entirely.
 
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
-import type * as UseWorkspaceChangedFilesModule from "@/hooks/useWorkspaceChangedFiles";
 import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
 import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseConversationsModule from "@/hooks/useConversations";
@@ -33,8 +32,7 @@ vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
   ...(await importOriginal<typeof UseTerminalsModule>()),
   useTerminals: vi.fn(() => ({ terminals: [], isLoading: false, error: null })),
 }));
-vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => ({
-  ...(await importOriginal<typeof UseWorkspaceChangedFilesModule>()),
+vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: vi.fn(() => ({
     data: { available: true, root: null },
     isLoading: false,
@@ -74,7 +72,6 @@ vi.mock("./Sidebar", () => ({
   isMobileViewport: vi.fn(() => false),
 }));
 vi.mock("./PullRequestPanel", () => ({
-  selectPullRequestInPanel: vi.fn(),
   PullRequestPanel: () => {
     if (pullRequestFault.error) throw pullRequestFault.error;
     return <div data-testid="github-panel">Pull request details</div>;
@@ -106,7 +103,6 @@ vi.mock("./TerminalsPanel", () => ({
 import { AppShell } from "./AppShell";
 import { FileViewerContext, useFolderOpener, useOpenGithubTab } from "./FileViewerContext";
 import { revealFolderInFilesPanel } from "./FilesPanel";
-import { selectPullRequestInPanel } from "./PullRequestPanel";
 import { isMobileViewport } from "./Sidebar";
 import { usePullRequestInfo } from "@/hooks/usePullRequests";
 import { useConversations } from "@/hooks/useConversations";
@@ -125,7 +121,6 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  vi.mocked(selectPullRequestInPanel).mockClear();
   pullRequestFault.error = null;
   window.addEventListener("error", suppressPullRequestFault);
   // The rail persists per-session state (selected tab, width) in
@@ -167,7 +162,6 @@ beforeEach(() => {
 });
 
 const LINKED_FOLDER = "/home/u/ws/experimental/data";
-const LINKED_PR = "https://github.com/example/app/pull/42";
 
 function ChatLinkProbe() {
   const [broken, setBroken] = useState(false);
@@ -186,9 +180,6 @@ function ChatLinkProbe() {
       </button>
       <button type="button" onClick={() => openGithubTab?.()}>
         Open PR
-      </button>
-      <button type="button" onClick={() => openGithubTab?.(LINKED_PR)}>
-        Open selected PR
       </button>
       <button type="button" onClick={() => openFolder?.(LINKED_FOLDER)}>
         Open folder
@@ -277,12 +268,7 @@ describe("opening Pull Requests from the composer", () => {
     vi.mocked(isMobileViewport).mockReturnValue(true);
     renderShell();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open selected PR" }));
-    expect(selectPullRequestInPanel).toHaveBeenLastCalledWith(
-      expect.any(QueryClient),
-      "conv_ws",
-      LINKED_PR,
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Open PR" }));
 
     const drawer = screen.getByTestId("github-panel-drawer");
     expect(drawer).toHaveAttribute("data-state", "open");
@@ -303,12 +289,7 @@ describe("opening Pull Requests from the composer", () => {
       if (!isPinned) writePinnedWorkspaceTabs(["files", "changes", "subagents"]);
       renderShell();
 
-      fireEvent.click(screen.getByRole("button", { name: "Open selected PR" }));
-      expect(selectPullRequestInPanel).toHaveBeenLastCalledWith(
-        expect.any(QueryClient),
-        "conv_ws",
-        LINKED_PR,
-      );
+      fireEvent.click(screen.getByRole("button", { name: "Open PR" }));
 
       const workspace = screen.getByRole("complementary", { name: "Workspace" });
       expect(within(workspace).getByRole("tab", { name: "Pull Requests" })).toHaveAttribute(

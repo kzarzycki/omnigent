@@ -207,15 +207,14 @@ extension AppRootView {
     guard let deepLink = DeepLink.parse(url) else {
       #if DEBUG
         if ProcessInfo.processInfo.environment["OMNIGENT_DEEPLINK_TRACE"] != nil {
-          NSLog("[DeepLink] REJECTED")
+          NSLog("[DeepLink] REJECTED \(url.absoluteString)")
         }
       #endif
       return
     }
     #if DEBUG
       if ProcessInfo.processInfo.environment["OMNIGENT_DEEPLINK_TRACE"] != nil {
-        let route = deepLink.path.split(separator: "?", maxSplits: 1).first ?? ""
-        NSLog("[DeepLink] ACCEPTED origin=\(deepLink.origin) path=\(route)")
+        NSLog("[DeepLink] ACCEPTED origin=\(deepLink.origin) path=\(deepLink.path)")
       }
     #endif
     let targetOrigin = deepLink.origin
@@ -272,16 +271,7 @@ extension AppRootView {
 
   /// Append a conversation under the mount without moving it into the server's query or fragment.
   static func conversationURL(for serverURL: URL, path: String) -> URL {
-    guard let route = URLComponents(string: path), let query = route.percentEncodedQuery else {
-      return serverURL.appendingPathComponent(path)
-    }
-    let destination = serverURL.appendingPathComponent(route.path)
-    guard var components = URLComponents(url: destination, resolvingAgainstBaseURL: false) else {
-      return destination
-    }
-    components.percentEncodedQuery = [components.percentEncodedQuery, query]
-      .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "&")
-    return components.url ?? destination
+    serverURL.appendingPathComponent(path)
   }
 }
 

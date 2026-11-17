@@ -14,7 +14,7 @@
 // stale. Returns `null` when the session hasn't been loaded yet or is a hostless
 // local session; such requests carry the client's own key (`routingKey.ts`).
 
-import { clientRoutingKey } from "./routingKey.ts";
+import { clientRoutingKey } from "./routingKey";
 
 const _sessionHosts = new Map<string, string>();
 const _hostChangeListeners = new Set<() => void>();
@@ -200,11 +200,11 @@ let _modalHostResolved = false;
  * first-seen insertion order (Map iteration order), which is stable enough for
  * a best-effort cache-affinity hint.
  */
-function pickModalHost(hostIds: Iterable<string>): string | null {
+function pickModalHost(hosts: Map<string, string>): string | null {
   const counts = new Map<string, number>();
   let best: string | null = null;
   let bestCount = 0;
-  for (const host of hostIds) {
+  for (const host of hosts.values()) {
     const next = (counts.get(host) ?? 0) + 1;
     counts.set(host, next);
     if (next > bestCount) {
@@ -227,9 +227,9 @@ function pickModalHost(hostIds: Iterable<string>): string | null {
  * persisted-preference backstop, so a stale/sandbox-sentinel choice can never
  * become the slice key.
  */
-export function resolveModalHost(ownListHostIds: Iterable<string>): void {
+export function resolveModalHost(): void {
   if (_modalHostResolved) return;
-  _modalHostId = pickModalHost(ownListHostIds);
+  _modalHostId = pickModalHost(_sessionHosts);
   _modalHostResolved = true;
 }
 

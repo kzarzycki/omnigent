@@ -27,7 +27,6 @@ from .datamodel import (
     GitSshBinding,
     OSEnvSandboxSpec,
     OSEnvSpec,
-    TcpEgressRoute,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,7 +193,6 @@ class SandboxPolicy:
     egress_relay_port: int | None = None
     egress_socket_path: str | None = None
     git_ssh_socket_path: str | None = None
-    tcp_egress_socket_path: str | None = None
     deny_unix_socket_paths: list[Path] | None = None
     credential_source_paths: list[Path] | None = None
     # Parent-side only: the resolved credential-proxy policy. Read in
@@ -205,7 +203,6 @@ class SandboxPolicy:
     # secrets never touch the policy that serialises into logs / dumps.
     credential_proxy: CredentialProxySpec | None = None
     git_ssh: list[GitSshBinding] | None = None
-    tcp_egress: list[TcpEgressRoute] | None = None
     # Parent-side only: write roots the dotfile / escaping-symlink mask
     # scan must NOT walk. Framework code adds the sandbox's own runtime
     # scaffolding to ``write_roots`` via
@@ -261,7 +258,6 @@ class SandboxPolicy:
             "egress_relay_port": self.egress_relay_port,
             "egress_socket_path": self.egress_socket_path,
             "git_ssh_socket_path": self.git_ssh_socket_path,
-            "tcp_egress_socket_path": self.tcp_egress_socket_path,
             "deny_unix_socket_paths": (
                 _json_string_list(self.deny_unix_socket_paths)
                 if self.deny_unix_socket_paths is not None
@@ -328,10 +324,6 @@ class SandboxPolicy:
         git_ssh_socket_path = (
             str(git_ssh_socket_path_raw) if git_ssh_socket_path_raw is not None else None
         )
-        tcp_egress_socket_path_raw = data.get("tcp_egress_socket_path")
-        tcp_egress_socket_path = (
-            str(tcp_egress_socket_path_raw) if tcp_egress_socket_path_raw is not None else None
-        )
         deny_unix_socket_paths_data = data.get("deny_unix_socket_paths")
         deny_unix_socket_paths: list[Path] | None = None
         if isinstance(deny_unix_socket_paths_data, list):
@@ -371,7 +363,6 @@ class SandboxPolicy:
             egress_relay_port=egress_relay_port,
             egress_socket_path=egress_socket_path,
             git_ssh_socket_path=git_ssh_socket_path,
-            tcp_egress_socket_path=tcp_egress_socket_path,
             deny_unix_socket_paths=deny_unix_socket_paths,
             credential_source_paths=credential_source_paths,
         )
@@ -542,18 +533,6 @@ def resolve_sandbox(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
             sandbox_spec, git_ssh=normalize_git_ssh_bindings(sandbox_spec.git_ssh)
         )
         spec = replace(spec, sandbox=sandbox_spec)
-    if sandbox_spec.tcp_egress is not None:
-        if sandbox_spec.type not in ("linux_bwrap", "darwin_seatbelt"):
-            raise ValueError("tcp_egress requires linux_bwrap or darwin_seatbelt")
-        from .tcp_egress_policy import normalize_tcp_egress
-
-        sandbox_spec = replace(
-            sandbox_spec,
-            tcp_egress=normalize_tcp_egress(
-                sandbox_spec.tcp_egress, egress_rules=sandbox_spec.egress_rules or ()
-            ),
-        )
-        spec = replace(spec, sandbox=sandbox_spec)
     if sandbox_spec.type != "linux_bwrap" and any(
         grant.copy_on_write for grant in sandbox_spec.write_path_specs
     ):
@@ -589,8 +568,6 @@ def resolve_sandbox(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
             allow_network=True,
         )
     policy = _get_backend(sandbox_spec.type).resolve(spec, cwd)
-    if policy.tcp_egress:
-        policy = replace(policy, allow_network=False)
     if policy.credential_proxy is not None:
         for entry in policy.credential_proxy.entries:
             if (
@@ -869,8 +846,6 @@ def is_unconfined(policy: SandboxPolicy) -> bool:
 def activate_sandbox(policy: SandboxPolicy) -> None:
     if not policy.active:
         return
-    if policy.tcp_egress and policy.tcp_egress_socket_path is None:
-        raise ValueError("tcp_egress requires its parent broker before sandbox activation")
     _get_backend(policy.backend_type).activate(policy)
 
 
@@ -920,7 +895,6 @@ def _clone_policy_with(
         egress_relay_port=policy.egress_relay_port,
         egress_socket_path=policy.egress_socket_path,
         git_ssh_socket_path=policy.git_ssh_socket_path,
-        tcp_egress_socket_path=policy.tcp_egress_socket_path,
         deny_unix_socket_paths=(
             list(policy.deny_unix_socket_paths)
             if policy.deny_unix_socket_paths is not None
@@ -937,7 +911,6 @@ def _clone_policy_with(
         # the feature.
         credential_proxy=policy.credential_proxy,
         git_ssh=policy.git_ssh,
-        tcp_egress=policy.tcp_egress,
         # Preserve (or, when a helper is extending it, override) the set
         # of framework write roots excluded from the mask scan. ``None``
         # from a caller means "keep whatever the source policy carried".
@@ -985,11 +958,7 @@ def with_additional_write_roots(
 def _restore_broker_socket_roots(policy: SandboxPolicy) -> SandboxPolicy:
     roots = [
         Path(path).parent
-        for path in (
-            policy.egress_socket_path,
-            policy.git_ssh_socket_path,
-            policy.tcp_egress_socket_path,
-        )
+        for path in (policy.egress_socket_path, policy.git_ssh_socket_path)
         if path is not None
     ]
     return with_additional_write_roots(policy, roots) if roots else policy
@@ -1385,8 +1354,6 @@ def create_exec_launcher(
         launcher, which would produce an unrunnable script.
     :raises ValueError: If a write grant includes the launcher directory.
     """
-    if sandbox.tcp_egress and sandbox.tcp_egress_socket_path is None:
-        raise ValueError("tcp_egress requires its parent broker before creating a launcher")
     launcher_dir = Path(tempfile.gettempdir()).resolve(strict=False)
     if sandbox.active:
         for root in [*sandbox.write_roots, *sandbox.write_files]:

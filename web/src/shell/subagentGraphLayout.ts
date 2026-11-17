@@ -1,4 +1,3 @@
-import type { AgentCost } from "@/hooks/useAgentCosts";
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
 import { MAX_TREE_DEPTH } from "@/hooks/useChildSessions";
 import { nativeCodingAgentForSubagentWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
@@ -13,8 +12,6 @@ export interface AgentNodeData {
   sessionId: string;
   isActive: boolean;
   preview: string | null;
-  /** Display cost, when the session overview feature has loaded one. */
-  cost?: AgentCost;
   [key: string]: unknown;
 }
 

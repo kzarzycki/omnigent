@@ -12,7 +12,6 @@ Servers that track a session's PRs vouch for the PR a request targets
 
 from __future__ import annotations
 
-import functools
 import logging
 import re
 import subprocess
@@ -760,35 +759,6 @@ def pr_labels(
     return facet.repo_labels(root, reference)
 
 
-# Names of the operations that change a PR on GitHub, recorded by ``_invalidates_pr_reads``.
-PR_WRITE_OPERATIONS: set[str] = set()
-
-
-def _invalidates_pr_reads(
-    function: Callable[..., dict[str, Any]],
-) -> Callable[..., dict[str, Any]]:
-    """Drop the shared PR read cache after ``function``, even when it raises.
-
-    A failed write may have changed the PR before it failed. Every caller (the runner's
-    routes and the host's offline-runner dispatch) goes through the write function, so
-    the cache is invalidated in this one place.
-    """
-
-    PR_WRITE_OPERATIONS.add(function.__name__)
-
-    @functools.wraps(function)
-    def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        try:
-            return function(*args, **kwargs)
-        finally:
-            from omnigent.runner import github_resource
-
-            github_resource.invalidate_pr_reads(kwargs.get("pr_url"))
-
-    return wrapper
-
-
-@_invalidates_pr_reads
 def update_pr_labels(
     root: str,
     *,
@@ -841,7 +811,6 @@ def _merge_request(merge_method: object, expected_head: object) -> tuple[str, st
     return merge_method, expected_head
 
 
-@_invalidates_pr_reads
 def merge_pr(
     root: str,
     *,
@@ -863,7 +832,6 @@ def merge_pr(
     return facet.merge(root, reference, merge_method=method, expected_head=head)
 
 
-@_invalidates_pr_reads
 def merge_pr_as(
     root: str,
     *,
@@ -898,7 +866,6 @@ def merge_pr_as(
     )
 
 
-@_invalidates_pr_reads
 def disable_pr_auto_merge(
     root: str, *, session_id: str | None = None, pr_url: str | None = None
 ) -> dict[str, Any]:
@@ -941,7 +908,6 @@ def pr_review_candidates(
     return facet.review_candidates(root, reference)
 
 
-@_invalidates_pr_reads
 def update_pr_reviewers(
     root: str,
     *,
@@ -1049,7 +1015,6 @@ def pr_review_thread_comments(
     )
 
 
-@_invalidates_pr_reads
 def reply_to_pr_review_thread(
     root: str,
     *,
@@ -1066,7 +1031,6 @@ def reply_to_pr_review_thread(
     )
 
 
-@_invalidates_pr_reads
 def create_pr_review_thread(
     root: str,
     *,
@@ -1111,7 +1075,6 @@ def create_pr_review_thread(
     )
 
 
-@_invalidates_pr_reads
 def create_pr_comment(
     root: str,
     *,
@@ -1144,7 +1107,6 @@ def _details_target(
     )
 
 
-@_invalidates_pr_reads
 def update_pr_details(
     root: str,
     *,

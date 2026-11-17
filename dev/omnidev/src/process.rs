@@ -152,7 +152,6 @@ mod tests {
 
     #[test]
     fn vite_forwards_configured_host_and_port_but_backend_url_stays_loopback() {
-        let _guard = crate::paths::lock_test_env();
         let repo = tempdir();
         let pod_dir = tempdir();
         let pod = Pod::create(
@@ -185,7 +184,6 @@ mod tests {
 
     #[test]
     fn omnigent_processes_mirror_logs_to_omnidev_pipe() {
-        let _guard = crate::paths::lock_test_env();
         let repo = tempdir();
         let pod_dir = tempdir();
         let pod = Pod::create(
@@ -233,7 +231,6 @@ mod tests {
 
     #[test]
     fn external_profile_expands_runtime_values() {
-        let _guard = crate::paths::lock_test_env();
         let repo = tempdir();
         let pod_dir = tempdir();
         let mut pod = Pod::create(

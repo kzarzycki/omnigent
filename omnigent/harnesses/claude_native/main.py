@@ -1054,12 +1054,8 @@ def _claude_model_probe_launch(
     if not claude_code_managed_mcp_present():
         args.extend(["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'])
     args.extend(["--no-session-persistence", *extra_args])
-    # The user's SessionStart hooks would otherwise run for this headless call
-    # and push it past the probe timeout.
-    probe_settings: dict[str, object] = {"disableAllHooks": True}
     if claude_config is not None and claude_config.api_key_helper:
-        probe_settings["apiKeyHelper"] = claude_config.api_key_helper
-    args.extend(("--settings", json.dumps(probe_settings)))
+        args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
     cfg = load_effective_config()
     command = resolve_harness_command("claude-native", default="claude", cfg=cfg)
     launch_args = resolve_harness_args("claude-native", tuple(args), cfg=cfg)
@@ -7255,7 +7251,6 @@ def _websocket_connect(
 
     from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
     from omnigent.session_host import session_routing_headers
-    from omnigent.telemetry.request_headers import pop_client_user_agent
     from omnigent.util.tls import client_ssl_context
 
     # Identify as a first-party client so the server's WebSocket origin
@@ -7267,8 +7262,6 @@ def _websocket_connect(
         **session_routing_headers(attach_url),
         "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
     }
-    # websockets adds its own User-Agent on top of the handshake headers; send only ours.
-    user_agent = pop_client_user_agent(handshake_headers)
     # A remote (https) workspace yields a wss:// attach URL; build a verifying
     # SSL context from a real CA bundle so verification works on interpreters
     # whose OpenSSL default cert path is empty. ws:// passes ssl=None (the
@@ -7282,7 +7275,6 @@ def _websocket_connect(
                 additional_headers=handshake_headers,
                 close_timeout=_CLAUDE_ATTACH_WS_CLOSE_TIMEOUT_S,
                 ssl=ssl_ctx,
-                user_agent_header=user_agent,
             ),
         )
     except TypeError:
@@ -7293,7 +7285,6 @@ def _websocket_connect(
                 extra_headers=handshake_headers,
                 close_timeout=_CLAUDE_ATTACH_WS_CLOSE_TIMEOUT_S,
                 ssl=ssl_ctx,
-                user_agent_header=user_agent,
             ),
         )
 

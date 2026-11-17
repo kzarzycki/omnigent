@@ -12,7 +12,6 @@ from typing import Any, Protocol, cast
 import httpx
 
 from omnigent.debug_logging import runner_primary_session_id
-from omnigent.inner.executor import INTERRUPTION_MARKER_TEXT
 from omnigent.runner.app_support import (
     _resolve_forwarded_message_content,
     _SpecEntry,
@@ -42,7 +41,14 @@ class SessionHistory:
 
 
 # The user-role item Stop appends; it closes the turn rather than asking for one.
-CANCELLATION_MARKER_TEXT = INTERRUPTION_MARKER_TEXT
+CANCELLATION_MARKER_TEXT = (
+    "[System: interrupted]\n"
+    "The user interrupted and abandoned their previous request (the user "
+    "message immediately before this one). Do not resume or act on that "
+    "interrupted request unless the user asks for it again; treat the next "
+    "user message as the current instruction. The preceding assistant "
+    "message may be incomplete."
+)
 
 
 def is_cancellation_marker(item: dict[str, object]) -> bool:
@@ -386,6 +392,7 @@ def build_session_history(
         return True
 
     _CANCELLATION_TOOL_OUTPUT = "[Cancelled — tool execution was interrupted.]"
+    _CANCELLATION_MARKER_TEXT = CANCELLATION_MARKER_TEXT
 
     def _append_cancellation_items(conv_id: str) -> None:
         history = _session_histories.get(conv_id, [])
@@ -428,7 +435,7 @@ def build_session_history(
             "content": [
                 {
                     "type": "input_text",
-                    "text": INTERRUPTION_MARKER_TEXT,
+                    "text": _CANCELLATION_MARKER_TEXT,
                 }
             ],
         }

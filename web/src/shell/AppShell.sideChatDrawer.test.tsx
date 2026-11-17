@@ -5,7 +5,6 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // must not surface over the conversation now on screen.
 
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
-import type * as UseWorkspaceChangedFilesModule from "@/hooks/useWorkspaceChangedFiles";
 import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
 import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseConversationsModule from "@/hooks/useConversations";
@@ -29,8 +28,7 @@ vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
   ...(await importOriginal<typeof UseTerminalsModule>()),
   useTerminals: vi.fn(() => ({ terminals: [], isLoading: false, error: null })),
 }));
-vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => ({
-  ...(await importOriginal<typeof UseWorkspaceChangedFilesModule>()),
+vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: vi.fn(() => ({
     data: { available: true, root: null },
     isLoading: false,
@@ -75,7 +73,6 @@ vi.mock("./Sidebar", () => ({
   isMobileViewport: vi.fn(() => false),
 }));
 vi.mock("./PullRequestPanel", () => ({
-  selectPullRequestInPanel: vi.fn(),
   PullRequestPanel: () => <div data-testid="github-panel">Pull request details</div>,
 }));
 vi.mock("./FilesPanel", () => ({

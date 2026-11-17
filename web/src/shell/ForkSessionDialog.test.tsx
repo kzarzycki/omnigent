@@ -1855,7 +1855,6 @@ describe("ForkSessionDialog", () => {
           info: {
             features: { sandbox_profiles: true },
             managed_sandboxes_enabled: true,
-            request_managed_sandbox_host_id: true,
             sandbox_provider: "modal",
             sandbox_providers: ["modal", "agent_sandbox"],
           },
@@ -1895,7 +1894,6 @@ describe("ForkSessionDialog", () => {
             upToResponseId,
             sandbox: {
               provider: "agent_sandbox",
-              hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
               profileId: "large",
               profileRevision: "other-revision",
               workspaces: [],
@@ -2131,11 +2129,7 @@ describe("ForkSessionDialog", () => {
       } as unknown as Awaited<ReturnType<typeof forkSession>>);
       renderDialog({
         ...CODING,
-        info: {
-          managed_sandboxes_enabled: true,
-          sandbox_provider: "modal",
-          request_managed_sandbox_host_id: true,
-        },
+        info: { managed_sandboxes_enabled: true, sandbox_provider: "modal" },
       });
 
       selectSandbox();
@@ -2155,11 +2149,7 @@ describe("ForkSessionDialog", () => {
         agentId: undefined,
         upToResponseId: undefined,
         config: {},
-        sandbox: {
-          provider: "modal",
-          hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
-          workspaces: ["https://github.com/org/repo#release-1.2"],
-        },
+        sandbox: { provider: "modal", workspaces: ["https://github.com/org/repo#release-1.2"] },
       });
       // The server provisions the host, so the dialog must NOT also try to
       // bind one — a launchRunner here would 404 on a host that doesn't exist.
@@ -2200,7 +2190,6 @@ describe("ForkSessionDialog", () => {
           ...CODING,
           info: {
             managed_sandboxes_enabled: true,
-            request_managed_sandbox_host_id: true,
             sandbox_providers: ["lakebox", "arclet"],
             sibling_sessions: true,
           },
@@ -2231,11 +2220,7 @@ describe("ForkSessionDialog", () => {
           upToResponseId: undefined,
           config: {},
           sandbox: provider
-            ? {
-                provider,
-                hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
-                workspaces: ["https://github.com/example-org/monorepo"],
-              }
+            ? { provider, workspaces: ["https://github.com/example-org/monorepo"] }
             : undefined,
         });
         if (provider) {
@@ -2453,7 +2438,6 @@ describe("ForkSessionDialog", () => {
           ...CODING,
           info: {
             managed_sandboxes_enabled: true,
-            request_managed_sandbox_host_id: true,
             sandbox_provider: "agent_sandbox",
             sandbox_providers: ["agent_sandbox"],
             sandbox_provider_capabilities: { agent_sandbox: { multi_repo: true } },
@@ -2487,10 +2471,7 @@ describe("ForkSessionDialog", () => {
           ]);
         } else {
           expect(fetchSessionRepositoryBranchesMock).not.toHaveBeenCalled();
-          expect(call?.sandbox).toEqual({
-            provider: "agent_sandbox",
-            hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
-          });
+          expect(call?.sandbox).toEqual({ provider: "agent_sandbox" });
         }
       },
     );
@@ -2510,7 +2491,6 @@ describe("ForkSessionDialog", () => {
         ...CODING,
         info: {
           managed_sandboxes_enabled: true,
-          request_managed_sandbox_host_id: true,
           sandbox_provider: "agent_sandbox",
           sandbox_provider_capabilities: { agent_sandbox: { multi_repo: true } },
           session_fork_workspaces: undefined,
@@ -2542,7 +2522,6 @@ describe("ForkSessionDialog", () => {
       fireEvent.click(submit);
       await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
       expect(forkSessionMock.mock.calls[0][1]?.sandbox).toEqual({
-        hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
         provider: "agent_sandbox",
         workspace: "https://github.com/org/api#main",
       });
@@ -2681,7 +2660,6 @@ describe("ForkSessionDialog", () => {
           ...CODING,
           info: {
             managed_sandboxes_enabled: true,
-            request_managed_sandbox_host_id: true,
             sandbox_provider: "modal",
             session_fork_workspaces: undefined,
           },
@@ -2695,7 +2673,6 @@ describe("ForkSessionDialog", () => {
         fireEvent.click(screen.getByTestId("fork-session-submit"));
         await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
         expect(forkSessionMock.mock.calls[0][1]?.sandbox).toEqual({
-          hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
           provider: "modal",
           workspace: "https://github.com/org/api#main",
         });
@@ -2957,11 +2934,7 @@ describe("ForkSessionDialog", () => {
         } as unknown as Awaited<ReturnType<typeof forkSession>>);
         renderDialog({
           ...CODING,
-          info: {
-            managed_sandboxes_enabled: true,
-            session_fork_workspaces: acceptsWorkspaces,
-            request_managed_sandbox_host_id: true,
-          },
+          info: { managed_sandboxes_enabled: true, session_fork_workspaces: acceptsWorkspaces },
         });
 
         selectSandbox();
@@ -2976,7 +2949,6 @@ describe("ForkSessionDialog", () => {
 
         await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
         expect(forkSessionMock.mock.calls[0][1]?.sandbox).toEqual({
-          hostId: expect.stringMatching(/^[0-9a-f]{32}$/),
           provider: null,
           ...(acceptsWorkspaces ? { workspaces: [] } : { workspace: null }),
         });

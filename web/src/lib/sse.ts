@@ -905,7 +905,7 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       type: "session_superseded",
       conversationId,
       targetConversationId,
-      reason: data.reason === "rewind" ? "rewind" : "clear",
+      reason: "clear",
     } satisfies SessionSupersededEvent;
   }
   if (eventType === "session.btw_sidechat") {
