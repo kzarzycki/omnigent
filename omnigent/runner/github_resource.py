@@ -81,6 +81,7 @@ except ImportError:  # Windows: reads are not single-flighted
 
 from omnigent import config as _config
 from omnigent.git_providers import host_of
+from omnigent.git_providers.github import gh_config_dir
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.process_logging import data_dir
 from omnigent.runner import pr_resource
@@ -1162,6 +1163,8 @@ _LISTING_LIMIT = 100
 _OPEN_PR_TTL_SECONDS = 10.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
 _ACCOUNTS_TTL_SECONDS = 30.0
+# A failed read is remembered briefly so waiters on one lock don't each retry ``gh``.
+_FAILED_READ_TTL_SECONDS = 5.0
 
 # Set for the server's own refreshes, which need no conversation (comments, timeline).
 _background_read: ContextVar[bool] = ContextVar("github_background_read", default=False)
@@ -1175,15 +1178,6 @@ def background_reads(enabled: object) -> Iterator[None]:
         yield
     finally:
         _background_read.reset(token)
-
-
-def _gh_config_dir() -> Path:
-    """Where ``gh`` keeps ``hosts.yml``, resolved in ``gh``'s own order."""
-    configured = os.environ.get("GH_CONFIG_DIR")
-    if configured:
-        return Path(configured)
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "gh"
 
 
 def _accounts_file_stat(config_dir: Path) -> list[int] | None:
@@ -1205,7 +1199,7 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     stat stored with it, so a switch is seen at once. A missing file is never cached.
     The window still bounds a token that expires without the file changing.
     """
-    config_dir = _gh_config_dir()
+    config_dir = Path(gh_config_dir())
     key = ("accounts", str(config_dir))
     stat = _accounts_file_stat(config_dir)
     if stat is not None:
@@ -1292,6 +1286,7 @@ def _open_pr_listing(
         hit, listing = _cache_get(key, shared=True)
         if hit:
             return listing
+        started = time.time()
         read = _gh_pr_read(
             [
                 "list",
@@ -1307,8 +1302,9 @@ def _open_pr_listing(
             token=token,
         )
         if read is None or not isinstance(read[0], list):
+            _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
             return None
-        _cache_put(key, read[0], _OPEN_PR_TTL_SECONDS, shared=True)
+        _cache_put(key, read[0], _OPEN_PR_TTL_SECONDS, shared=True, started=started)
         return read[0]
 
 
@@ -1344,23 +1340,72 @@ def _reference_pr_data(
             for entry in listing or []:
                 if isinstance(entry, dict) and entry.get("number") == reference.number:
                     return entry
+        started = time.time()
         data = _pr_json(root, reference, fields, token)
-        if data is not None:
-            state = data.get("state")
-            finished = state == "MERGED" or (background and state == "CLOSED")
-            _cache_put(
-                key,
-                data,
-                _FINISHED_PR_TTL_SECONDS if finished else _OPEN_PR_TTL_SECONDS,
-                shared=True,
-            )
+        if data is None:
+            _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
+            return None
+        state = data.get("state")
+        finished = state == "MERGED" or (background and state == "CLOSED")
+        _cache_put(
+            key,
+            data,
+            _FINISHED_PR_TTL_SECONDS if finished else _OPEN_PR_TTL_SECONDS,
+            shared=True,
+            started=started,
+        )
         return data
+
+
+def _scope_of(key: Sequence[str]) -> tuple[str, str | None] | None:
+    """``(repository, number)`` a PR cache key covers (``None`` number: the listing)."""
+    if key[0] == "pr":
+        return key[2], key[3]
+    if key[0] == "pr-list":
+        return key[2], None
+    return None
+
+
+def _invalidation_directory() -> Path:
+    return _cache_directory() / "invalidated"
+
+
+def _invalidated_since(key: Sequence[str]) -> float:
+    """When a write last invalidated ``key``'s PR (0 when none did), as other runners see it."""
+    scope = _scope_of(key)
+    latest = 0.0
+    if scope is None:
+        return latest
+    for path in _invalidation_directory().glob("*.json"):
+        try:
+            marker = json.loads(path.read_text(encoding="utf-8"))
+            repository, number, at = marker["repository"], marker["number"], float(marker["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if repository in ("*", scope[0]) and (number == "*" or scope[1] in (None, number)):
+            latest = max(latest, at)
+    return latest
+
+
+def _record_invalidation(repository: str, number: str) -> None:
+    """Stamp the PR (``*`` for all) as written now, so reads begun earlier aren't cached."""
+    directory = _invalidation_directory()
+    digest = hashlib.sha256(f"{repository}\0{number}".encode()).hexdigest()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"repository": repository, "number": number, "at": time.time()}, handle)
+        os.replace(temporary, directory / f"{digest}.json")
+    except OSError:
+        _logger.debug("github_resource: could not record an invalidation", exc_info=True)
 
 
 def invalidate_pr_reads(pr_url: str | None) -> None:
     """Drop the shared PR entries a write made stale: the PR's, and its repository's listing.
 
-    Without a ``pr_url`` (a write to the checkout's own PR) every PR entry goes.
+    Without a ``pr_url`` (a write to the checkout's own PR) every PR entry goes. The write
+    is also stamped on disk, so a read already in flight is not cached when it returns.
     """
     scope: tuple[str, str] | None = None
     if pr_url:
@@ -1369,6 +1414,7 @@ def invalidate_pr_reads(pr_url: str | None) -> None:
             scope = (_repo_argument(reference).lower(), str(reference.number))
         except ValueError:
             pass
+    _record_invalidation(*(scope or ("*", "*")))
 
     def stale(key: Sequence[str]) -> bool:
         if key[0] == "pr":
@@ -2911,6 +2957,21 @@ def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any
     return True, value
 
 
+def _remove_unheld_lock(path: Path) -> None:
+    """Delete a lock file only if nobody holds it (``flock`` doesn't touch its mtime)."""
+    if fcntl is None:
+        path.unlink()
+        return
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path.unlink()
+    except BlockingIOError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _sweep_cache_directory(directory: Path) -> None:
     """Remove expired entries and files a crashed writer or finished lock left behind."""
     now = time.time()
@@ -2922,11 +2983,14 @@ def _sweep_cache_directory(directory: Path) -> None:
                 continue
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    for pattern in ("*.tmp", "*.lock"):
-        for path in directory.glob(pattern):
-            with suppress(OSError):
-                if now - path.stat().st_mtime > _STALE_FILE_SECONDS:
-                    path.unlink()
+    for path in (*directory.glob("*.tmp"), *(directory / "invalidated").glob("*")):
+        with suppress(OSError):
+            if now - path.stat().st_mtime > _STALE_FILE_SECONDS:
+                path.unlink()
+    for path in directory.glob("*.lock"):
+        with suppress(OSError):
+            if now - path.stat().st_mtime > _STALE_FILE_SECONDS:
+                _remove_unheld_lock(path)
     remaining = list(directory.glob("*.json"))
     if len(remaining) >= _PREVIEW_CACHE_MAX:
         for path in remaining:
@@ -2934,8 +2998,21 @@ def _sweep_cache_directory(directory: Path) -> None:
                 path.unlink()
 
 
-def _cache_put(key: tuple[str, ...], value: Any, ttl: float, *, shared: bool = False) -> None:
-    """Remember ``value`` for ``ttl`` seconds, in memory and, if ``shared``, on disk."""
+def _cache_put(
+    key: tuple[str, ...],
+    value: Any,
+    ttl: float,
+    *,
+    shared: bool = False,
+    started: float | None = None,
+) -> None:
+    """Remember ``value`` for ``ttl`` seconds, in memory and, if ``shared``, on disk.
+
+    A PR read that ``started`` before a write to that PR is not remembered: it may
+    predate the write.
+    """
+    if started is not None and _invalidated_since(key) >= started:
+        return
     with _preview_lock:
         if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
             _preview_cache.clear()
@@ -2950,6 +3027,10 @@ def _cache_put(key: tuple[str, ...], value: Any, ttl: float, *, shared: bool = F
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump({"expires": time.time() + ttl, "key": list(key), "value": value}, handle)
         os.replace(temporary, path)
+        if started is not None and _invalidated_since(key) >= started:
+            path.unlink(missing_ok=True)
+            with _preview_lock:
+                _preview_cache.pop(key, None)
     except (OSError, TypeError, ValueError):
         _logger.debug("github_resource: could not share a cached read", exc_info=True)
 

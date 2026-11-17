@@ -13,10 +13,12 @@ from typing import Any
 import httpx
 import pytest
 
+from omnigent.git_providers.github import gh_config_dir
 from omnigent.process_logging import data_dir
 from omnigent.runner import create_runner_app, pr_resource
 from omnigent.runner import github_resource as github
 from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
+from tests._helpers.polling import poll_until
 from tests.runner.helpers import NullServerClient
 
 REPO = "https://github.com/acme/widgets"
@@ -44,6 +46,7 @@ class FakeGh:
         self.preference: str | None = None
         self.states: dict[int, str] = {}
         self.delay = 0.0
+        self.fail = False  # pr reads fail after their delay
 
     @property
     def accounts(self) -> list[dict[str, Any]]:
@@ -96,10 +99,14 @@ class FakeGh:
             return (0, self.tokens[login], "") if login in self.tokens else (1, "", "no token")
         if argv[:2] == ["pr", "list"]:
             time.sleep(self.delay)
+            if self.fail:
+                return 1, "", "github is down"
             numbers = [n for n in OPEN_NUMBERS if self.states.get(n, "OPEN") == "OPEN"]
             return 0, json.dumps([self._pr(number, token) for number in numbers]), ""
         if argv[:2] == ["pr", "view"]:
             time.sleep(self.delay)
+            if self.fail:
+                return 1, "", "github is down"
             return 0, json.dumps(self._pr(int(argv[2]), token)), ""
         return 1, "", "not faked"
 
@@ -256,12 +263,12 @@ def test_runners_with_different_gh_config_dirs_do_not_share_accounts(
 def test_the_gh_config_dir_follows_ghs_own_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", "/xdg")
-    assert github._gh_config_dir() == Path("/xdg/gh")
+    assert Path(gh_config_dir()) == Path("/xdg/gh")
     monkeypatch.setenv("GH_CONFIG_DIR", "/explicit")
-    assert github._gh_config_dir() == Path("/explicit")
+    assert Path(gh_config_dir()) == Path("/explicit")
     monkeypatch.delenv("GH_CONFIG_DIR")
     monkeypatch.delenv("XDG_CONFIG_HOME")
-    assert github._gh_config_dir() == Path.home() / ".config" / "gh"
+    assert Path(gh_config_dir()) == Path.home() / ".config" / "gh"
 
 
 @pytest.mark.parametrize("background", [False, True])
@@ -341,7 +348,9 @@ async def test_a_write_drops_the_pr_and_its_listing_but_not_other_prs(
     for number in (1, 2):
         _read(number, background=False)
         _read(number, background=True)
-    monkeypatch.setattr(pr_resource, operation, lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        pr_resource, operation, pr_resource._invalidates_pr_reads(lambda *_a, **_kw: {})
+    )
     async with runner_client as client:
         response = await client.post(
             f"/v1/sessions/session/resources/github/{route}",
@@ -396,3 +405,133 @@ def test_writing_sweeps_expired_entries_and_stale_temporary_files(fake_gh: FakeG
     assert sorted(path.name for path in directory.iterdir() if path.suffix != ".lock") == [
         github._cache_path(fresh_key).name
     ]
+
+
+def _fetch(number: int, *, background: bool) -> dict[str, Any] | None:
+    """A read that keeps the runner's in-memory cache."""
+    return github._reference_pr_data(
+        "/work", PullRequestRef.from_url(f"{REPO}/pull/{number}"), background=background
+    )
+
+
+def _in_threads(count: int, work: Any) -> None:
+    start = threading.Barrier(count)
+
+    def run(index: int) -> None:
+        start.wait()
+        work(index)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+class _MergeFacet:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    def merge(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if self.error:
+            raise self.error
+        return {}
+
+
+def _merge_through_host(monkeypatch: pytest.MonkeyPatch, error: Exception | None = None) -> None:
+    """Merge PR 1 the way the host does when the runner is offline."""
+    from omnigent.host.connect import HostProcess
+
+    reference = PullRequestRef.from_url(f"{REPO}/pull/1")
+    monkeypatch.setattr(pr_resource, "_merge_target", lambda *_a: (_MergeFacet(error), reference))
+    params = {"pr_url": reference.url, "merge_method": "squash", "expected_head": "a" * 40}
+    HostProcess._dispatch_fs_write_op("/work", "github_merge", params)
+
+
+def test_a_write_through_the_host_dispatcher_shows_the_new_state(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _read(1, background=False)["pr"]["state"] == "OPEN"
+    fake_gh.states[1] = "MERGED"
+    _merge_through_host(monkeypatch)
+    assert _read(1, background=False)["pr"]["state"] == "MERGED"
+
+
+def test_a_write_that_raises_still_drops_the_pr(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _read(1, background=False)
+    with pytest.raises(ValueError, match="refused"):
+        _merge_through_host(monkeypatch, ValueError("refused"))
+    assert ("pr", "1") not in {(key[0], key[3]) for key in _cached_keys() if key[0] == "pr"}
+
+
+def test_a_write_drops_the_runners_own_in_memory_entry(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (_fetch(1, background=False) or {})["state"] == "OPEN"
+    fake_gh.states[1] = "MERGED"
+    _merge_through_host(monkeypatch)
+    assert (_fetch(1, background=False) or {})["state"] == "MERGED"
+
+
+def test_a_read_in_flight_across_a_write_is_not_cached(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.4
+    github._preview_cache.clear()
+    reader = threading.Thread(target=_fetch, args=(1,), kwargs={"background": False})
+    reader.start()
+    poll_until(lambda: fake_gh.calls["pr view"], timeout_s=5, interval_s=0.01)  # read is in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    reader.join()
+    assert not [key for key in _cached_keys() if key[0] == "pr"]
+    assert not [key for key in github._preview_cache if key[0] == "pr"]
+
+
+def test_a_read_in_flight_across_a_write_to_another_pr_is_still_cached(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.4
+    github._preview_cache.clear()
+    reader = threading.Thread(target=_fetch, args=(1,), kwargs={"background": False})
+    reader.start()
+    poll_until(lambda: fake_gh.calls["pr view"], timeout_s=5, interval_s=0.01)  # read is in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/2")
+    reader.join()
+    assert [key[3] for key in _cached_keys() if key[0] == "pr"] == ["1"]
+
+
+def test_waiters_do_not_retry_a_read_that_just_failed(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.3
+    fake_gh.fail = True
+    github._preview_cache.clear()
+    _in_threads(4, lambda _: _fetch(1, background=True))
+    assert (fake_gh.calls["pr list"], fake_gh.calls["pr view"]) == (1, 1)
+
+
+def test_a_failed_read_is_tried_again_after_a_few_seconds(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.fail = True
+    assert _fetch(1, background=False) is None
+    fake_gh.fail = False
+    _later(monkeypatch, github._FAILED_READ_TTL_SECONDS + 1)
+    github._preview_cache.clear()
+    assert (_fetch(1, background=False) or {})["number"] == 1
+
+
+def test_the_sweep_keeps_a_held_lock_and_removes_an_idle_old_one(fake_gh: FakeGh) -> None:
+    held_key = ("pr", "token:x", "github.com/acme/widgets", "1", "full")
+    idle_key = ("pr", "token:x", "github.com/acme/widgets", "2", "full")
+    long_ago = time.time() - 2 * github._STALE_FILE_SECONDS
+    with github._single_flight(held_key):
+        github._single_flight(idle_key).__enter__()  # take and release the idle lock
+        for key in (held_key, idle_key):
+            os.utime(github._cache_path(key).with_suffix(".lock"), (long_ago, long_ago))
+        github._sweep_cache_directory(github._cache_directory())
+        assert github._cache_path(held_key).with_suffix(".lock").exists()
+        assert not github._cache_path(idle_key).with_suffix(".lock").exists()
+
+
+def test_different_prs_missing_at_once_share_one_listing_read(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.3
+    github._preview_cache.clear()
+    _in_threads(4, lambda index: _fetch(index + 1, background=True))
+    assert fake_gh.calls["pr list"] == 1
