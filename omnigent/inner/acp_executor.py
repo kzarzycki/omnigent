@@ -2213,7 +2213,8 @@ class AcpExecutor(Executor):
         """Tell an agent that asked to hear it that its Omnigent session ended.
 
         An agent that left idle is started again to be told, since it is the one that can
-        end what it holds; one that exited otherwise is not. A failure is logged, never raised.
+        end what it holds, then stopped so the next turn spawns afresh; one that exited
+        otherwise is not. A failure is logged, never raised.
         """
         method, acp_session_id = self._session_ended_method, self._session_id
         if method is None or acp_session_id is None:
@@ -2224,6 +2225,7 @@ class AcpExecutor(Executor):
                     session_key,
                 )
             return
+        restarted = False
         try:
             if self._proc is None:
                 logger.warning(
@@ -2243,6 +2245,7 @@ class AcpExecutor(Executor):
                     return
                 # The workspace may be gone by now (a reaped worker's worktree); the agent
                 # only has to end what it holds, so it starts from a directory that exists.
+                restarted = True
                 await self._start_process(
                     cwd=self._cwd if os.path.isdir(self._cwd) else tempfile.gettempdir()
                 )
@@ -2260,6 +2263,21 @@ class AcpExecutor(Executor):
                 session_key,
                 exc_info=True,
             )
+        finally:
+            if restarted:
+                await self._stop_notice_process()
+
+    async def _stop_notice_process(self) -> None:
+        """Stop the agent restarted only for the notice, so the next turn spawns afresh."""
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            _proc.terminate_tree(proc)
+            await asyncio.wait_for(proc.wait(), timeout=_ACP_TERMINATION_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                _proc.kill_tree(proc)
 
     def close_timeout(self) -> float:
         return ACP_REAP_TIMEOUT_SECONDS
