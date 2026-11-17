@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Sequence
+from typing import Literal
 
 
 def insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[str]:
@@ -50,3 +51,48 @@ def with_default_flag_value(args: Sequence[str], flag: str, value: str) -> list[
     if has_flag_before_separator(args, flag):
         return list(args)
     return insert_before_separator(args, (flag, value))
+
+
+def without_flags_before_separator(
+    args: Sequence[str],
+    flags: Collection[str],
+    *,
+    value_may_be_flag: bool = True,
+    on_drop: Callable[[str, Literal["flag", "value", "inline"]], None] | None = None,
+) -> list[str]:
+    """
+    Drop ``flags`` (and their values) before the first ``--``; keep the rest as given.
+
+    :param args: Launch args, possibly containing a ``--`` separator.
+    :param flags: Flag names to drop, e.g. ``("--resume", "-r")``. Both ``flag value``
+        and ``flag=value`` forms are dropped.
+    :param value_may_be_flag: When ``False``, a token after a bare flag that starts
+        with ``-`` is kept (it is another flag, not the value).
+    :param on_drop: Called with each dropped token and its kind: ``"flag"`` (bare flag),
+        ``"value"`` (the token after it) or ``"inline"`` (a ``flag=value`` token).
+    :returns: The args without the flags ahead of the separator.
+    """
+    options = args_before_separator(args)
+    inline_prefixes = tuple(f"{flag}=" for flag in flags)
+    kept: list[str] = []
+    expect_value = False
+    for arg in options:
+        if expect_value:
+            expect_value = False
+            if value_may_be_flag or not arg.startswith("-"):
+                if on_drop is not None:
+                    on_drop(arg, "value")
+                continue
+            kept.append(arg)
+            continue
+        if arg in flags:
+            expect_value = True
+            if on_drop is not None:
+                on_drop(arg, "flag")
+            continue
+        if arg.startswith(inline_prefixes):
+            if on_drop is not None:
+                on_drop(arg, "inline")
+            continue
+        kept.append(arg)
+    return [*kept, *args[len(options) :]]

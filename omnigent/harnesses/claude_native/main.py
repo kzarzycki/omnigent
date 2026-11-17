@@ -117,7 +117,10 @@ from omnigent.harnesses.claude_native.status_file import (
     find_background_holder,
     session_has_live_process,
 )
-from omnigent.harnesses.launch_args import with_default_flag_value
+from omnigent.harnesses.launch_args import (
+    with_default_flag_value,
+    without_flags_before_separator,
+)
 from omnigent.host.daemon_launch import (
     daemon_poll_intervals,
     error_text,
@@ -3053,32 +3056,30 @@ def _strip_resume_from_claude_args(args: tuple[str, ...]) -> tuple[str, ...]:
     upstream Claude, which would apply it to its own session-id
     namespace.
 
+    Only args before a client ``--`` are scanned; everything from the
+    separator on is prompt text and is kept as given.
+
     :param args: Raw ``claude_args`` from Click pass-through.
-    :returns: Args with stray ``--resume`` / ``-r`` removed.
+    :returns: Args with stray ``--resume`` / ``-r`` removed ahead of any ``--``.
     """
-    out: list[str] = []
-    consume_value = False
-    for arg in args:
-        if consume_value:
-            consume_value = False
-            # Only swallow the next token if it looks like a value, not a flag.
-            # ``-- --resume --foo`` should drop ``--resume`` but keep ``--foo``.
-            if not arg.startswith("-"):
-                _logger.warning("Stripped stray --resume value %r from claude args.", arg)
-                continue
-            out.append(arg)
-            continue
-        if arg in ("--resume", "-r"):
+
+    def warn(token: str, kind: str) -> None:
+        if kind == "value":
+            _logger.warning("Stripped stray --resume value %r from claude args.", token)
+        elif kind == "inline":
+            _logger.warning("Stripped stray %s from claude args.", token.split("=", 1)[0])
+        else:
             _logger.warning(
-                "Stripped stray %s from claude args; use `omnigent claude --resume`.", arg
+                "Stripped stray %s from claude args; use `omnigent claude --resume`.", token
             )
-            consume_value = True
-            continue
-        if arg.startswith(("--resume=", "-r=")):
-            _logger.warning("Stripped stray %s from claude args.", arg.split("=", 1)[0])
-            continue
-        out.append(arg)
-    return tuple(out)
+
+    # A flag-like token after a bare ``--resume`` is kept: ``--resume --foo`` drops only
+    # ``--resume``.
+    return tuple(
+        without_flags_before_separator(
+            args, ("--resume", "-r"), value_may_be_flag=False, on_drop=warn
+        )
+    )
 
 
 def _ucode_config_for_profile(
