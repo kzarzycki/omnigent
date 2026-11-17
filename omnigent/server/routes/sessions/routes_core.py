@@ -233,6 +233,7 @@ from omnigent.server.routes._sessions.helpers import (
 )
 from omnigent.server.routes._sessions.orchestration import (
     HOST_OFFLINE_HOLD_S,
+    SnapshotReads,
     _best_effort_stop,
     _build_session_list_item,
     _build_session_response,
@@ -259,6 +260,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _spawn_archive_stop,
     _validate_session_model_selection,
     ensure_runner_connected,
+    read_snapshot_extras,
 )
 from omnigent.server.runner_session_init import post_runner_session_init
 from omnigent.server.sandbox_profile_launch import prepare_profile, record_profile
@@ -2479,7 +2481,9 @@ def register_core_routes(
         # One read burst over a single pool checkout: authorization, the
         # conversation row, the bound agent row and the side-chat owner
         # grant, each reused by the snapshot instead of re-read.
-        def _read_inputs() -> tuple[SessionAccess, Conversation, Agent | None, bool]:
+        def _read_inputs() -> tuple[
+            SessionAccess, Conversation, Agent | None, bool, SnapshotReads
+        ]:
             with shared_read_scope():
                 access, conv, agent = _read_session_snapshot_inputs(
                     user_id,
@@ -2488,9 +2492,16 @@ def register_core_routes(
                     conversation_store,
                     agent_store,
                 )
-                return access, conv, agent, _side_chat_allowed_sync(user_id, conv)
+                extras = read_snapshot_extras(
+                    conv,
+                    conversation_store,
+                    include_items=include_items,
+                    include_usage=include_usage,
+                    liveness_lookup=liveness_lookup if include_liveness else None,
+                )
+                return access, conv, agent, _side_chat_allowed_sync(user_id, conv), extras
 
-        access, conv, agent, side_chat_ok = await asyncio.to_thread(_read_inputs)
+        access, conv, agent, side_chat_ok, extras = await asyncio.to_thread(_read_inputs)
         snapshot = await _get_session_snapshot(
             conversation_store,
             session_id,
@@ -2509,6 +2520,7 @@ def register_core_routes(
             sandbox_config=getattr(request.app.state, "sandbox_config", None),
             viewer_id=user_id,
             request=request,
+            prefetched=extras,
         )
         snapshot.side_chat_allowed = side_chat_ok
         return snapshot

@@ -17,6 +17,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import httpx
@@ -57,6 +58,7 @@ from omnigent.entities.conversation import (
     FunctionCallOutputData,
     parse_item_data,
 )
+from omnigent.entities.pagination import PagedList
 from omnigent.entities.permission import SessionPermission
 from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.harness_availability import (
@@ -15685,6 +15687,7 @@ async def _get_session_snapshot(
     request: Request | None = None,
     include_usage: bool = True,
     agent: Agent | None = None,
+    prefetched: SnapshotReads | None = None,
 ) -> SessionResponse:
     """
     Read a full session snapshot from the store.
@@ -15733,6 +15736,8 @@ async def _get_session_snapshot(
     :param agent: The already-fetched bound agent row to reuse, skipping the
         ``agent_store.get`` read here and in the harness resolutions below.
         ``None`` reads it here as before.
+    :param prefetched: Items, liveness and subtree usage the caller already
+        read over its own checkout; each set field skips that read here.
     :returns: The fully populated :class:`SessionResponse`.
     :raises OmnigentError: 404 if no session exists, 500 if the
         underlying conversation has no agent binding
@@ -15750,11 +15755,15 @@ async def _get_session_snapshot(
     # snapshot directly.
     items: list[ConversationItem] = []
     if include_items:
-        items_page = await asyncio.to_thread(
-            conv_store.list_items,
-            conversation_id=session_id,
-            limit=100,
-            order="desc",
+        items_page = (
+            prefetched.items_page
+            if prefetched is not None and prefetched.items_page is not None
+            else await asyncio.to_thread(
+                conv_store.list_items,
+                conversation_id=session_id,
+                limit=100,
+                order="desc",
+            )
         )
         items = list(reversed(items_page.data))
     # Resolve the bound runner client once — used for live status (on a
@@ -15987,23 +15996,28 @@ async def _get_session_snapshot(
     runner_online: bool | None = None
     host_online: bool | None = None
     if liveness_lookup is not None:
-        liveness = await asyncio.to_thread(liveness_lookup, [session_id])
+        liveness = (
+            prefetched.liveness
+            if prefetched is not None and prefetched.liveness is not None
+            else await asyncio.to_thread(liveness_lookup, [session_id])
+        )
         result = liveness.get(session_id)
         if result is not None:
             runner_online = result.runner_online
             host_online = result.host_online
     # Display costs include descendants. Empty usage marks a skipped aggregate;
     # None would fall back to the parent's own spend and under-report it.
-    subtree_usage = (
-        await asyncio.to_thread(
+    if not include_usage:
+        subtree_usage: dict[str, Any] = {}
+    elif prefetched is not None and prefetched.subtree_usage is not None:
+        subtree_usage = prefetched.subtree_usage
+    else:
+        subtree_usage = await asyncio.to_thread(
             load_session_usage,
             conv.id,
             conv_store,
             root_conversation_id=conv.root_conversation_id,
         )
-        if include_usage
-        else {}
-    )
     # Static signal telling the open view a host-bound, host-down session is a
     # resumable managed host it can wake by sending a message, vs a terminal
     # host_offline dead-end. Computed independently of liveness_lookup (the web
@@ -16086,6 +16100,41 @@ async def _get_session_snapshot(
     return response
 
 
+@dataclass
+class SnapshotReads:
+    """Snapshot reads taken over the caller's checkout; ``None`` means not read."""
+
+    items_page: PagedList[ConversationItem] | None = None
+    liveness: dict[str, SessionLiveness] | None = None
+    subtree_usage: dict[str, Any] | None = None
+
+
+def read_snapshot_extras(
+    conv: Conversation,
+    conversation_store: ConversationStore,
+    *,
+    include_items: bool,
+    include_usage: bool,
+    liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None,
+) -> SnapshotReads:
+    """Read the snapshot's items, liveness and subtree usage; call inside a read scope."""
+    return SnapshotReads(
+        items_page=(
+            conversation_store.list_items(conversation_id=conv.id, limit=100, order="desc")
+            if include_items
+            else None
+        ),
+        liveness=liveness_lookup([conv.id]) if liveness_lookup is not None else None,
+        subtree_usage=(
+            load_session_usage(
+                conv.id, conversation_store, root_conversation_id=conv.root_conversation_id
+            )
+            if include_usage
+            else None
+        ),
+    )
+
+
 def _read_session_snapshot_inputs(
     user_id: str | None,
     session_id: str,
@@ -16131,6 +16180,7 @@ def _read_session_snapshot_inputs(
 
 
 __all__ = [
+    "SnapshotReads",
     "_accumulate_session_usage",
     "_archive_stop",
     "_best_effort_stop",
@@ -16206,4 +16256,5 @@ __all__ = [
     "_wake_parent_for_blocked_child",
     "configure_subagent_block_notifier",
     "ensure_runner_connected",
+    "read_snapshot_extras",
 ]
