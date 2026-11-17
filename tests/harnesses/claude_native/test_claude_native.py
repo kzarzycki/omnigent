@@ -5795,6 +5795,50 @@ def test_strip_resume_from_claude_args_removes_recognized_forms(
     assert claude_native._strip_resume_from_claude_args(args) == expected
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--", "grep", "-r", "foo"),
+        ("--", "--resume", "x"),
+        ("--", "--resume=x"),
+        ("--", "-r=x"),
+        ("--foo", "--", "-r", "foo"),
+    ],
+)
+def test_strip_resume_from_claude_args_keeps_text_after_separator(
+    args: tuple[str, ...],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Everything from a client ``--`` on is prompt text and comes back
+    unchanged, with no stray-resume warning.
+    """
+    with caplog.at_level("WARNING"):
+        assert claude_native._strip_resume_from_claude_args(args) == args
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        (("--resume", "conv_x"), ()),
+        (("-r", "conv_x"), ()),
+        (("--resume", "conv_x", "--", "-r", "foo"), ("--", "-r", "foo")),
+    ],
+)
+def test_strip_resume_from_claude_args_still_strips_before_separator(
+    args: tuple[str, ...],
+    expected: tuple[str, ...],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A stray resume ahead of any separator is still removed, with the warning.
+    """
+    with caplog.at_level("WARNING"):
+        assert claude_native._strip_resume_from_claude_args(args) == expected
+    assert caplog.records
+
+
 # ── _resolve_cold_resume_args ───────────────────────────────
 
 

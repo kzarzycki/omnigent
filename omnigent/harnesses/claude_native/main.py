@@ -117,7 +117,7 @@ from omnigent.harnesses.claude_native.status_file import (
     find_background_holder,
     session_has_live_process,
 )
-from omnigent.harnesses.launch_args import with_default_flag_value
+from omnigent.harnesses.launch_args import args_before_separator, with_default_flag_value
 from omnigent.host.daemon_launch import (
     daemon_poll_intervals,
     error_text,
@@ -3053,12 +3053,16 @@ def _strip_resume_from_claude_args(args: tuple[str, ...]) -> tuple[str, ...]:
     upstream Claude, which would apply it to its own session-id
     namespace.
 
+    Only args before a client ``--`` are scanned; everything from the
+    separator on is prompt text and is kept as given.
+
     :param args: Raw ``claude_args`` from Click pass-through.
-    :returns: Args with stray ``--resume`` / ``-r`` removed.
+    :returns: Args with stray ``--resume`` / ``-r`` removed ahead of any ``--``.
     """
+    options = args_before_separator(args)
     out: list[str] = []
     consume_value = False
-    for arg in args:
+    for arg in options:
         if consume_value:
             consume_value = False
             # Only swallow the next token if it looks like a value, not a flag.
@@ -3078,7 +3082,7 @@ def _strip_resume_from_claude_args(args: tuple[str, ...]) -> tuple[str, ...]:
             _logger.warning("Stripped stray %s from claude args.", arg.split("=", 1)[0])
             continue
         out.append(arg)
-    return tuple(out)
+    return (*out, *args[len(options) :])
 
 
 def _ucode_config_for_profile(
