@@ -94,6 +94,7 @@ from omnigent.harnesses.diagnostics import (
     sign_in_running_elsewhere,
 )
 from omnigent.harnesses.kiro_native import bridge as kiro_bridge
+from omnigent.harnesses.launch_args import insert_before_separator
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
@@ -3285,22 +3286,27 @@ def augment_claude_args(
             _logger.warning(MANAGED_MCP_RELAY_MISSING_WARNING)
     else:
         mcp_config = build_mcp_config(bridge_dir, python_executable=python_executable)
-        args.extend(["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))])
-    args.extend(["--settings", str(settings_path)])
+        args = insert_before_separator(
+            args, ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
+        )
+    args = insert_before_separator(args, ["--settings", str(settings_path)])
     args = _merge_append_system_prompt(args, append_system_prompt, bridge_dir=bridge_dir)
     # Imported here: bundle-skills parsing rides the spec graph; launch-only.
     from omnigent.inner.bundle_skills import claude_agents_skill_args, claude_native_skill_args
 
-    args.extend(
+    args = insert_before_separator(
+        args,
         claude_native_skill_args(
             bundle_dir,
             agent_name=agent_name,
             skills_filter=skills_filter,
-        )
+        ),
     )
     if workspace is not None:
         roots = (workspace, bundle_dir) if bundle_dir is not None else (workspace,)
-        args.extend(claude_agents_skill_args(bridge_dir, roots, skills_filter))
+        args = insert_before_separator(
+            args, claude_agents_skill_args(bridge_dir, roots, skills_filter)
+        )
     from omnigent.harnesses.claude_native.diagnostics import augment_claude_debug_args
 
     return augment_claude_debug_args(args, bridge_dir)
@@ -3394,7 +3400,7 @@ def extract_settings_args(
     args: Sequence[str], *, base_dir: Path | None = None
 ) -> tuple[list[str], _JsonObject]:
     """
-    Remove every caller ``--settings`` flag from ``args`` and parse its value.
+    Remove every caller ``--settings`` flag before any ``--`` and parse its value.
 
     The value is a JSON object string or a file path. Later flags override
     earlier ones. An unreadable or non-object value is logged and skipped.
@@ -3407,9 +3413,10 @@ def extract_settings_args(
     remaining: list[str] = []
     merged: _JsonObject = {}
     index = 0
-    while index < len(args):
+    end = args.index("--") if "--" in args else len(args)
+    while index < end:
         arg = args[index]
-        if arg == "--settings" and index + 1 < len(args):
+        if arg == "--settings" and index + 1 < end:
             value = args[index + 1]
             index += 2
         elif arg.startswith("--settings="):
@@ -3424,7 +3431,7 @@ def extract_settings_args(
             _logger.warning("Ignoring a --settings value that is not a JSON object or file.")
         else:
             merged = _merge_settings_objects(merged, parsed)
-    return remaining, merged
+    return [*remaining, *args[end:]], merged
 
 
 def _parse_settings_value(value: str, base_dir: Path | None) -> _JsonObject | None:
@@ -3482,9 +3489,7 @@ def _merge_tool_list_flag(args: list[str], flag: str, extra: tuple[str, ...]) ->
     try:
         idx = args.index(flag, 0, split)
     except ValueError:
-        # Before the ``--`` prompt separator, after which Claude reads flags as text.
-        args[split:split] = [flag, ",".join(extra)]
-        return args
+        return insert_before_separator(args, [flag, ",".join(extra)])
     value_idx = idx + 1
     if value_idx >= len(args):
         return args
@@ -3544,8 +3549,7 @@ def _merge_append_system_prompt(
         return args
     startup_context.unlink(missing_ok=True)
     if location is None:
-        args.extend([flag, extra])
-        return args
+        return insert_before_separator(args, [flag, extra])
     value_idx, offset = location
     existing = args[value_idx][offset:]
     args[value_idx] = args[value_idx][:offset] + (f"{extra}\n\n{existing}" if existing else extra)

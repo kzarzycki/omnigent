@@ -85,6 +85,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
 )
+from omnigent.harnesses.launch_args import insert_before_separator
 from omnigent.native.native_dispatch import resolve_hook
 from omnigent.pi_prompt import pi_prompt_args
 from omnigent.process_logging import process_log_reference
@@ -1430,18 +1431,6 @@ async def _pi_native_launch_config(
     )
 
 
-def _insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[str]:
-    """
-    Insert ``extra`` before the first ``--``, which the CLIs read as the start of prompt text.
-
-    :param args: Launch args, possibly containing a ``--`` separator.
-    :param extra: Flags to place ahead of the separator (or at the end without one).
-    :returns: The combined args.
-    """
-    split = args.index("--") if "--" in args else len(args)
-    return [*args[:split], *extra, *args[split:]]
-
-
 def _codex_launch_config_for_spec(
     launch_config: _CodexNativeLaunchConfig,
     agent_spec: AgentSpec | ResolvedSpec | None,
@@ -1462,7 +1451,7 @@ def _codex_launch_config_for_spec(
     )
     return dataclasses.replace(
         launch_config,
-        terminal_launch_args=_insert_before_separator(kept, ["--sandbox", "read-only"]),
+        terminal_launch_args=insert_before_separator(kept, ["--sandbox", "read-only"]),
         bypass_sandbox=False,
     )
 
@@ -8080,7 +8069,7 @@ async def _launch_claude_native_terminal(
         _spec_tool_names(inner_spec, "allowed_tools") if inner_spec is not None else ()
     )
     if allowed is not None:
-        claude_args = _insert_before_separator(
+        claude_args = insert_before_separator(
             _strip_claude_tools_args(claude_args), ["--tools", allowed]
         )
     spec = dataclasses.replace(spec, args=[*prefix, *claude_args])
@@ -8560,8 +8549,11 @@ def _build_claude_native_base_args(
     # model_override is a default: it applies only when the user did
     # not pass their own ``--model`` (in either the long ``--model X``
     # or the joined ``--model=X`` form).
-    if model_override and not any(arg == "--model" or arg.startswith("--model=") for arg in args):
-        args.extend(("--model", model_override))
+    separator = args.index("--") if "--" in args else len(args)
+    if model_override and not any(
+        arg == "--model" or arg.startswith("--model=") for arg in args[:separator]
+    ):
+        args = insert_before_separator(args, ("--model", model_override))
     return tuple(args)
 
 

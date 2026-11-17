@@ -89,6 +89,13 @@ from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
             ["hello", "--mcp-config", "mcp.json"],
             ("hello", "--mcp-config", "mcp.json", "--model", "claude-opus-4-7"),
         ),
+        # The model default precedes a client ``--``; text after it is prompt, not a flag.
+        (
+            None,
+            "claude-opus-4-7",
+            ["--", "--model", "fix the bug"],
+            ("--model", "claude-opus-4-7", "--", "--model", "fix the bug"),
+        ),
     ],
     ids=[
         "effort-only",
@@ -102,6 +109,7 @@ from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
         "empty-passthrough-still-adds-model",
         "unknown-effort-dropped",
         "leading-prompt-stays-first",
+        "model-default-before-separator",
     ],
 )
 def test_build_claude_native_base_args(
