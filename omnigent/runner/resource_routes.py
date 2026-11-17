@@ -1440,15 +1440,19 @@ def register_resource_routes(
         *,
         server_tracked: object = False,
         default_pr_url: object = None,
+        background: object = False,
         **kwargs: Any,
     ) -> JSONResponse:
-        from omnigent.runner import pr_resource
+        from omnigent.runner import github_resource, pr_resource
 
         root = await _github_workspace_root(session_id)
         function = getattr(pr_resource, operation)
 
         def call() -> dict[str, Any]:
-            with pr_resource.server_tracking(server_tracked, default_pr_url):
+            with (
+                pr_resource.server_tracking(server_tracked, default_pr_url),
+                github_resource.background_reads(background),
+            ):
                 return function(root, session_id=session_id, **kwargs)
 
         try:
@@ -1485,6 +1489,7 @@ def register_resource_routes(
         pr_url: str | None = None,
         server_tracked: bool = False,
         default_pr_url: str | None = None,
+        background: bool = False,
     ) -> JSONResponse:
         return await _github_call(
             session_id,
@@ -1492,6 +1497,7 @@ def register_resource_routes(
             pr_url=pr_url,
             server_tracked=server_tracked,
             default_pr_url=default_pr_url,
+            background=background,
         )
 
     @app.get("/v1/sessions/{session_id}/resources/github/preview")

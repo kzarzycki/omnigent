@@ -4004,6 +4004,36 @@ async def test_a_listed_session_is_imported_from_its_runner_in_the_background(
 
 
 @pytest.mark.asyncio
+async def test_the_background_refresh_asks_the_runner_for_a_background_read(
+    runner_globals_reset: None, db_uri: str
+) -> None:
+    """Only the server's own refresh opts out of the conversation read; a viewer's does not."""
+    from omnigent.server.session_pull_requests import PullRequestRefresher
+
+    del runner_globals_reset
+    SqlAlchemyConversationStore(db_uri).create_conversation(conversation_id=_PR_SESSION)
+    conversation_store = _ConversationStore()
+    conversation_store.storage_location = db_uri  # type: ignore[attr-defined]
+    conversation_store._conversations[_PR_SESSION].runner_id = "runner_pr"
+    refresher = PullRequestRefresher()
+    app = _sessions_app(conversation_store, pull_request_refresher=refresher)
+    runner = _FakeRunnerClient(payload=_pr_info())
+    set_runner_router(_OnlineRunnerRouter(runner))  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://server"
+    ) as client:
+        await client.get(f"/v1/sessions/{_PR_SESSION}/resources/github")
+        viewer_params = list(runner.get_params)
+        runner.get_params.clear()
+        refresher.request(_PR_SESSION)
+        await asyncio.sleep(0)
+        while refresher._running:
+            await asyncio.gather(*refresher._running.values())
+    assert all("background" not in (params or {}) for params in viewer_params)
+    assert [(params or {}).get("background") for params in runner.get_params] == ["1"]
+
+
+@pytest.mark.asyncio
 async def test_pull_request_list_pages_by_url(pr_client: httpx.AsyncClient) -> None:
     set_runner_router(_FakeRunnerRouter(_FakeRunnerClient(payload=_pr_info())))  # type: ignore[arg-type]
     await pr_client.get(f"/v1/sessions/{_PR_SESSION}/resources/github")
