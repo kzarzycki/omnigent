@@ -53,6 +53,7 @@ import math
 import os
 import secrets
 import shlex
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -596,8 +597,11 @@ class AcpExecutor(Executor):
     # Low-level ACP transport
     # ------------------------------------------------------------------
 
-    async def _start_process(self) -> None:
+    async def _start_process(self, *, cwd: str | None = None) -> None:
         """Start the configured ACP agent as an asyncio subprocess.
+
+        *cwd* overrides the working directory for this spawn only (the session-ended
+        restart, whose workspace may be gone).
 
         The StreamReader limit is raised to 16 MiB so a large ``session/new``
         response or tool-output line can't hit the default 64 KiB per-line cap.
@@ -605,10 +609,11 @@ class AcpExecutor(Executor):
         # Re-validate cwd before every spawn and respawn: the workspace may have
         # been deleted after __init__, and this error flows through
         # _startup_error_message so the UI also shows the harness-log path.
-        _resolve_cwd(self._cwd, session_id=self._session_id)
+        spawn_cwd = cwd if cwd is not None else self._cwd
+        _resolve_cwd(spawn_cwd, session_id=self._session_id)
         # If the cwd is relative the spawn resolves it against the process cwd;
         # fail early with a clear message if that directory was also deleted.
-        if not os.path.isabs(self._cwd):
+        if not os.path.isabs(spawn_cwd):
             _resolve_cwd(None, session_id=self._session_id)
         # Reset handshake state: this may be a restart after the previous
         # subprocess died. ``_initialized`` is a one-way latch.
@@ -632,7 +637,7 @@ class AcpExecutor(Executor):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            cwd=self._cwd,
+            cwd=spawn_cwd,
             limit=_STREAM_LIMIT,
             # Own session/group: the sandbox launcher forks the real agent,
             # and without a group boundary teardown reaches only the wrapper.
@@ -2236,7 +2241,11 @@ class AcpExecutor(Executor):
                         self._proc.returncode,
                     )
                     return
-                await self._start_process()
+                # The workspace may be gone by now (a reaped worker's worktree); the agent
+                # only has to end what it holds, so it starts from a directory that exists.
+                await self._start_process(
+                    cwd=self._cwd if os.path.isdir(self._cwd) else tempfile.gettempdir()
+                )
                 await self._ensure_initialized()
                 method = self._session_ended_method
                 if method is None:

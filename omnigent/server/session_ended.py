@@ -45,7 +45,14 @@ async def notify_session_ended(
 
     try:
         harness = _resolve_harness(conv, agent_store=agent_store)
-        if harness is None or canonicalize_harness(harness) != "acp":
+        if harness is None:
+            _logger.warning(
+                "Session %s ended but its harness could not be resolved; no notice sent",
+                conv.id,
+                extra={"session_id": conv.id},
+            )
+            return False
+        if canonicalize_harness(harness) != "acp":
             return False
         client = await _get_runner_client(
             conv.id, runner_router or get_server_runner_router(), conversation=conv

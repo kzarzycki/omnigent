@@ -168,7 +168,7 @@ def _executor_after_exit(method: str | None, status: int) -> tuple[acp.AcpExecut
     executor._proc = SimpleNamespace(returncode=status)  # type: ignore[assignment]
     executor._idle_exit_status = 75
 
-    async def start() -> None:
+    async def start(cwd: str | None = None) -> None:
         steps.append("spawn")
         executor._reset_session_state()  # a respawn forgets the old process's session
 
