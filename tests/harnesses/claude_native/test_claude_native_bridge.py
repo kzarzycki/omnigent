@@ -5083,7 +5083,9 @@ def test_augment_claude_args_appends_caller_system_prompt(
     assert omnigent_args.count("--append-system-prompt") == 1
     assert omnigent_args[prompt_index + 1] == _FRAMEWORK_PROMPT
     if merged_args is None:
-        # Flags Omnigent adds precede the caller's ``--`` separator.
+        # Tool-list flags Omnigent adds precede the caller's ``--`` separator. The
+        # ``--settings``/``--mcp-config``/``--append-system-prompt`` placement
+        # below is known-wrong (they land after it); see issue #436.
         allowed_index = omnigent_args.index("--allowedTools")
         allowed_pair = omnigent_args[allowed_index : allowed_index + 2]
         del omnigent_args[allowed_index : allowed_index + 2]
@@ -5092,6 +5094,14 @@ def test_augment_claude_args_appends_caller_system_prompt(
         # The caller's prompt is sent once, so the launch command does not grow by its size.
         del omnigent_args[prompt_index : prompt_index + 2]
         assert args == [*merged_args, *omnigent_args]
+
+
+@pytest.mark.parametrize("flag", ["--allowedTools", "--disallowedTools"])
+def test_merge_tool_list_flag_ignores_flag_text_after_separator(flag: str) -> None:
+    """A tool-list flag after ``--`` is prompt text: it stays intact and a new flag precedes ``--``."""
+    merged = claude_native_bridge._merge_tool_list_flag(["--", flag, "Read"], flag, ("Bash",))
+
+    assert merged == [flag, "Bash", "--", flag, "Read"]
 
 
 @pytest.mark.parametrize(
