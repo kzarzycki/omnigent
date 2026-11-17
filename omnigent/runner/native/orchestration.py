@@ -73,6 +73,7 @@ from omnigent.errors import (
 )
 from omnigent.harness_plugins import native_provider_for_key
 from omnigent.harnesses.launch_args import (
+    args_before_separator,
     has_flag_before_separator,
     insert_before_separator,
     with_default_flag_value,
@@ -8475,7 +8476,7 @@ def _without_claude_session_id_arg(args: list[str]) -> list[str]:
     :returns: *args* without ``--session-id <value>`` / ``--session-id=<value>``,
         unchanged when ``--fork-session`` is present.
     """
-    if "--fork-session" in args:
+    if "--fork-session" in args_before_separator(args):
         return args
     return without_claude_session_id_arg(args)
 
