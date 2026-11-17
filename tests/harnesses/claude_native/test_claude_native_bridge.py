@@ -5098,7 +5098,7 @@ def test_augment_claude_args_appends_caller_system_prompt(
 
 @pytest.mark.parametrize("flag", ["--allowedTools", "--disallowedTools"])
 def test_merge_tool_list_flag_ignores_flag_text_after_separator(flag: str) -> None:
-    """A tool-list flag after ``--`` is prompt text: it stays intact and a new flag precedes ``--``."""
+    """A tool-list flag after ``--`` is prompt text; a new flag lands before ``--``."""
     merged = claude_native_bridge._merge_tool_list_flag(["--", flag, "Read"], flag, ("Bash",))
 
     assert merged == [flag, "Bash", "--", flag, "Read"]
