@@ -737,3 +737,21 @@ def test_each_identity_reads_its_own_title(fake_gh: FakeGh) -> None:
     assert _lookup_title(1)[0] == "read as alice"
     fake_gh.preference = None
     assert _lookup_title(1)[0] == "read as carol"
+
+
+def test_a_title_read_in_flight_across_a_write_is_not_cached(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.4
+    reader = threading.Thread(target=_lookup_title, args=(1,))
+    reader.start()
+    poll_until(lambda: fake_gh.calls["pr view"], timeout_s=5, interval_s=0.01)  # read is in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    reader.join()
+    assert not [key for key in _cached_keys() if key[0] == "pr"]
+
+
+def test_concurrent_title_misses_share_one_read(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.3
+    github._preview_cache.clear()
+    reference = PullRequestRef.from_url(f"{REPO}/pull/1")
+    _in_threads(4, lambda _: github._pr_title_before("/work", reference, time.monotonic() + 5))
+    assert fake_gh.calls["pr view"] == 1
