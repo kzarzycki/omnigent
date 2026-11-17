@@ -52,6 +52,9 @@ class FakeGh:
         self.fail = False  # pr reads fail after their delay
         self.titles: dict[int, str] = {}  # overrides of a PR's title
         self.time_out = False  # pr reads are cut off by the caller's deadline
+        self.rate_limited = False  # pr reads fail as GitHub does once the quota is spent
+        self.quota_reset: float | None = None  # ``gh api rate_limit``'s graphql reset
+        self.argvs: list[list[str]] = []
 
     @property
     def accounts(self) -> list[dict[str, Any]]:
@@ -96,6 +99,12 @@ class FakeGh:
         self, argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
     ) -> tuple[int | None, str, str]:
         self.calls[" ".join(argv[:2])] += 1
+        self.argvs.append(argv)
+        if argv[:2] == ["api", "rate_limit"] and self.quota_reset is not None:
+            graphql = {"limit": 5000, "remaining": 0, "reset": self.quota_reset}
+            return 0, json.dumps({"resources": {"graphql": graphql}}), ""
+        if argv[0] == "pr" and self.rate_limited:
+            return 1, "", "GraphQL: API rate limit exceeded for user ID 1."
         if argv[:2] == ["auth", "status"]:
             hosts = {"github.com": [dict(account) for account in self.accounts]}
             return 0, json.dumps({"hosts": hosts}), ""
@@ -170,13 +179,42 @@ def test_five_sessions_viewing_their_prs_make_one_read_each_per_window(fake_gh: 
     assert fake_gh.calls == {"auth status": 1, "pr view": 5, "api --hostname": 5}
 
 
+def test_background_refreshes_within_120_seconds_share_one_listing(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _read(1, background=True)
+    _later(monkeypatch, 119)
+    for number in OPEN_NUMBERS:
+        _read(number, background=True)
+    assert fake_gh.calls["pr list"] == 1
+
+
 def test_open_pr_listing_is_read_again_after_the_window(
     fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _read(1, background=True)
-    _later(monkeypatch, github._OPEN_PR_TTL_SECONDS + 1)
+    _later(monkeypatch, github._BACKGROUND_PR_TTL_SECONDS + 1)
     _read(2, background=True)
     assert fake_gh.calls["pr list"] == 2
+
+
+def test_the_background_listing_reads_no_nested_lists(fake_gh: FakeGh) -> None:
+    _read(1, background=True)
+    (listing,) = [argv for argv in fake_gh.argvs if argv[:2] == ["pr", "list"]]
+    fields = set(listing[listing.index("--json") + 1].split(","))
+    nested = {"statusCheckRollup", "reviews", "reviewRequests", "latestReviews", "labels"}
+    assert not fields & (nested | {"comments"})
+    assert {"number", "title", "state", "isDraft"} <= fields
+
+
+def test_a_viewer_reads_again_after_15_seconds(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _read(1, background=True)
+    _read(1, background=False)
+    _later(monkeypatch, 15)
+    _read(1, background=False)
+    assert fake_gh.calls["pr view"] == 2
 
 
 def test_merged_pr_is_not_read_again_within_the_long_period(
@@ -755,3 +793,74 @@ def test_concurrent_title_misses_share_one_read(fake_gh: FakeGh) -> None:
     reference = PullRequestRef.from_url(f"{REPO}/pull/1")
     _in_threads(4, lambda _: github._pr_title_before("/work", reference, time.monotonic() + 5))
     assert fake_gh.calls["pr view"] == 1
+
+
+def _host_refresh(root: Path, session_id: str, *, background: bool = True) -> dict[str, Any]:
+    """One session's refresh served by the host, with the server's query parameters."""
+    from omnigent.host.connect import HostProcess
+    from omnigent.workspace_fs import WorkspaceReader
+
+    github._preview_cache.clear()
+    params = {"background": "1"} if background else {}
+    return HostProcess._dispatch_fs_op(WorkspaceReader(root), "github_info", session_id, params)
+
+
+def _link(session_id: str, numbers: tuple[int, ...]) -> None:
+    references = [PullRequestRef.from_url(f"{REPO}/pull/{number}") for number in numbers]
+    SessionPrRegistry(session_id).record(references, relationship="created", source="test")
+
+
+def test_a_background_refresh_through_the_host_reads_the_listing(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
+    _link("session", (1,))
+    info = _host_refresh(tmp_path, "session")
+    assert info["pr"]["state"] == "OPEN"
+    assert fake_gh.calls["pr list"] == 1
+    assert fake_gh.calls["pr view"] == 0
+    assert not [argv for argv in fake_gh.argvs if argv[0] == "api"]  # no GraphQL conversation
+
+
+def test_one_refresh_wave_of_35_sessions_linking_3_prs_through_the_host(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server refreshes each session once, about a second apart."""
+    linked = (1, 2, 3)
+    for index in range(35):
+        shift = index % len(linked)  # each PR is the first linked PR of some sessions
+        _link(f"session-{index}", linked[shift:] + linked[:shift])
+    started = time.time()
+    for index in range(35):
+        monkeypatch.setattr(github.time, "time", lambda index=index: started + index)
+        _host_refresh(tmp_path, f"session-{index}")
+    assert fake_gh.calls == {"auth status": 2, "pr list": 1}
+
+
+def test_background_reads_pause_until_the_rate_limit_resets(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _link("session", (1, 2, 3))
+    fake_gh.rate_limited = True
+    fake_gh.quota_reset = time.time() + 600
+    assert _read(1, background=True)["pr"] is None
+    fake_gh.rate_limited = False
+    calls = dict(fake_gh.calls)
+    for number in OPEN_NUMBERS:
+        assert _read(number, background=True)["pr"] is None
+    assert _host_refresh(tmp_path, "session")["pr"] is None  # its title lookups wait too
+    assert fake_gh.calls == calls
+    assert _read(1, background=False)["pr"]["state"] == "OPEN"  # a viewer still reads
+    _later(monkeypatch, 601)
+    assert _read(2, background=True)["pr"]["state"] == "OPEN"
+
+
+def test_a_rate_limit_with_no_reset_time_pauses_for_15_minutes(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.rate_limited = True
+    _read(1, background=True)
+    fake_gh.rate_limited = False
+    _later(monkeypatch, 15 * 60 - 5)
+    assert _read(1, background=True)["pr"] is None
+    _later(monkeypatch, 15 * 60 + 1)
+    assert _read(1, background=True)["pr"]["state"] == "OPEN"

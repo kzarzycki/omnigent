@@ -715,17 +715,27 @@ class WorkspaceReader:
     # the git provider's CLI or API (``gh`` for GitHub).
 
     def github_info(
-        self, session_id: str | None = None, pr_url: str | None = None
+        self,
+        session_id: str | None = None,
+        pr_url: str | None = None,
+        *,
+        background: object = False,
     ) -> _WorkspacePayload:
-        """PR context for an explicit session PR or the workspace branch."""
-        return cast(
-            "_WorkspacePayload",
-            pr_resource.pr_info(
-                str(self._root),
-                session_id=session_id,
-                pr_url=pr_url,
-            ),
-        )
+        """PR context for an explicit session PR or the workspace branch.
+
+        :param background: The server's refresh flag, as the runner route reads it.
+        """
+        from omnigent.runner import github_resource
+
+        with github_resource.background_reads(background):
+            return cast(
+                "_WorkspacePayload",
+                pr_resource.pr_info(
+                    str(self._root),
+                    session_id=session_id,
+                    pr_url=pr_url,
+                ),
+            )
 
     def github_review_threads(
         self, session_id: str, pr_url: str, after: str, head_sha: str, base_sha: str
