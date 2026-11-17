@@ -7328,11 +7328,15 @@ def _acknowledge_auto_mode_billing_notice(socket_path: str, tmux_target: str) ->
 
 
 def bridge_dir_from_launch_args(args: Sequence[str]) -> Path | None:
-    """Read the stable bridge identity from the generated invocation settings path."""
+    """Read the stable bridge identity from the generated invocation settings path.
+
+    Only args before a client ``--`` count; later ones are prompt text.
+    """
+    options = args_before_separator(args)
     found: Path | None = None
-    for index, arg in enumerate(args):
-        if arg == "--settings" and index + 1 < len(args):
-            value = args[index + 1]
+    for index, arg in enumerate(options):
+        if arg == "--settings" and index + 1 < len(options):
+            value = options[index + 1]
         elif arg.startswith("--settings="):
             value = arg.partition("=")[2]
         else:

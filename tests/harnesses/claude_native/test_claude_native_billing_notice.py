@@ -237,6 +237,17 @@ def test_stale_bridge_cannot_acknowledge_another_terminal(
         (["--settings", "claude-settings.json"], None),
         (["--settings"], None),
         ([], None),
+        (
+            [
+                "--settings",
+                "/tmp/own-bridge/claude-settings.json",
+                "--",
+                "--settings",
+                "/tmp/other-bridge/claude-settings.json",
+            ],
+            Path("/tmp/own-bridge"),
+        ),
+        (["--", "--settings", "/tmp/other-bridge/claude-settings.json"], None),
     ],
 )
 def test_resolves_actual_bridge_from_launch_args(args: list[str], expected: Path | None) -> None:

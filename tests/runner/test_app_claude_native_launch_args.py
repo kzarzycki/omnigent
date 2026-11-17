@@ -259,6 +259,22 @@ def test_build_claude_native_base_args(
             False,
             ("--session-id", "11111111-2222-3333-4444-555555555555"),
         ),
+        (
+            None,
+            None,
+            ["--session-id", "old-id", "--", "explain", "--session-id", "flag"],
+            "sid-123",
+            False,
+            ("--resume", "sid-123", "--", "explain", "--session-id", "flag"),
+        ),
+        (
+            None,
+            None,
+            ["--session-id", "old-id", "--", "--fork-session"],
+            "sid-123",
+            False,
+            ("--resume", "sid-123", "--", "--fork-session"),
+        ),
     ],
     ids=[
         "resume-only",
@@ -273,6 +289,8 @@ def test_build_claude_native_base_args(
         "resume-drops-joined-session-id",
         "fork-session-keeps-session-id",
         "fresh-launch-keeps-session-id",
+        "resume-keeps-session-id-text-after-separator",
+        "fork-session-text-after-separator-ignored",
     ],
 )
 def test_build_claude_native_base_args_resume_prefix(
