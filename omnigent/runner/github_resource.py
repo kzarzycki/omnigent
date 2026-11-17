@@ -831,6 +831,8 @@ def _gh_pr_read(
     """
     rc, out, err = _gh(["pr", *verb, "--json", fields], cwd=cwd, token=token)
     while rc != 0:
+        if _note_rate_limit(err, cwd=cwd, token=token):
+            return None
         refused = _refused_pr_fields(err) & set(fields.split(","))
         refused &= _PR_REVIEW_FIELDS | _PR_MERGE_FIELDS | {_PR_CHECKS_FIELD, _PR_COMMENTS_FIELD}
         if refused & _PR_REVIEW_FIELDS:
@@ -896,7 +898,7 @@ def _refresh_conversation(data: dict[str, Any], *, cwd: str, token: str | None) 
         }
       }
     }"""
-    rc, out, _ = _gh(
+    rc, out, err = _gh(
         [
             "api",
             *host,
@@ -918,6 +920,7 @@ def _refresh_conversation(data: dict[str, Any], *, cwd: str, token: str | None) 
         token=token,
     )
     if rc != 0:
+        _note_rate_limit(err, cwd=cwd, token=token)
         return
     try:
         conversation = json.loads(out)["data"]["repository"]["pullRequest"]
@@ -1152,15 +1155,17 @@ def _pr_json(
 
 
 _REFERENCE_EXTRA_FIELDS = ",headRefOid,baseRefOid,headRepository,headRepositoryOwner"
-# ``comments`` and the timeline are per-PR reads; the open-PR listing leaves them out.
+# A background refresh stores only state, draft and title, so it reads no nested lists
+# (checks, reviews, labels, comments), which make up most of a listing's GraphQL cost.
 _LISTING_FIELDS = (
-    ",".join(field for field in _PR_VIEW_FIELDS.split(",") if field != "comments")
-    + _REFERENCE_EXTRA_FIELDS
+    "number,title,state,url,isDraft,author,baseRefName,headRefName" + _REFERENCE_EXTRA_FIELDS
 )
 _LISTING_LIMIT = 100
-# An open PR's CI and reviews change within the poll cadence. A merged PR doesn't change
+# A viewer sees CI and reviews change within its poll cadence. A merged PR doesn't change
 # back; a closed one can be reopened, so only the server's refresher skips re-reading it.
 _OPEN_PR_TTL_SECONDS = 10.0
+# Background refreshes of one wave share a read; the server refreshes a PR every 300 s.
+_BACKGROUND_PR_TTL_SECONDS = 120.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
 _ACCOUNTS_TTL_SECONDS = 30.0
 # A failed read is remembered briefly so waiters on one lock don't each retry ``gh``.
@@ -1178,6 +1183,49 @@ def background_reads(enabled: object) -> Iterator[None]:
         yield
     finally:
         _background_read.reset(token)
+
+
+# One stamp per host: every runner skips background PR reads until GitHub's quota resets.
+_RATE_LIMIT_KEY = ("rate-limited",)
+# GitHub's own wording, for the primary quota and for its secondary (abuse) limits.
+_RATE_LIMIT_PATTERN = re.compile(
+    r"rate limit (?:already )?exceeded|secondary rate limit", re.IGNORECASE
+)
+_RATE_LIMIT_DEFAULT_SECONDS = 15 * 60.0
+_RATE_LIMIT_MAX_SECONDS = 3600.0
+
+
+def _rate_limit_reset(stderr: str, *, cwd: str, token: str | None) -> float:
+    """When the exhausted quota resets, in epoch seconds; 15 minutes on when ``gh`` can't say.
+
+    ``gh api rate_limit`` doesn't count against the quota it reports.
+    """
+    now = time.time()
+    resource = "graphql" if "graphql" in stderr.lower() else "core"
+    rc, out, _ = _gh(["api", "rate_limit"], cwd=cwd, token=token)
+    try:
+        quota = json.loads(out)["resources"][resource]
+        reset = float(quota["reset"]) if rc == 0 and int(quota["remaining"]) == 0 else 0.0
+    except (ValueError, KeyError, TypeError):
+        reset = 0.0
+    if reset <= now:
+        return now + _RATE_LIMIT_DEFAULT_SECONDS
+    return min(reset, now + _RATE_LIMIT_MAX_SECONDS)
+
+
+def _note_rate_limit(stderr: str, *, cwd: str, token: str | None) -> bool:
+    """Stamp the host as rate limited when ``stderr`` says so; whether it did."""
+    if not _RATE_LIMIT_PATTERN.search(stderr):
+        return False
+    until = _rate_limit_reset(stderr, cwd=cwd, token=token)
+    _logger.warning("github_resource: GitHub rate limit hit; pausing background PR reads")
+    _cache_put(_RATE_LIMIT_KEY, until, until - time.time(), shared=True)
+    return True
+
+
+def _background_reads_paused() -> bool:
+    """Whether this is a background read while the host's rate-limit stamp holds."""
+    return _background_read.get() and _cache_get(_RATE_LIMIT_KEY, shared=True)[0]
 
 
 def _accounts_file_stat(config_dir: Path) -> list[int] | None:
@@ -1304,7 +1352,7 @@ def _open_pr_listing(
         if read is None or not isinstance(read[0], list):
             _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
             return None
-        _cache_put(key, read[0], _OPEN_PR_TTL_SECONDS, shared=True, started=started)
+        _cache_put(key, read[0], _BACKGROUND_PR_TTL_SECONDS, shared=True, started=started)
         return read[0]
 
 
@@ -1340,20 +1388,19 @@ def _reference_pr_data(
             for entry in listing or []:
                 if isinstance(entry, dict) and entry.get("number") == reference.number:
                     return entry
+            if _background_reads_paused():
+                return None
         started = time.time()
         data = _pr_json(root, reference, fields, token)
         if data is None:
             _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
             return None
         state = data.get("state")
-        finished = state == "MERGED" or (background and state == "CLOSED")
-        _cache_put(
-            key,
-            data,
-            _FINISHED_PR_TTL_SECONDS if finished else _OPEN_PR_TTL_SECONDS,
-            shared=True,
-            started=started,
-        )
+        if state == "MERGED" or (background and state == "CLOSED"):
+            ttl = _FINISHED_PR_TTL_SECONDS
+        else:
+            ttl = _BACKGROUND_PR_TTL_SECONDS if background else _OPEN_PR_TTL_SECONDS
+        _cache_put(key, data, ttl, shared=True, started=started)
         return data
 
 
@@ -1462,7 +1509,7 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
         "repo": {"name_with_owner": reference.repository},
         "selected_pr_url": reference.url,
     }
-    if not info["gh_available"]:
+    if not info["gh_available"] or _background_reads_paused():
         return info
     # The PR read lists the accounts fresh, which the shared copy below then serves.
     data = _reference_pr_data(root, reference, background=_background_read.get())
@@ -1545,8 +1592,10 @@ def _pr_title_before(
 
     :param deadline: A ``time.monotonic()`` value.
     :returns: ``(title, timed_out)``; ``timed_out`` is true only when the
-        deadline ended the lookup.
+        deadline ended the lookup, or a rate-limit pause skipped a background one.
     """
+    if _background_reads_paused():
+        return None, True  # looked up again once the pause ends; the cached title stays
     with _gh_deadline_scope(deadline):
         token, identity = _pr_read(root, reference)
         if identity is None:
@@ -2991,7 +3040,9 @@ def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any
     """Look ``key`` up in the runner's read cache: ``(hit, value)``.
 
     A ``shared`` entry also lives in a file under the data directory, since every
-    session runs in its own runner process and only the disk is common to them.
+    session runs in its own runner process and only the disk is common to them. Memory
+    keeps it for at most the viewer window, so a write another process made (which
+    deletes the file) is seen within that window.
     """
     now = time.monotonic()
     with _preview_lock:
@@ -3011,7 +3062,7 @@ def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any
             _cache_path(key).unlink()
         return False, None
     with _preview_lock:
-        _preview_cache[key] = (now + remaining, value)
+        _preview_cache[key] = (now + min(remaining, _OPEN_PR_TTL_SECONDS), value)
     return True, value
 
 
@@ -3074,7 +3125,8 @@ def _cache_put(
     with _preview_lock:
         if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
             _preview_cache.clear()
-        _preview_cache[key] = (time.monotonic() + ttl, value)
+        memory_ttl = min(ttl, _OPEN_PR_TTL_SECONDS) if shared else ttl
+        _preview_cache[key] = (time.monotonic() + memory_ttl, value)
     if not shared:
         return
     path = _cache_path(key)

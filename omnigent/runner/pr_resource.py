@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import contextmanager, suppress
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any
@@ -397,8 +397,12 @@ def _session_prs_with_titles(
 
     may_cache = time.monotonic() < request_deadline
     if pending and time.monotonic() < deadline:
+        # Each lookup runs in a copy of this context, so it sees a background read's flag.
+        contexts = [copy_context() for _ in pending]
         with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
-            for result in executor.map(fetch_title, pending):
+            for result in executor.map(
+                lambda context, entry: context.run(fetch_title, entry), contexts, pending
+            ):
                 if result is not None:
                     url, title, timed_out = result
                     titles[url] = title
