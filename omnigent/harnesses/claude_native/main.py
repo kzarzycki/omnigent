@@ -3062,6 +3062,7 @@ def _strip_resume_from_claude_args(args: tuple[str, ...]) -> tuple[str, ...]:
     :param args: Raw ``claude_args`` from Click pass-through.
     :returns: Args with stray ``--resume`` / ``-r`` removed ahead of any ``--``.
     """
+
     def warn(token: str, kind: str) -> None:
         if kind == "value":
             _logger.warning("Stripped stray --resume value %r from claude args.", token)
