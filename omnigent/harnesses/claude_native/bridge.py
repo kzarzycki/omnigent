@@ -94,7 +94,11 @@ from omnigent.harnesses.diagnostics import (
     sign_in_running_elsewhere,
 )
 from omnigent.harnesses.kiro_native import bridge as kiro_bridge
-from omnigent.harnesses.launch_args import insert_before_separator
+from omnigent.harnesses.launch_args import (
+    args_before_separator,
+    has_flag_before_separator,
+    insert_before_separator,
+)
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
@@ -3369,6 +3373,7 @@ def _arg_value(args: tuple[str, ...], flag: str) -> str | None:
     :param flag: Long flag to read, e.g. ``"--model"``.
     :returns: The flag value, or ``None`` when absent/empty.
     """
+    args = tuple(args_before_separator(args))
     joined_prefix = f"{flag}="
     value: str | None = None
     for idx, arg in enumerate(args):
@@ -3466,7 +3471,7 @@ def _args_request_bypass_permissions(args: tuple[str, ...]) -> bool:
     :param args: Claude CLI args, e.g. ``("--dangerously-skip-permissions",)``.
     :returns: ``True`` when this launch requests bypass mode.
     """
-    return "--dangerously-skip-permissions" in args or (
+    return has_flag_before_separator(args, "--dangerously-skip-permissions") or (
         _arg_value(args, "--permission-mode") == "bypassPermissions"
     )
 
