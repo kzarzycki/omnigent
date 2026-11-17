@@ -3418,6 +3418,27 @@ async def test_effort_rejection_surfaces_agent_message_before_prompt() -> None:
     assert ex._active_effort is None
 
 
+def test_session_ended_timeouts_nest_from_bridge_to_server() -> None:
+    """Each hop of the session-ended chain waits longer than the hop it wraps."""
+    import importlib.util
+
+    from omnigent.runner.app import _SESSION_ENDED_FORWARD_TIMEOUT_S
+    from omnigent.server.session_ended import _SESSION_ENDED_TIMEOUT_S
+
+    bridge_path = Path(__file__).parents[2] / "integrations/claude-cloud-acp/claude_cloud_acp.py"
+    spec = importlib.util.spec_from_file_location("claude_cloud_acp_under_test", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+
+    executor_wait = (
+        acp_executor_module._SESSION_ENDED_TIMEOUT_SECONDS
+        + acp_executor_module._ACP_TERMINATION_TIMEOUT_SECONDS
+    )
+    assert bridge.API_CALL_TIMEOUT_S < acp_executor_module._SESSION_ENDED_TIMEOUT_SECONDS
+    assert executor_wait < _SESSION_ENDED_FORWARD_TIMEOUT_S < _SESSION_ENDED_TIMEOUT_S
+
+
 @pytest.mark.asyncio
 async def test_unsupported_effort_refused_at_start_by_claude_cloud_bridge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

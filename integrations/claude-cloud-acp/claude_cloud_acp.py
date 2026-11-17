@@ -59,6 +59,8 @@ API_BASE = os.environ.get("CLAUDE_CLOUD_API_BASE", "https://api.anthropic.com")
 CLAUDE_CLI = os.environ.get("CLAUDE_CLOUD_CLI", "claude")
 # The stream sends a keepalive every ~12 s; reconnect when it goes quiet for longer.
 STREAM_IDLE_S = 60
+# Bound on one sessions-API call, the session-end archive included.
+API_CALL_TIMEOUT_S = 30
 # A dropped stream reconnects after 1 s, doubling up to this while the failures last.
 RECONNECT_MAX_S = 30
 # A turn waits as long as its cloud session shows life; this long without any, while
@@ -228,7 +230,7 @@ def call_api(path: str, body: dict | None = None, method: str | None = None) -> 
         headers=_headers(),
         method=method,
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=API_CALL_TIMEOUT_S) as resp:
         raw = resp.read()
     return json.loads(raw) if raw.strip() else {}
 
