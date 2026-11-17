@@ -106,7 +106,8 @@ _IDLE_EXIT_CAPABILITY = "omnigentIdleExit"
 # An agent that wants to hear that its Omnigent session ended (the claude-cloud bridge archives
 # its cloud session then) names the request in ``{"omnigentSessionEnded": {"method": ...}}``.
 _SESSION_ENDED_CAPABILITY = "omnigentSessionEnded"
-_SESSION_ENDED_TIMEOUT_SECONDS = 20.0
+# Above the bridge's 30 s archive call, which it makes before answering.
+_SESSION_ENDED_TIMEOUT_SECONDS = 40.0
 _ACP_CLEANUP_HEADROOM_SECONDS = 1.0
 ACP_REAP_TIMEOUT_SECONDS = (
     ACP_CANCEL_GRACE_SECONDS + _ACP_TERMINATION_TIMEOUT_SECONDS + _ACP_CLEANUP_HEADROOM_SECONDS

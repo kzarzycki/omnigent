@@ -244,7 +244,6 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, asyncio.subproce
 
     monkeypatch.setattr(acp.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(acp.AcpExecutor, "_sandbox_launch", lambda self, keys: ("sleep", []))
-    monkeypatch.setattr(acp.AcpExecutor, "_start_reader_tasks", lambda self: None, raising=False)
     return spawns
 
 
@@ -301,3 +300,24 @@ async def test_the_agent_started_for_the_notice_is_stopped_before_the_next_turn(
     for _, proc in spawned:
         if proc.returncode is None:
             proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_a_live_agent_told_the_session_ended_is_left_running() -> None:
+    executor = acp.AcpExecutor(acp.AcpAgentConfig(command="x", name="bridge"))
+    live = await asyncio.create_subprocess_exec("sleep", "60")
+    executor._proc = live
+    executor._session_ended_method = "_omnigent/session_ended"
+    executor._session_id = "acp-1"
+
+    async def rpc(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    executor._rpc = rpc  # type: ignore[assignment]
+    try:
+        await executor.end_session("key")
+        assert live.returncode is None  # only an agent restarted for the notice is stopped
+    finally:
+        if live.returncode is None:
+            live.kill()
+        await live.wait()

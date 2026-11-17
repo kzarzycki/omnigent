@@ -20,7 +20,7 @@ _logger = logging.getLogger(__name__)
 
 SESSION_ENDED_EVENT_TYPE = "session_ended"
 # Above the runner's own forward bound, which is above the bridge's archive call.
-_SESSION_ENDED_TIMEOUT_S = 30.0
+_SESSION_ENDED_TIMEOUT_S = 65.0
 
 
 async def notify_session_ended(

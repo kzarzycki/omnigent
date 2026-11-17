@@ -232,8 +232,8 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 _logger = logging.getLogger(__name__)
 _BRIDGE_NOTIFICATIONS = DedicatedExecutor(max_workers=2, thread_name_prefix="runner-bridge-notify")
 
-# Allow process termination and forwarder cleanup to finish before DELETE proceeds.
-_SESSION_ENDED_FORWARD_TIMEOUT_S = 25.0
+# Above the ACP notice timeout (40 s) plus stopping a restarted agent.
+_SESSION_ENDED_FORWARD_TIMEOUT_S = 55.0
 _SESSION_INIT_CANCEL_TIMEOUT_S = 20.0
 
 
