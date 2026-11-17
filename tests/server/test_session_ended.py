@@ -66,6 +66,14 @@ async def test_no_runner_is_logged_and_not_raised(monkeypatch, caplog) -> None:
     assert "no runner to tell" in caplog.text
 
 
+async def test_an_unresolvable_harness_is_logged_and_not_told(runner, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(sessions_facade, "_resolve_harness", lambda *a, **k: None)
+    with caplog.at_level(logging.WARNING):
+        assert await session_ended.notify_session_ended(CONV) is False  # type: ignore[arg-type]
+    assert "harness could not be resolved" in caplog.text
+    assert runner.posts == []
+
+
 @pytest.mark.parametrize("failure", ["status", "transport"])
 async def test_a_failed_notice_is_logged_and_not_raised(runner, caplog, failure) -> None:
     if failure == "status":

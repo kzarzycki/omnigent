@@ -1478,8 +1478,12 @@ class ExecutorAdapter(HarnessApp):
     async def on_session_ended(self) -> None:
         """Let the executor end state it holds outside the runner."""
         executor = self._executor
-        if executor is not None:
-            await executor.end_session(self._session_key)
+        if executor is None:
+            _logger.warning(
+                "session %s ended with no executor in this harness to tell", self._session_key
+            )
+            return
+        await executor.end_session(self._session_key)
 
     async def on_shutdown(self) -> None:
         """Drain background interrupt tasks, then close the executor session and executor."""

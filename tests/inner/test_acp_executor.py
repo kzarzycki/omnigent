@@ -2236,6 +2236,67 @@ async def test_prompt_met_by_idle_exit_is_resent_once(
         assert prompts == ["remember PELICAN"]
 
 
+_IDLE_THEN_ENDED_ACP_AGENT = r"""
+import os, sys, json
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+caps = {"omnigentIdleExit": {"status": 75}, "omnigentSessionEnded": {"method": "_fake/ended"}}
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if method == "initialize":
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps("start") + "\n")
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": 1, "agentCapabilities": caps}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "sess-fixed"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        os._exit(75)  # idle exit once the turn is answered
+    elif method == "_fake/ended":
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps(["archive", params["sessionId"]]) + "\n")
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+"""
+
+
+@pytest.mark.asyncio
+async def test_session_ended_after_idle_exit_restarts_agent_and_tells_it(tmp_path: Path) -> None:
+    """An agent that left idle after its turn is started again and told its session ended,
+    even when its workspace was removed first (a reaped worker's worktree)."""
+    agent_path = tmp_path / "idle_then_ended_acp_agent.py"
+    agent_path.write_text(_IDLE_THEN_ENDED_ACP_AGENT)
+    log_path = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join([sys.executable, str(agent_path), str(log_path)]), name="Fake"
+        ),
+        cwd=str(workspace),
+    )
+    try:
+        events = [ev async for ev in ex.run_turn([{"role": "user", "content": "hi"}], [], "")]
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        assert ex._proc is not None
+        await ex._proc.wait()
+        assert ex._proc.returncode == 75
+        workspace.rmdir()
+        await ex.end_session("session-key")
+    finally:
+        await ex.close()
+
+    assert [json.loads(line) for line in log_path.read_text().splitlines()] == [
+        "start",
+        "start",
+        ["archive", "sess-fixed"],
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Omnigent MCP bridge (session/new.mcpServers via the shared serve-mcp relay)
 # ---------------------------------------------------------------------------

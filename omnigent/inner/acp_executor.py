@@ -53,6 +53,7 @@ import math
 import os
 import secrets
 import shlex
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -105,7 +106,8 @@ _IDLE_EXIT_CAPABILITY = "omnigentIdleExit"
 # An agent that wants to hear that its Omnigent session ended (the claude-cloud bridge archives
 # its cloud session then) names the request in ``{"omnigentSessionEnded": {"method": ...}}``.
 _SESSION_ENDED_CAPABILITY = "omnigentSessionEnded"
-_SESSION_ENDED_TIMEOUT_SECONDS = 20.0
+# Above the bridge's 30 s archive call, which it makes before answering.
+_SESSION_ENDED_TIMEOUT_SECONDS = 40.0
 _ACP_CLEANUP_HEADROOM_SECONDS = 1.0
 ACP_REAP_TIMEOUT_SECONDS = (
     ACP_CANCEL_GRACE_SECONDS + _ACP_TERMINATION_TIMEOUT_SECONDS + _ACP_CLEANUP_HEADROOM_SECONDS
@@ -596,8 +598,11 @@ class AcpExecutor(Executor):
     # Low-level ACP transport
     # ------------------------------------------------------------------
 
-    async def _start_process(self) -> None:
+    async def _start_process(self, *, cwd: str | None = None) -> None:
         """Start the configured ACP agent as an asyncio subprocess.
+
+        *cwd* overrides the working directory for this spawn only (the session-ended
+        restart, whose workspace may be gone).
 
         The StreamReader limit is raised to 16 MiB so a large ``session/new``
         response or tool-output line can't hit the default 64 KiB per-line cap.
@@ -605,10 +610,11 @@ class AcpExecutor(Executor):
         # Re-validate cwd before every spawn and respawn: the workspace may have
         # been deleted after __init__, and this error flows through
         # _startup_error_message so the UI also shows the harness-log path.
-        _resolve_cwd(self._cwd, session_id=self._session_id)
+        spawn_cwd = cwd if cwd is not None else self._cwd
+        _resolve_cwd(spawn_cwd, session_id=self._session_id)
         # If the cwd is relative the spawn resolves it against the process cwd;
         # fail early with a clear message if that directory was also deleted.
-        if not os.path.isabs(self._cwd):
+        if not os.path.isabs(spawn_cwd):
             _resolve_cwd(None, session_id=self._session_id)
         # Reset handshake state: this may be a restart after the previous
         # subprocess died. ``_initialized`` is a one-way latch.
@@ -632,7 +638,7 @@ class AcpExecutor(Executor):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            cwd=self._cwd,
+            cwd=spawn_cwd,
             limit=_STREAM_LIMIT,
             # Own session/group: the sandbox launcher forks the real agent,
             # and without a group boundary teardown reaches only the wrapper.
@@ -2208,7 +2214,8 @@ class AcpExecutor(Executor):
         """Tell an agent that asked to hear it that its Omnigent session ended.
 
         An agent that left idle is started again to be told, since it is the one that can
-        end what it holds; one that exited otherwise is not. A failure is logged, never raised.
+        end what it holds, then stopped so the next turn spawns afresh; one that exited
+        otherwise is not. A failure is logged, never raised.
         """
         method, acp_session_id = self._session_ended_method, self._session_id
         if method is None or acp_session_id is None:
@@ -2219,6 +2226,7 @@ class AcpExecutor(Executor):
                     session_key,
                 )
             return
+        restarted = False
         try:
             if self._proc is None:
                 logger.warning(
@@ -2236,7 +2244,12 @@ class AcpExecutor(Executor):
                         self._proc.returncode,
                     )
                     return
-                await self._start_process()
+                # The workspace may be gone by now (a reaped worker's worktree); the agent
+                # only has to end what it holds, so it starts from a directory that exists.
+                restarted = True
+                await self._start_process(
+                    cwd=self._cwd if os.path.isdir(self._cwd) else tempfile.gettempdir()
+                )
                 await self._ensure_initialized()
                 method = self._session_ended_method
                 if method is None:
@@ -2251,6 +2264,21 @@ class AcpExecutor(Executor):
                 session_key,
                 exc_info=True,
             )
+        finally:
+            if restarted:
+                await self._stop_notice_process()
+
+    async def _stop_notice_process(self) -> None:
+        """Stop the agent restarted only for the notice, so the next turn spawns afresh."""
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            _proc.terminate_tree(proc)
+            await asyncio.wait_for(proc.wait(), timeout=_ACP_TERMINATION_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                _proc.kill_tree(proc)
 
     def close_timeout(self) -> float:
         return ACP_REAP_TIMEOUT_SECONDS

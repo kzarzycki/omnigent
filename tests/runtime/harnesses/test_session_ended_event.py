@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -33,10 +34,12 @@ class _Executor(Executor):
 
 
 @pytest.mark.asyncio
-async def test_the_adapter_tells_its_executor_the_session_ended() -> None:
+async def test_the_adapter_tells_its_executor_the_session_ended(caplog) -> None:
     executor = _Executor()
     adapter = ExecutorAdapter(lambda: executor, session_key="key")
-    await adapter.on_session_ended()  # no executor built yet: nothing to tell
+    with caplog.at_level(logging.WARNING):
+        await adapter.on_session_ended()  # no executor built yet: nothing to tell
+    assert "no executor in this harness to tell" in caplog.text
     adapter._executor = executor
     response = await adapter._post_session_event(
         "c" * 32,
@@ -168,7 +171,7 @@ def _executor_after_exit(method: str | None, status: int) -> tuple[acp.AcpExecut
     executor._proc = SimpleNamespace(returncode=status)  # type: ignore[assignment]
     executor._idle_exit_status = 75
 
-    async def start() -> None:
+    async def start(cwd: str | None = None) -> None:
         steps.append("spawn")
         executor._reset_session_state()  # a respawn forgets the old process's session
 
@@ -219,3 +222,102 @@ async def test_a_failed_start_after_an_idle_exit_is_logged_not_raised(caplog) ->
     with caplog.at_level(logging.WARNING):
         await executor.end_session("key")
     assert "session-ended notice failed" in caplog.text
+
+
+@pytest.fixture
+def spawned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, asyncio.subprocess.Process]]:
+    """Real stand-in agent processes, recorded with the cwd each was spawned in."""
+    spawns: list[tuple[str, asyncio.subprocess.Process]] = []
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def spawn(*_args: object, cwd: str, **kwargs: object) -> asyncio.subprocess.Process:
+        proc = await real_spawn(
+            "sleep",
+            "60",
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        spawns.append((cwd, proc))
+        return proc
+
+    monkeypatch.setattr(acp.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(acp.AcpExecutor, "_sandbox_launch", lambda self, keys: ("sleep", []))
+    return spawns
+
+
+async def _second_turn(executor: acp.AcpExecutor) -> list[object]:
+    async def initialized() -> None:
+        executor._initialized = True
+
+    async def no_session() -> str:
+        raise RuntimeError("stop after spawn")
+
+    executor._ensure_initialized = initialized  # type: ignore[method-assign]
+    executor._ensure_session = no_session  # type: ignore[method-assign]
+    return [event async for event in executor.run_turn([], [], "")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_removed", [True, False])
+async def test_the_agent_started_for_the_notice_is_stopped_before_the_next_turn(
+    tmp_path, spawned, workspace_removed
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = acp.AcpExecutor(acp.AcpAgentConfig(command="x", name="bridge"), cwd=str(workspace))
+    executor._proc = SimpleNamespace(returncode=75)  # type: ignore[assignment]
+    executor._idle_exit_status = 75
+    executor._session_ended_method = "_omnigent/session_ended"
+    executor._session_id = "acp-1"
+
+    async def initialize() -> None:
+        executor._session_ended_method = "_omnigent/session_ended"
+
+    async def rpc(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    async def _no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    executor._ensure_initialized = initialize  # type: ignore[method-assign]
+    executor._rpc = rpc  # type: ignore[assignment]
+    executor._session_id = "acp-1"
+    if workspace_removed:
+        workspace.rmdir()
+
+    await executor.end_session("key")
+    assert len(spawned) == 1
+    assert spawned[0][1].returncode is not None  # the notice's agent did not stay up
+
+    events = await _second_turn(executor)
+    if workspace_removed:
+        assert len(spawned) == 1  # refused by the workspace check, nothing spawned
+        assert "does not exist" in events[0].message
+    else:
+        assert [cwd for cwd, _ in spawned] == [str(workspace), str(workspace)]
+    for _, proc in spawned:
+        if proc.returncode is None:
+            proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_a_live_agent_told_the_session_ended_is_left_running() -> None:
+    executor = acp.AcpExecutor(acp.AcpAgentConfig(command="x", name="bridge"))
+    live = await asyncio.create_subprocess_exec("sleep", "60")
+    executor._proc = live
+    executor._session_ended_method = "_omnigent/session_ended"
+    executor._session_id = "acp-1"
+
+    async def rpc(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    executor._rpc = rpc  # type: ignore[assignment]
+    try:
+        await executor.end_session("key")
+        assert live.returncode is None  # only an agent restarted for the notice is stopped
+    finally:
+        if live.returncode is None:
+            live.kill()
+        await live.wait()
