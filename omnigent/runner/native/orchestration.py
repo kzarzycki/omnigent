@@ -72,6 +72,7 @@ from omnigent.errors import (
     OmnigentError,
 )
 from omnigent.harness_plugins import native_provider_for_key
+from omnigent.harnesses.launch_args import insert_before_separator
 from omnigent.host.harness_startup import env_wrapper_chdir, env_wrapper_environment
 from omnigent.inference_config import ModelNotAllowedError
 from omnigent.inner.terminal import build_terminal_os_env_spec, terminal_pane_environment
@@ -85,7 +86,6 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
 )
-from omnigent.harnesses.launch_args import insert_before_separator
 from omnigent.native.native_dispatch import resolve_hook
 from omnigent.pi_prompt import pi_prompt_args
 from omnigent.process_logging import process_log_reference
