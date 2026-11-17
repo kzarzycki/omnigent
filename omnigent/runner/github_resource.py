@@ -3040,7 +3040,9 @@ def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any
     """Look ``key`` up in the runner's read cache: ``(hit, value)``.
 
     A ``shared`` entry also lives in a file under the data directory, since every
-    session runs in its own runner process and only the disk is common to them.
+    session runs in its own runner process and only the disk is common to them. Memory
+    keeps it for at most the viewer window, so a write another process made (which
+    deletes the file) is seen within that window.
     """
     now = time.monotonic()
     with _preview_lock:
@@ -3060,7 +3062,7 @@ def _cache_get(key: tuple[str, ...], *, shared: bool = False) -> tuple[bool, Any
             _cache_path(key).unlink()
         return False, None
     with _preview_lock:
-        _preview_cache[key] = (now + remaining, value)
+        _preview_cache[key] = (now + min(remaining, _OPEN_PR_TTL_SECONDS), value)
     return True, value
 
 
@@ -3123,7 +3125,8 @@ def _cache_put(
     with _preview_lock:
         if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
             _preview_cache.clear()
-        _preview_cache[key] = (time.monotonic() + ttl, value)
+        memory_ttl = min(ttl, _OPEN_PR_TTL_SECONDS) if shared else ttl
+        _preview_cache[key] = (time.monotonic() + memory_ttl, value)
     if not shared:
         return
     path = _cache_path(key)

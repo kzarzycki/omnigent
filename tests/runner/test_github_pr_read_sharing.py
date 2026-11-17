@@ -53,7 +53,10 @@ class FakeGh:
         self.titles: dict[int, str] = {}  # overrides of a PR's title
         self.time_out = False  # pr reads are cut off by the caller's deadline
         self.rate_limited = False  # pr reads fail as GitHub does once the quota is spent
+        self.rate_limit_message = "GraphQL: API rate limit exceeded for user ID 1."
         self.quota_reset: float | None = None  # ``gh api rate_limit``'s graphql reset
+        self.quota_remaining = 0  # ``gh api rate_limit``'s graphql remaining
+        self.conversation_rate_limited = False  # the conversation query fails as above
         self.argvs: list[list[str]] = []
 
     @property
@@ -101,10 +104,12 @@ class FakeGh:
         self.calls[" ".join(argv[:2])] += 1
         self.argvs.append(argv)
         if argv[:2] == ["api", "rate_limit"] and self.quota_reset is not None:
-            graphql = {"limit": 5000, "remaining": 0, "reset": self.quota_reset}
+            graphql = {"limit": 5000, "remaining": self.quota_remaining, "reset": self.quota_reset}
             return 0, json.dumps({"resources": {"graphql": graphql}}), ""
         if argv[0] == "pr" and self.rate_limited:
-            return 1, "", "GraphQL: API rate limit exceeded for user ID 1."
+            return 1, "", self.rate_limit_message
+        if argv[0] == "api" and "graphql" in argv and self.conversation_rate_limited:
+            return 1, "", self.rate_limit_message
         if argv[:2] == ["auth", "status"]:
             hosts = {"github.com": [dict(account) for account in self.accounts]}
             return 0, json.dumps({"hosts": hosts}), ""
@@ -864,3 +869,78 @@ def test_a_rate_limit_with_no_reset_time_pauses_for_15_minutes(
     assert _read(1, background=True)["pr"] is None
     _later(monkeypatch, 15 * 60 + 1)
     assert _read(1, background=True)["pr"]["state"] == "OPEN"
+
+
+def _paused_for(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, seconds: float, *, setup: Any = None
+) -> None:
+    """After a rate-limit error the stamp holds just under ``seconds`` and ends just after."""
+    (setup or (lambda: _read(1, background=True)))()
+    fake_gh.rate_limited = fake_gh.conversation_rate_limited = False
+    _later(monkeypatch, seconds - 5)
+    assert _read(1, background=True)["pr"] is None
+    _later(monkeypatch, seconds + 1)
+    assert _read(1, background=True)["pr"]["state"] == "OPEN"
+
+
+def test_an_open_pr_outside_the_listing_is_read_once_in_the_background_window(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    beyond_listing = 50
+    _read(beyond_listing, background=True)
+    _later(monkeypatch, 119)
+    _read(beyond_listing, background=True)
+    assert (fake_gh.calls["pr list"], fake_gh.calls["pr view"]) == (1, 1)
+
+
+def test_a_secondary_rate_limit_pauses_for_15_minutes_whatever_the_quota_says(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.rate_limited = True
+    fake_gh.rate_limit_message = "GraphQL: You have exceeded a secondary rate limit."
+    fake_gh.quota_remaining = 100  # the hourly quota is not spent, so its reset time is moot
+    fake_gh.quota_reset = time.time() + 600
+    _paused_for(fake_gh, monkeypatch, 15 * 60)
+
+
+def test_the_pause_ends_within_an_hour_of_a_later_reset(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.rate_limited = True
+    fake_gh.quota_reset = time.time() + 2 * 3600
+    _paused_for(fake_gh, monkeypatch, 3600)
+
+
+def test_a_rate_limited_conversation_query_pauses_background_reads(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.conversation_rate_limited = True
+    assert _read(1, background=False)["pr"]["state"] == "OPEN"  # the viewer's read still works
+    assert fake_gh.calls["api rate_limit"] == 1
+    assert _read(2, background=True)["pr"] is None
+    assert fake_gh.calls["pr list"] == 0
+
+
+def test_a_background_read_whose_own_listing_hits_the_limit_stops_there(fake_gh: FakeGh) -> None:
+    fake_gh.rate_limited = True
+    assert _read(1, background=True)["pr"] is None
+    assert (fake_gh.calls["pr list"], fake_gh.calls["pr view"]) == (1, 0)
+    assert fake_gh.calls["api rate_limit"] == 1
+
+
+@pytest.mark.parametrize("number", [1, 50], ids=["listed", "beyond-listing"])
+def test_another_process_stops_serving_a_pr_after_a_write_within_the_viewer_window(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, number: int
+) -> None:
+    _read(number, background=True)
+    other_process_memory = dict(github._preview_cache)  # what a second process still holds
+    fake_gh.titles[number] = "after the write"
+    github.invalidate_pr_reads(f"{REPO}/pull/{number}")
+    github._preview_cache.update(other_process_memory)
+    clock, wall = time.monotonic(), time.time()
+    monkeypatch.setattr(github.time, "monotonic", lambda: clock + 60)
+    monkeypatch.setattr(github.time, "time", lambda: wall + 60)
+    with github.background_reads(True):
+        info = github._reference_info("/work", PullRequestRef.from_url(f"{REPO}/pull/{number}"))
+    assert info["pr"]["title"] == "after the write"
+    assert fake_gh.calls["pr list"] == 2
