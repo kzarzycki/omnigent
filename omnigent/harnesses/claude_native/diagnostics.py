@@ -19,6 +19,7 @@ from omnigent.harnesses.diagnostics import (
     DIAGNOSTIC_TAIL_BYTES,
     bounded_diagnostic_tail,
 )
+from omnigent.harnesses.launch_args import has_flag_before_separator, insert_before_separator
 from omnigent.native.failure_telemetry import FailureContext, normalize_failure_context
 from omnigent.process_logging import harness_stderr_capture_enabled
 
@@ -99,10 +100,7 @@ def augment_claude_debug_args(args: list[str], bridge_dir: Path) -> list[str]:
         _ensure_secure_dir(bridge_dir)
         directory_fd = _open_directory(bridge_dir)
         _clear_capture(directory_fd)
-        separator = args.index("--") if "--" in args else len(args)
-        if any(
-            arg == "--debug-file" or arg.startswith("--debug-file=") for arg in args[:separator]
-        ):
+        if has_flag_before_separator(args, "--debug-file"):
             return args
         launch_id = uuid.uuid4().hex
         filename = f"claude-debug-{launch_id}.log"
@@ -118,7 +116,7 @@ def augment_claude_debug_args(args: list[str], bridge_dir: Path) -> list[str]:
             bridge_dir / CLAUDE_DEBUG_LOG_MARKER,
             {"filename": filename, "launch_id": launch_id},
         )
-        return [*args[:separator], "--debug-file", str(created), *args[separator:]]
+        return insert_before_separator(args, ["--debug-file", str(created)])
     except Exception:  # noqa: BLE001 — diagnostics must never prevent a launch
         if created is not None:
             with contextlib.suppress(OSError):

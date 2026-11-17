@@ -54,6 +54,7 @@ from omnigent.harnesses.claude_native.bridge import (
     count_hook_events,
     display_cost_approval_popup,
     ensure_claude_workspace_trusted,
+    extract_settings_args,
     inject_interrupt,
     inject_user_message,
     is_auth_slash_command,
@@ -5083,17 +5084,78 @@ def test_augment_claude_args_appends_caller_system_prompt(
     assert omnigent_args.count("--append-system-prompt") == 1
     assert omnigent_args[prompt_index + 1] == _FRAMEWORK_PROMPT
     if merged_args is None:
-        # Tool-list flags Omnigent adds precede the caller's ``--`` separator. The
-        # ``--settings``/``--mcp-config``/``--append-system-prompt`` placement
-        # below is known-wrong (they land after it); see issue #436.
-        allowed_index = omnigent_args.index("--allowedTools")
-        allowed_pair = omnigent_args[allowed_index : allowed_index + 2]
-        del omnigent_args[allowed_index : allowed_index + 2]
-        assert args == [*allowed_pair, *user_args, *omnigent_args]
+        # Every flag Omnigent adds precedes the caller's ``--`` separator.
+        separator = args.index("--") if "--" in args else len(args)
+        assert args[separator:] == list(
+            user_args[user_args.index("--") :] if "--" in user_args else ()
+        )
+        assert args[:separator].count("--append-system-prompt") == 1
+        assert _FRAMEWORK_PROMPT in args[:separator]
     else:
         # The caller's prompt is sent once, so the launch command does not grow by its size.
         del omnigent_args[prompt_index : prompt_index + 2]
         assert args == [*merged_args, *omnigent_args]
+
+
+def test_augment_claude_args_places_every_added_flag_before_separator(tmp_path: Path) -> None:
+    """With a client ``--``, Omnigent's flags precede it and the prompt tokens are untouched."""
+    bundle_dir = tmp_path / "bundle"
+    (bundle_dir / "skills" / "demo").mkdir(parents=True)
+    (bundle_dir / "skills" / "demo" / "SKILL.md").write_text("---\nname: demo\n---\n")
+    client_tail = ["--", "--settings", "fix the bug"]
+
+    args = augment_claude_args(
+        tuple(client_tail),
+        bridge_dir=tmp_path / "bridge",
+        python_executable="/venv/bin/python",
+        append_system_prompt=_FRAMEWORK_PROMPT,
+        bundle_dir=bundle_dir,
+        workspace=tmp_path,
+        skills_filter="none",
+    )
+
+    separator = args.index("--")
+    assert args[separator:] == client_tail
+    before = args[:separator]
+    for flag in (
+        "--mcp-config",
+        "--settings",
+        "--append-system-prompt",
+        "--plugin-dir",
+        "--setting-sources",
+        "--allowedTools",
+    ):
+        assert flag in before, flag
+
+
+def test_augment_claude_args_places_portable_skill_dir_before_separator(tmp_path: Path) -> None:
+    """A workspace portable skill's ``--add-dir`` precedes a client ``--``."""
+    skill_dir = tmp_path / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\n")
+    client_tail = ["--", "fix the bug"]
+
+    args = augment_claude_args(
+        tuple(client_tail),
+        bridge_dir=tmp_path / "bridge",
+        python_executable="/venv/bin/python",
+        workspace=tmp_path,
+        skills_filter="all",
+    )
+
+    separator = args.index("--")
+    assert args[separator:] == client_tail
+    assert "--add-dir" in args[:separator]
+
+
+def test_extract_settings_args_leaves_client_tail_untouched() -> None:
+    """A ``--settings`` after the client ``--`` is prompt text and stays in place."""
+    args = ["--settings", '{"env":{"A":"1"}}', "--", "--settings", "fix the bug"]
+
+    remaining, merged = extract_settings_args(args)
+
+    assert remaining == ["--", "--settings", "fix the bug"]
+    assert merged == {"env": {"A": "1"}}
 
 
 @pytest.mark.parametrize("flag", ["--allowedTools", "--disallowedTools"])
