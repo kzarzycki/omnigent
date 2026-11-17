@@ -544,6 +544,23 @@ def test_claude_terminal_request_does_not_infer_gateway_model_overrides(
     assert "modelOverrides" not in settings
 
 
+@pytest.mark.parametrize(
+    ("claude_args", "expected"),
+    [
+        (("--", "fix the bug"), ("--model", "m", "--", "fix the bug")),
+        (("--", "--model", "x"), ("--model", "m", "--", "--model", "x")),
+        (("--model=x", "--", "hi"), ("--model=x", "--", "hi")),
+        (("--print",), ("--print", "--model", "m")),
+    ],
+    ids=["tail-prompt", "model-in-tail", "explicit-before", "no-separator"],
+)
+def test_merge_default_model_arg_stays_before_separator(
+    claude_args: tuple[str, ...], expected: tuple[str, ...]
+) -> None:
+    """The model default lands before a client ``--`` and ignores ``--model`` after it."""
+    assert claude_native._merge_default_model_arg(claude_args, model="m") == expected
+
+
 def test_claude_terminal_request_preserves_user_model_arg(tmp_path, monkeypatch) -> None:
     """
     User-selected Claude model wins over the ucode default.

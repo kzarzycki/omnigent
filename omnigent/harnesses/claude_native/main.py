@@ -117,6 +117,7 @@ from omnigent.harnesses.claude_native.status_file import (
     find_background_holder,
     session_has_live_process,
 )
+from omnigent.harnesses.launch_args import with_default_flag_value
 from omnigent.host.daemon_launch import (
     daemon_poll_intervals,
     error_text,
@@ -7109,14 +7110,11 @@ def _merge_default_model_arg(
         ``("--model", "sonnet")``.
     :param model: Ucode model id, e.g.
         ``"databricks-claude-opus-4-7"``.
-    :returns: Args with ``--model <model>`` appended when appropriate.
+    :returns: Args with ``--model <model>`` placed before any ``--`` when appropriate.
     """
     if not model:
         return claude_args
-    for arg in claude_args:
-        if arg == "--model" or arg.startswith("--model="):
-            return claude_args
-    return (*claude_args, "--model", model)
+    return tuple(with_default_flag_value(claude_args, "--model", model))
 
 
 async def attach_local_terminal(

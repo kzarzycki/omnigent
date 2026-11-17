@@ -54,6 +54,7 @@ from omnigent.harnesses.claude_native.bridge import (
     count_hook_events,
     display_cost_approval_popup,
     ensure_claude_workspace_trusted,
+    extract_settings_args,
     inject_interrupt,
     inject_user_message,
     is_auth_slash_command,
@@ -5125,6 +5126,36 @@ def test_augment_claude_args_places_every_added_flag_before_separator(tmp_path: 
         "--allowedTools",
     ):
         assert flag in before, flag
+
+
+def test_augment_claude_args_places_portable_skill_dir_before_separator(tmp_path: Path) -> None:
+    """A workspace portable skill's ``--add-dir`` precedes a client ``--``."""
+    skill_dir = tmp_path / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\n")
+    client_tail = ["--", "fix the bug"]
+
+    args = augment_claude_args(
+        tuple(client_tail),
+        bridge_dir=tmp_path / "bridge",
+        python_executable="/venv/bin/python",
+        workspace=tmp_path,
+        skills_filter="all",
+    )
+
+    separator = args.index("--")
+    assert args[separator:] == client_tail
+    assert "--add-dir" in args[:separator]
+
+
+def test_extract_settings_args_leaves_client_tail_untouched() -> None:
+    """A ``--settings`` after the client ``--`` is prompt text and stays in place."""
+    args = ["--settings", '{"env":{"A":"1"}}', "--", "--settings", "fix the bug"]
+
+    remaining, merged = extract_settings_args(args)
+
+    assert remaining == ["--", "--settings", "fix the bug"]
+    assert merged == {"env": {"A": "1"}}
 
 
 @pytest.mark.parametrize("flag", ["--allowedTools", "--disallowedTools"])

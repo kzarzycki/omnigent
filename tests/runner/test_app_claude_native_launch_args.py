@@ -96,6 +96,13 @@ from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
             ["--", "--model", "fix the bug"],
             ("--model", "claude-opus-4-7", "--", "--model", "fix the bug"),
         ),
+        # A persisted effort is not suppressed by an ``--effort`` that is prompt text.
+        (
+            "high",
+            None,
+            ["--", "--effort", "fix the bug"],
+            ("--effort", "high", "--", "--effort", "fix the bug"),
+        ),
     ],
     ids=[
         "effort-only",
@@ -110,6 +117,7 @@ from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
         "unknown-effort-dropped",
         "leading-prompt-stays-first",
         "model-default-before-separator",
+        "effort-default-ignores-prompt-text",
     ],
 )
 def test_build_claude_native_base_args(
@@ -1480,7 +1488,9 @@ async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
     assert args[args.index("--tools") + 1] == "Read,Grep"
 
 
+@pytest.mark.parametrize("wrapper_prefix", [[], ["--"]], ids=["bare", "wrapper-separator"])
 async def test_configured_claude_settings_merge_into_the_invocation_settings(
+    wrapper_prefix: list[str],
     bridge_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1514,6 +1524,7 @@ async def test_configured_claude_settings_merge_into_the_invocation_settings(
     monkeypatch.setattr(
         "omnigent.harness_startup_config.resolve_harness_args",
         lambda _harness, cli_args, cfg=None: [
+            *wrapper_prefix,
             "--settings",
             '{"env": {"INLINE": "1"}}',
             "--settings",
@@ -1532,6 +1543,28 @@ async def test_configured_claude_settings_merge_into_the_invocation_settings(
     env = json.loads(Path(args[args.index("--settings") + 1]).read_text())["env"]
     assert env["INLINE"] == "1"
     assert env["FROM_FILE"] == "2"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        ["--", "--settings", '{"env": {"WRAPPED": "1"}}'],
+        ["--settings", '{"env": {"WRAPPED": "1"}}', "--"],
+        ["--settings", '{"env": {"WRAPPED": "1"}}'],
+    ],
+    ids=["after-wrapper-separator", "before-wrapper-separator", "no-separator"],
+)
+def test_extract_configured_settings_args_reads_both_sides_of_wrapper_separator(
+    configured: list[str],
+) -> None:
+    """Configured args are all Claude options, so ``--settings`` merges around a wrapper ``--``."""
+    from omnigent.runner.native.orchestration import _extract_configured_settings_args
+
+    remaining, settings = _extract_configured_settings_args(configured, base_dir=Path("."))
+
+    assert "--settings" not in remaining
+    assert remaining == (["--"] if "--" in configured else [])
+    assert settings == {"env": {"WRAPPED": "1"}}
 
 
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(

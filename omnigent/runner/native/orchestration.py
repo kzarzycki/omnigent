@@ -72,7 +72,11 @@ from omnigent.errors import (
     OmnigentError,
 )
 from omnigent.harness_plugins import native_provider_for_key
-from omnigent.harnesses.launch_args import insert_before_separator
+from omnigent.harnesses.launch_args import (
+    has_flag_before_separator,
+    insert_before_separator,
+    with_default_flag_value,
+)
 from omnigent.host.harness_startup import env_wrapper_chdir, env_wrapper_environment
 from omnigent.inference_config import ModelNotAllowedError
 from omnigent.inner.terminal import build_terminal_os_env_spec, terminal_pane_environment
@@ -8533,9 +8537,7 @@ def _build_claude_native_base_args(
     args: list[str] = []
     if resume_external_session_id:
         args.extend(("--resume", resume_external_session_id))
-    passed_effort = any(
-        arg == "--effort" or arg.startswith("--effort=") for arg in terminal_launch_args or ()
-    )
+    passed_effort = has_flag_before_separator(terminal_launch_args or (), "--effort")
     if reasoning_effort is not None and reasoning_effort in CLAUDE_EFFORTS and not passed_effort:
         args.extend(("--effort", reasoning_effort))
     if terminal_launch_args:
@@ -8549,12 +8551,34 @@ def _build_claude_native_base_args(
     # model_override is a default: it applies only when the user did
     # not pass their own ``--model`` (in either the long ``--model X``
     # or the joined ``--model=X`` form).
-    separator = args.index("--") if "--" in args else len(args)
-    if model_override and not any(
-        arg == "--model" or arg.startswith("--model=") for arg in args[:separator]
-    ):
-        args = insert_before_separator(args, ("--model", model_override))
+    if model_override:
+        args = with_default_flag_value(args, "--model", model_override)
     return tuple(args)
+
+
+def _extract_configured_settings_args(
+    configured_args: Sequence[str], *, base_dir: Path
+) -> tuple[list[str], dict[str, Any]]:
+    """
+    Pull ``--settings`` out of configured ``harness.claude-native.args``.
+
+    A ``--`` there is the wrapper's separator (``wrapper -- <claude args>``), not a
+    client pass-through, so the args on both sides of it are Claude options.
+
+    :param configured_args: Configured args, e.g. ``["--", "--settings", "{}"]``.
+    :param base_dir: Directory relative settings files resolve from.
+    :returns: ``(args without --settings, merged configured settings)``.
+    """
+    from omnigent.harnesses.claude_native.bridge import (  # noqa: FlagLocalImports
+        extract_settings_args,
+    )
+
+    if "--" not in configured_args:
+        return extract_settings_args(configured_args, base_dir=base_dir)
+    split = configured_args.index("--")
+    head, head_settings = extract_settings_args(configured_args[:split], base_dir=base_dir)
+    tail, tail_settings = extract_settings_args(configured_args[split + 1 :], base_dir=base_dir)
+    return [*head, "--", *tail], {**head_settings, **tail_settings}
 
 
 def _claude_terminal_env_unset(
@@ -9507,7 +9531,6 @@ async def _auto_create_claude_terminal(
         augment_claude_args,
         claude_terminal_relay_env,
         ensure_claude_workspace_trusted,
-        extract_settings_args,
         prepare_bridge_dir,
         validate_claude_hook_interpreter_compatibility,
     )
@@ -10181,7 +10204,7 @@ async def _auto_create_claude_terminal(
     _harness_cfg = load_effective_config(workspace=workspace)
     # Configured --settings must merge into the invocation settings: the flag
     # would otherwise land before Omnigent's own and lose.
-    configured_args, configured_settings = extract_settings_args(
+    configured_args, configured_settings = _extract_configured_settings_args(
         resolve_harness_args("claude-native", (), cfg=_harness_cfg), base_dir=Path(workspace)
     )
     claude_args = augment_claude_args(
