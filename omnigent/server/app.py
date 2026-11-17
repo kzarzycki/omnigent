@@ -35,6 +35,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from omnigent._platform import resolve_repo_symlink
 from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
 from omnigent.db.db_models import InvalidUuidError
+from omnigent.db.utils import shared_read_scope
 from omnigent.debug_logging import (
     add_audit_attrs,
     audit_event_logger,
@@ -3543,7 +3544,7 @@ def create_app(
             sid, SessionLiveness(runner_online=True, host_online=None)
         )
 
-    def _bulk_session_liveness(ids: list[str]) -> dict[str, SessionLiveness]:
+    def _bulk_session_liveness_reads(ids: list[str]) -> dict[str, SessionLiveness]:
         """
         Bulk strict-liveness check with a fixed, small number of SQL
         queries.
@@ -3645,6 +3646,11 @@ def create_app(
                 host_version=host_version,
             )
         return result
+
+    def _bulk_session_liveness(ids: list[str]) -> dict[str, SessionLiveness]:
+        """Run :func:`_bulk_session_liveness_reads` over one pool checkout."""
+        with shared_read_scope():
+            return _bulk_session_liveness_reads(ids)
 
     @app.get("/health")
     async def health(

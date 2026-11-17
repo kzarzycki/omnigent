@@ -11,7 +11,8 @@ from fastapi import (
     Request,
 )
 
-from omnigent.entities import Conversation
+from omnigent.db.utils import shared_read_scope
+from omnigent.entities import Conversation, ConversationItem, PagedList
 from omnigent.entities.conversation import ITEM_TYPE_TO_DATA_CLS
 from omnigent.errors import StaleCursorError
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
@@ -38,6 +39,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
+from omnigent.server.routes._auth_helpers import require_access_and_level_sync
 from omnigent.server.routes._errors import (
     STALE_CURSOR_RESPONSE,
 )
@@ -207,22 +209,28 @@ def register_items_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         user_id = _get_user_id(request, auth_provider)
-        access = await _require_access_and_level(
-            user_id, session_id, LEVEL_READ, permission_store, conversation_store
-        )
-        if access.conversation is None:
-            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-            if conv is None:
-                raise _session_not_found()
-        page = await asyncio.to_thread(
-            conversation_store.list_items,
-            session_id,
-            limit=limit,
-            after=after,
-            before=before,
-            order=order,
-            type=type,
-        )
+
+        def _read_page() -> PagedList[ConversationItem]:
+            # Authorization, the existence check and the page share one checkout.
+            with shared_read_scope():
+                access = require_access_and_level_sync(
+                    user_id, session_id, LEVEL_READ, permission_store, conversation_store
+                )
+                if (
+                    access.conversation is None
+                    and conversation_store.get_conversation(session_id) is None
+                ):
+                    raise _session_not_found()
+                return conversation_store.list_items(
+                    session_id,
+                    limit=limit,
+                    after=after,
+                    before=before,
+                    order=order,
+                    type=type,
+                )
+
+        page = await asyncio.to_thread(_read_page)
         data = [m.to_api_dict() for m in page.data]
         return PaginatedList(
             data=data,

@@ -431,3 +431,58 @@ async def test_usage_report_loads_each_session_tree_once(
         f"usage report issued {len(scans)} per-root tree scans for {listed} listed "
         f"sessions; trees should load in one batched read per page. statements={scans}"
     )
+
+
+@contextmanager
+def _count_checkouts(db_uri: str) -> Iterator[list[int]]:
+    """
+    Count pool checkouts on the test engine.
+
+    Each checkout is a pre-ping, a transaction and a reset on a networked
+    database, so it is the cost a polled route pays per store call.
+
+    :param db_uri: The test database URI (keys the shared engine cache).
+    :returns: Context manager yielding a one-element list holding the count.
+    """
+    from sqlalchemy import event as sa_event
+
+    engine = _engine_cache[db_uri]
+    count = [0]
+
+    def _on_checkout(*_args: object) -> None:
+        count[0] += 1
+
+    sa_event.listen(engine, "checkout", _on_checkout)
+    try:
+        yield count
+    finally:
+        sa_event.remove(engine, "checkout", _on_checkout)
+
+
+async def test_polled_session_reads_stay_within_checkout_budget(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A supervisor's 5 s poll (session read + items page) must not open a pool
+    checkout per store call.
+
+    The snapshot's items, liveness and subtree usage ride the authorization
+    checkout, and the items route authorizes, checks existence and reads its
+    page over one checkout, so each route stays at a small constant.
+    """
+    agent = await create_test_agent(client)
+    sid = (await _create_session(client, agent["id"]))["id"]
+    for _ in range(2):  # warm the agent cache so the counted requests are steady-state
+        await client.get(f"/v1/sessions/{sid}")
+        await client.get(f"/v1/sessions/{sid}/items?limit=100")
+
+    with _count_checkouts(db_uri) as session_read:
+        resp = await client.get(f"/v1/sessions/{sid}")
+    assert resp.status_code == 200, resp.text
+    with _count_checkouts(db_uri) as items_read:
+        resp = await client.get(f"/v1/sessions/{sid}/items?limit=100")
+    assert resp.status_code == 200, resp.text
+
+    assert session_read[0] <= 3, f"session read took {session_read[0]} pool checkouts (max 3)"
+    assert items_read[0] <= 1, f"items read took {items_read[0]} pool checkouts (max 1)"
