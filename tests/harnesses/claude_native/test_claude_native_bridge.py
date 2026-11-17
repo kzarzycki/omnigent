@@ -4830,6 +4830,44 @@ def test_augment_claude_args_leaves_bypass_consent_alone_otherwise(
     )
 
 
+@pytest.mark.parametrize(
+    ("prompt_args", "absent_key"),
+    [
+        (("--permission-mode", "bypassPermissions"), "defaultMode"),
+        (("--dangerously-skip-permissions",), "skipDangerousModePermissionPrompt"),
+        (("--model", "claude-fable-5"), "model"),
+        (("--effort", "xhigh"), "effortLevel"),
+    ],
+    ids=["permission-mode", "skip-flag", "model", "effort"],
+)
+def test_augment_claude_args_ignores_launch_flags_after_separator(
+    prompt_args: tuple[str, ...],
+    absent_key: str,
+    tmp_path: Path,
+) -> None:
+    """Flag-like prompt text after a client ``--`` does not set launch settings."""
+    args = augment_claude_args(
+        ("--", *prompt_args),
+        bridge_dir=tmp_path,
+        python_executable="/venv/bin/python",
+    )
+
+    settings = _load_invocation_settings(args)
+    assert absent_key not in settings
+    assert absent_key not in settings.get("permissions", {})
+
+
+def test_augment_claude_args_reads_launch_flags_before_separator(tmp_path: Path) -> None:
+    """Flags before ``--`` still set launch settings while prompt text is ignored."""
+    args = augment_claude_args(
+        ("--model", "claude-fable-5", "--", "--model", "other"),
+        bridge_dir=tmp_path,
+        python_executable="/venv/bin/python",
+    )
+
+    assert _load_invocation_settings(args)["model"] == "claude-fable-5"
+
+
 def test_augment_claude_args_preapproves_project_mcp_servers(tmp_path: Path) -> None:
     """
     Every launch pre-approves the project's ``.mcp.json`` servers.

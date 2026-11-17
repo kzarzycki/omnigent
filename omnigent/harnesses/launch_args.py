@@ -17,6 +17,16 @@ def insert_before_separator(args: Sequence[str], extra: Sequence[str]) -> list[s
     return [*args[:split], *extra, *args[split:]]
 
 
+def args_before_separator(args: Sequence[str]) -> Sequence[str]:
+    """
+    Return the args before the first ``--``; the rest is prompt text, not flags.
+
+    :param args: Launch args, possibly containing a ``--`` separator.
+    :returns: The leading args up to (excluding) the separator.
+    """
+    return args[: args.index("--")] if "--" in args else args
+
+
 def has_flag_before_separator(args: Sequence[str], flag: str) -> bool:
     """
     Return whether ``flag`` (as ``flag`` or ``flag=value``) appears before the first ``--``.
@@ -25,8 +35,7 @@ def has_flag_before_separator(args: Sequence[str], flag: str) -> bool:
     :param flag: Long flag name, e.g. ``"--model"``.
     :returns: ``True`` when Omnigent-visible args already carry the flag.
     """
-    end = args.index("--") if "--" in args else len(args)
-    return any(arg == flag or arg.startswith(f"{flag}=") for arg in args[:end])
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in args_before_separator(args))
 
 
 def with_default_flag_value(args: Sequence[str], flag: str, value: str) -> list[str]:
