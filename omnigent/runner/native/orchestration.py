@@ -8570,6 +8570,7 @@ def _extract_configured_settings_args(
     :returns: ``(args without --settings, merged configured settings)``.
     """
     from omnigent.harnesses.claude_native.bridge import (  # noqa: FlagLocalImports
+        _merge_settings_objects,
         extract_settings_args,
     )
 
@@ -8578,7 +8579,7 @@ def _extract_configured_settings_args(
     split = configured_args.index("--")
     head, head_settings = extract_settings_args(configured_args[:split], base_dir=base_dir)
     tail, tail_settings = extract_settings_args(configured_args[split + 1 :], base_dir=base_dir)
-    return [*head, "--", *tail], {**head_settings, **tail_settings}
+    return [*head, "--", *tail], _merge_settings_objects(head_settings, tail_settings)
 
 
 def _claude_terminal_env_unset(
