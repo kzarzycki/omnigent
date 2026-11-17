@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
+import { managedSandboxHostId } from "@/lib/managedSandboxHost";
 import { useNavigate } from "@/lib/routing";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -94,7 +95,6 @@ import { agentRootName, forkTargetCarriesHistory, harnessFamily } from "@/lib/fo
 import { checkHostDirectory, hostDirectoryMissing } from "@/hooks/useHostFilesystem";
 import { getCliServerUrl } from "@/lib/host";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
-import { randomUUID } from "@/lib/randomUUID";
 import {
   sandboxOptionLabel,
   sandboxProviderOptions,
@@ -1570,6 +1570,7 @@ function SupportedForkSessionForm({
       // Empty title → omit so the server derives "Fork of <source title>".
       // The run-config section (native targets only) reports its ready-to-send
       // value; an empty object (non-native target) sends no run overrides.
+      const sandboxHostId = sandboxSelected ? await managedSandboxHostId(info) : undefined;
       const fork = await forkSession(sourceSessionId, {
         title: trimmed === "" ? undefined : trimmed,
         agentId: switching ? agentChoice : undefined,
@@ -1590,9 +1591,7 @@ function SupportedForkSessionForm({
               ...sandboxWorkspaceFields,
               // The new sandbox host's id; keys the fork and its requests
               // until the host binds (see NewChatDialog's managed create).
-              ...(info !== "loading" && info.request_managed_sandbox_host_id
-                ? { hostId: randomUUID().replace(/-/g, "") }
-                : {}),
+              ...(sandboxHostId ? { hostId: sandboxHostId } : {}),
             }
           : undefined,
       });

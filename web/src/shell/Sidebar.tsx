@@ -22,6 +22,7 @@ import {
   useProjectFolderPageSize,
 } from "@/lib/projectFolderPaginationPreferences";
 import { useSessionRowQuickActions } from "@/lib/sessionRowQuickActionsPreferences";
+import { useCuratedOutHarnesses } from "@/hooks/useCuratedOutHarnesses";
 import { useInertRef } from "@/hooks/useInertRef";
 import { useMenuGuardedTooltip } from "@/hooks/useMenuGuardedTooltip";
 import { useSidebarDisplayPagination } from "@/hooks/useSidebarDisplayPagination";
@@ -233,8 +234,10 @@ import {
   markConversationRead,
   markConversationUnread,
   useConversationReadState,
+  useReadStateSnapshot,
   useUnseenTick,
 } from "@/hooks/useUnseenConversations";
+import { collectUnreadInboxItems } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 import { useOmnigentAnalytics } from "@/lib/analytics";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -315,6 +318,7 @@ import { isRowFullyVisible } from "./sidebarRowVisibility";
 import { ComposerAgentIcon } from "@/components/ComposerAgentIcon";
 import { useHarnessLabels } from "@/lib/agentLabels";
 import {
+  NATIVE_CODING_AGENTS,
   nativeCodingAgentForSession,
   nativeCodingAgentForWrapper,
   type NativeCodingAgentIconKind,
@@ -895,7 +899,19 @@ function SidebarImpl({
         : availableTab === "shared"
           ? sidebarData.shared
           : sidebarData.all;
-  const inboxCount = sidebarData.inboxCount;
+  const { conversationId: activeConversationId } = useParams<{ conversationId: string }>();
+  // Unread sessions as the Inbox lists them; like its row dot, the open session
+  // counts only when marked unread.
+  const unreadInboxCount = useReadStateSnapshot(
+    () =>
+      collectUnreadInboxItems(
+        sidebarData.inboxRows,
+        (id, updatedAt, status) =>
+          isConversationUnseen(id, updatedAt, status) &&
+          (id !== activeConversationId || isExplicitlyUnread(id)),
+      ).length,
+  );
+  const inboxCount = sidebarData.inboxCount + unreadInboxCount;
   const inboxCountIncomplete = sidebarData.inboxCountIncomplete;
 
   // The scrollable list container — used as the IntersectionObserver root for
@@ -942,6 +958,8 @@ function SidebarImpl({
   // for the settings section nav (see settingsNav.tsx) — entering settings
   // shouldn't replace the whole sidebar.
   const { inSettings } = useSettingsRoute();
+  // Fetched only in Settings, whose nav drops Harnesses when none is offered.
+  const curatedOutHarnesses = useCuratedOutHarnesses(inSettings);
   // Remember the pre-settings location so the Back row returns to the
   // conversation the user was viewing, not the home page. Tracked here since
   // the sidebar stays mounted across the transition into settings.
@@ -1320,7 +1338,10 @@ function SidebarImpl({
           />
         )}
         {inSettings ? (
-          <SettingsSidebarBody onNavClick={onNavClick} />
+          <SettingsSidebarBody
+            onNavClick={onNavClick}
+            harnessesOffered={curatedOutHarnesses.size < NATIVE_CODING_AGENTS.length}
+          />
         ) : (
           <>
             {/* sidebar-header-row is the hook for the macOS Electron shell. It
@@ -1783,7 +1804,8 @@ function ProjectFolder({
     growFrom.current = { height: listRef.current?.offsetHeight ?? 0, count: visibleCount };
     return display.loadMore();
   };
-  const errors = useSessionErrorStates(conversations);
+  // Rendered rows read their own badges; the folder only reuses those results.
+  const errors = useSessionErrorStates(conversations, { startReads: false });
   const startingConversationId = useChatStore((s) =>
     s.status === "streaming" || s.terminalPending ? s.conversationId : null,
   );
@@ -1796,7 +1818,8 @@ function ProjectFolder({
     errors.filter(isHidden),
     startingConversationId,
   );
-  // "Show more" carries the badge of the rows it hides, as a collapsed header does.
+  // "Show more" carries the badge of the rows it hides, as a collapsed header does,
+  // from cached reads only: hidden rows show an idle error once they have rendered.
   const hiddenMarker =
     expanded && visibleCount < conversations.length
       ? projectMarkerState(
@@ -3500,6 +3523,7 @@ function ConversationList({
                           <>
                             <ProjectHeaderActions
                               hostId={defaultProjectHostId}
+                              hosts={hosts}
                               hostsLoading={hostsLoading}
                               onOrderChange={(manual) => {
                                 const ranks = new Map(
@@ -4288,6 +4312,7 @@ function SessionFilterMenu({
 
 function ProjectHeaderActions({
   hostId,
+  hosts,
   hostsLoading,
   onOrderChange,
   manualOrder,
@@ -4302,6 +4327,7 @@ function ProjectHeaderActions({
   onEnterSelectionMode,
 }: {
   hostId: string | null;
+  hosts: Host[];
   hostsLoading: boolean;
   onOrderChange: (manual: boolean) => void;
   manualOrder: boolean;
@@ -4326,7 +4352,12 @@ function ProjectHeaderActions({
 
   return (
     <div className="flex items-center gap-0.5">
-      <NewProjectButton onCreated={onProjectCreated} hostId={hostId} hostsLoading={hostsLoading} />
+      <NewProjectButton
+        onCreated={onProjectCreated}
+        hostId={hostId}
+        hosts={hosts}
+        hostsLoading={hostsLoading}
+      />
       {showMenu && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

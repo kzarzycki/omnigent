@@ -127,6 +127,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { backgroundSessionTitlesRequestHeaders } from "@/lib/backgroundSessionTitlesPreferences";
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
+import { managedSandboxHostId } from "@/lib/managedSandboxHost";
 import { randomUUID } from "@/lib/randomUUID";
 import { sessionRoutingHostId, setSessionHost } from "@/lib/sessionHost";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
@@ -215,6 +216,7 @@ import {
   initialPrefillState,
   prefillDone,
   projectPrefillStep,
+  projectRepository,
   withProjectLaunchDefaults,
   type ProjectPrefillConfig,
   type ProjectPrefillState,
@@ -2363,6 +2365,8 @@ function NewChatLandingContent({
           useWorktree: c.use_worktree,
           model: c.model,
           effort: c.effort,
+          sandboxProvider: c.sandbox_provider,
+          repository: projectRepository(c.repository),
         }
       : {};
     return withProjectLaunchDefaults(stored, projectLaunch);
@@ -5058,7 +5062,16 @@ function NewChatLandingContent({
     const { writes } = step;
     if (writes.selectSandbox) {
       setSandboxSelected(true);
-      setSandboxProvider(defaultSandboxProvider());
+      // A stored provider the server no longer offers falls back to the default.
+      const storedProvider = writes.sandboxProvider;
+      setSandboxProvider(
+        storedProvider !== undefined && sandboxProviderRows.includes(storedProvider)
+          ? storedProvider
+          : defaultSandboxProvider(),
+      );
+    }
+    if (writes.sandboxRepos !== undefined) {
+      setSandboxRepoSelections(writes.sandboxRepos);
     }
     if (writes.hostId !== undefined) setSelectedHostId((cur) => cur ?? writes.hostId!);
     if (writes.agentId !== undefined) {
@@ -5100,6 +5113,7 @@ function NewChatLandingContent({
     prefillConfig,
     projectLaunch,
     defaultSandboxProvider,
+    sandboxProviderRows,
   ]);
 
   // Nested agents reuse their source checkout unless a new worktree is explicitly chosen.
@@ -6214,7 +6228,7 @@ function NewChatLandingContent({
         const metadata: Parameters<typeof createBundledSession>[1] = { labels: createLabels };
         if (siblingSourceId) metadata.sibling_source_id = siblingSourceId;
         if (sandboxSelected) {
-          // Multipart creates allocate their host server-side; they cannot reserve a host ID.
+          // Bundle creates send no host id until the server's multipart host_id is deployed.
           metadata.host_type = "managed";
           metadata.workspaces = composeSandboxWorkspaces(sandboxRepoSelections);
           if (sandboxProvider !== null) metadata.sandbox_provider = sandboxProvider;
@@ -6308,6 +6322,7 @@ function NewChatLandingContent({
         const matchOwnCreate = (item: SessionListWireItem) =>
           item.parent_session_id == null &&
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
+        const managedHostId = sandboxSelected ? await managedSandboxHostId(info) : undefined;
         const createPayload = JSON.stringify({
           ...(siblingSourceId ? { sibling_source_id: siblingSourceId } : {}),
           ...(serverOwnsInitialInput ? { initial_input: initialInput } : {}),
@@ -6340,9 +6355,7 @@ function NewChatLandingContent({
                   : {}),
                 // The new sandbox host's id, in the server's minted shape;
                 // keys the create and the session's requests until it binds.
-                ...(info !== "loading" && info.request_managed_sandbox_host_id
-                  ? { host_id: randomUUID().replace(/-/g, "") }
-                  : {}),
+                ...(managedHostId ? { host_id: managedHostId } : {}),
                 ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision
                   ? {
                       inference_configuration_revision: sandboxModels.data.configuration_revision,
@@ -8204,7 +8217,7 @@ function NewChatLandingContent({
             ? async (bundle) => {
                 const installed = await installAgentBundle(bundle);
                 try {
-                  const mine = await queryClient.fetchQuery({
+                  const { agents: mine } = await queryClient.fetchQuery({
                     queryKey: USER_AGENTS_QUERY_KEY,
                     queryFn: fetchUserAgents,
                     staleTime: 0,
