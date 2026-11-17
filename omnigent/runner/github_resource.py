@@ -1391,12 +1391,20 @@ def _record_invalidation(repository: str, number: str) -> None:
     """Stamp the PR (``*`` for all) as written now, so reads begun earlier aren't cached."""
     directory = _invalidation_directory()
     digest = hashlib.sha256(f"{repository}\0{number}".encode()).hexdigest()
+    stamp = directory / f"{digest}.json"
     try:
         directory.mkdir(parents=True, exist_ok=True)
+        try:
+            earlier = float(json.loads(stamp.read_text(encoding="utf-8"))["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            earlier = 0.0
         descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"repository": repository, "number": number, "at": time.time()}, handle)
-        os.replace(temporary, directory / f"{digest}.json")
+            json.dump(
+                {"repository": repository, "number": number, "at": max(earlier, time.time())},
+                handle,
+            )
+        os.replace(temporary, stamp)
     except OSError:
         _logger.debug("github_resource: could not record an invalidation", exc_info=True)
 

@@ -9,14 +9,17 @@ import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from typing_extensions import get_protocol_members
 
 from omnigent.git_providers.github import gh_config_dir
 from omnigent.process_logging import data_dir
 from omnigent.runner import create_runner_app, pr_resource
 from omnigent.runner import github_resource as github
+from omnigent.runner.git_providers import AccountMergeFacet, ReviewThreadsFacet
 from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
 from tests._helpers.polling import poll_until
 from tests.runner.helpers import NullServerClient
@@ -319,16 +322,29 @@ async def test_the_runner_route_reads_the_listing_for_a_background_refresh(
     assert (fake_gh.calls["pr view"], fake_gh.calls["pr list"]) == (1, 1)
 
 
+ANCHOR = {
+    "path": "a.py",
+    "side": "RIGHT",
+    "line": 1,
+    "head_sha": "a" * 40,
+    "base_sha": "b" * 40,
+}
+MERGE = {"merge_method": "squash", "expected_head": "a" * 40}
+# route, write function, and the arguments that get it past its own validation
 WRITE_ROUTES = [
-    ("labels", "update_pr_labels", {}),
-    ("merge", "merge_pr", {}),
-    ("merge-as", "merge_pr_as", {}),
+    ("labels", "update_pr_labels", {"add": ["bug"]}),
+    ("merge", "merge_pr", MERGE),
+    ("merge-as", "merge_pr_as", {**MERGE, "account": "writer"}),
     ("disable-auto-merge", "disable_pr_auto_merge", {}),
-    ("reviewers", "update_pr_reviewers", {}),
-    ("review-threads", "create_pr_review_thread", {}),
-    ("review-threads/thread/replies", "reply_to_pr_review_thread", {}),
-    ("comments", "create_pr_comment", {}),
-    ("details", "update_pr_details", {}),
+    ("reviewers", "update_pr_reviewers", {"add": [{"login": "writer", "kind": "user"}]}),
+    ("review-threads", "create_pr_review_thread", {"body": "x", "anchor": ANCHOR}),
+    (
+        "review-threads/thread/replies",
+        "reply_to_pr_review_thread",
+        {"body": "x", "thread_id": "t"},
+    ),
+    ("comments", "create_pr_comment", {"body": "x"}),
+    ("details", "update_pr_details", {"title": "new"}),
 ]
 
 
@@ -336,27 +352,33 @@ def test_every_write_operation_is_covered_by_a_route_case() -> None:
     assert {operation for _, operation, _ in WRITE_ROUTES} == pr_resource.PR_WRITE_OPERATIONS
 
 
-@pytest.mark.parametrize(("route", "operation", "extra"), WRITE_ROUTES)
-async def test_a_write_drops_the_pr_and_its_listing_but_not_other_prs(
+def _accepting_facet() -> Any:
+    """A provider that accepts every capability and answers every write with ``{}``."""
+    names = get_protocol_members(AccountMergeFacet) | get_protocol_members(ReviewThreadsFacet)
+    answer = lambda *_a, **_kw: {}  # noqa: E731
+    members = dict.fromkeys(names, answer)  # isinstance() on a protocol skips __getattr__
+    members.update(capabilities=MagicMock(), __getattr__=lambda _self, _name: answer)
+    return type("AcceptingFacet", (), members)()
+
+
+@pytest.mark.parametrize(("route", "operation", "arguments"), WRITE_ROUTES)
+def test_a_write_drops_the_pr_and_its_listing_but_not_other_prs(
     fake_gh: FakeGh,
-    runner_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     route: str,
     operation: str,
-    extra: dict[str, Any],
+    arguments: dict[str, Any],
 ) -> None:
     for number in (1, 2):
         _read(number, background=False)
         _read(number, background=True)
+    reference = PullRequestRef.from_url(f"{REPO}/pull/1")
     monkeypatch.setattr(
-        pr_resource, operation, pr_resource._invalidates_pr_reads(lambda *_a, **_kw: {})
+        pr_resource, "_capable_target", lambda *_a, **_kw: (_accepting_facet(), reference)
     )
-    async with runner_client as client:
-        response = await client.post(
-            f"/v1/sessions/session/resources/github/{route}",
-            json={"pr_url": f"{REPO}/pull/1", "body": "x", "thread_id": "thread", **extra},
-        )
-    assert response.status_code == 200, response.text
+    getattr(pr_resource, operation)(
+        "/work", session_id="session", pr_url=reference.url, **arguments
+    )
     remaining = {(key[0], key[3] if key[0] == "pr" else "") for key in _cached_keys()}
     assert ("pr", "1") not in remaining
     assert "pr-list" not in {kind for kind, _ in remaining}
@@ -535,3 +557,87 @@ def test_different_prs_missing_at_once_share_one_listing_read(fake_gh: FakeGh) -
     github._preview_cache.clear()
     _in_threads(4, lambda index: _fetch(index + 1, background=True))
     assert fake_gh.calls["pr list"] == 1
+
+
+PR_KEY = ("pr", "token:x", "github.com/acme/widgets", "1", "full")
+LISTING_KEY = ("pr-list", "token:x", "github.com/acme/widgets")
+
+
+def _is_cached(key: tuple[str, ...]) -> bool:
+    return key in github._preview_cache or github._cache_path(key).exists()
+
+
+def test_a_stamp_landing_during_the_put_removes_the_entry(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = time.time()
+    real_replace = os.replace
+    stamped = False
+
+    def stamp_then_replace(source: Any, destination: Any) -> None:
+        nonlocal stamped
+        if not stamped and Path(destination).parent.name != "invalidated":
+            stamped = True  # the write lands between the pre-check and the rename
+            github.invalidate_pr_reads(f"{REPO}/pull/1")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(github.os, "replace", stamp_then_replace)
+    github._cache_put(PR_KEY, {"title": "old"}, 60, shared=True, started=started)
+    assert stamped
+    assert not _is_cached(PR_KEY)
+
+
+@pytest.mark.parametrize("written", [1, 2])
+def test_a_listing_in_flight_across_a_write_is_not_cached(fake_gh: FakeGh, written: int) -> None:
+    fake_gh.delay = 0.4
+    github._preview_cache.clear()
+    reader = threading.Thread(target=_fetch, args=(1,), kwargs={"background": True})
+    reader.start()
+    poll_until(lambda: fake_gh.calls["pr list"], timeout_s=5, interval_s=0.01)  # list in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/{written}")
+    reader.join()
+    assert not [key for key in _cached_keys() if key[0] == "pr-list"]
+    assert not [key for key in github._preview_cache if key[0] == "pr-list"]
+
+
+@pytest.mark.parametrize("key", [PR_KEY, LISTING_KEY])
+def test_a_wildcard_stamp_blocks_reads_in_flight(fake_gh: FakeGh, key: tuple[str, ...]) -> None:
+    started = time.time()
+    github.invalidate_pr_reads(None)
+    github._cache_put(key, {"title": "old"}, 60, shared=True, started=started)
+    assert not _is_cached(key)
+
+
+def test_a_per_pr_stamp_blocks_a_listing_put_in_flight(fake_gh: FakeGh) -> None:
+    started = time.time()
+    github.invalidate_pr_reads(f"{REPO}/pull/3")
+    github._cache_put(LISTING_KEY, [], 60, shared=True, started=started)
+    assert not _is_cached(LISTING_KEY)
+
+
+def test_a_failing_listing_is_read_once_for_different_prs(fake_gh: FakeGh) -> None:
+    fake_gh.delay = 0.3
+    fake_gh.fail = True
+    github._preview_cache.clear()
+    _in_threads(4, lambda index: _fetch(index + 1, background=True))
+    assert fake_gh.calls["pr list"] == 1
+
+
+def test_old_invalidation_stamps_are_swept(fake_gh: FakeGh) -> None:
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    github.invalidate_pr_reads(f"{REPO}/pull/2")
+    stamps = sorted(github._invalidation_directory().glob("*.json"))
+    assert len(stamps) == 2
+    long_ago = time.time() - 2 * github._STALE_FILE_SECONDS
+    os.utime(stamps[0], (long_ago, long_ago))
+    github._cache_put(PR_KEY, {"title": "new"}, 60, shared=True)
+    assert sorted(github._invalidation_directory().glob("*.json")) == stamps[1:]
+
+
+def test_a_stamp_keeps_the_later_time(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    (stamp,) = github._invalidation_directory().glob("*.json")
+    first = json.loads(stamp.read_text())["at"]
+    _later(monkeypatch, -100)  # a runner whose clock is behind
+    github.invalidate_pr_reads(f"{REPO}/pull/1")
+    assert json.loads(stamp.read_text())["at"] == first

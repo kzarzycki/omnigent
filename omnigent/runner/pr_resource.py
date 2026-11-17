@@ -760,6 +760,10 @@ def pr_labels(
     return facet.repo_labels(root, reference)
 
 
+# Names of the operations that change a PR on GitHub, recorded by ``_invalidates_pr_reads``.
+PR_WRITE_OPERATIONS: set[str] = set()
+
+
 def _invalidates_pr_reads(
     function: Callable[..., dict[str, Any]],
 ) -> Callable[..., dict[str, Any]]:
@@ -769,6 +773,8 @@ def _invalidates_pr_reads(
     routes and the host's offline-runner dispatch) goes through the write function, so
     the cache is invalidated in this one place.
     """
+
+    PR_WRITE_OPERATIONS.add(function.__name__)
 
     @functools.wraps(function)
     def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -1407,19 +1413,3 @@ def pr_file_diff(
         head_sha=head_sha,
         base_sha=base_sha,
     )
-
-
-# Operations that change a PR on GitHub; each invalidates the shared PR read cache.
-PR_WRITE_OPERATIONS = frozenset(
-    {
-        "update_pr_labels",
-        "merge_pr",
-        "merge_pr_as",
-        "disable_pr_auto_merge",
-        "update_pr_reviewers",
-        "reply_to_pr_review_thread",
-        "create_pr_review_thread",
-        "create_pr_comment",
-        "update_pr_details",
-    }
-)
