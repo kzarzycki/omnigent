@@ -1567,6 +1567,24 @@ def test_extract_configured_settings_args_reads_both_sides_of_wrapper_separator(
     assert settings == {"env": {"WRAPPED": "1"}}
 
 
+def test_extract_configured_settings_args_deep_merges_across_wrapper_separator() -> None:
+    """Sibling keys under ``env`` on both sides of ``--`` are kept, not replaced."""
+    from omnigent.runner.native.orchestration import _extract_configured_settings_args
+
+    configured = [
+        "--settings",
+        '{"env":{"A":"1"}}',
+        "--",
+        "--settings",
+        '{"env":{"B":"2"}}',
+    ]
+
+    remaining, settings = _extract_configured_settings_args(configured, base_dir=Path("."))
+
+    assert remaining == ["--"]
+    assert settings == {"env": {"A": "1", "B": "2"}}
+
+
 async def test_auto_create_claude_terminal_seeds_trust_with_launch_env(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
