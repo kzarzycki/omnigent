@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -484,5 +485,49 @@ async def test_polled_session_reads_stay_within_checkout_budget(
         resp = await client.get(f"/v1/sessions/{sid}/items?limit=100")
     assert resp.status_code == 200, resp.text
 
-    assert session_read[0] <= 3, f"session read took {session_read[0]} pool checkouts (max 3)"
+    # One checkout: authorization + conversation + agent row + items + liveness + usage.
+    assert session_read[0] <= 1, f"session read took {session_read[0]} pool checkouts (max 1)"
     assert items_read[0] <= 1, f"items read took {items_read[0]} pool checkouts (max 1)"
+
+
+async def test_health_batch_liveness_reads_share_one_checkout(
+    db_uri: str,
+    tmp_path: Path,
+) -> None:
+    """
+    ``GET /health?session_ids=`` on a host-bound session runs its connectivity
+    and host reads over one pool checkout, not one per read.
+    """
+    from omnigent.runtime.agent_cache import AgentCache
+    from omnigent.server.app import create_app
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+    from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+    from omnigent.stores.host_store import HostStore
+
+    host_id = "2fd786c75c03cfbbec099a6820c08b62"
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    host_store = HostStore(db_uri)
+    host_store.upsert_on_connect(host_id, "laptop", "alice@example.com")
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=conversation_store,
+        artifact_store=artifact_store,
+        host_store=host_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+    )
+    session = conversation_store.create_conversation(
+        runner_id="rnr_example", host_id=host_id, workspace="/tmp/ws"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as health_client:
+        await health_client.get(f"/health?session_ids={session.id}")  # warm
+        with _count_checkouts(db_uri) as health_read:
+            resp = await health_client.get(f"/health?session_ids={session.id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sessions"][session.id]["host_online"] is True
+
+    assert health_read[0] <= 1, f"health read took {health_read[0]} pool checkouts (max 1)"
