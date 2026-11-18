@@ -105,3 +105,29 @@ async def test_a_second_resume_while_the_first_posts_sends_nothing(
         orphaned_background_work.configure(None, None, None)
 
     assert posted == [session_id]
+
+
+async def test_a_failed_post_lets_the_next_resume_post_once(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    session_id = _lost(store)
+    posted: list[str] = []
+
+    async def post(target: str, user_id: str | None, text: str) -> object:
+        posted.append(target)
+        if len(posted) == 1:
+            raise RuntimeError("the session's runner did not come back")
+        return {}
+
+    orphaned_background_work.configure(store, None, post)
+    try:
+        assert await orphaned_background_work.resume(session_id) is False
+        flagged = store.get_conversation(session_id)
+        assert flagged is not None and flagged.background_work_lost_at == 1_000
+        assert await orphaned_background_work.resume(session_id) is True
+    finally:
+        orphaned_background_work.configure(None, None, None)
+
+    assert posted == [session_id, session_id]
+    told = store.get_conversation(session_id)
+    assert told is not None and told.background_work_lost_at is None
