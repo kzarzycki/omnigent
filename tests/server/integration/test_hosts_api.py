@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -397,6 +398,23 @@ async def test_hosts_api_reports_stale_adopted_runners_and_refreshes_them(
             await asyncio.sleep(0.01)
         single = await client.get(f"/v1/hosts/{_HOST_ID}")
         assert single.json()["stale_adopted_runners"] == 1
+
+        # An older host's report carries no count; the endpoint keeps the previous value.
+        bare = json.loads(
+            encode_host_frame(
+                HostResourcesFrame(
+                    load_1m=2.0, cpu_count=4, memory_total_mb=8000, memory_available_mb=4000
+                )
+            )
+        )
+        del bare["stale_adopted_runners"]
+        await comm.send_input({"type": "websocket.receive", "text": json.dumps(bare)})
+        while conn.resources.load_1m != 2.0:
+            await asyncio.sleep(0.01)
+        for path in ("/v1/hosts", f"/v1/hosts/{_HOST_ID}"):
+            body = (await client.get(path)).json()
+            body = body["hosts"][0] if path == "/v1/hosts" else body
+            assert body["stale_adopted_runners"] == 1
 
 
 async def test_hosts_api_reports_host_resources_and_marks_them_stale(
