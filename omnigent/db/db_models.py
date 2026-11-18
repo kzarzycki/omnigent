@@ -709,6 +709,9 @@ class SqlConversationMetadata(OmnigentBase):
     # When the bound runner decided that value, in its own epoch nanoseconds;
     # NULL = never written.
     background_work_reported_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # When the server dropped a running background-work flag because the runner
+    # holding that work went away, in epoch seconds; NULL = nothing lost.
+    background_work_lost_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Why a running session's agent is parked on a terminal prompt; NULL = not parked.
     blocked_on: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # First-class project membership. Relates to projects.id; no DB FK
@@ -746,6 +749,10 @@ class SqlConversationMetadata(OmnigentBase):
             "background_work_reported_at IS NULL "
             "OR typeof(background_work_reported_at) = 'integer'",
             name="ck_conversation_metadata_reported_at_integer",
+        ).ddl_if(callable_=_on_sqlite_family),
+        CheckConstraint(
+            "background_work_lost_at IS NULL OR typeof(background_work_lost_at) = 'integer'",
+            name="ck_conversation_metadata_lost_at_integer",
         ).ddl_if(callable_=_on_sqlite_family),
         # Supports list_conversations_by_runner_id and get_runner_ids.
         Index("ix_conversation_metadata_runner_id", "workspace_id", "runner_id", "id"),

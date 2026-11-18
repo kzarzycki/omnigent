@@ -85,6 +85,7 @@ from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.server import (
     managed_host_keepalive,
     open_questions,
+    orphaned_background_work,
     session_live_state,
     session_pull_requests,
     session_recaps,
@@ -4136,6 +4137,7 @@ def create_app(
 
         app.state.post_server_message = post
         session_subscriptions.configure(conversation_store, permission_store, post)
+        orphaned_background_work.configure(conversation_store, permission_store, post)
 
     app.include_router(
         create_sessions_router(

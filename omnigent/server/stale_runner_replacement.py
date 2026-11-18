@@ -7,6 +7,9 @@ its owner: it launches a runner on the host's current build, stops the old one
 and resumes the session on the new runner with the ``retry_session`` recovery.
 A new runner that fails to come up, or an old runner that still has background
 work, rolls back: the new runner is stopped and the old one is bound again.
+Background work the old runner could not report (a runner built before the
+background-work route) and that the rebind dropped is recorded as lost, and the
+session is told after the swap.
 """
 
 from __future__ import annotations
@@ -15,12 +18,13 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
 from omnigent.entities.conversation import Conversation
 from omnigent.host.frames import HostReplaceRunnerFrame, HostReplaceRunnerResultFrame
+from omnigent.server import orphaned_background_work
 from omnigent.stores import ConversationStore
 
 _logger = logging.getLogger(__name__)
@@ -56,6 +60,8 @@ class ReplacementDeps:
         whether the session has a background shell or agent: ``True``,
         ``False``, :data:`NO_ROUTE` for a runner built before the route, or
         ``None`` when the runner can't answer.
+    :param resume_lost_background_work: Tells a session whose row records lost
+        background work that the work was lost, as a message that resumes it.
     """
 
     store: ConversationStore
@@ -68,6 +74,9 @@ class ReplacementDeps:
     has_queued_input: Callable[[str], bool]
     has_terminal_attach: Callable[[str], bool]
     runner_background_work: Callable[[Conversation], Awaitable[bool | str | None]]
+    resume_lost_background_work: Callable[[str], Awaitable[bool]] = field(
+        default=orphaned_background_work.resume
+    )
 
 
 def _message_role(item: Any) -> str | None:
@@ -139,7 +148,11 @@ async def _roll_back(
         )
         if conv.host_id is not None:
             await deps.stop(conv.id, conv.host_id, new_runner_id, "replacement_failed")
-    return deps.is_connected(old_runner_id)
+    kept = deps.is_connected(old_runner_id)
+    if kept and conv.background_work_lost_at is None:
+        # The old runner still holds any work the launch's rebind recorded as lost.
+        await asyncio.to_thread(deps.store.clear_background_work_lost, conv.id, None)
+    return kept
 
 
 _BACKGROUND_UNKNOWN = "the old runner did not report its background work"
@@ -248,6 +261,9 @@ async def replace_stale_runner(
                 extra={"session_id": conv.id},
             )
             return result("failed", f"the session did not resume on the new runner: {exc}")
+    # Work the old runner held when the rebind dropped its flag ended with it.
+    for session in (conv, *others):
+        await deps.resume_lost_background_work(session.id)
     _logger.info(
         "Replaced runner %s (commit %s) with %s (commit %s) for session %s",
         old_runner_id,

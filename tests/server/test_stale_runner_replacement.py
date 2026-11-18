@@ -41,9 +41,14 @@ class _FakeSessionMachinery:
     old_runner_background: bool | str | None = False
     background_starts_during_boot: bool = False
     asked_background: list[tuple[str, str | None]] = field(default_factory=list)
+    # The old runner reports background work after the check, before the rebind.
+    background_reported_before_rebind: bool = False
+    told_lost_background_work: list[str] = field(default_factory=list)
 
     async def launch(self, conv: Conversation) -> tuple[str, str | None]:
         self.launched.append(conv.id)
+        if self.background_reported_before_rebind:
+            self.store.set_background_work_running(conv.id, True, runner_id=_OLD)
         self.store.replace_runner_id(conv.id, _NEW)
         return _NEW, None
 
@@ -65,6 +70,13 @@ class _FakeSessionMachinery:
         self.asked_background.append((conv.id, conv.runner_id))
         return self.old_runner_background
 
+    async def resume_lost_background_work(self, session_id: str) -> bool:
+        conv = self.store.get_conversation(session_id)
+        if conv is None or conv.background_work_lost_at is None:
+            return False
+        self.told_lost_background_work.append(session_id)
+        return True
+
     def deps(self) -> ReplacementDeps:
         return ReplacementDeps(
             store=self.store,
@@ -79,6 +91,7 @@ class _FakeSessionMachinery:
             has_queued_input=lambda session_id: session_id in self.queued,
             has_terminal_attach=terminal_attach.has_write_terminal_attach,
             runner_background_work=self.runner_background_work,
+            resume_lost_background_work=self.resume_lost_background_work,
         )
 
 
@@ -360,3 +373,37 @@ async def test_runner_without_the_background_route_falls_back_to_the_stored_flag
 
     assert (skipped.status, skipped.reason) == ("skipped", "background_work_running")
     assert machinery.launched == []
+
+
+async def test_swap_that_drops_unreported_background_work_resumes_the_session(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    # A runner built before the background-work route can only report through
+    # the stored flag, and its report lands after the swap checked it.
+    machinery.old_runner_background = NO_ROUTE
+    machinery.background_reported_before_rebind = True
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert (result.status, result.reason) == ("replaced", None)
+    assert machinery.stopped == [(_OLD, "superseded")]
+    swapped = store.get_conversation(session_id)
+    assert swapped is not None and swapped.runner_id == _NEW
+    # The rebind dropped the flag but kept the loss, and the session is told.
+    assert swapped.background_work_running is None
+    assert swapped.background_work_lost_at is not None
+    assert machinery.told_lost_background_work == [session_id]
+
+
+async def test_swap_with_no_background_work_tells_the_session_nothing(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert result.status == "replaced"
+    swapped = store.get_conversation(session_id)
+    assert swapped is not None and swapped.background_work_lost_at is None
+    assert machinery.told_lost_background_work == []

@@ -151,6 +151,7 @@ from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.scheduled_context import scheduled_run_scope
 from omnigent.server import (
     open_questions,
+    orphaned_background_work,
     question_answers,
     session_live_state,
     session_revival,
@@ -1496,6 +1497,7 @@ def _build_session_list_item(
             else pending_count
         ),
         background_work_running=conv.background_work_running is True,
+        background_work_lost_at=conv.background_work_lost_at,
         blocked_on=_blocked_on_for(conv.id, conv.blocked_on),
         workspace=conv.workspace,
         git_branch=conv.git_branch,
@@ -5416,7 +5418,9 @@ async def _mark_runner_sessions_offline_impl(
     )
 
 
-def _clear_departed_runner_background_work(conv: Conversation, swept_at: int) -> None:
+def _clear_departed_runner_background_work(
+    conv: Conversation, swept_at: int, *, lost: bool = True
+) -> None:
     """
     Drop the background flag of a session whose runner the offline sweep found gone.
 
@@ -5426,16 +5430,28 @@ def _clear_departed_runner_background_work(conv: Conversation, swept_at: int) ->
     skipped, and the stored clear applies only while the session is still bound
     to the runner and the runner has not been seen since the sweep began.
 
+    A dropped ``True`` flag is recorded as lost work, and the session is told
+    (:mod:`omnigent.server.orphaned_background_work`), unless *lost* is
+    ``False``: a deliberate stop, or a turn the runner's revival continues.
+
     :param conv: Session snapshot the sweep loaded for the departed runner.
     :param swept_at: Epoch seconds when the sweep began.
+    :param lost: Whether pending background work counts as lost.
     """
     if conv.runner_id is None:
         return
     router = get_server_runner_router()
     if router is not None and router.runner_is_online(conv.runner_id):
         return
-    session_live_state.clear_background_work_running(
-        conv.id, conv.runner_id, unseen_since=swept_at
+    written = session_live_state.clear_background_work_running(
+        conv.id, conv.runner_id, unseen_since=swept_at, lost_at=swept_at if lost else None
+    )
+    if written is None or not lost or conv.kind == "sub_agent":
+        return
+    loop = asyncio.get_running_loop()
+    session_id = conv.id
+    written.add_done_callback(
+        lambda _done: loop.call_soon_threadsafe(orphaned_background_work.resume_soon, session_id)
     )
 
 
@@ -5458,7 +5474,12 @@ async def _mark_runner_sessions_offline_once(
             if stopped_runner_id == conv.runner_id:
                 _intentional_stop_sessions.pop(conv.id, None)
             continue
-        _clear_departed_runner_background_work(conv, swept_at)
+        _clear_departed_runner_background_work(
+            conv,
+            swept_at,
+            lost=stopped_runner_id != conv.runner_id
+            and _session_status_cache.get(conv.id, conv.live_status) not in _MID_TURN_STATUSES,
+        )
         if stopped_runner_id is not None and stopped_runner_id != conv.runner_id:
             try:
                 binding = await asyncio.to_thread(conversation_store.get_runner_liveness, conv.id)
