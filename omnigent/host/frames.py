@@ -133,7 +133,9 @@ SERVER_CAPABILITIES_HEADER = "X-Omnigent-Server-Capabilities"
 # The server accepts ``"tmux-unavailable"`` readiness. An older server's live
 # readiness decoder rejects the whole frame for it, so hosts down-map it to True.
 SERVER_CAP_TMUX_READINESS = "tmux_readiness"
-SERVER_CAPABILITIES: list[str] = [SERVER_CAP_TMUX_READINESS]
+# The server answers ``host.replace_stale_runner``; a host asks only a server that sends this.
+SERVER_CAP_REPLACE_STALE_RUNNER = "replace_stale_runner"
+SERVER_CAPABILITIES: list[str] = [SERVER_CAP_TMUX_READINESS, SERVER_CAP_REPLACE_STALE_RUNNER]
 
 
 def parse_server_capabilities(header_value: str | None) -> frozenset[str]:
@@ -243,6 +245,8 @@ class HostFrameKind(str, Enum):
     RUNNER_EXITED = "host.runner_exited"
     RUNNER_STATUS = "host.runner_status"
     RUNNER_STATUS_RESULT = "host.runner_status_result"
+    REPLACE_STALE_RUNNER = "host.replace_stale_runner"
+    REPLACE_STALE_RUNNER_RESULT = "host.replace_stale_runner_result"
     STAT = "host.stat"
     STAT_RESULT = "host.stat_result"
     LIST_DIR = "host.list_dir"
@@ -619,6 +623,45 @@ class HostRunnerStatusResultFrame:
 
     request_id: str
     status: str
+
+
+# Outcomes of a ``host.replace_stale_runner`` request.
+REPLACE_STALE_RUNNER_REPLACED = "replaced"
+REPLACE_STALE_RUNNER_BUSY = "busy"
+REPLACE_STALE_RUNNER_INELIGIBLE = "ineligible"
+REPLACE_STALE_RUNNER_FAILED = "failed"
+
+
+@dataclass
+class HostReplaceStaleRunnerFrame:
+    """Host → server: relaunch this stale adopted runner's session if it is idle.
+
+    :param request_id: Correlates the result, e.g. ``"req_rsr_1"``.
+    :param runner_id: The adopted runner on an older build, e.g. ``"runner_abc123..."``.
+    :param session_id: The session the runner was launched for, e.g. ``"conv_abc123"``.
+    """
+
+    request_id: str
+    runner_id: str
+    session_id: str
+
+
+@dataclass
+class HostReplaceStaleRunnerResultFrame:
+    """Server → host: outcome of a :class:`HostReplaceStaleRunnerFrame`.
+
+    :param request_id: Correlates to the request, e.g. ``"req_rsr_1"``.
+    :param status: :data:`REPLACE_STALE_RUNNER_REPLACED` (a new runner was
+        launched and supersedes this one), :data:`REPLACE_STALE_RUNNER_BUSY`
+        (not idle or the owner is driving it; ask again later),
+        :data:`REPLACE_STALE_RUNNER_INELIGIBLE` (the session no longer owns this
+        runner; don't ask again) or :data:`REPLACE_STALE_RUNNER_FAILED`.
+    :param reason: Why, for the host's log, e.g. ``"turn running"``.
+    """
+
+    request_id: str
+    status: str
+    reason: str | None = None
 
 
 @dataclass
@@ -1710,6 +1753,8 @@ HostFrame = (
     | HostRunnerExitedFrame
     | HostRunnerStatusFrame
     | HostRunnerStatusResultFrame
+    | HostReplaceStaleRunnerFrame
+    | HostReplaceStaleRunnerResultFrame
     | HostStatFrame
     | HostStatResultFrame
     | HostListDirFrame
@@ -1967,6 +2012,24 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.RUNNER_STATUS_RESULT.value,
                 "request_id": frame.request_id,
                 "status": frame.status,
+            }
+        )
+    if isinstance(frame, HostReplaceStaleRunnerFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REPLACE_STALE_RUNNER.value,
+                "request_id": frame.request_id,
+                "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
+            }
+        )
+    if isinstance(frame, HostReplaceStaleRunnerResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REPLACE_STALE_RUNNER_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "reason": frame.reason,
             }
         )
     if isinstance(frame, HostStatFrame):
@@ -2812,6 +2875,18 @@ def _decode_known_host_frame(
             return _decode_runner_status(msg)
         case HostFrameKind.RUNNER_STATUS_RESULT:
             return _decode_runner_status_result(msg)
+        case HostFrameKind.REPLACE_STALE_RUNNER:
+            return HostReplaceStaleRunnerFrame(
+                request_id=_required_str(msg, "request_id"),
+                runner_id=_required_str(msg, "runner_id"),
+                session_id=_required_str(msg, "session_id"),
+            )
+        case HostFrameKind.REPLACE_STALE_RUNNER_RESULT:
+            return HostReplaceStaleRunnerResultFrame(
+                request_id=_required_str(msg, "request_id"),
+                status=_required_str(msg, "status"),
+                reason=_optional_nullable_str(msg, "reason"),
+            )
         case HostFrameKind.STAT:
             return _decode_stat(msg)
         case HostFrameKind.STAT_RESULT:

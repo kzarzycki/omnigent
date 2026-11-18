@@ -64,6 +64,8 @@ from omnigent.host.frames import (
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
+    HostReplaceStaleRunnerFrame,
+    HostReplaceStaleRunnerResultFrame,
     HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
@@ -1783,6 +1785,18 @@ def test_runner_status_result_frame_round_trip() -> None:
         assert isinstance(decoded, HostRunnerStatusResultFrame)
         assert decoded.request_id == "req_rs_1"
         assert decoded.status == status
+
+
+def test_replace_stale_runner_frames_round_trip() -> None:
+    """The host's replacement request and the server's answer survive encode → decode."""
+    request = HostReplaceStaleRunnerFrame(
+        request_id="rsr_1", runner_id="runner_token_abc", session_id="conv_abc123"
+    )
+    answer = HostReplaceStaleRunnerResultFrame(
+        request_id="rsr_1", status="busy", reason="turn running"
+    )
+    assert decode_host_frame(encode_host_frame(request)) == request
+    assert decode_host_frame(encode_host_frame(answer)) == answer
 
 
 def test_decode_unknown_kind_raises() -> None:

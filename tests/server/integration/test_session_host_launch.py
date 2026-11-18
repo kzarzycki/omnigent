@@ -43,6 +43,8 @@ from omnigent.host.frames import (
     HostHelloFrame,
     HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
+    HostReplaceStaleRunnerFrame,
+    HostReplaceStaleRunnerResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -4508,6 +4510,66 @@ async def test_relaunch_stops_the_superseded_runner(
         f"got {stop_frame.runner_id!r}"
     )
     assert stop_frame.reason == "superseded"
+
+
+@pytest.mark.parametrize(
+    ("launch_status", "expected_status"),
+    [("launched", "replaced"), ("failed", "failed")],
+    ids=["replaced", "refused"],
+)
+async def test_a_host_replaces_an_idle_stale_runner_without_stopping_it_first(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    launch_status: str,
+    expected_status: str,
+) -> None:
+    """A stale runner's session moves to a new runner; a refused launch keeps the old one.
+
+    The old runner is named as superseded, so the host stops it only once the
+    new runner's process is alive; the server sends no stop of its own.
+    """
+    comm = await _connect_host(app)
+    session = await _inline_launch_session(client, comm)
+    session_id, old_runner_id = session["id"], session["runner_id"]
+    request = HostReplaceStaleRunnerFrame(
+        request_id="rsr_test", runner_id=old_runner_id, session_id=session_id
+    )
+    await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(request)})
+
+    launch_frame: HostLaunchRunnerFrame | None = None
+    stop_frames: list[HostStopRunnerFrame] = []
+    result: HostReplaceStaleRunnerResultFrame | None = None
+    deadline = Deadline(20.0)
+    while result is None:
+        output = await comm.receive_output(timeout=deadline.next_wait(5.0))
+        if output["type"] != "websocket.send":
+            continue
+        frame = decode_host_frame(output["text"])
+        if isinstance(frame, HostLaunchRunnerFrame):
+            launch_frame = frame
+            launched = launch_status == "launched"
+            answer = HostLaunchRunnerResultFrame(
+                request_id=frame.request_id,
+                status=launch_status,
+                runner_id=token_bound_runner_id(frame.binding_token) if launched else None,
+                error=None if launched else "failed to spawn runner",
+            )
+            await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(answer)})
+        elif isinstance(frame, HostStopRunnerFrame):
+            stop_frames.append(frame)
+        elif isinstance(frame, HostReplaceStaleRunnerResultFrame):
+            result = frame
+
+    assert result.request_id == "rsr_test"
+    assert result.status == expected_status
+    assert launch_frame is not None
+    assert launch_frame.session_id == session_id
+    assert launch_frame.superseded_runner_ids == (old_runner_id,)
+    assert stop_frames == []
+    bound = (await client.get(f"/v1/sessions/{session_id}")).json()["runner_id"]
+    new_runner_id = token_bound_runner_id(launch_frame.binding_token)
+    assert bound == (new_runner_id if launch_status == "launched" else old_runner_id)
 
 
 @pytest.mark.parametrize(
