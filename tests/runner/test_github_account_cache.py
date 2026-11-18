@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from omnigent.git_providers import github as git_github
 from omnigent.onboarding import copilot_auth
 from omnigent.runner import github_resource as github
 from omnigent.runner.git_providers import github_created
@@ -172,3 +173,18 @@ def test_copilot_token_lookups_spawn_gh_once_until_hosts_file_changes(
     assert len(spawned) == 2
     fake_gh.rewrite_hosts_file("after login")
     assert copilot_auth.gh_cli_github_token("ghe.example.com") == "token-3"
+
+
+def test_runners_with_different_gh_config_dirs_do_not_share_tokens(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Files on different filesystems can share a stat; the key must still tell them apart.
+    monkeypatch.setattr(git_github, "hosts_file_stat", lambda _dir=None: [1, 1, 1])
+    monkeypatch.setenv("GH_CONFIG_DIR", str(fake_gh.config_dir))
+    assert (
+        git_github.cached_gh_token("github.com", "alice", lambda: "first-token") == "first-token"
+    )
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "other-config"))
+    assert (
+        git_github.cached_gh_token("github.com", "alice", lambda: "second-token") == "second-token"
+    )
