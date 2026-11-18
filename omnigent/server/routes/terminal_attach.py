@@ -72,12 +72,13 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Final
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
 from starlette import status
 
+from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import debug_event, set_current_user_id
 from omnigent.errors import OmnigentError
 from omnigent.runtime import (
@@ -102,6 +103,32 @@ from omnigent.terminals.ws_common import (
 )
 
 _logger = logging.getLogger(__name__)
+
+# Open write (interactive) attaches per session through this server's runner proxy.
+_write_attach_counts: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
+
+
+def has_write_terminal_attach(session_id: str) -> bool:
+    """Whether a viewer has an interactive terminal of *session_id* open through this server."""
+    return _write_attach_counts.get(session_id, 0) > 0
+
+
+@contextlib.contextmanager
+def _counting_write_attach(session_id: str, read_only: bool) -> Iterator[None]:
+    """Count an interactive attach for :func:`has_write_terminal_attach` while it is open."""
+    if read_only:
+        yield
+        return
+    _write_attach_counts[session_id] = _write_attach_counts.get(session_id, 0) + 1
+    try:
+        yield
+    finally:
+        remaining = _write_attach_counts[session_id] - 1
+        if remaining:
+            _write_attach_counts[session_id] = remaining
+        else:
+            del _write_attach_counts[session_id]
+
 
 _WS_CLOSE_TERMINAL_NOT_FOUND: Final[int] = WS_CLOSE_TERMINAL_NOT_FOUND
 _WS_CLOSE_INTERNAL_ERROR: Final[int] = WS_CLOSE_INTERNAL_ERROR
@@ -253,13 +280,14 @@ def create_terminal_attach_router(
                     },
                 ):
                     async with runner_cm as runner_ws:
-                        await _shuttle_ws_frames(
-                            websocket,
-                            runner_ws,
-                            on_first_output=lambda: _log_attach_first_output(
-                                session_id, terminal_id, attach_started_at
-                            ),
-                        )
+                        with _counting_write_attach(session_id, read_only):
+                            await _shuttle_ws_frames(
+                                websocket,
+                                runner_ws,
+                                on_first_output=lambda: _log_attach_first_output(
+                                    session_id, terminal_id, attach_started_at
+                                ),
+                            )
             except _RunnerWSClosed as closed:
                 code = (
                     closed.code

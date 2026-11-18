@@ -133,7 +133,9 @@ SERVER_CAPABILITIES_HEADER = "X-Omnigent-Server-Capabilities"
 # The server accepts ``"tmux-unavailable"`` readiness. An older server's live
 # readiness decoder rejects the whole frame for it, so hosts down-map it to True.
 SERVER_CAP_TMUX_READINESS = "tmux_readiness"
-SERVER_CAPABILITIES: list[str] = [SERVER_CAP_TMUX_READINESS]
+# The server answers ``host.replace_runner`` requests.
+SERVER_CAP_REPLACE_RUNNER = "replace_runner"
+SERVER_CAPABILITIES: list[str] = [SERVER_CAP_TMUX_READINESS, SERVER_CAP_REPLACE_RUNNER]
 
 
 def parse_server_capabilities(header_value: str | None) -> frozenset[str]:
@@ -241,6 +243,8 @@ class HostFrameKind(str, Enum):
     STOP_RUNNER = "host.stop_runner"
     STOP_RUNNER_RESULT = "host.stop_runner_result"
     RUNNER_EXITED = "host.runner_exited"
+    REPLACE_RUNNER = "host.replace_runner"
+    REPLACE_RUNNER_RESULT = "host.replace_runner_result"
     RUNNER_STATUS = "host.runner_status"
     RUNNER_STATUS_RESULT = "host.runner_status_result"
     STAT = "host.stat"
@@ -547,6 +551,43 @@ class HostStopRunnerResultFrame:
     request_id: str
     status: str
     error: str | None = None
+
+
+@dataclass
+class HostReplaceRunnerFrame:
+    """Host → server: replace an adopted runner on another build if its session is idle.
+
+    The server checks the session's activity, launches a runner on this host's
+    build, resumes the session there and stops the old runner.
+
+    :param request_id: Correlates the result, e.g. ``"req_def456"``.
+    :param runner_id: The adopted runner to replace.
+    :param session_id: The session the runner was launched for.
+    :param runner_commit: Commit the old runner loaded, ``None`` when unrecorded.
+    :param host_commit: Commit this host runs.
+    """
+
+    request_id: str
+    runner_id: str
+    session_id: str
+    runner_commit: str | None = None
+    host_commit: str | None = None
+
+
+@dataclass
+class HostReplaceRunnerResultFrame:
+    """Server → host: outcome of a :class:`HostReplaceRunnerFrame`.
+
+    :param request_id: Correlates to the request.
+    :param status: ``"replaced"``; ``"skipped"`` when the session is not idle
+        or is driven by its owner (ask again later); ``"failed"`` when the
+        resume failed (the old runner was kept if it was still alive).
+    :param reason: Why it was skipped or failed, e.g. ``"turn_running"``.
+    """
+
+    request_id: str
+    status: str
+    reason: str | None = None
 
 
 @dataclass
@@ -1708,6 +1749,8 @@ HostFrame = (
     | HostStopRunnerFrame
     | HostStopRunnerResultFrame
     | HostRunnerExitedFrame
+    | HostReplaceRunnerFrame
+    | HostReplaceRunnerResultFrame
     | HostRunnerStatusFrame
     | HostRunnerStatusResultFrame
     | HostStatFrame
@@ -1942,6 +1985,26 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "request_id": frame.request_id,
                 "status": frame.status,
                 "error": frame.error,
+            }
+        )
+    if isinstance(frame, HostReplaceRunnerFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REPLACE_RUNNER.value,
+                "request_id": frame.request_id,
+                "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
+                "runner_commit": frame.runner_commit,
+                "host_commit": frame.host_commit,
+            }
+        )
+    if isinstance(frame, HostReplaceRunnerResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.REPLACE_RUNNER_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "reason": frame.reason,
             }
         )
     if isinstance(frame, HostRunnerExitedFrame):
@@ -2808,6 +2871,20 @@ def _decode_known_host_frame(
             return _decode_stop_runner_result(msg)
         case HostFrameKind.RUNNER_EXITED:
             return _decode_runner_exited(msg)
+        case HostFrameKind.REPLACE_RUNNER:
+            return HostReplaceRunnerFrame(
+                request_id=_required_str(msg, "request_id"),
+                runner_id=_required_str(msg, "runner_id"),
+                session_id=_required_str(msg, "session_id"),
+                runner_commit=_optional_nullable_str(msg, "runner_commit"),
+                host_commit=_optional_nullable_str(msg, "host_commit"),
+            )
+        case HostFrameKind.REPLACE_RUNNER_RESULT:
+            return HostReplaceRunnerResultFrame(
+                request_id=_required_str(msg, "request_id"),
+                status=_required_str(msg, "status"),
+                reason=_optional_nullable_str(msg, "reason"),
+            )
         case HostFrameKind.RUNNER_STATUS:
             return _decode_runner_status(msg)
         case HostFrameKind.RUNNER_STATUS_RESULT:

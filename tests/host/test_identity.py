@@ -16,6 +16,7 @@ from omnigent.host.identity import (
     load_host_identity_if_present,
     load_keep_runners_on_restart,
     load_or_create_host_identity,
+    load_stale_runner_replacement,
     reset_host_id,
 )
 
@@ -509,3 +510,46 @@ def test_load_keep_runners_on_restart_refuses_a_blank_value(tmp_path: Path) -> N
     path.write_text("host:\n  keep_runners_on_restart:\n")
     with pytest.raises(ValueError, match=r"host\.keep_runners_on_restart"):
         load_keep_runners_on_restart(path)
+
+
+@pytest.mark.parametrize(
+    ("config", "enabled", "excluded"),
+    [
+        (None, True, set()),
+        ({"host": {"name": "box"}}, True, set()),
+        ({"host": {"replace_stale_runners": False}}, False, set()),
+        (
+            {"host": {"replace_stale_runners_exclude": ["conv_a", "conv_b"]}},
+            True,
+            {"conv_a", "conv_b"},
+        ),
+    ],
+    ids=["no-config", "keys-missing", "off", "exclude-list"],
+)
+def test_load_stale_runner_replacement(
+    tmp_path: Path, config: dict[str, object] | None, enabled: bool, excluded: set[str]
+) -> None:
+    """Replacement is on by default; the exclude list is a list of session ids."""
+    path = tmp_path / "config.yaml"
+    if config is not None:
+        path.write_text(yaml.safe_dump(config))
+    settings = load_stale_runner_replacement(path)
+    assert (settings.enabled, settings.excluded_session_ids) == (enabled, excluded)
+
+
+@pytest.mark.parametrize(
+    ("host_section", "key"),
+    [
+        ({"replace_stale_runners": "no"}, "replace_stale_runners"),
+        ({"replace_stale_runners_exclude": "conv_a"}, "replace_stale_runners_exclude"),
+        ({"replace_stale_runners_exclude": [1]}, "replace_stale_runners_exclude"),
+    ],
+)
+def test_load_stale_runner_replacement_refuses_bad_values(
+    tmp_path: Path, host_section: dict[str, object], key: str
+) -> None:
+    """A malformed switch or list is refused with a message naming the key."""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"host": host_section}))
+    with pytest.raises(ValueError, match=rf"host\.{key}"):
+        load_stale_runner_replacement(path)

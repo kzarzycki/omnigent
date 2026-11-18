@@ -64,6 +64,8 @@ from omnigent.host.frames import (
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
+    HostReplaceRunnerFrame,
+    HostReplaceRunnerResultFrame,
     HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
@@ -1707,6 +1709,28 @@ def test_stop_runner_result_frame_round_trip() -> None:
     assert decoded.request_id == "req_002"
     assert decoded.status == "stopped"
     assert decoded.error is None
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        HostReplaceRunnerFrame(
+            request_id="req_r",
+            runner_id="runner_old",
+            session_id="conv_a",
+            runner_commit="old000000",
+            host_commit="new111111",
+        ),
+        HostReplaceRunnerFrame(request_id="req_r", runner_id="runner_old", session_id="conv_a"),
+        HostReplaceRunnerResultFrame(request_id="req_r", status="skipped", reason="turn_running"),
+        HostReplaceRunnerResultFrame(request_id="req_r", status="replaced"),
+    ],
+)
+def test_replace_runner_frames_round_trip(
+    frame: HostReplaceRunnerFrame | HostReplaceRunnerResultFrame,
+) -> None:
+    """The replacement request and its result keep the runner, session and both builds."""
+    assert decode_host_frame(encode_host_frame(frame)) == frame
 
 
 @pytest.mark.parametrize("had_connected", [None, False, True])

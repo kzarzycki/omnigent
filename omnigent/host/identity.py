@@ -103,6 +103,48 @@ def load_keep_runners_on_restart(path: Path) -> bool:
     return value
 
 
+@dataclass(frozen=True)
+class StaleRunnerReplacement:
+    """Whether to replace adopted runners on another build, and which sessions to leave.
+
+    :param enabled: ``host.replace_stale_runners``; on by default.
+    :param excluded_session_ids: ``host.replace_stale_runners_exclude``, session ids
+        whose runner is never replaced.
+    """
+
+    enabled: bool = True
+    excluded_session_ids: frozenset[str] = frozenset()
+
+
+def load_stale_runner_replacement(path: Path) -> StaleRunnerReplacement:
+    """Read the stale runner replacement setting and exclude list from *path*.
+
+    :param path: The host's ``config.yaml``.
+    :returns: The settings; the defaults when the file or keys are missing.
+    :raises ValueError: If the switch is not a boolean or the list is not a list
+        of session id strings.
+    """
+    if not path.exists():
+        return StaleRunnerReplacement()
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    host_section = cfg.get("host") if isinstance(cfg, dict) else None
+    if not isinstance(host_section, dict):
+        return StaleRunnerReplacement()
+    enabled = host_section.get("replace_stale_runners", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(
+            f"host.replace_stale_runners in {path} must be true or false, got {enabled!r}."
+        )
+    excluded = host_section.get("replace_stale_runners_exclude") or []
+    if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
+        raise ValueError(
+            f"host.replace_stale_runners_exclude in {path} must be a list of session ids, "
+            f"got {excluded!r}."
+        )
+    return StaleRunnerReplacement(enabled=enabled, excluded_session_ids=frozenset(excluded))
+
+
 def host_config_path(path: Path | None = None) -> Path:
     """Return the effective config path used for host identity."""
     return path if path is not None else global_config_path(CONFIG_PATH)

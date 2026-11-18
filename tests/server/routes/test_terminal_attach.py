@@ -49,6 +49,7 @@ from omnigent.server.auth import (
     UnifiedAuthProvider,
 )
 from omnigent.server.host_registry import HostRegistry
+from omnigent.server.routes import terminal_attach
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.terminals import TerminalRegistry
 from omnigent.terminals.ws_common import WS_CLOSE_INTERNAL_ERROR, WS_CLOSE_WRONG_REPLICA
@@ -414,9 +415,20 @@ async def test_attach_terminal_rejects_missing_identity_before_runner_proxy() ->
 
 
 async def test_attach_terminal_allows_owner_for_interactive_proxy(
-    debug_log_rows: list[dict[str, Any]],
+    debug_log_rows: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The session owner may open an interactive (write) terminal attach."""
+    """The session owner may open an interactive (write) terminal attach.
+
+    The attach counts as an interactive terminal on the session while it is open.
+    """
+    attached_while_shuttling: list[bool] = []
+    shuttle = terminal_attach._shuttle_ws_frames
+
+    async def _recording_shuttle(*args: Any, **kwargs: Any) -> None:
+        attached_while_shuttling.append(terminal_attach.has_write_terminal_attach("conv_alice"))
+        await shuttle(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_attach, "_shuttle_ws_frames", _recording_shuttle)
     conv_store = _StubConversationStore()
     conv_store.add("conv_alice")
     perm_store = _StubPermissionStore()
@@ -447,6 +459,8 @@ async def test_attach_terminal_allows_owner_for_interactive_proxy(
     ]
     assert b"whoami\n" in conn.received
     assert _connected_attach_user_ids(debug_log_rows) == ["alice@example.com"]
+    assert attached_while_shuttling == [True]
+    assert not terminal_attach.has_write_terminal_attach("conv_alice")
 
 
 async def test_attach_terminal_attributes_logs_with_permissions_disabled(

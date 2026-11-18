@@ -67,6 +67,8 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeResultFrame,
+    HostReplaceRunnerFrame,
+    HostReplaceRunnerResultFrame,
     HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
@@ -117,6 +119,10 @@ _HARNESS_ACCOUNT_PROBE_TIMEOUT_S = 30.0
 _CLEAN_CLOSE_CODES = frozenset({1000, 1001})
 
 RunnerExitedCallback = Callable[[str, str, str], Awaitable[None]]
+# ``(host_id, request)`` → the result to send back.
+ReplaceRunnerCallback = Callable[
+    [str, HostReplaceRunnerFrame], Awaitable[HostReplaceRunnerResultFrame]
+]
 """Async ``(host_id, runner_id, error)`` hook for a ``host.runner_exited`` report."""
 
 
@@ -167,6 +173,7 @@ def create_host_tunnel_router(
     on_host_disconnect: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_runner_exited: RunnerExitedCallback | None = None,
+    on_replace_runner: ReplaceRunnerCallback | None = None,
     local_single_user: bool | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
     harness_install: HarnessInstallGate = False,
@@ -200,6 +207,8 @@ def create_host_tunnel_router(
         runner-tunnel ``on_runner_disconnect`` path never fires). When
         set, it owns the ``runner_exited`` event (see
         :func:`log_runner_exited`) so rows carry the bound session.
+    :param on_replace_runner: Optional async callback answering a host's
+        ``host.replace_runner`` request; ``None`` answers ``failed``.
     :param on_host_disconnect: Optional async callback fired when
         a host's tunnel closes. Receives the ``host_id``.
     :param on_host_update: Optional async callback fired when a connected
@@ -516,6 +525,7 @@ def create_host_tunnel_router(
                         runner_exit_reports,
                         on_runner_exited,
                         on_host_update,
+                        on_replace_runner,
                     ),
                     name=f"host-receive:{host_id}",
                 )
@@ -814,6 +824,33 @@ def _import_session_queue_payload(total: int, session: HostImportedLocalSession)
     }
 
 
+# Retained replacement tasks, so none is collected mid-flight.
+# custom-lint: disable-next=workspace-scoped-cache -- set of Task objects
+_replace_runner_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _answer_replace_runner(
+    host_registry: HostRegistry,
+    conn: HostConnection,
+    host_id: str,
+    frame: HostReplaceRunnerFrame,
+    on_replace_runner: ReplaceRunnerCallback | None,
+) -> None:
+    """Run a host's runner replacement request and send its result back."""
+    if on_replace_runner is None:
+        result = HostReplaceRunnerResultFrame(
+            frame.request_id, "failed", "this server does not replace runners"
+        )
+    else:
+        try:
+            result = await on_replace_runner(host_id, frame)
+        except Exception as exc:
+            _logger.exception("Replacing runner %s for host %s failed", frame.runner_id, host_id)
+            result = HostReplaceRunnerResultFrame(frame.request_id, "failed", str(exc))
+    with contextlib.suppress(ConnectionError):
+        host_registry.send_text(conn, encode_host_frame(result))
+
+
 async def _receive_loop(
     ws: WebSocket,
     conn: HostConnection,
@@ -823,6 +860,7 @@ async def _receive_loop(
     runner_exit_reports: RunnerExitReports | None,
     on_runner_exited: RunnerExitedCallback | None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None,
+    on_replace_runner: ReplaceRunnerCallback | None = None,
 ) -> None:
     """Receive host frames and route results to pending futures.
 
@@ -841,6 +879,7 @@ async def _receive_loop(
         logs the session-less ``runner_exited`` event here instead.
     :param on_host_update: Callback fired after readiness changes persist;
         ``None`` skips it.
+    :param on_replace_runner: Answers ``host.replace_runner``; ``None`` fails it.
     """
     # Per-request reassembly of chunked import sessions; buffers die with the
     # connection, so a tunnel drop can never leak a partial session.
@@ -942,6 +981,16 @@ async def _receive_loop(
             future = conn.pending_stops.pop(frame.request_id, None)
             if future is not None and not future.done():
                 future.set_result({"status": frame.status, "error": frame.error})
+            continue
+
+        if isinstance(frame, HostReplaceRunnerFrame):
+            # A replacement waits for a new runner to start; keep reading meanwhile.
+            task = asyncio.create_task(
+                _answer_replace_runner(host_registry, conn, host_id, frame, on_replace_runner),
+                name=f"host-replace-runner:{host_id}",
+            )
+            _replace_runner_tasks.add(task)
+            task.add_done_callback(_replace_runner_tasks.discard)
             continue
 
         if isinstance(frame, HostRunnerExitedFrame):

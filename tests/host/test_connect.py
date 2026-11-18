@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import click
 import httpx
 import pytest
+import yaml
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
 from websockets.frames import Close
@@ -48,6 +49,7 @@ from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
+    SERVER_CAP_REPLACE_RUNNER,
     SERVER_CAP_TMUX_READINESS,
     SERVER_CAPABILITIES_HEADER,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -89,6 +91,8 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
+    HostReplaceRunnerFrame,
+    HostReplaceRunnerResultFrame,
     HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
@@ -4810,6 +4814,180 @@ async def test_hello_and_resources_report_the_current_stale_adopted_count(
         runner.wait()
         for task in list(host._watcher_tasks):
             task.cancel()
+
+
+class _ReplacingServer:
+    """Fake server end of the tunnel: records replace requests and answers each one."""
+
+    def __init__(self, host: HostProcess, status: str, reason: str | None = None) -> None:
+        self.host = host
+        self.status = status
+        self.reason = reason
+        self.requests: list[HostReplaceRunnerFrame] = []
+
+    async def send_text(self, ws: object, text: str) -> None:
+        frame = decode_host_frame(text)
+        if not isinstance(frame, HostReplaceRunnerFrame):
+            return
+        self.requests.append(frame)
+        answer = HostReplaceRunnerResultFrame(frame.request_id, self.status, self.reason)
+        # Answer on a later loop tick, as a frame arriving off the socket would.
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.ensure_future(self.host._dispatch_host_frame(ws, answer))  # type: ignore[arg-type]
+        )
+
+
+def _stale_host_with_runners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sessions: list[str],
+    host_section: dict[str, object] | None = None,
+) -> tuple[HostProcess, list[subprocess.Popen[bytes]]]:
+    """A host on ``new111111`` that adopted one ``old000000`` fake runner per session."""
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "new111111")
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: "new111111")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"host": host_section or {}}))
+    host = HostProcess(
+        HostIdentity(host_id="host_test_connect", name="test-laptop"),
+        "http://localhost:8000",
+        config_path=config_path,
+    )
+    host._server_capabilities = frozenset({SERVER_CAP_REPLACE_RUNNER})
+    procs: list[subprocess.Popen[bytes]] = []
+    entries = []
+    for index, session_id in enumerate(sessions):
+        proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        procs.append(proc)
+        entries.append(
+            dataclasses.replace(
+                _registered(f"runner_old_{index}", proc, tmp_path / f"runner{index}.log"),
+                session_id=session_id,
+                commit="old000000",
+            )
+        )
+    _write_released_by_dead_daemon(tmp_path / "target.runners", *entries)
+    host._runner_registry = RunnerRegistry(tmp_path / "target.runners")
+    for claimed in host._runner_registry.claim():
+        host._adopt_runner(claimed)
+    return host, procs
+
+
+async def _run_stale_check(host: HostProcess) -> None:
+    """Run one periodic stale-runner check and wait for its request to settle."""
+    await host._check_stale_runners(None)  # type: ignore[arg-type]
+    if host._replacement_task is not None:
+        await host._replacement_task
+
+
+def _end_fake_runners(host: HostProcess, procs: list[subprocess.Popen[bytes]]) -> None:
+    for proc in procs:
+        proc.kill()
+        proc.wait()
+    for task in list(host._watcher_tasks):
+        task.cancel()
+
+
+async def test_idle_stale_runner_is_offered_and_its_replacement_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The periodic check offers an adopted stale runner, naming its session and both builds."""
+    host, procs = _stale_host_with_runners(tmp_path, monkeypatch, ["conv_a"])
+    server = _ReplacingServer(host, "replaced")
+    monkeypatch.setattr(host, "_send_text", server.send_text)
+    try:
+        with caplog.at_level(logging.INFO, logger="omnigent.host.connect"):
+            await _run_stale_check(host)
+        assert [
+            (r.runner_id, r.session_id, r.runner_commit, r.host_commit) for r in server.requests
+        ] == [("runner_old_0", "conv_a", "old000000", "new111111")]
+        assert any("Replaced runner runner_old_0" in r.getMessage() for r in caplog.records)
+    finally:
+        _end_fake_runners(host, procs)
+
+
+async def test_stale_check_offers_one_runner_per_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each check offers a single runner; a busy one goes to the back of the line."""
+    host, procs = _stale_host_with_runners(tmp_path, monkeypatch, ["conv_a", "conv_b"])
+    server = _ReplacingServer(host, "skipped", "turn_running")
+    monkeypatch.setattr(host, "_send_text", server.send_text)
+    try:
+        await _run_stale_check(host)
+        assert len(server.requests) == 1
+        await _run_stale_check(host)
+        assert sorted(r.session_id for r in server.requests) == ["conv_a", "conv_b"]
+        # A skipped runner is not marked failed, so it is offered again.
+        await _run_stale_check(host)
+        assert len(server.requests) == 3
+        assert host._replacement_failed_runner_ids == set()
+    finally:
+        _end_fake_runners(host, procs)
+
+
+async def test_stale_check_never_offers_an_excluded_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host, procs = _stale_host_with_runners(
+        tmp_path,
+        monkeypatch,
+        ["conv_a", "conv_keep"],
+        {"replace_stale_runners_exclude": ["conv_keep"]},
+    )
+    server = _ReplacingServer(host, "skipped", "turn_running")
+    monkeypatch.setattr(host, "_send_text", server.send_text)
+    try:
+        for _ in range(3):
+            await _run_stale_check(host)
+        assert {r.session_id for r in server.requests} == {"conv_a"}
+    finally:
+        _end_fake_runners(host, procs)
+
+
+async def test_stale_check_reads_the_switch_at_every_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning the setting off stops replacement at the next check, without a restart."""
+    host, procs = _stale_host_with_runners(tmp_path, monkeypatch, ["conv_a"])
+    server = _ReplacingServer(host, "skipped", "turn_running")
+    monkeypatch.setattr(host, "_send_text", server.send_text)
+    try:
+        await _run_stale_check(host)
+        assert len(server.requests) == 1
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"host": {"replace_stale_runners": False}})
+        )
+        await _run_stale_check(host)
+        await _run_stale_check(host)
+        assert len(server.requests) == 1
+    finally:
+        _end_fake_runners(host, procs)
+
+
+async def test_failed_replacement_warns_once_and_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed resume logs one warning with the session and both builds, then stops trying."""
+    host, procs = _stale_host_with_runners(tmp_path, monkeypatch, ["conv_a"])
+    server = _ReplacingServer(host, "failed", "the new runner never connected")
+    monkeypatch.setattr(host, "_send_text", server.send_text)
+    try:
+        with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+            for _ in range(3):
+                await _run_stale_check(host)
+        assert len(server.requests) == 1
+        warnings = [
+            r.getMessage() for r in caplog.records if "Could not replace" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        for part in ("conv_a", "old000000", "new111111", "the new runner never connected"):
+            assert part in warnings[0]
+        # The old runner is still tracked; the host does not stop it.
+        assert procs[0].poll() is None
+        assert "runner_old_0" in host._runners
+    finally:
+        _end_fake_runners(host, procs)
 
 
 async def test_run_reports_adopted_stale_runners_in_hello(
