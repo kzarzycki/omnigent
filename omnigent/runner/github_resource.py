@@ -81,7 +81,12 @@ except ImportError:  # Windows: reads are not single-flighted
 
 from omnigent import config as _config
 from omnigent.git_providers import host_of
-from omnigent.git_providers.github import gh_config_dir
+from omnigent.git_providers.github import (
+    cached_gh_token,
+    forget_gh_tokens,
+    gh_config_dir,
+    hosts_file_stat,
+)
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.process_logging import data_dir
 from omnigent.runner import pr_resource
@@ -369,8 +374,6 @@ def _workspace_key(root: str) -> str | None:
     return None
 
 
-# Tokens of ``gh auth token``, per (host, login), for this process only: never shared on disk.
-_account_tokens: dict[tuple[str, str], str] = {}
 _AUTH_FAILURE_PATTERN = re.compile(
     r"HTTP 401|bad credentials|gh auth login|not logged in|authentication failed"
     r"|token in .* is invalid|requires authentication",
@@ -381,18 +384,15 @@ _AUTH_FAILURE_PATTERN = re.compile(
 def _gh_auth_token(root: str, login: str, host: str = "github.com") -> str | None:
     """Return *login*'s GitHub token via ``gh auth token --user`` (never logged).
 
-    Remembered per host and login until a ``gh`` call fails to authenticate.
+    Remembered per host and login while ``hosts.yml`` is unchanged, and until a ``gh``
+    call fails to authenticate.
     """
-    key = (host, login)
-    with _preview_lock:
-        if (cached := _account_tokens.get(key)) is not None:
-            return cached
-    rc, out, _ = _gh(["auth", "token", "--user", login, "-h", host], cwd=root)
-    token = out.strip() if rc == 0 else ""
-    if token:
-        with _preview_lock:
-            _account_tokens[key] = token
-    return token or None
+
+    def fetch() -> str | None:
+        rc, out, _ = _gh(["auth", "token", "--user", login, "-h", host], cwd=root)
+        return out.strip() or None if rc == 0 else None
+
+    return cached_gh_token(host, login, fetch)
 
 
 def _forget_account_lookups(token: str | None) -> None:
@@ -400,9 +400,8 @@ def _forget_account_lookups(token: str | None) -> None:
 
     A failed call as a chosen account drops that token; one as ``gh``'s own auth drops all.
     """
+    forget_gh_tokens(token)
     with _preview_lock:
-        for key in [k for k, known in _account_tokens.items() if token in (None, known)]:
-            del _account_tokens[key]
         for key in [k for k in _preview_cache if k[:1] == ("accounts",)]:
             del _preview_cache[key]
     with suppress(OSError):
@@ -1262,18 +1261,6 @@ def _background_reads_paused() -> bool:
     return _background_read.get() and _cache_get(_RATE_LIMIT_KEY, shared=True)[0]
 
 
-def _accounts_file_stat(config_dir: Path) -> list[int] | None:
-    """Identify the accounts file's content cheaply; ``None`` when it is missing.
-
-    ``gh auth switch`` / ``login`` / ``logout`` rewrite it, so any of them changes this.
-    """
-    try:
-        status = (config_dir / "hosts.yml").stat()
-    except OSError:
-        return None
-    return [status.st_mtime_ns, status.st_size, status.st_ino]
-
-
 def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     """:func:`_list_accounts`, shared by the host's runners while ``hosts.yml`` is unchanged.
 
@@ -1283,7 +1270,7 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     """
     config_dir = Path(gh_config_dir())
     key = ("accounts", str(config_dir))
-    stat = _accounts_file_stat(config_dir)
+    stat = hosts_file_stat(config_dir)
     if stat is not None:
         hit, cached = _cache_get(key, shared=True)
         if hit and isinstance(cached, dict) and cached.get("stat") == stat:

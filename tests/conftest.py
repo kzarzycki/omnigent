@@ -324,6 +324,19 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_gh_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Point gh at an empty config dir and forget remembered tokens, so no test reads the
+    developer's own gh login. Tests that switch accounts write ``hosts.yml`` as gh does."""
+    from omnigent.git_providers.github import forget_gh_tokens
+
+    forget_gh_tokens()
+    config_dir = tmp_path_factory.mktemp("gh-config-empty")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(config_dir))
+
+
+@pytest.fixture(autouse=True)
 def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests off the network: the host's workspace probe answers "unknown".
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +31,25 @@ class FakeGh:
     """A ``gh`` stand-in: answers ``auth status`` and routes ``pr view`` / ``api`` by path."""
 
     def __init__(self, auth: str, api: dict[str, tuple[int, str, str]], pr: dict | None) -> None:
+        self._writes = 0
         self.auth = auth
         self.api = api
         self.pr = pr
         self.calls: list[GhCall] = []
         self.cwds: set[str] = set()
+
+    @property
+    def auth(self) -> str:
+        return self._auth
+
+    @auth.setter
+    def auth(self, auth: str) -> None:
+        """Set the accounts as ``gh auth switch`` / ``login`` does: rewrite ``hosts.yml``."""
+        self._auth = auth
+        hosts_file = Path(os.environ["GH_CONFIG_DIR"]) / "hosts.yml"
+        hosts_file.write_text(auth)
+        self._writes += 1
+        os.utime(hosts_file, ns=(self._writes * 10**9, self._writes * 10**9))
 
     def __call__(
         self, argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None

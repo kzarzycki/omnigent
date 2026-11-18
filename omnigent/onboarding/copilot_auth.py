@@ -34,6 +34,7 @@ import importlib.util
 import subprocess
 
 from omnigent.errors import OmnigentError
+from omnigent.git_providers.github import cached_gh_token
 from omnigent.onboarding.extra_install import extra_install_command
 from omnigent.onboarding.provider_config import load_config, resolve_secret
 
@@ -72,17 +73,24 @@ def gh_cli_github_token(host: str | None = None) -> str | None:
 
     :param host: GitHub hostname to fetch the token for, e.g. ``"acme.ghe.com"``;
         ``None`` lets ``gh`` pick its default host.
-    :returns: The token, or ``None`` when ``gh`` is absent, logged out, or fails.
+    :returns: The token, or ``None`` when ``gh`` is absent, logged out, or fails. Remembered
+        while ``hosts.yml`` is unchanged, so repeated readiness probes spawn no ``gh``.
     """
     argv = ["gh", "auth", "token"]
     if host:
         argv += ["--hostname", host]
-    try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    token = completed.stdout.strip()
-    return token if completed.returncode == 0 and token else None
+
+    def fetch() -> str | None:
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, timeout=10, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        token = completed.stdout.strip()
+        return token if completed.returncode == 0 and token else None
+
+    return cached_gh_token(host or "", None, fetch)
 
 
 def looks_like_github_copilot_token(value: str) -> bool:

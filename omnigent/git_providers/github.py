@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -60,6 +62,52 @@ def gh_config_dir() -> str:
     if os.name == "nt" and app_data:
         return os.path.join(app_data, "GitHub CLI")
     return os.path.join(Path.home(), ".config", "gh")
+
+
+def hosts_file_stat(config_dir: str | Path | None = None) -> list[int] | None:
+    """Identify the gh ``hosts.yml`` content cheaply; ``None`` when it is missing.
+
+    ``gh auth switch`` / ``login`` / ``logout`` / ``refresh`` rewrite it, so any changes this.
+    """
+    try:
+        status = (Path(config_dir or gh_config_dir()) / "hosts.yml").stat()
+    except OSError:
+        return None
+    return [status.st_mtime_ns, status.st_size, status.st_ino]
+
+
+# ``gh auth token`` results per (config dir, host, login or ``None`` for gh's active
+# account), with the ``hosts.yml`` stat they were read under. In this process only.
+_gh_tokens: dict[tuple[str, str, str | None], tuple[list[int], str]] = {}
+_gh_tokens_lock = threading.Lock()
+
+
+def cached_gh_token(host: str, login: str | None, fetch: Callable[[], str | None]) -> str | None:
+    """Return the token ``fetch`` reads, remembered while ``hosts.yml`` is unchanged.
+
+    A login, logout, switch or refresh changes the file's stat and so misses; a missing
+    file or a failed lookup is never remembered.
+    """
+    config_dir = gh_config_dir()
+    key = (config_dir, host, login)
+    stat = hosts_file_stat(config_dir)
+    if stat is not None:
+        with _gh_tokens_lock:
+            entry = _gh_tokens.get(key)
+        if entry is not None and entry[0] == stat:
+            return entry[1]
+    token = fetch()
+    if token and stat is not None:
+        with _gh_tokens_lock:
+            _gh_tokens[key] = (stat, token)
+    return token
+
+
+def forget_gh_tokens(token: str | None = None) -> None:
+    """Drop the remembered tokens: only those equal to *token*, or all when it is ``None``."""
+    with _gh_tokens_lock:
+        for key in [k for k, (_, known) in _gh_tokens.items() if token in (None, known)]:
+            del _gh_tokens[key]
 
 
 def _read_gh_hosts(hosts_path: str) -> frozenset[str]:

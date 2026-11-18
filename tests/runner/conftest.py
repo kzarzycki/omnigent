@@ -109,9 +109,8 @@ def _isolated_model_catalog_store(
 
 @pytest.fixture(autouse=True)
 def _isolated_github_read_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Give each test empty GitHub read and account-token caches, in memory and on disk."""
+    """Give each test an empty GitHub read cache, in memory and on disk."""
     github_resource._preview_cache.clear()
-    github_resource._account_tokens.clear()
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
 
 

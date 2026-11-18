@@ -158,6 +158,8 @@ def test_lookups_that_cannot_add_a_pr_make_no_requests(
 def test_candidates_share_one_deadline(
     gh: list[list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The scripted clock counts only the deadline checks, so read the accounts uncached.
+    monkeypatch.setattr(github_resource, "hosts_file_stat", lambda *_args: None)
     clock = iter([0.0, 1.0, 6.0])
     monkeypatch.setattr(github_created.time, "monotonic", lambda: next(clock, 6.0))
 
