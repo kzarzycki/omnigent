@@ -1029,6 +1029,101 @@ def test_runner_outlives_a_daemon_restart_and_is_adopted(
                 _end_host_daemon(daemon)
 
 
+def _mark_registered_runners_as_older_build(omni_dir: Path, commit: str) -> None:
+    """Record *commit* as the build of every runner a stopped daemon left for the next one."""
+    for registry in (omni_dir / "daemons").glob("*.runners"):
+        payload = json.loads(registry.read_text())
+        for entry in payload["runners"].values():
+            entry["commit"] = commit
+        registry.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def test_adopted_runner_on_an_older_build_is_replaced_and_its_session_resumes(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+) -> None:
+    """A restarted daemon replaces an idle adopted runner from an older build.
+
+    The session's history stays, the old runner process exits, and the next
+    message completes on the new runner.
+    """
+    history = f"STALE_HISTORY_{uuid.uuid4().hex[:12].upper()}"
+    marker = f"STALE_RESUMED_{uuid.uuid4().hex[:12].upper()}"
+    configure_mock_llm(mock_llm_server_url, [{"text": marker}], match=marker)
+    first = _spawn_host_daemon(
+        tmp_path=tmp_path,
+        live_server=live_server,
+        mock_llm_server_url=mock_llm_server_url,
+        keep_runners_on_restart=True,
+    )
+    second: _SpawnedHostDaemon | None = None
+    try:
+        _wait_for_host_online(http_client, first.host_id, timeout=30.0)
+        agent_id = lookup_agent_id(
+            http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
+        )
+        created = http_client.post(
+            "/v1/sessions",
+            json={"agent_id": agent_id, "host_id": first.host_id, "workspace": str(tmp_path)},
+            timeout=60.0,
+        )
+        created.raise_for_status()
+        session_id = created.json()["id"]
+        old_runner = created.json()["runner_id"]
+        _wait_for_runner_status(http_client, old_runner, online=True)
+        # History without a recent owner message, which would hold the runner for 30 minutes.
+        seeded = http_client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "item_data": {
+                        "role": "assistant",
+                        "agent": "external-agent",
+                        "content": [{"type": "output_text", "text": history}],
+                    },
+                },
+            },
+        )
+        assert seeded.is_success, seeded.text
+        old_pid = _runner_pid_from_daemon_log(first.daemon_log)
+        assert old_pid is not None, first.daemon_log.read_text()
+
+        first.proc.send_signal(signal.SIGTERM)
+        first.proc.wait(timeout=15)
+        _mark_registered_runners_as_older_build(tmp_path / ".omnigent", "old000000")
+        second = _spawn_host_daemon(
+            tmp_path=tmp_path,
+            live_server=live_server,
+            mock_llm_server_url=mock_llm_server_url,
+            host_id=first.host_id,
+            log_name="host-daemon-restarted.log",
+        )
+        replaced = f"Replaced runner {old_runner} for session {session_id}"
+        deadline = time.monotonic() + 120.0
+        while replaced not in second.daemon_log.read_text():
+            assert time.monotonic() < deadline, second.daemon_log.read_text()
+            time.sleep(POLL_INTERVAL_S)
+
+        new_runner = http_client.get(f"/v1/sessions/{session_id}").json()["runner_id"]
+        assert new_runner != old_runner
+        deadline = time.monotonic() + 15.0
+        while _pid_alive(old_pid):
+            assert time.monotonic() < deadline, "the replaced runner is still running"
+            time.sleep(POLL_INTERVAL_S)
+        _assert_round_trip(http_client, session_id, marker)
+        items = http_client.get(f"/v1/sessions/{session_id}/items").json()["data"]
+        texts = json.dumps(items)
+        assert history in texts and marker in texts
+    finally:
+        for daemon in (second, first):
+            if daemon is not None:
+                _end_host_daemon(daemon)
+
+
 # ── Host-restart native round-trip ─────────────────────────────
 #
 # Skipped when ``claude`` or ``tmux`` are absent from PATH — the test
