@@ -1,4 +1,4 @@
-"""The runner looks up a GitHub account once per host and login, until ``gh`` stops accepting it."""
+"""The runner looks up a GitHub account once per host and login until `gh` rejects it."""
 
 from __future__ import annotations
 
