@@ -825,6 +825,7 @@ def _import_session_queue_payload(total: int, session: HostImportedLocalSession)
 
 
 # Retained replacement tasks, so none is collected mid-flight.
+# custom-lint: disable-next=workspace-scoped-cache -- set of Task objects
 _replace_runner_tasks: set[asyncio.Task[None]] = set()
 
 

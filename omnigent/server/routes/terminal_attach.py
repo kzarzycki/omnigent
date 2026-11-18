@@ -78,6 +78,7 @@ from typing import Any, Final
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
 from starlette import status
 
+from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import debug_event, set_current_user_id
 from omnigent.errors import OmnigentError
 from omnigent.runtime import (
@@ -104,7 +105,7 @@ from omnigent.terminals.ws_common import (
 _logger = logging.getLogger(__name__)
 
 # Open write (interactive) attaches per session through this server's runner proxy.
-_write_attach_counts: dict[str, int] = {}
+_write_attach_counts: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
 
 
 def has_write_terminal_attach(session_id: str) -> bool:
