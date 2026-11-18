@@ -304,7 +304,7 @@ def test_runners_with_different_gh_config_dirs_do_not_share_accounts(
     fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Files on different filesystems can share a stat; the key must still tell them apart.
-    monkeypatch.setattr(github, "_accounts_file_stat", lambda _dir: [1, 1, 1])
+    monkeypatch.setattr(github, "hosts_file_stat", lambda _dir: [1, 1, 1])
     fake_gh.accounts = _accounts("carol")
     assert _title() == "read as carol"
     other = FakeGh(tmp_path / "other-config")

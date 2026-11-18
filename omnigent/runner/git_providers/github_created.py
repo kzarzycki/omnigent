@@ -82,7 +82,7 @@ def created_prs(
     deadline = time.monotonic() + 5.0
     root = tempfile.gettempdir()
     with github_resource._gh_deadline_scope(deadline):
-        _, accounts = github_resource._list_accounts(root)
+        _, accounts = github_resource._cached_accounts(root)
         signed_in = [account for account in accounts if account.get("state") == "success"]
         logins = {
             (str(account["host"]).lower(), str(account["login"]).lower()) for account in signed_in
