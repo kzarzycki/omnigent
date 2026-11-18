@@ -33,6 +33,10 @@ class _FakeSessionMachinery:
     stopped: list[tuple[str, str]] = field(default_factory=list)
     resumed: list[tuple[str, str | None]] = field(default_factory=list)
     on_new_runner_up: list[str] = field(default_factory=list)
+    # What the old runner answers about background work; ``None`` is no answer.
+    old_runner_background: bool | None = False
+    background_starts_during_boot: bool = False
+    asked_background: list[tuple[str, str | None]] = field(default_factory=list)
 
     async def launch(self, conv: Conversation) -> tuple[str, str | None]:
         self.launched.append(conv.id)
@@ -42,6 +46,8 @@ class _FakeSessionMachinery:
     async def wait_connected(self, runner_id: str, timeout_s: float) -> bool:
         for session_id in self.on_new_runner_up:
             self.store.set_session_live_status(session_id, "running")
+        if self.background_starts_during_boot:
+            self.old_runner_background = True
         return self.new_runner_connects
 
     async def stop(self, session_id: str, host_id: str, runner_id: str, reason: str) -> bool:
@@ -50,6 +56,10 @@ class _FakeSessionMachinery:
 
     async def resume(self, conv: Conversation) -> None:
         self.resumed.append((conv.id, conv.runner_id))
+
+    async def runner_background_work(self, conv: Conversation) -> bool | None:
+        self.asked_background.append((conv.id, conv.runner_id))
+        return self.old_runner_background
 
     def deps(self) -> ReplacementDeps:
         return ReplacementDeps(
@@ -64,6 +74,7 @@ class _FakeSessionMachinery:
             status_of=lambda _session_id: None,
             has_queued_input=lambda session_id: session_id in self.queued,
             has_terminal_attach=terminal_attach.has_write_terminal_attach,
+            runner_background_work=self.runner_background_work,
         )
 
 
@@ -231,15 +242,96 @@ async def test_new_runner_that_never_connects_keeps_the_old_one(
     assert bound is not None and bound.runner_id == _OLD
 
 
-async def test_turn_started_while_the_new_runner_came_up_keeps_the_old_one(
+async def test_turn_started_on_the_new_runner_during_boot_finishes_the_swap(
     store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
 ) -> None:
     session_id = _bound_session(store)
+    # The launch already bound the session to the new runner, so this turn runs there.
     machinery.on_new_runner_up.append(session_id)
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert (result.status, result.reason) == ("replaced", None)
+    assert machinery.stopped == [(_OLD, "superseded")]
+    # The running turn is left alone rather than resumed over.
+    assert machinery.resumed == []
+    bound = store.get_conversation(session_id)
+    assert bound is not None and bound.runner_id == _NEW and bound.live_status == "running"
+
+
+async def test_sub_agent_turn_started_during_boot_keeps_the_old_runner(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    child = store.create_conversation(
+        kind="sub_agent",
+        parent_conversation_id=session_id,
+        host_id=_HOST,
+        workspace="/ws",
+        runner_id=_OLD,
+    )
+    machinery.on_new_runner_up.append(child.id)
 
     result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
 
     assert (result.status, result.reason) == ("skipped", "turn_running")
     assert machinery.stopped == [(_NEW, "replacement_failed")]
+    for kept_id in (session_id, child.id):
+        kept = store.get_conversation(kept_id)
+        assert kept is not None and kept.runner_id == _OLD
+
+
+async def test_stored_background_work_keeps_the_runner(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    store.set_background_work_running(session_id, True, runner_id=_OLD)
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert (result.status, result.reason) == ("skipped", "background_work_running")
+    assert machinery.launched == []
+
+
+async def test_background_work_the_old_runner_reports_keeps_it(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    machinery.old_runner_background = True
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert (result.status, result.reason) == ("skipped", "background_work_running")
+    assert machinery.launched == []
+    assert machinery.asked_background == [(session_id, _OLD)]
+
+
+async def test_background_work_reported_during_boot_rolls_back(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    # The server's copy of the flag lags; only the old runner knows yet.
+    machinery.background_starts_during_boot = True
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert (result.status, result.reason) == ("skipped", "background_work_running")
+    assert machinery.stopped == [(_NEW, "replacement_failed")]
+    # Both checks asked the old runner, not the newly bound one.
+    assert machinery.asked_background == [(session_id, _OLD), (session_id, _OLD)]
     bound = store.get_conversation(session_id)
     assert bound is not None and bound.runner_id == _OLD
+
+
+async def test_old_runner_that_cannot_answer_counts_as_busy(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    session_id = _bound_session(store)
+    machinery.old_runner_background = None
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert result.status == "failed"
+    assert result.reason == "the old runner did not report its background work"
+    assert machinery.launched == []
+    assert machinery.stopped == []

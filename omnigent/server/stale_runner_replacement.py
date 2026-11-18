@@ -5,8 +5,8 @@ build through ``host.replace_runner``. The server, which sees the session's
 activity, replaces the runner only when the session is idle and not driven by
 its owner: it launches a runner on the host's current build, stops the old one
 and resumes the session on the new runner with the ``retry_session`` recovery.
-A new runner that fails to come up is stopped and the old runner, still running
-and untouched, is bound again.
+A new runner that fails to come up, or an old runner that still has background
+work, rolls back: the new runner is stopped and the old one is bound again.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from omnigent.entities.conversation import Conversation
 from omnigent.host.frames import HostReplaceRunnerFrame, HostReplaceRunnerResultFrame
@@ -30,6 +31,8 @@ OWNER_ACTIVE_WINDOW_S = 30 * 60
 _RECENT_MESSAGE_PAGE = 50
 # How long the new runner gets to connect its tunnel.
 _NEW_RUNNER_CONNECT_TIMEOUT_S = 120.0
+# How long the old runner gets to say whether it has background work.
+_BACKGROUND_PROBE_TIMEOUT_S = 10.0
 _MID_TURN_STATUSES = frozenset({"running", "waiting"})
 
 
@@ -47,6 +50,9 @@ class ReplacementDeps:
     :param status_of: The session status this replica last saw, if any.
     :param has_queued_input: Whether the session has a message waiting for its turn.
     :param has_terminal_attach: Whether a viewer has its terminal open for input.
+    :param runner_background_work: Asks the runner a session record is bound to
+        whether the session has a background shell or agent; ``None`` when the
+        runner can't answer.
     """
 
     store: ConversationStore
@@ -58,6 +64,7 @@ class ReplacementDeps:
     status_of: Callable[[str], str | None]
     has_queued_input: Callable[[str], bool]
     has_terminal_attach: Callable[[str], bool]
+    runner_background_work: Callable[[Conversation], Awaitable[bool | None]]
 
 
 def _message_role(item: Any) -> str | None:
@@ -132,6 +139,33 @@ async def _roll_back(
     return deps.is_connected(old_runner_id)
 
 
+_BACKGROUND_UNKNOWN = "the old runner did not report its background work"
+
+
+async def _old_runner_background_blocker(
+    sessions: Sequence[Conversation], deps: ReplacementDeps
+) -> str | None:
+    """Ask the old runner, which each record is bound to, about background work.
+
+    :returns: ``"background_work_running"``, :data:`_BACKGROUND_UNKNOWN` when the
+        runner can't answer, or ``None``.
+    """
+    for conv in sessions:
+        running = await deps.runner_background_work(conv)
+        if running is None:
+            return _BACKGROUND_UNKNOWN
+        if running:
+            return "background_work_running"
+    return None
+
+
+def _background_result(
+    result: Callable[[str, str | None], HostReplaceRunnerResultFrame], reason: str
+) -> HostReplaceRunnerResultFrame:
+    """Background work ends on its own, so ask later; a runner that can't answer won't."""
+    return result("failed" if reason == _BACKGROUND_UNKNOWN else "skipped", reason)
+
+
 async def replace_stale_runner(
     host_id: str, frame: HostReplaceRunnerFrame, deps: ReplacementDeps
 ) -> HostReplaceRunnerResultFrame:
@@ -156,6 +190,8 @@ async def replace_stale_runner(
     sessions = await asyncio.to_thread(deps.store.list_conversations_by_runner_id, old_runner_id)
     if (reason := await asyncio.to_thread(_runner_blocker, sessions, deps)) is not None:
         return result("skipped", reason)
+    if (reason := await _old_runner_background_blocker(sessions, deps)) is not None:
+        return _background_result(result, reason)
 
     new_runner_id, launch_error = await deps.launch(conv)
     if launch_error is None and not await deps.wait_connected(
@@ -167,35 +203,47 @@ async def replace_stale_runner(
         suffix = "; the old runner was kept" if kept else "; the old runner is gone"
         return result("failed", launch_error + suffix)
 
-    # Work may have started while the new runner came up.
-    fresh = await asyncio.to_thread(deps.store.list_conversations_by_runner_id, old_runner_id)
-    current = await asyncio.to_thread(deps.store.get_conversation, conv.id)
-    rechecked = [current or conv, *(other for other in fresh if other.id != conv.id)]
-    if (reason := await asyncio.to_thread(_runner_blocker, rechecked, deps)) is not None:
+    # The launch bound this session to the new runner, so work that started on
+    # it during the boot stays there; only sessions still on the old runner can
+    # keep it.
+    others = [
+        other
+        for other in await asyncio.to_thread(
+            deps.store.list_conversations_by_runner_id, old_runner_id
+        )
+        if other.id != conv.id
+    ]
+    if (reason := await asyncio.to_thread(_runner_blocker, others, deps)) is not None:
         await _roll_back(conv, old_runner_id, new_runner_id, deps)
         return result("skipped", reason)
-    for other in fresh:
-        if other.id != conv.id:
-            # Sub-agents ride their parent's runner; move them with it.
-            await asyncio.to_thread(
-                deps.store.replace_runner_id,
-                other.id,
-                new_runner_id,
-                expected_runner_id=old_runner_id,
-            )
-    await deps.stop(conv.id, host_id, old_runner_id, "superseded")
+    # The rebind cleared this session's stored flag, which lags anyway; *conv*
+    # is the record from before the launch, so this asks the old runner.
+    if (reason := await _old_runner_background_blocker([conv, *others], deps)) is not None:
+        await _roll_back(conv, old_runner_id, new_runner_id, deps)
+        return _background_result(result, reason)
     bound = await asyncio.to_thread(deps.store.get_conversation, conv.id)
-    try:
-        await deps.resume(bound or conv)
-    except Exception as exc:  # the old runner is stopped; report the failed resume
-        _logger.warning(
-            "Session %s did not resume on its replacement runner %s",
-            conv.id,
+    busy_on_new_runner = await asyncio.to_thread(session_blocker, bound or conv, deps, time.time())
+    for other in others:
+        # Sub-agents ride their parent's runner; move them with it.
+        await asyncio.to_thread(
+            deps.store.replace_runner_id,
+            other.id,
             new_runner_id,
-            exc_info=True,
-            extra={"session_id": conv.id},
+            expected_runner_id=old_runner_id,
         )
-        return result("failed", f"the session did not resume on the new runner: {exc}")
+    await deps.stop(conv.id, host_id, old_runner_id, "superseded")
+    if busy_on_new_runner is None:
+        try:
+            await deps.resume(bound or conv)
+        except Exception as exc:  # the old runner is stopped; report the failed resume
+            _logger.warning(
+                "Session %s did not resume on its replacement runner %s",
+                conv.id,
+                new_runner_id,
+                exc_info=True,
+                extra={"session_id": conv.id},
+            )
+            return result("failed", f"the session did not resume on the new runner: {exc}")
     _logger.info(
         "Replaced runner %s (commit %s) with %s (commit %s) for session %s",
         old_runner_id,
@@ -224,8 +272,10 @@ def server_replacement_deps(
     :param tunnel_registry: Live runner tunnels.
     :returns: The dependencies for :func:`replace_stale_runner`.
     """
+    import httpx
     from starlette.datastructures import Headers
 
+    from omnigent.errors import OmnigentError
     from omnigent.runtime import get_runner_router, pending_inputs
     from omnigent.server.routes._auth_helpers import get_session_owner_id
     from omnigent.server.routes._sessions.common import _session_status_cache
@@ -265,6 +315,24 @@ def server_replacement_deps(
             reason=reason,
         )
 
+    async def runner_background_work(conv: Conversation) -> bool | None:
+        router = get_runner_router()
+        if router is None:
+            return None
+        try:
+            # Routed by *conv*'s own runner, which may no longer be the bound one.
+            routed = await asyncio.to_thread(
+                router.client_for_session_control, conv.id, conversation=conv
+            )
+            response = await routed.client.get(
+                f"/v1/sessions/{quote(conv.id, safe='')}/background-work",
+                timeout=_BACKGROUND_PROBE_TIMEOUT_S,
+            )
+            running = response.json().get("running") if response.is_success else None
+        except (OmnigentError, httpx.HTTPError, OSError, ValueError, AttributeError):
+            return None
+        return running if isinstance(running, bool) else None
+
     async def resume(conv: Conversation) -> object:
         owner = await asyncio.to_thread(get_session_owner_id, conv.id, permission_store)
         return await _retry_session_single_flight(
@@ -287,4 +355,5 @@ def server_replacement_deps(
         status_of=_session_status_cache.get,
         has_queued_input=pending_inputs.has_pending,
         has_terminal_attach=has_write_terminal_attach,
+        runner_background_work=runner_background_work,
     )

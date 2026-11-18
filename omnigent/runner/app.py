@@ -4202,6 +4202,18 @@ def create_runner_app(
             },
         )
 
+    @app.get("/v1/sessions/{session_id}/background-work")
+    async def get_session_background_work(session_id: str) -> JSONResponse:
+        """Whether a settled turn left a background shell or agent working.
+
+        The server's copy of this flag lags behind retried reports, so a
+        caller about to stop this runner asks here instead.
+        """
+        running = session_id in _sessions_with_background_shell or (
+            resource_registry.session_has_background_agents(session_id)
+        )
+        return JSONResponse(status_code=200, content={"running": running})
+
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
         resource_registry.note_terminal_control_request(session_id, "delete_session")

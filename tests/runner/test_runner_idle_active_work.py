@@ -1345,3 +1345,29 @@ async def test_native_pane_with_live_work_holds_watchdog_despite_idle_edge(
             background(conv_id, False)
             assert app.state.has_active_work() is False
             assert app.state.has_sandbox_work() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["background_agent", "background_shell", "no_evidence"])
+async def test_background_work_endpoint_reports_the_runner_own_flag(
+    monkeypatch: pytest.MonkeyPatch, evidence: str
+) -> None:
+    """The runner answers for its own background shells and agents, ahead of the server's copy."""
+    conv_id = "conv_background_work_probe"
+    app = _scaffold_app()
+    registry = app.state.session_resource_registry
+    monkeypatch.setattr(
+        registry,
+        "session_has_background_agents",
+        lambda session_id: evidence == "background_agent" and session_id == conv_id,
+    )
+    if evidence == "background_shell":
+        registry._session_background_publisher(conv_id, True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+        answer = await client.get(f"/v1/sessions/{conv_id}/background-work")
+        other = await client.get("/v1/sessions/conv_other/background-work")
+
+    assert answer.status_code == 200
+    assert answer.json() == {"running": evidence != "no_evidence"}
+    assert other.json() == {"running": False}
