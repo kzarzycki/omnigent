@@ -230,6 +230,8 @@ def _gh(
         env.pop("GITHUB_TOKEN", None)
         env.pop("GITHUB_ENTERPRISE_TOKEN", None)
     result = _run(["gh", *argv], cwd=cwd, timeout=timeout, env=env)
+    if result[0] not in (0, None) and _AUTH_FAILURE_PATTERN.search(result[2]):
+        _forget_account_lookups(token)
     if (
         deadline is not None
         and result[0] is None
@@ -367,12 +369,44 @@ def _workspace_key(root: str) -> str | None:
     return None
 
 
+# Tokens of ``gh auth token``, per (host, login), for this process only: never shared on disk.
+_account_tokens: dict[tuple[str, str], str] = {}
+_AUTH_FAILURE_PATTERN = re.compile(
+    r"HTTP 401|bad credentials|gh auth login|not logged in|authentication failed"
+    r"|token in .* is invalid|requires authentication",
+    re.IGNORECASE,
+)
+
+
 def _gh_auth_token(root: str, login: str, host: str = "github.com") -> str | None:
-    """Return *login*'s GitHub token via ``gh auth token --user`` (never logged)."""
+    """Return *login*'s GitHub token via ``gh auth token --user`` (never logged).
+
+    Remembered per host and login until a ``gh`` call fails to authenticate.
+    """
+    key = (host, login)
+    with _preview_lock:
+        if (cached := _account_tokens.get(key)) is not None:
+            return cached
     rc, out, _ = _gh(["auth", "token", "--user", login, "-h", host], cwd=root)
-    if rc != 0:
-        return None
-    return out.strip() or None
+    token = out.strip() if rc == 0 else ""
+    if token:
+        with _preview_lock:
+            _account_tokens[key] = token
+    return token or None
+
+
+def _forget_account_lookups(token: str | None) -> None:
+    """Drop the remembered tokens and account list after an auth failure, so a re-login shows.
+
+    A failed call as a chosen account drops that token; one as ``gh``'s own auth drops all.
+    """
+    with _preview_lock:
+        for key in [k for k, known in _account_tokens.items() if token in (None, known)]:
+            del _account_tokens[key]
+        for key in [k for k in _preview_cache if k[:1] == ("accounts",)]:
+            del _preview_cache[key]
+    with suppress(OSError):
+        _cache_path(("accounts", str(Path(gh_config_dir())))).unlink()
 
 
 def _account_token_for(root: str, workspace_key: str | None = None) -> str | None:
@@ -1100,7 +1134,7 @@ def _workspace_github_info(root: str) -> dict[str, Any]:
 
     # Repo unreachable / not signed in — enumerate accounts so the panel can offer
     # the account selector (the only state where it's shown).
-    authenticated, accounts = _list_accounts(root)
+    authenticated, accounts = _cached_accounts(root)
     payload["authenticated"] = authenticated
     payload["accounts"] = accounts
     workspace_key = _workspace_key(root)
@@ -1143,7 +1177,7 @@ def _pr_json(
 ) -> dict[str, Any] | None:
     """``gh pr view`` of ``reference``, as ``token`` or, by default, its preferred account."""
     if reference.host != "github.com":
-        _, accounts = _list_accounts(root)
+        _, accounts = _cached_accounts(root)
         if reference.host not in {account.get("host") for account in accounts}:
             return None
     return _gh_pr_view(
@@ -2187,7 +2221,7 @@ def _pr_compare(
 
 def _host_args(root: str, reference: PullRequestRef) -> list[str]:
     if reference.host != "github.com":
-        _, accounts = _list_accounts(root)
+        _, accounts = _cached_accounts(root)
         if reference.host not in {account.get("host") for account in accounts}:
             raise ValueError("Sign in to this GitHub host with gh before viewing its PRs")
     return ["--hostname", reference.host]
@@ -2461,7 +2495,7 @@ def _merge_error(stderr: str, *, action: str) -> str:
 
 def _active_login(root: str, host: str) -> str | None:
     """``gh``'s active account on ``host``, or ``None`` when there is none."""
-    _, accounts = _list_accounts(root)
+    _, accounts = _cached_accounts(root)
     return next(
         (a.get("login") for a in accounts if a.get("host") == host and a.get("active")), None
     )
@@ -3320,7 +3354,7 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     accounts can't be listed (an older ``gh``) and no token names it, or the active one
     isn't signed in properly, ``cache_identity`` is ``None``: don't cache.
     """
-    authenticated, accounts = _list_accounts(root)
+    authenticated, accounts = _cached_accounts(root)
     logins = [
         account
         for account in accounts
