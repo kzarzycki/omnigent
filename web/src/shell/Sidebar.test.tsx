@@ -10,6 +10,7 @@ vi.mock("@/hooks/useScopeCache", () => import("@/test/mockScopeCache"));
 import { SidebarDataProvider } from "@/hooks/useSidebarData";
 import { conversationPage } from "@/test/sidebarMockHelpers";
 import * as automationInboxHook from "@/hooks/useAutomationInbox";
+import * as commentInboxHook from "@/hooks/useCommentInbox";
 import { PINNED_LABEL_KEY } from "@/lib/sessionListCache";
 import { sidebarConfig, type SidebarConfig } from "@/lib/sidebarConfig";
 // Integration tests for the Sidebar's session list. The search box no
@@ -1196,6 +1197,13 @@ describe("Sidebar session list", () => {
       ],
       hasNextPage: true,
     } as unknown as ReturnType<typeof automationInboxHook.useAutomationInbox>);
+    const commentInbox = vi.spyOn(commentInboxHook, "useCommentInbox");
+    commentInbox.mockReturnValue({
+      items: [{ row: conv("conv_unread", "Codex"), comment: { id: "cm_1" } }],
+      isLoading: false,
+      failedCount: 0,
+      retryFailed: vi.fn(),
+    } as unknown as ReturnType<typeof commentInboxHook.useCommentInbox>);
     try {
       seedReadState([{ id: "conv_unread", viewer_last_seen: 199 }]);
       mockConversations([
@@ -1209,6 +1217,7 @@ describe("Sidebar session list", () => {
       expect(badge).toHaveTextContent(/^2$/);
     } finally {
       automationInbox.mockRestore();
+      commentInbox.mockRestore();
     }
   });
 

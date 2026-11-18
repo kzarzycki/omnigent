@@ -879,7 +879,7 @@ describe("InboxPage comments and errors", () => {
     // Collapsed: the author's avatar tile plus "author: body" in the preview.
     expect(item).toHaveTextContent("alice: Please reconsider this line.");
     expect(within(item).getByRole("img", { name: "Unread" })).toBeInTheDocument();
-    expect(screen.getByText("1 comment")).toBeInTheDocument();
+    expect(screen.queryByText("1 comment")).not.toBeInTheDocument();
 
     fireEvent.click(within(item).getByRole("button", { name: /Comment: My Session/ }));
     expect(item).toHaveAttribute("data-expanded", "true");
@@ -928,7 +928,7 @@ describe("InboxPage unread sessions", () => {
       await within(item).findByText(/Refactor finished; 3 files changed\./),
     ).toBeInTheDocument();
     expect(sessionsApi.fetchSessionItemsPage).toHaveBeenCalledWith("sess_unread", { limit: 12 });
-    expect(screen.getByText("1 unread")).toBeInTheDocument();
+    expect(screen.queryByText("1 unread")).not.toBeInTheDocument();
     expect(screen.queryByText("Nothing waiting on you")).not.toBeInTheDocument();
   });
 
@@ -1766,6 +1766,37 @@ describe("InboxPage filter tabs", () => {
     const summary = screen.getByText("1 approval · 1 comment · 1 unread");
     expect(summary.parentElement).toHaveAttribute("title", "1 approval · 1 comment · 1 unread");
     expect(summary.previousElementSibling).toHaveTextContent(/^1$/);
+  });
+
+  it("hides the header pill when nothing is pending, even with unread items", async () => {
+    localStorage.clear();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([unreadConversation()]),
+    );
+    renderPage();
+    selectTab("Unread");
+    await screen.findByTestId("inbox-unread");
+    expect(screen.queryByText("1 unread")).not.toBeInTheDocument();
+  });
+
+  it("takes the hover's approvals figure from the same count as the pill", async () => {
+    localStorage.clear();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([
+        conversation({
+          id: "sess_approval",
+          title: "Approval Session",
+          pending_elicitations_count: 2,
+        }),
+      ]),
+    );
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+    await screen.findByTestId("inbox-item");
+    const summary = screen.getByText("2 approvals");
+    expect(summary.previousElementSibling).toHaveTextContent(/^2$/);
   });
 
   it("shows every kind under All, then narrows to one kind per tab", async () => {

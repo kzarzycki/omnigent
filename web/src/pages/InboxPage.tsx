@@ -341,7 +341,7 @@ export function InboxPage() {
     visibleUnread.length +
     visibleAutomations.length;
   const summary = [
-    items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
+    pendingCount > 0 && (pendingCount === 1 ? "1 approval" : `${pendingCount} approvals`),
     commentInbox.items.length > 0 &&
       (commentInbox.items.length === 1 ? "1 comment" : `${commentInbox.items.length} comments`),
     unreadItems.length > 0 && `${unreadItems.length} unread`,
@@ -891,7 +891,7 @@ export function InboxPage() {
     <PageScroll maxWidthClassName="max-w-[960px]" contentClassName="px-4 md:px-10">
       <div className="mb-4 flex items-center gap-3">
         <h1 className="text-2xl font-normal">Inbox</h1>
-        {summary && (
+        {pendingCount > 0 && (
           <span
             title={summary}
             className="rounded-full bg-foreground px-2 py-0.5 text-sm font-medium text-card"
