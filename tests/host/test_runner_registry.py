@@ -113,6 +113,21 @@ def test_released_registry_is_adopted_by_the_next_daemon(tmp_path: Path, spawn_p
     assert other.poll() is None
 
 
+def test_a_runner_entry_carries_the_commit_it_loaded(
+    tmp_path: Path, spawn_process, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "abc123def")
+    runner = spawn_process()
+    path = tmp_path / "target.runners"
+    registry = RunnerRegistry(path)
+    registry.add(
+        "runner_a", runner.pid, session_id="s1", log_path=tmp_path / "a.log", connect_marker=None
+    )
+    snapshot = read_registry(path)
+    assert snapshot is not None
+    assert snapshot.runners["runner_a"].commit == "abc123def"
+
+
 def test_unreleased_registry_is_not_adopted(tmp_path: Path, spawn_process) -> None:
     path = tmp_path / "target.runners"
     old_daemon, runner = spawn_process(), spawn_process()

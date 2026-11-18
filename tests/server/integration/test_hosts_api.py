@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -59,10 +60,12 @@ def _make_hello(
     harness_accounts: dict[str, dict[str, object]] | None = None,
     capabilities: list[str] | None = None,
     commit: str | None = None,
+    stale_adopted_runners: int = 0,
 ) -> str:
     """Encode a HostHelloFrame for tests.
 
     :param commit: Source-install commit to report, e.g. ``"abc123def"``.
+    :param stale_adopted_runners: Adopted runners on another commit, e.g. ``2``.
 
     :param name: Human-readable host name.
     :param configured_harnesses: Per-harness readiness map to report,
@@ -83,6 +86,7 @@ def _make_hello(
             harness_accounts=harness_accounts,
             capabilities=capabilities or [],
             commit=commit,
+            stale_adopted_runners=stale_adopted_runners,
         )
     )
 
@@ -161,6 +165,7 @@ async def _connect_host(
     harness_accounts: dict[str, dict[str, object]] | None = None,
     capabilities: list[str] | None = None,
     commit: str | None = None,
+    stale_adopted_runners: int = 0,
 ) -> ApplicationCommunicator:
     """Connect a mock host via WebSocket tunnel.
 
@@ -190,6 +195,7 @@ async def _connect_host(
                 harness_accounts,
                 capabilities,
                 commit,
+                stale_adopted_runners,
             ),
         },
     )
@@ -361,6 +367,54 @@ async def test_hosts_api_surfaces_version_and_commit(
     for body in (listing.json()["hosts"][0], single.json()):
         assert body["version"] == "0.1.0-test"
         assert body["commit"] == "abc123def"
+
+
+async def test_hosts_api_reports_stale_adopted_runners_and_refreshes_them(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """The hello's stale-runner count reaches both endpoints; a resources report updates it.
+
+    The count must drop after an adopted runner exits without a reconnect.
+    """
+    app, registry, _hs, _cs = host_api_app
+    comm = await _connect_host(app, registry, stale_adopted_runners=2)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for path in ("/v1/hosts", f"/v1/hosts/{_HOST_ID}"):
+            body = (await client.get(path)).json()
+            body = body["hosts"][0] if path == "/v1/hosts" else body
+            assert body["stale_adopted_runners"] == 2
+
+        report = HostResourcesFrame(
+            load_1m=1.0,
+            cpu_count=4,
+            memory_total_mb=8000,
+            memory_available_mb=4000,
+            stale_adopted_runners=1,
+        )
+        await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(report)})
+        conn = registry.get(_HOST_ID)
+        assert conn is not None
+        while conn.resources is None:
+            await asyncio.sleep(0.01)
+        single = await client.get(f"/v1/hosts/{_HOST_ID}")
+        assert single.json()["stale_adopted_runners"] == 1
+
+        # An older host's report carries no count; the endpoint keeps the previous value.
+        bare = json.loads(
+            encode_host_frame(
+                HostResourcesFrame(
+                    load_1m=2.0, cpu_count=4, memory_total_mb=8000, memory_available_mb=4000
+                )
+            )
+        )
+        del bare["stale_adopted_runners"]
+        await comm.send_input({"type": "websocket.receive", "text": json.dumps(bare)})
+        while conn.resources.load_1m != 2.0:
+            await asyncio.sleep(0.01)
+        for path in ("/v1/hosts", f"/v1/hosts/{_HOST_ID}"):
+            body = (await client.get(path)).json()
+            body = body["hosts"][0] if path == "/v1/hosts" else body
+            assert body["stale_adopted_runners"] == 1
 
 
 async def test_hosts_api_reports_host_resources_and_marks_them_stale(

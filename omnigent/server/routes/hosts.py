@@ -1055,6 +1055,7 @@ def create_hosts_router(
         return {
             "version": hello.version if hello else None,
             "commit": hello.commit if hello else None,
+            "stale_adopted_runners": hello.stale_adopted_runners if hello else None,
             "update": _host_update(hello),
             "resources": _host_resources(conn, time.time()),
         }

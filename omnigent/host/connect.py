@@ -167,6 +167,8 @@ from omnigent.host.runner_registry import (
     RegisteredRunner,
     RunnerRegistry,
     end_runner_sessions,
+    is_stale_runner,
+    loaded_commit,
     runner_registry_path,
     session_leaders,
 )
@@ -1390,6 +1392,8 @@ class HostProcess:
             self._interactive_shells = ["bash"]
         self._harness_tmp_parent = resolve_harness_tmp_parent()
         self._runners: dict[str, _RunnerHandle] = {}
+        # Adopted runners on another commit than this host; counted in the hello.
+        self._stale_adopted_runner_ids: set[str] = set()
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -2471,8 +2475,13 @@ class HostProcess:
             return None
         return zygote
 
+    def _stale_adopted_runner_count(self) -> int:
+        """Adopted runners still tracked that run another commit than this host."""
+        return len(self._stale_adopted_runner_ids & self._runners.keys())
+
     def _forget_runner(self, runner_id: str) -> _RunnerHandle | None:
         """Drop a runner from the tracked set and from the on-disk registry."""
+        self._stale_adopted_runner_ids.discard(runner_id)
         if self._runner_registry is not None:
             self._runner_registry.remove(runner_id)
         return self._runners.pop(runner_id, None)
@@ -2480,6 +2489,15 @@ class HostProcess:
     def _adopt_runner(self, entry: RegisteredRunner) -> None:
         """Track a runner the previous daemon for this target left running."""
         _logger.info("Adopting runner %s (pid %d)", entry.runner_id, entry.pid)
+        if is_stale_runner(entry):
+            self._stale_adopted_runner_ids.add(entry.runner_id)
+            _logger.warning(
+                "Adopted runner %s (session %s) runs commit %s; this host runs %s",
+                entry.runner_id,
+                entry.session_id,
+                entry.commit or "unknown",
+                loaded_commit(),
+            )
         self._runners[entry.runner_id] = _RunnerHandle(
             proc=AdoptedRunnerProc(entry),
             log_path=Path(entry.log_path),
@@ -5205,6 +5223,9 @@ class HostProcess:
         from omnigent.host.crash_reporting import host_asyncio_exception_handler
 
         asyncio.get_running_loop().set_exception_handler(host_asyncio_exception_handler)
+        # Fix the commit this daemon loaded now, so the zygote and later runner
+        # entries are compared against the code at start, not at first use.
+        loaded_commit()
         # Reap orphaned harness/tool grandchildren that reparent here when a
         # runner dies (this host is PID 1 in a container, or a subreaper
         # otherwise). Without this they pile up as <defunct> zombies and can
@@ -5925,6 +5946,7 @@ class HostProcess:
             capabilities=list(HOST_CAPABILITIES),
             connection_id=connection_id,
             commit=await asyncio.to_thread(source_install_commit),
+            stale_adopted_runners=self._stale_adopted_runner_count(),
             workspace_socket=str(listener.path) if (listener := self._workspace_socket) else None,
             workspace_token_key=listener.token_key if listener else None,
         )
@@ -6052,6 +6074,7 @@ class HostProcess:
                 _logger.exception("Host resources sample failed")
                 report = None
             if report is not None:
+                report.stale_adopted_runners = self._stale_adopted_runner_count()
                 await self._send_text(ws, encode_host_frame(report))
             await asyncio.sleep(HOST_RESOURCES_INTERVAL_S)
 
