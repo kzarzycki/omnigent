@@ -1029,6 +1029,99 @@ def test_runner_outlives_a_daemon_restart_and_is_adopted(
                 _end_host_daemon(daemon)
 
 
+def test_an_idle_runner_adopted_on_an_older_build_is_replaced_and_resumes(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+    mock_llm_server_url: str,
+) -> None:
+    """A restarted daemon replaces an idle runner left by an older build.
+
+    The registry entry's recorded build is rewritten to an older one before the
+    second daemon adopts it. That daemon asks the server to replace it; the
+    session moves to a new runner process and its next turn completes there,
+    with the earlier turn still in its history. The first turn is a
+    session-to-session message, since a message from the owner keeps the
+    runner for 30 minutes.
+    """
+    marker1 = "STALE_RUNNER_PRE"
+    marker2 = "STALE_RUNNER_POST"
+    configure_mock_llm(mock_llm_server_url, [{"text": marker1}, {"text": marker2}])
+    first = _spawn_host_daemon(
+        tmp_path=tmp_path,
+        live_server=live_server,
+        mock_llm_server_url=mock_llm_server_url,
+        keep_runners_on_restart=True,
+    )
+    second: _SpawnedHostDaemon | None = None
+    try:
+        _wait_for_host_online(http_client, first.host_id, timeout=30.0)
+        agent_id = lookup_agent_id(
+            http_client, upload_agent(http_client, _write_smoke_agent_yaml(tmp_path))
+        )
+        session_resp = http_client.post("/v1/sessions", json={"agent_id": agent_id})
+        session_resp.raise_for_status()
+        session_id = session_resp.json()["id"]
+        launch_resp = http_client.post(
+            f"/v1/hosts/{first.host_id}/runners",
+            json={"session_id": session_id, "workspace": str(tmp_path)},
+            timeout=60.0,
+        )
+        assert launch_resp.status_code == 200, launch_resp.text
+        old_runner_id = launch_resp.json()["runner_id"]
+        _wait_for_runner_status(http_client, old_runner_id, online=True)
+        http_client.patch(
+            f"/v1/sessions/{session_id}", json={"runner_id": old_runner_id}
+        ).raise_for_status()
+        response_id = send_user_message_to_session(
+            http_client,
+            session_id=session_id,
+            content=f"[Message from session conv_peer]\nReply with exactly {marker1}.",
+        )
+        body = poll_session_until_terminal(
+            http_client, session_id=session_id, response_id=response_id, timeout=120
+        )
+        assert marker1 in final_assistant_text(body)
+        old_runner_pid = _runner_pid_from_daemon_log(first.daemon_log)
+        assert old_runner_pid is not None, first.daemon_log.read_text()
+
+        first.proc.send_signal(signal.SIGTERM)
+        first.proc.wait(timeout=15)
+        (registry_path,) = (tmp_path / ".omnigent" / "daemons").glob("*.runners")
+        registry = json.loads(registry_path.read_text())
+        registry["runners"][old_runner_id]["commit"] = "old000000"
+        registry_path.write_text(json.dumps(registry))
+
+        second = _spawn_host_daemon(
+            tmp_path=tmp_path,
+            live_server=live_server,
+            mock_llm_server_url=mock_llm_server_url,
+            host_id=first.host_id,
+            log_name="host-daemon-restarted.log",
+        )
+        replaced = f"Replaced stale runner {old_runner_id} for session {session_id}"
+        deadline = time.monotonic() + 90.0
+        while replaced not in second.daemon_log.read_text():
+            assert time.monotonic() < deadline, second.daemon_log.read_text()
+            time.sleep(POLL_INTERVAL_S)
+        new_runner_id = http_client.get(f"/v1/sessions/{session_id}").json()["runner_id"]
+        assert new_runner_id != old_runner_id
+        _wait_for_runner_status(http_client, new_runner_id, online=True, timeout=60.0)
+        deadline = time.monotonic() + 30.0
+        while _pid_alive(old_runner_pid):
+            assert time.monotonic() < deadline, "the superseded runner kept running"
+            time.sleep(POLL_INTERVAL_S)
+
+        _assert_round_trip(http_client, session_id, marker2)
+        items = http_client.get(f"/v1/sessions/{session_id}/items", params={"limit": 100})
+        items.raise_for_status()
+        assert marker1 in json.dumps(items.json()), "the earlier turn left the history"
+    finally:
+        for daemon in (second, first):
+            if daemon is not None:
+                _end_host_daemon(daemon)
+
+
 # ── Host-restart native round-trip ─────────────────────────────
 #
 # Skipped when ``claude`` or ``tmux`` are absent from PATH — the test

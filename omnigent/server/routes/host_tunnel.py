@@ -37,6 +37,8 @@ from omnigent.errors import ErrorCategory, ErrorImpact, ErrorPhase
 from omnigent.host.frames import (
     CAP_HARNESS_ACCOUNTS,
     IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS,
+    REPLACE_STALE_RUNNER_FAILED,
+    REPLACE_STALE_RUNNER_INELIGIBLE,
     SERVER_CAPABILITIES,
     SERVER_CAPABILITIES_HEADER,
     HostCloneRepositoryResultFrame,
@@ -67,6 +69,8 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeResultFrame,
+    HostReplaceStaleRunnerFrame,
+    HostReplaceStaleRunnerResultFrame,
     HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
@@ -119,6 +123,10 @@ _CLEAN_CLOSE_CODES = frozenset({1000, 1001})
 RunnerExitedCallback = Callable[[str, str, str], Awaitable[None]]
 """Async ``(host_id, runner_id, error)`` hook for a ``host.runner_exited`` report."""
 
+ReplaceStaleRunnerCallback = Callable[[str, str, str], Awaitable[tuple[str, str | None]]]
+"""Async ``(host_id, runner_id, session_id)`` hook answering ``host.replace_stale_runner``
+with a ``(status, reason)`` pair."""
+
 
 def log_runner_exited(
     host_id: str,
@@ -167,6 +175,7 @@ def create_host_tunnel_router(
     on_host_disconnect: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_runner_exited: RunnerExitedCallback | None = None,
+    on_replace_stale_runner: ReplaceStaleRunnerCallback | None = None,
     local_single_user: bool | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
     harness_install: HarnessInstallGate = False,
@@ -200,6 +209,9 @@ def create_host_tunnel_router(
         runner-tunnel ``on_runner_disconnect`` path never fires). When
         set, it owns the ``runner_exited`` event (see
         :func:`log_runner_exited`) so rows carry the bound session.
+    :param on_replace_stale_runner: Optional async callback answering a host's
+        request to replace an idle adopted runner on an older build. ``None``
+        answers every request as ineligible.
     :param on_host_disconnect: Optional async callback fired when
         a host's tunnel closes. Receives the ``host_id``.
     :param on_host_update: Optional async callback fired when a connected
@@ -516,6 +528,7 @@ def create_host_tunnel_router(
                         runner_exit_reports,
                         on_runner_exited,
                         on_host_update,
+                        on_replace_stale_runner,
                     ),
                     name=f"host-receive:{host_id}",
                 )
@@ -814,6 +827,34 @@ def _import_session_queue_payload(total: int, session: HostImportedLocalSession)
     }
 
 
+async def _answer_replace_stale_runner(
+    conn: HostConnection,
+    host_id: str,
+    host_registry: HostRegistry,
+    frame: HostReplaceStaleRunnerFrame,
+    on_replace_stale_runner: ReplaceStaleRunnerCallback | None,
+) -> None:
+    """Run the replacement callback and send its answer back to the host."""
+    status, reason = REPLACE_STALE_RUNNER_INELIGIBLE, "this server does not replace runners"
+    if on_replace_stale_runner is not None:
+        try:
+            status, reason = await on_replace_stale_runner(
+                host_id, frame.runner_id, frame.session_id
+            )
+        except Exception as exc:
+            _logger.exception(
+                "Replacing stale runner %s for session %s failed",
+                frame.runner_id,
+                frame.session_id,
+            )
+            status, reason = REPLACE_STALE_RUNNER_FAILED, str(exc) or type(exc).__name__
+    result = HostReplaceStaleRunnerResultFrame(
+        request_id=frame.request_id, status=status, reason=reason
+    )
+    with contextlib.suppress(ConnectionError):
+        host_registry.send_text(conn, encode_host_frame(result))
+
+
 async def _receive_loop(
     ws: WebSocket,
     conn: HostConnection,
@@ -823,6 +864,7 @@ async def _receive_loop(
     runner_exit_reports: RunnerExitReports | None,
     on_runner_exited: RunnerExitedCallback | None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None,
+    on_replace_stale_runner: ReplaceStaleRunnerCallback | None = None,
 ) -> None:
     """Receive host frames and route results to pending futures.
 
@@ -841,10 +883,14 @@ async def _receive_loop(
         logs the session-less ``runner_exited`` event here instead.
     :param on_host_update: Callback fired after readiness changes persist;
         ``None`` skips it.
+    :param on_replace_stale_runner: Callback answering ``host.replace_stale_runner``;
+        ``None`` answers each request as ineligible.
     """
     # Per-request reassembly of chunked import sessions; buffers die with the
     # connection, so a tunnel drop can never leak a partial session.
     import_chunk_assemblers: dict[str, ImportLocalSessionChunkAssembler] = {}
+    # Replacement answers in flight on this connection, held so none is collected early.
+    replace_stale_runner_tasks: set[asyncio.Task[None]] = set()
     while True:
         message = await ws.receive()
         if message["type"] == "websocket.disconnect":
@@ -964,6 +1010,18 @@ async def _receive_loop(
                     _logger.exception(
                         "on_runner_exited callback failed for %s/%s", host_id, frame.runner_id
                     )
+            continue
+
+        if isinstance(frame, HostReplaceStaleRunnerFrame):
+            # A relaunch takes seconds; answer off the receive loop.
+            task = asyncio.create_task(
+                _answer_replace_stale_runner(
+                    conn, host_id, host_registry, frame, on_replace_stale_runner
+                ),
+                name=f"host-replace-stale-runner:{host_id}",
+            )
+            replace_stale_runner_tasks.add(task)
+            task.add_done_callback(replace_stale_runner_tasks.discard)
             continue
 
         if isinstance(frame, HostRunnerStatusResultFrame):

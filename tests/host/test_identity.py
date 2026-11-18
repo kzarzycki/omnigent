@@ -16,6 +16,7 @@ from omnigent.host.identity import (
     load_host_identity_if_present,
     load_keep_runners_on_restart,
     load_or_create_host_identity,
+    load_stale_runner_replacement,
     reset_host_id,
 )
 
@@ -509,3 +510,43 @@ def test_load_keep_runners_on_restart_refuses_a_blank_value(tmp_path: Path) -> N
     path.write_text("host:\n  keep_runners_on_restart:\n")
     with pytest.raises(ValueError, match=r"host\.keep_runners_on_restart"):
         load_keep_runners_on_restart(path)
+
+
+@pytest.mark.parametrize(
+    ("config", "enabled", "excluded"),
+    [
+        (None, True, frozenset()),
+        ({"host": {"name": "box"}}, True, frozenset()),
+        ({"host": {"replace_stale_runners": False}}, False, frozenset()),
+        (
+            {"host": {"replace_stale_runners_exclude": ["conv_a", "conv_b"]}},
+            True,
+            {"conv_a", "conv_b"},
+        ),
+    ],
+    ids=["no-config", "keys-missing", "off", "exclude-list"],
+)
+def test_load_stale_runner_replacement(
+    tmp_path: Path, config: dict[str, object] | None, enabled: bool, excluded: frozenset[str]
+) -> None:
+    """Replacement is on by default; the exclude list is a list of session ids."""
+    path = tmp_path / "config.yaml"
+    if config is not None:
+        path.write_text(yaml.safe_dump(config))
+    settings = load_stale_runner_replacement(path)
+    assert settings.enabled is enabled
+    assert settings.excluded_session_ids == excluded
+
+
+@pytest.mark.parametrize(
+    "host_section",
+    [{"replace_stale_runners": "no"}, {"replace_stale_runners_exclude": "conv_a"}],
+    ids=["non-boolean-setting", "exclude-not-a-list"],
+)
+def test_load_stale_runner_replacement_refuses_a_wrong_type(
+    tmp_path: Path, host_section: dict[str, object]
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"host": host_section}))
+    with pytest.raises(ValueError, match=r"host\.replace_stale_runners"):
+        load_stale_runner_replacement(path)

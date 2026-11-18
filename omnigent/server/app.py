@@ -4943,6 +4943,20 @@ def create_app(
 
         task.add_done_callback(_clear_grace_slot)
 
+    async def _on_replace_stale_runner(
+        host_id: str, runner_id: str, session_id: str
+    ) -> tuple[str, str | None]:
+        """Relaunch an idle session whose host adopted its runner on an older build."""
+        from omnigent.server.stale_runner_replacement import replace_stale_runner
+
+        return await replace_stale_runner(
+            host_id,
+            runner_id,
+            session_id,
+            conversation_store=conversation_store,
+            host_registry=host_registry,
+        )
+
     async def _on_runner_exited(host_id: str, runner_id: str, error: str) -> None:
         """Mark a crashed runner's session(s) failed and push the cause.
 
@@ -5427,6 +5441,7 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
+                on_replace_stale_runner=_on_replace_stale_runner,
                 on_host_connect=_on_hosts_changed,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,

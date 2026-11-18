@@ -74,7 +74,12 @@ from omnigent.host.frames import (
     HOST_CAPABILITIES,
     HOST_RESOURCES_INTERVAL_S,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
+    REPLACE_STALE_RUNNER_BUSY,
+    REPLACE_STALE_RUNNER_FAILED,
+    REPLACE_STALE_RUNNER_INELIGIBLE,
+    REPLACE_STALE_RUNNER_REPLACED,
     RUNNER_LOG_TAIL_HEADING,
+    SERVER_CAP_REPLACE_STALE_RUNNER,
     SERVER_CAPABILITIES_HEADER,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCloneRepositoryFrame,
@@ -127,6 +132,8 @@ from omnigent.host.frames import (
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
+    HostReplaceStaleRunnerFrame,
+    HostReplaceStaleRunnerResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -158,7 +165,12 @@ from omnigent.host.git_worktree import (
     list_worktrees,
     remove_worktree,
 )
-from omnigent.host.identity import HostIdentity, load_or_create_host_identity
+from omnigent.host.identity import (
+    HostIdentity,
+    StaleRunnerReplacement,
+    load_or_create_host_identity,
+    load_stale_runner_replacement,
+)
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.resources import sample_host_resources
 from omnigent.host.runner_registry import (
@@ -180,6 +192,7 @@ from omnigent.host.session_slice import (
     activate_session_slice,
     load_session_slice_config,
 )
+from omnigent.host.stale_runners import runner_has_attached_terminal
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
@@ -436,6 +449,8 @@ def _connect_marker_path(log_path: Path) -> Path:
 # Collect adopted children every two seconds. Process discovery runs off-loop;
 # exit-status collection uses nonblocking waits.
 _ORPHAN_REAP_INTERVAL_S = 2.0
+# How long a stale runner check waits for the server to relaunch the session.
+_STALE_RUNNER_REPLACE_TIMEOUT_S = 120.0
 
 
 def _install_child_subreaper() -> bool:
@@ -1356,6 +1371,7 @@ class HostProcess:
         *,
         keep_runners_on_restart: bool = False,
         session_slice: SessionSliceLaunch | None = None,
+        config_path: Path | None = None,
     ) -> None:
         """Initialize the host process.
 
@@ -1374,8 +1390,11 @@ class HostProcess:
             it is ``False`` each attempt is treated as refused instead of dialing.
         :param session_slice: The active ``host.session_slice`` runners and
             the zygote start in; ``None`` starts them in the daemon's cgroup.
+        :param config_path: The host's ``config.yaml``, re-read at each stale
+            runner check; ``None`` uses the defaults (replacement on, no excludes).
         """
         self._identity = identity
+        self._config_path = config_path
         self._server_url = server_url.rstrip("/")
         self._server_still_ours = server_still_ours
         # One reader per workspace, so its registry keeps state between
@@ -1394,6 +1413,13 @@ class HostProcess:
         self._runners: dict[str, _RunnerHandle] = {}
         # Adopted runners on another commit than this host; counted in the hello.
         self._stale_adopted_runner_ids: set[str] = set()
+        # The commit each adopted runner recorded, for the replacement log.
+        self._adopted_runner_commits: dict[str, str | None] = {}
+        # Stale runners not to replace again before the next host restart.
+        self._replacement_held_runner_ids: set[str] = set()
+        self._pending_replacements: dict[
+            str, asyncio.Future[HostReplaceStaleRunnerResultFrame]
+        ] = {}
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -2491,6 +2517,7 @@ class HostProcess:
         _logger.info("Adopting runner %s (pid %d)", entry.runner_id, entry.pid)
         if is_stale_runner(entry):
             self._stale_adopted_runner_ids.add(entry.runner_id)
+            self._adopted_runner_commits[entry.runner_id] = entry.commit
             _logger.warning(
                 "Adopted runner %s (session %s) runs commit %s; this host runs %s",
                 entry.runner_id,
@@ -6076,7 +6103,115 @@ class HostProcess:
             if report is not None:
                 report.stale_adopted_runners = self._stale_adopted_runner_count()
                 await self._send_text(ws, encode_host_frame(report))
+            try:
+                await self._replace_one_stale_runner(ws)
+            except (asyncio.CancelledError, ConnectionClosed):
+                raise
+            except Exception:
+                _logger.exception("Stale runner replacement check failed")
             await asyncio.sleep(HOST_RESOURCES_INTERVAL_S)
+
+    def _stale_runner_replacement_settings(self) -> StaleRunnerReplacement | None:
+        """Re-read the replacement setting and exclude list; ``None`` when unreadable."""
+        if self._config_path is None:
+            return StaleRunnerReplacement()
+        try:
+            return load_stale_runner_replacement(self._config_path)
+        except (OSError, ValueError) as exc:
+            _logger.warning("Not replacing stale runners: %s", exc)
+            return None
+
+    def _stale_runner_candidates(self, excluded: frozenset[str]) -> list[tuple[str, str]]:
+        """Live stale adopted runners that may be replaced, as ``(runner_id, session_id)``."""
+        candidates = []
+        for runner_id in sorted(self._stale_adopted_runner_ids & self._runners.keys()):
+            handle = self._runners[runner_id]
+            if (
+                runner_id in self._replacement_held_runner_ids
+                or handle.session_id is None
+                or handle.session_id in excluded
+                or handle.stop_requested
+                or handle.proc.poll() is not None
+            ):
+                continue
+            candidates.append((runner_id, handle.session_id))
+        return candidates
+
+    async def _replace_one_stale_runner(
+        self, ws: websockets.asyncio.client.ClientConnection
+    ) -> None:
+        """Ask the server to replace one idle stale adopted runner with a fresh one.
+
+        Runs from the periodic resources check, re-reading the host setting and
+        exclude list each time. A session with an attached terminal is skipped
+        here; the server skips one that is busy or that its owner drove recently.
+        A failure keeps the old runner and holds it until the next host restart.
+        """
+        if SERVER_CAP_REPLACE_STALE_RUNNER not in self._server_capabilities:
+            return
+        settings = self._stale_runner_replacement_settings()
+        if settings is None or not settings.enabled:
+            return
+        for runner_id, session_id in self._stale_runner_candidates(settings.excluded_session_ids):
+            handle = self._runners.get(runner_id)
+            if handle is None:
+                continue
+            if await asyncio.to_thread(runner_has_attached_terminal, handle.proc.pid):
+                _logger.debug("Stale runner %s has an attached terminal; keeping it", runner_id)
+                continue
+            result = await self._request_stale_runner_replacement(ws, runner_id, session_id)
+            if result.status == REPLACE_STALE_RUNNER_BUSY:
+                _logger.debug("Stale runner %s is not idle yet: %s", runner_id, result.reason)
+                continue
+            if result.status == REPLACE_STALE_RUNNER_REPLACED:
+                _logger.info(
+                    "Replaced stale runner %s for session %s with one on commit %s",
+                    runner_id,
+                    session_id,
+                    loaded_commit(),
+                )
+            elif result.status == REPLACE_STALE_RUNNER_INELIGIBLE:
+                self._replacement_held_runner_ids.add(runner_id)
+            else:
+                self._replacement_held_runner_ids.add(runner_id)
+                _logger.warning(
+                    "Replacing stale runner %s for session %s failed (runner commit %s, "
+                    "host commit %s): %s; keeping it until the next host restart",
+                    runner_id,
+                    session_id,
+                    self._adopted_runner_commits.get(runner_id) or "unknown",
+                    loaded_commit(),
+                    result.reason or "no reason given",
+                )
+            return
+
+    async def _request_stale_runner_replacement(
+        self, ws: websockets.asyncio.client.ClientConnection, runner_id: str, session_id: str
+    ) -> HostReplaceStaleRunnerResultFrame:
+        """Send one replacement request and wait for the server's answer."""
+        request_id = f"rsr_{uuid.uuid4().hex}"
+        future: asyncio.Future[HostReplaceStaleRunnerResultFrame] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending_replacements[request_id] = future
+        try:
+            await self._send_text(
+                ws,
+                encode_host_frame(
+                    HostReplaceStaleRunnerFrame(
+                        request_id=request_id, runner_id=runner_id, session_id=session_id
+                    )
+                ),
+            )
+            return await asyncio.wait_for(future, timeout=_STALE_RUNNER_REPLACE_TIMEOUT_S)
+        except TimeoutError:
+            return HostReplaceStaleRunnerResultFrame(
+                request_id=request_id,
+                status=REPLACE_STALE_RUNNER_FAILED,
+                reason="the server did not answer in time",
+            )
+        finally:
+            self._pending_replacements.pop(request_id, None)
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
@@ -6277,6 +6412,10 @@ class HostProcess:
             await self._send_text(ws, self._encode_frame(stop_result))
         elif isinstance(frame, HostRunnerStatusFrame):
             await self._send_text(ws, self._encode_frame(await self._handle_runner_status(frame)))
+        elif isinstance(frame, HostReplaceStaleRunnerResultFrame):
+            replacement = self._pending_replacements.get(frame.request_id)
+            if replacement is not None and not replacement.done():
+                replacement.set_result(frame)
         elif isinstance(frame, HostStatFrame):
             # Even a single metadata lookup can block on a mounted filesystem.
             stat_result = await asyncio.to_thread(self._handle_stat, frame)
@@ -6721,6 +6860,7 @@ def _serve_host_until_exit(
         server_still_ours=server_still_ours,
         keep_runners_on_restart=keep_runners_on_restart,
         session_slice=activate_session_slice(session_slice),
+        config_path=path,
     )
     crash_reporting.set_hangup_callback(host.signal_runners_finish_work)
     try:

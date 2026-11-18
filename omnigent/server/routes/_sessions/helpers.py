@@ -6661,6 +6661,7 @@ async def _launch_runner_on_host_impl(
     host_conn: HostConnection,
     *,
     replace_move_claim: bool = False,
+    stop_superseded_first: bool = True,
 ) -> _HostLaunchAttempt:
     """
     Ask a host to spawn a runner for a session and capture the result.
@@ -6688,6 +6689,8 @@ async def _launch_runner_on_host_impl(
     :param host_conn: The live ``HostConnection`` for the host.
     :param replace_move_claim: Whether this launch may replace a move's claim
         on the runner; only the move's own sandbox launch may.
+    :param stop_superseded_first: Stop the old runner now; ``False`` leaves it to
+        the host, which stops it only once the new runner process is alive.
     :returns: The :class:`_HostLaunchAttempt` — the new runner id plus any
         structured refusal from the host.
     """
@@ -6736,6 +6739,7 @@ async def _launch_runner_on_host_impl(
             host_registry,
             host_conn,
             replace_move_claim=replace_move_claim,
+            stop_superseded_first=stop_superseded_first,
         )
         # Re-insert so the plain dict's insertion order is newest-last, then
         # evict from the front once past the cap.
@@ -6767,6 +6771,7 @@ async def _launch_runner_on_host_locked(
     host_conn: HostConnection,
     *,
     replace_move_claim: bool = False,
+    stop_superseded_first: bool = True,
 ) -> _HostLaunchAttempt:
     """The launch round-trip proper; runs under the conversation's lock."""
     from omnigent.host.frames import HostLaunchRunnerFrame, encode_host_frame
@@ -6814,7 +6819,12 @@ async def _launch_runner_on_host_locked(
         ),
     )
     with runner_log_scope(conv.id, new_runner_id):
-        if reap_superseded and superseded_runner_id and conv.host_id is not None:
+        if (
+            stop_superseded_first
+            and reap_superseded
+            and superseded_runner_id
+            and conv.host_id is not None
+        ):
             # The old runner is unbound as of the replace above; reap it so it
             # doesn't idle on the host. A sub-agent's inherited runner stays up
             # for the ancestor that owns it.
