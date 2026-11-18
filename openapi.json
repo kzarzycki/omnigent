@@ -8979,6 +8979,19 @@
             "title": "Archived",
             "type": "boolean"
           },
+          "background_work_lost_at": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the runner holding the session's background work went away with it, in epoch seconds, or `None`. Set until the server has told the session the work was lost, so a session it could not resume stays flagged.",
+            "title": "Background Work Lost At"
+          },
           "background_work_running": {
             "default": false,
             "description": "`True` while work outlives the session's ended turn, such as a background shell or a Codex goal that keeps running between turns. The sidebar shows such a session as working; `status` stays as reported, so the session still takes a new message. `False` while the session's runner is offline.",

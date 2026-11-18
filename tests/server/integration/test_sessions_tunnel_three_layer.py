@@ -2254,6 +2254,102 @@ async def test_on_runner_disconnect_spares_idle_sessions_and_labels_interrupted_
             sessions_module._session_status_cache.pop(session_id, None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+@pytest.mark.parametrize("delivered", [True, False], ids=["resumed", "flagged"])
+async def test_runner_exit_resumes_only_the_session_with_pending_background_work(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+    delivered: bool,
+) -> None:
+    """A runner that leaves with background work pending resumes that session.
+
+    Of two sessions that ended their turn, only one had a background shell
+    running when the tunnel dropped. That one gets the lost-work notice, or,
+    when the notice can't be delivered, stays flagged on the session list. The
+    other is left alone. So is a mid-turn session, which the runner revival
+    resumes, and one whose runner was stopped on purpose, though both had
+    background work too.
+    """
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server import orphaned_background_work
+    from omnigent.server.routes import sessions as sessions_module
+    from tests._helpers.polling import poll_until_async
+
+    ap_client = tunnel_three_layer_stack.ap_client
+    ap_app = tunnel_three_layer_stack.ap_app
+    runner_id = "runner-background-work-lost"
+    monkeypatch.setattr("omnigent.server.routes.sessions.RUNNER_DISCONNECT_GRACE_S", 0.05)
+    notices: list[tuple[str, str]] = []
+    posted = asyncio.Event()
+
+    async def post(session_id: str, user_id: str | None, text: str) -> object:
+        notices.append((session_id, text))
+        posted.set()
+        if not delivered:
+            raise RuntimeError("the session's host is offline")
+        return {}
+
+    monkeypatch.setattr(orphaned_background_work, "_post", post)
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
+
+    store = get_conversation_store()
+    session_ids: list[str] = []
+    for status in ("idle", "idle", "running", "idle"):
+        create_resp = await ap_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps({})},
+            files={"bundle": ("agent.tar.gz", _build_harness_agent_bundle(), "application/gzip")},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        session_id = create_resp.json()["session_id"]
+        store.replace_runner_id(session_id, runner_id)
+        sessions_module._session_status_cache[session_id] = status
+        session_ids.append(session_id)
+    pending_id, quiet_id, mid_turn_id, stopped_id = session_ids
+    for session_id in (pending_id, mid_turn_id, stopped_id):
+        store.set_background_work_running(session_id, True, runner_id=runner_id)
+    sessions_module._intentional_stop_sessions[stopped_id] = runner_id
+
+    try:
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1006})
+        await asyncio.wait_for(posted.wait(), timeout=budget(5.0))
+
+        def settled() -> bool:
+            row = store.get_conversation(pending_id)
+            others = [store.get_conversation(other) for other in (mid_turn_id, stopped_id)]
+            return (
+                row is not None
+                and (row.background_work_lost_at is None) is delivered
+                and all(
+                    other is not None and not other.background_work_running for other in others
+                )
+            )
+
+        await poll_until_async(settled, timeout_s=budget(5.0))
+
+        assert notices == [(pending_id, orphaned_background_work.NOTICE)]
+        listed = {
+            item["id"]: item
+            for item in (await ap_client.get("/v1/sessions")).json()["data"]
+            if item["id"] in session_ids
+        }
+        assert listed[pending_id]["background_work_running"] is False
+        # The notice clears the record; one that didn't land leaves it flagged.
+        assert (listed[pending_id].get("background_work_lost_at") is not None) is not delivered
+        assert sessions_module._session_status_cache.get(quiet_id) == "idle"
+        # Revival or the stop owns these; a loss record would add a second notice.
+        for session_id in (quiet_id, mid_turn_id, stopped_id):
+            assert listed[session_id].get("background_work_lost_at") is None, session_id
+    finally:
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await communicator.wait(timeout=budget(2.0))
+        sessions_module._intentional_stop_sessions.pop(stopped_id, None)
+        for session_id in session_ids:
+            sessions_module._session_status_cache.pop(session_id, None)
+
+
 def _drain_session_live_state() -> None:
     """Block until every live-state write queued so far has run."""
     from omnigent.server import session_live_state

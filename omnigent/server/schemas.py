@@ -3456,6 +3456,10 @@ class SessionListItem(BaseModel):
         keeps running between turns. The sidebar shows such a session as
         working; ``status`` stays as reported, so the session still takes a new
         message. ``False`` while the session's runner is offline.
+    :param background_work_lost_at: When the runner holding the session's
+        background work went away with it, in epoch seconds, or ``None``. Set
+        until the server has told the session the work was lost, so a session
+        it could not resume stays flagged.
     :param blocked_on: Why the session's agent is parked on a terminal prompt,
         e.g. ``"permission prompt"``, from the last status edge, truncated to
         128 characters. The sidebar shows such a session as needing input even
@@ -3538,6 +3542,7 @@ class SessionListItem(BaseModel):
     shared_with_others: bool | None = None
     pending_elicitations_count: int = 0
     background_work_running: bool = False
+    background_work_lost_at: int | None = None
     blocked_on: str | None = None
     workspace: str | None = None
     git_branch: str | None = None

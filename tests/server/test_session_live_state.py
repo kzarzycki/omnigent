@@ -74,10 +74,12 @@ class _RecordingStore:
         runner_id: str | None = None,
         unseen_since: int | None = None,
         reported_at: int | None = None,
+        lost_at: int | None = None,
     ) -> None:
         guard = () if runner_id is None else (runner_id, unseen_since)
         stamp = () if reported_at is None else (reported_at,)
-        self.background_writes.append((conversation_id, running, *guard, *stamp))
+        lost = () if lost_at is None else (("lost_at", lost_at),)
+        self.background_writes.append((conversation_id, running, *guard, *stamp, *lost))
 
     def set_blocked_on(self, conversation_id: str, blocked_on: str | None) -> None:
         self.blocked_writes.append((conversation_id, blocked_on))
@@ -149,11 +151,15 @@ def test_clearing_a_departed_runners_flag_is_guarded(
     session_live_state.persist_background_work_running("conv_1", True)
     session_live_state.clear_background_work_running("conv_1", "runner_gone", unseen_since=1_000)
     session_live_state.persist_background_work_running("conv_1", True)
-    _wait_until(lambda: len(recording_store.background_writes) >= 3)
+    session_live_state.clear_background_work_running(
+        "conv_1", "runner_gone", unseen_since=1_000, lost_at=1_000
+    )
+    _wait_until(lambda: len(recording_store.background_writes) >= 4)
     assert recording_store.background_writes == [
         ("conv_1", True),
         ("conv_1", False, "runner_gone", 1_000),
         ("conv_1", True),
+        ("conv_1", False, "runner_gone", 1_000, ("lost_at", 1_000)),
     ]
 
 

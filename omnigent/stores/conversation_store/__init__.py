@@ -1925,6 +1925,7 @@ class ConversationStore(ABC):
         runner_id: str | None = None,
         unseen_since: int | None = None,
         reported_at: int | None = None,
+        lost_at: int | None = None,
     ) -> None:
         """
         Persist whether a session's background shells outlive its ended turn.
@@ -1944,6 +1945,22 @@ class ConversationStore(ABC):
         :param reported_at: When the runner decided *running*, in its epoch
             nanoseconds. When set, write only if no newer report is stored, and
             store it with the value.
+        :param lost_at: Epoch seconds. When set, and the flag this write
+            replaces was ``True``, record it as ``background_work_lost_at``: the
+            runner holding that work went away with it.
+        """
+        ...
+
+    @abstractmethod
+    def clear_background_work_lost(self, conversation_id: str, lost_at: int | None) -> None:
+        """
+        Clear ``background_work_lost_at`` once the session was told, or kept its work.
+
+        Must NOT bump ``updated_at``.
+
+        :param conversation_id: Session/conversation identifier.
+        :param lost_at: Clear only while this loss is the stored one, so a newer
+            loss stays flagged; ``None`` clears whatever is stored.
         """
         ...
 

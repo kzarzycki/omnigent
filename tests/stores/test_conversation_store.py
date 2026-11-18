@@ -8631,6 +8631,88 @@ def test_runner_change_resets_a_flag_stored_after_the_row_was_read(
     assert reported is not None and reported.background_work_running is True
 
 
+def test_background_work_a_departed_runner_held_stays_lost_across_the_rebind(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    Dropping a running flag for a departed runner records the loss; rebinds keep it.
+
+    A flag that was not running records nothing, and clearing the record names
+    the loss it clears, so a newer one stays.
+    """
+    store = conversation_store
+    lost = store.create_conversation(runner_id="runner_a")
+    quiet = store.create_conversation(runner_id="runner_a")
+    store.set_background_work_running(lost.id, True, runner_id="runner_a")
+    store.set_background_work_running(quiet.id, False, runner_id="runner_a")
+
+    for conv in (lost, quiet):
+        store.set_background_work_running(
+            conv.id, False, runner_id="runner_a", unseen_since=2_000, lost_at=1_000
+        )
+        store.replace_runner_id(conv.id, "runner_b")
+
+    rebound = store.get_conversation(lost.id)
+    assert rebound is not None and rebound.runner_id == "runner_b"
+    assert rebound.background_work_lost_at == 1_000
+    untouched = store.get_conversation(quiet.id)
+    assert untouched is not None and untouched.background_work_lost_at is None
+
+    store.clear_background_work_lost(lost.id, 999)
+    kept = store.get_conversation(lost.id)
+    assert kept is not None and kept.background_work_lost_at == 1_000
+    store.clear_background_work_lost(lost.id, 1_000)
+    cleared = store.get_conversation(lost.id)
+    assert cleared is not None and cleared.background_work_lost_at is None
+
+
+@pytest.mark.parametrize("second_drop", ["runner_gone", "expected_runner_swap"])
+def test_a_second_dropped_flag_keeps_the_loss_the_session_was_not_told_about(
+    conversation_store: SqlAlchemyConversationStore, second_drop: str
+) -> None:
+    """
+    Background work lost again before the first notice keeps the first loss.
+
+    The notice clears the record by the loss it read, so a later loss replacing
+    it would leave the record stored after its notice.
+    """
+    store = conversation_store
+    conv = store.create_conversation(runner_id="runner_a")
+    store.set_background_work_running(conv.id, True, runner_id="runner_a")
+    store.set_background_work_running(
+        conv.id, False, runner_id="runner_a", unseen_since=3_000, lost_at=1_000
+    )
+    store.set_background_work_running(conv.id, True, runner_id="runner_a")
+
+    if second_drop == "runner_gone":
+        store.set_background_work_running(
+            conv.id, False, runner_id="runner_a", unseen_since=3_000, lost_at=2_000
+        )
+    else:
+        store.replace_runner_id(conv.id, "runner_b", expected_runner_id="runner_a")
+
+    dropped = store.get_conversation(conv.id)
+    assert dropped is not None and not dropped.background_work_running
+    assert dropped.background_work_lost_at == 1_000
+
+
+@pytest.mark.parametrize("guarded", [False, True], ids=["bind", "expected_runner"])
+def test_moving_a_session_off_a_runner_with_background_work_records_the_loss(
+    conversation_store: SqlAlchemyConversationStore, guarded: bool
+) -> None:
+    store = conversation_store
+    conv = store.create_conversation(runner_id="runner_a")
+    store.set_background_work_running(conv.id, True, runner_id="runner_a")
+
+    store.replace_runner_id(
+        conv.id, "runner_b", expected_runner_id="runner_a" if guarded else None
+    )
+
+    moved = store.get_conversation(conv.id)
+    assert moved is not None and moved.background_work_running is None
+    assert moved.background_work_lost_at is not None
+
+
 @pytest.mark.parametrize("deleted_host", [False, True])
 def test_runner_reassignment_and_its_rollback_reset_the_background_flag(
     conversation_store: SqlAlchemyConversationStore, db_uri: str, deleted_host: bool

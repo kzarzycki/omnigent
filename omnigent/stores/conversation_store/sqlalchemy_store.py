@@ -406,17 +406,48 @@ def _bind_runner(meta: SqlConversationMetadata, runner_id: str | None) -> None:
     Only the bound runner reports the flag, so the old runner's value would stay
     on a moved or unbound session, and report times from two runners' clocks
     would be compared. The reset is written even when the row was read with no
-    flag, since the old runner may have stored one after that read.
+    flag, since the old runner may have stored one after that read. Moving a
+    session off a runner that still reported background work records the loss
+    in ``background_work_lost_at`` unless an earlier loss is stored; the rebind
+    leaves it in place.
 
     :param meta: The session's metadata row, inside the write transaction.
     :param runner_id: The runner to bind, e.g. ``"runner_abc123"``, or ``None``.
     """
     if meta.runner_id != runner_id:
+        if (
+            meta.runner_id is not None
+            and runner_id is not None
+            and meta.background_work_running
+            and meta.background_work_lost_at is None
+        ):
+            meta.background_work_lost_at = int(time.time())
         meta.background_work_running = None
         meta.background_work_reported_at = None
         flag_modified(meta, "background_work_running")
         flag_modified(meta, "background_work_reported_at")
     meta.runner_id = runner_id
+
+
+def _lost_at_if_running(lost_at: int) -> Any:
+    """``background_work_lost_at`` for an UPDATE that drops a running background flag.
+
+    :param lost_at: Epoch seconds to record when the flag being dropped is set.
+    :returns: A SQL expression keeping the stored value when no work was running,
+        or when an earlier loss the session was not told about is stored.
+    """
+    from sqlalchemy import and_, case
+
+    return case(
+        (
+            and_(
+                SqlConversationMetadata.background_work_running.is_(True),
+                SqlConversationMetadata.background_work_lost_at.is_(None),
+            ),
+            lost_at,
+        ),
+        else_=SqlConversationMetadata.background_work_lost_at,
+    )
 
 
 def _to_conversation(
@@ -506,6 +537,7 @@ def _to_conversation(
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
         runner_last_seen=meta.runner_last_seen if meta else None,
         background_work_running=meta.background_work_running if meta else None,
+        background_work_lost_at=meta.background_work_lost_at if meta else None,
         blocked_on=meta.blocked_on if meta else None,
         project_id=meta.project_id if meta else None,
         side_chat_parent_id=meta.side_chat_parent_id if meta else None,
@@ -5189,6 +5221,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         runner_id: str | None = None,
         unseen_since: int | None = None,
         reported_at: int | None = None,
+        lost_at: int | None = None,
     ) -> None:
         """
         Persist whether a session's background shells outlive its ended turn.
@@ -5202,6 +5235,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param unseen_since: When set, write only while the runner was last seen
             before this epoch second, or never.
         :param reported_at: When set, write only if no newer report is stored.
+        :param lost_at: When set, record it as ``background_work_lost_at`` if
+            the flag this write replaces was ``True``.
         """
         from sqlalchemy import or_, update
 
@@ -5228,11 +5263,39 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             )
             values["background_work_reported_at"] = reported_at
+        if lost_at is not None:
+            values["background_work_lost_at"] = _lost_at_if_running(lost_at)
 
         def write(session: Session) -> None:
             session.execute(update(SqlConversationMetadata).where(*conditions).values(**values))
 
         run_write_transaction(self._session_immediate, "set_background_work_running", write)
+
+    def clear_background_work_lost(self, conversation_id: str, lost_at: int | None) -> None:
+        """
+        Clear ``background_work_lost_at`` once the session no longer needs the flag.
+
+        :param conversation_id: Session/conversation identifier.
+        :param lost_at: Clear only while this loss is the stored one, so a newer
+            loss stays flagged; ``None`` clears whatever is stored.
+        """
+        from sqlalchemy import update
+
+        conditions = [
+            SqlConversationMetadata.workspace_id == current_workspace_id(),
+            SqlConversationMetadata.id == conversation_id,
+        ]
+        if lost_at is not None:
+            conditions.append(SqlConversationMetadata.background_work_lost_at == lost_at)
+
+        def write(session: Session) -> None:
+            session.execute(
+                update(SqlConversationMetadata)
+                .where(*conditions)
+                .values(background_work_lost_at=None)
+            )
+
+        run_write_transaction(self._session_immediate, "clear_background_work_lost", write)
 
     def set_blocked_on(self, conversation_id: str, blocked_on: str | None) -> None:
         """
@@ -5306,9 +5369,14 @@ class SqlAlchemyConversationStore(ConversationStore):
             if expected_runner_id is None:
                 _bind_runner(meta, runner_id)
             else:
-                # The old runner's background work is not the new runner's to report.
+                # The old runner's background work is not the new runner's to report;
+                # a swap that drops it records the loss.
                 reset = (
-                    {"background_work_running": None, "background_work_reported_at": None}
+                    {
+                        "background_work_running": None,
+                        "background_work_reported_at": None,
+                        "background_work_lost_at": _lost_at_if_running(int(time.time())),
+                    }
                     if runner_id != expected_runner_id
                     else {}
                 )

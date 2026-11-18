@@ -415,7 +415,9 @@ def persist_background_work_running(
     )
 
 
-def clear_background_work_running(session_id: str, runner_id: str, *, unseen_since: int) -> None:
+def clear_background_work_running(
+    session_id: str, runner_id: str, *, unseen_since: int, lost_at: int | None = None
+) -> Future[Any] | None:
     """
     Clear a session's background flag while it is still bound to a departed runner.
 
@@ -426,14 +428,20 @@ def clear_background_work_running(session_id: str, runner_id: str, *, unseen_sin
     :param session_id: Session/conversation identifier.
     :param runner_id: The departed runner, e.g. ``"runner_abc123"``.
     :param unseen_since: Epoch seconds the runner must not have been seen since.
+    :param lost_at: When set, a cleared ``True`` flag is recorded as work lost
+        at this epoch second.
+    :returns: Future of the write; ``None`` without a store.
     """
     if _store is None:
-        return
-    _submit_while_owned(
+        return None
+    return _submit_while_owned(
         session_id,
         "background_work_running",
         functools.partial(
-            _store.set_background_work_running, runner_id=runner_id, unseen_since=unseen_since
+            _store.set_background_work_running,
+            runner_id=runner_id,
+            unseen_since=unseen_since,
+            lost_at=lost_at,
         ),
         session_id,
         False,
