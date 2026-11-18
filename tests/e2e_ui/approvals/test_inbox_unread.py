@@ -64,7 +64,9 @@ def test_unseen_reply_surfaces_in_inbox_until_read(
     )
 
     page.goto(f"{base_url}/inbox")
+    page.get_by_role("tab", name="All").click()
     expect(page.get_by_text("Nothing waiting on you")).to_be_visible(timeout=30_000)
+    page.get_by_role("tab", name="Unread").click()
 
     _wait_for_next_second()
     _send_user_message(base_url, session_id, f"Summarize the refactor. Marker: {first_marker}")
@@ -73,7 +75,7 @@ def test_unseen_reply_surfaces_in_inbox_until_read(
     expect(row).to_be_visible(timeout=_TURN_TIMEOUT_MS)
     expect(row).to_have_attribute("data-kind", "done")
     expect(row).to_contain_text(_FIRST_REPLY, timeout=15_000)
-    expect(page.get_by_title("1 unread")).to_be_visible()
+    expect(page.get_by_title("1 unread")).to_have_count(0)
 
     # It raised no approval, so "Awaiting response" leaves it out.
     page.get_by_role("tab", name="Awaiting response").click()

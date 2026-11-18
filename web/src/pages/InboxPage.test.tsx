@@ -178,6 +178,21 @@ function renderPage(
   );
 }
 
+function commentItem(): CommentInbox["items"][number] {
+  return {
+    row: conversation({ id: "sess_comment", pending_elicitations_count: 0 }),
+    comment: {
+      id: "cm_1",
+      path: "src/app.ts",
+      body: "Please reconsider this line.",
+      created_by: "alice",
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000_000,
+      status: "draft",
+    } as CommentInbox["items"][number]["comment"],
+  };
+}
+
 function automationInboxStub(overrides: Record<string, unknown> = {}) {
   return {
     items: [],
@@ -192,6 +207,8 @@ function automationInboxStub(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Most tests exercise every kind together; the default-tab tests clear this.
+  localStorage.setItem("omnigent:inbox-filter", "all");
   vi.mocked(automationInboxHook.useAutomationInbox).mockReturnValue(automationInboxStub());
   vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([]));
   vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(commentInboxStub());
@@ -862,7 +879,7 @@ describe("InboxPage comments and errors", () => {
     // Collapsed: the author's avatar tile plus "author: body" in the preview.
     expect(item).toHaveTextContent("alice: Please reconsider this line.");
     expect(within(item).getByRole("img", { name: "Unread" })).toBeInTheDocument();
-    expect(screen.getByText("1 comment")).toBeInTheDocument();
+    expect(screen.queryByText("1 comment")).not.toBeInTheDocument();
 
     fireEvent.click(within(item).getByRole("button", { name: /Comment: My Session/ }));
     expect(item).toHaveAttribute("data-expanded", "true");
@@ -911,7 +928,7 @@ describe("InboxPage unread sessions", () => {
       await within(item).findByText(/Refactor finished; 3 files changed\./),
     ).toBeInTheDocument();
     expect(sessionsApi.fetchSessionItemsPage).toHaveBeenCalledWith("sess_unread", { limit: 12 });
-    expect(screen.getByText("1 unread")).toBeInTheDocument();
+    expect(screen.queryByText("1 unread")).not.toBeInTheDocument();
     expect(screen.queryByText("Nothing waiting on you")).not.toBeInTheDocument();
   });
 
@@ -1719,6 +1736,69 @@ describe("InboxPage filter tabs", () => {
     renderPage();
   }
 
+  it("opens on Awaiting response with only approval cards when no tab is stored", async () => {
+    localStorage.clear();
+    renderMixedInbox();
+    expect(await screen.findByTestId("inbox-item")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Awaiting response" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument();
+  });
+
+  it("orders the tabs Awaiting response, Unread, All", () => {
+    renderPage();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Awaiting response",
+      "Unread",
+      "All",
+    ]);
+  });
+
+  it("counts only pending approvals in the header and keeps the full breakdown in its summary", async () => {
+    localStorage.clear();
+    vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(
+      commentInboxStub({ items: [commentItem()] }),
+    );
+    renderMixedInbox();
+    await screen.findByTestId("inbox-item");
+    const summary = screen.getByText("1 approval · 1 comment · 1 unread");
+    expect(summary.parentElement).toHaveAttribute("title", "1 approval · 1 comment · 1 unread");
+    expect(summary.previousElementSibling).toHaveTextContent(/^1$/);
+  });
+
+  it("hides the header pill when nothing is pending, even with unread items", async () => {
+    localStorage.clear();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([unreadConversation()]),
+    );
+    renderPage();
+    selectTab("Unread");
+    await screen.findByTestId("inbox-unread");
+    expect(screen.queryByText("1 unread")).not.toBeInTheDocument();
+  });
+
+  it("takes the hover's approvals figure from the same count as the pill", async () => {
+    localStorage.clear();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([
+        conversation({
+          id: "sess_approval",
+          title: "Approval Session",
+          pending_elicitations_count: 2,
+        }),
+      ]),
+    );
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+    await screen.findByTestId("inbox-item");
+    const summary = screen.getByText("2 approvals");
+    expect(summary.previousElementSibling).toHaveTextContent(/^2$/);
+  });
+
   it("shows every kind under All, then narrows to one kind per tab", async () => {
     renderMixedInbox();
     expect(await screen.findByTestId("inbox-item")).toBeInTheDocument();
@@ -1751,6 +1831,7 @@ describe("InboxPage filter tabs", () => {
 
   it("shows a tab-specific empty state", async () => {
     renderPage();
+    selectTab("All");
     await screen.findByText("Nothing waiting on you");
     selectTab("Unread");
     expect(screen.getByText("You’re all caught up")).toBeInTheDocument();

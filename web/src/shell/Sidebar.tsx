@@ -234,10 +234,8 @@ import {
   markConversationRead,
   markConversationUnread,
   useConversationReadState,
-  useReadStateSnapshot,
   useUnseenTick,
 } from "@/hooks/useUnseenConversations";
-import { collectUnreadInboxItems } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 import { useOmnigentAnalytics } from "@/lib/analytics";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -789,10 +787,8 @@ export function useMigrateLocalPinsToServer(
   }, [pinnedLoaded, filterHonored, ownedIds]);
 }
 
-function inboxBadgeLabel(count: number, incomplete: boolean): string {
-  const label = count === 1 ? "1 inbox item waiting" : `${count} inbox items waiting`;
-  if (incomplete) return `${label}; more automations not yet checked`;
-  return label;
+function inboxBadgeLabel(count: number): string {
+  return count === 1 ? "1 inbox item waiting" : `${count} inbox items waiting`;
 }
 
 function SidebarImpl({
@@ -899,20 +895,7 @@ function SidebarImpl({
         : availableTab === "shared"
           ? sidebarData.shared
           : sidebarData.all;
-  const { conversationId: activeConversationId } = useParams<{ conversationId: string }>();
-  // Unread sessions as the Inbox lists them; like its row dot, the open session
-  // counts only when marked unread.
-  const unreadInboxCount = useReadStateSnapshot(
-    () =>
-      collectUnreadInboxItems(
-        sidebarData.inboxRows,
-        (id, updatedAt, status) =>
-          isConversationUnseen(id, updatedAt, status) &&
-          (id !== activeConversationId || isExplicitlyUnread(id)),
-      ).length,
-  );
-  const inboxCount = sidebarData.inboxCount + unreadInboxCount;
-  const inboxCountIncomplete = sidebarData.inboxCountIncomplete;
+  const inboxCount = sidebarData.inboxCount;
 
   // The scrollable list container — used as the IntersectionObserver root for
   // infinite scroll (auto-loading the next page as the sentinel nears view).
@@ -1494,12 +1477,9 @@ function SidebarImpl({
                     )}
                   />
                   Inbox
-                  {(inboxCount > 0 || inboxCountIncomplete) && (
+                  {inboxCount > 0 && (
                     <span
-                      title={
-                        inboxCountIncomplete ? "Open Inbox to check older automations." : undefined
-                      }
-                      aria-label={inboxBadgeLabel(inboxCount, inboxCountIncomplete)}
+                      aria-label={inboxBadgeLabel(inboxCount)}
                       className={cn(
                         "ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-10 font-medium text-[var(--sidebar-active-foreground)] tabular-nums",
                         // The active Inbox row already paints the translucent
@@ -1508,8 +1488,7 @@ function SidebarImpl({
                         isInboxPage ? "bg-transparent" : "bg-[var(--sidebar-active)]",
                       )}
                     >
-                      {inboxCount > 0 ? inboxCount : ""}
-                      {inboxCountIncomplete ? "+" : ""}
+                      {inboxCount}
                     </span>
                   )}
                 </Link>

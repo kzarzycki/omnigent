@@ -162,9 +162,9 @@ const HOST_OFFLINE_REPLY_MESSAGE =
   "The host for this session is offline, so the reply wasn’t sent. Try again once it reconnects.";
 
 const INBOX_TABS: { value: InboxFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "unread", label: "Unread" },
   { value: "awaiting", label: "Awaiting response" },
+  { value: "unread", label: "Unread" },
+  { value: "all", label: "All" },
 ];
 
 const EMPTY_STATES: Record<InboxFilter, { title: string; body: string }> = {
@@ -218,6 +218,7 @@ export function InboxPage() {
     serverInboxRows: allRows,
     comments: commentInbox,
     automationInbox,
+    inboxCount: pendingCount,
   } = useSidebarData();
   const taskDetailsEnabled = isFeatureEnabled(useServerInfo(), "automations_v2");
   const [filter, setFilter] = useState<InboxFilter>(readInboxFilter);
@@ -339,10 +340,8 @@ export function InboxPage() {
     visibleComments.length +
     visibleUnread.length +
     visibleAutomations.length;
-  const totalCount =
-    items.length + commentInbox.items.length + unreadItems.length + automationInbox.items.length;
   const summary = [
-    items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
+    pendingCount > 0 && (pendingCount === 1 ? "1 approval" : `${pendingCount} approvals`),
     commentInbox.items.length > 0 &&
       (commentInbox.items.length === 1 ? "1 comment" : `${commentInbox.items.length} comments`),
     unreadItems.length > 0 && `${unreadItems.length} unread`,
@@ -892,12 +891,12 @@ export function InboxPage() {
     <PageScroll maxWidthClassName="max-w-[960px]" contentClassName="px-4 md:px-10">
       <div className="mb-4 flex items-center gap-3">
         <h1 className="text-2xl font-normal">Inbox</h1>
-        {totalCount > 0 && (
+        {pendingCount > 0 && (
           <span
             title={summary}
             className="rounded-full bg-foreground px-2 py-0.5 text-sm font-medium text-card"
           >
-            <span aria-hidden>{totalCount}</span>
+            <span aria-hidden>{pendingCount}</span>
             <span className="sr-only">{summary}</span>
           </span>
         )}

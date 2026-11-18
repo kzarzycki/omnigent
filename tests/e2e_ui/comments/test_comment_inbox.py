@@ -7,15 +7,15 @@ Journey under test (the comment side of ``/inbox``):
    route her browser would hit.
 2. The viewer's browser (no header ⇒ the ``local`` identity) opens
    ``/inbox``: the comment is listed, iconed with Alice's avatar pill
-   (initials derived from her email), and the sidebar Inbox badge
-   counts it.
+   (initials derived from her email) on the Unread tab, and the
+   sidebar Inbox badge stays empty (it counts only items awaiting an answer).
 3. Opening the file with the comments panel COLLAPSED (a plain
    ``?file=`` visit) does NOT clear the item — the comment hasn't
    actually been read yet.
 4. "Open file" deep-links into the file browser (``?file=`` +
    ``?comment=``, which auto-opens the comments panel); the FileViewer
    marks the comment seen while the panel is open.
-5. Back on ``/inbox``, the comment is gone and the empty state shows —
+5. Back on ``/inbox`` (Unread tab), the comment is gone and the empty state shows —
    the seen registry (localStorage) persists across the navigation.
 
 If this goes red, the likely regressions are:
@@ -31,6 +31,7 @@ If this goes red, the likely regressions are:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 import httpx
@@ -124,6 +125,11 @@ def test_comment_surfaces_in_inbox_until_opened_in_file_browser(
 
     page.goto(f"{base_url}/inbox")
 
+    # A comment only awaits reading, so it lives on the "Unread" tab; the
+    # default "Awaiting response" tab lists approvals and questions only.
+    expect(page.locator('[data-testid="inbox-comment"]')).to_have_count(0)
+    page.get_by_role("tab", name="Unread").click()
+
     # The inbox lists the comment: rows carry comments_count, the page
     # fetches the session's comments, and the unseen draft survives the
     # collect filters (status/seen/author).
@@ -136,10 +142,9 @@ def test_comment_surfaces_in_inbox_until_opened_in_file_browser(
     expect(item).to_contain_text("AS")
     expect(item).to_contain_text(_ALICE)
 
-    # The sidebar Inbox badge counts the unseen comment. Exactly one
-    # item exists on this worker's server (sessions are per-test and
-    # torn down), so the singular label is deterministic.
-    expect(page.get_by_label("1 inbox item waiting")).to_be_visible()
+    # The sidebar Inbox badge counts only items awaiting an answer, so the
+    # unseen comment raises no badge.
+    expect(page.get_by_label(re.compile(r"inbox items? waiting"))).to_have_count(0)
 
     # Opening the file WITHOUT the comment param leaves the comments
     # panel collapsed — the comment body is not on screen, so it must
@@ -151,6 +156,7 @@ def test_comment_surfaces_in_inbox_until_opened_in_file_browser(
     expect(file_viewer).to_be_visible(timeout=30_000)
     expect(file_viewer).not_to_contain_text(_COMMENT_BODY)
     page.goto(f"{base_url}/inbox")
+    page.get_by_role("tab", name="Unread").click()
     item = page.locator('[data-testid="inbox-comment"]').filter(has_text=_COMMENT_BODY)
     expect(item).to_be_visible(timeout=15_000)
 
@@ -167,9 +173,10 @@ def test_comment_surfaces_in_inbox_until_opened_in_file_browser(
     # the badge is gone, and the empty state renders. If this still
     # shows the item, the FileViewer never recorded it as seen.
     page.goto(f"{base_url}/inbox")
-    expect(page.get_by_text("Nothing waiting on you")).to_be_visible(timeout=15_000)
+    page.get_by_role("tab", name="Unread").click()
+    expect(page.get_by_text("You’re all caught up")).to_be_visible(timeout=15_000)
     expect(page.locator('[data-testid="inbox-comment"]')).to_have_count(0)
-    expect(page.get_by_label("1 inbox item waiting")).to_have_count(0)
+    expect(page.get_by_label(re.compile(r"inbox items? waiting"))).to_have_count(0)
 
 
 @pytest.fixture
@@ -238,6 +245,7 @@ def test_own_comment_never_surfaces_in_inbox(
     # The empty state must render and no comment card may appear, despite
     # the session carrying an unseen draft comment. A visible card here
     # means the author filter regressed (self / unauthored comments leak).
-    expect(page.get_by_text("Nothing waiting on you")).to_be_visible(timeout=15_000)
+    page.get_by_role("tab", name="Unread").click()
+    expect(page.get_by_text("You’re all caught up")).to_be_visible(timeout=15_000)
     expect(page.locator('[data-testid="inbox-comment"]')).to_have_count(0)
-    expect(page.get_by_label("1 inbox item waiting")).to_have_count(0)
+    expect(page.get_by_label(re.compile(r"inbox items? waiting"))).to_have_count(0)

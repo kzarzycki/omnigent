@@ -7,9 +7,14 @@ afterEach(() => {
 });
 
 describe("inboxFilterPreferences", () => {
-  it('defaults to "all" when nothing is stored', () => {
-    expect(DEFAULT_INBOX_FILTER).toBe("all");
-    expect(readInboxFilter()).toBe("all");
+  it('defaults to "awaiting" when nothing is stored', () => {
+    expect(DEFAULT_INBOX_FILTER).toBe("awaiting");
+    expect(readInboxFilter()).toBe("awaiting");
+  });
+
+  it.each(["all", "unread"] as const)("keeps an explicitly stored %s tab", (filter) => {
+    localStorage.setItem("omnigent:inbox-filter", filter);
+    expect(readInboxFilter()).toBe(filter);
   });
 
   it("round-trips every filter value", () => {
@@ -22,13 +27,13 @@ describe("inboxFilterPreferences", () => {
   it("falls back to the default for an unknown stored value", () => {
     // A tab this build doesn't render would leave the viewer on an empty list.
     localStorage.setItem("omnigent:inbox-filter", "mentions");
-    expect(readInboxFilter()).toBe("all");
+    expect(readInboxFilter()).toBe("awaiting");
   });
 
   it("falls back to the default when storage throws", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
     });
-    expect(readInboxFilter()).toBe("all");
+    expect(readInboxFilter()).toBe("awaiting");
   });
 });

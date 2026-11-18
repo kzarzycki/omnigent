@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import random
+import re
 import secrets
 import threading
 import time
@@ -235,6 +236,8 @@ def test_pending_approval_surfaces_and_resolves_in_inbox(
     card = item.locator(_APPROVAL_CARD)
     expect(card).to_be_visible()
     expect(card.get_by_text("Approval required")).to_be_visible()
+    # The sidebar badge counts the parked approval.
+    expect(page.get_by_label("1 inbox item waiting")).to_be_visible(timeout=30_000)
 
     # Approve from the inbox: the verdict routes to the owning session, the
     # server drains the prompt, and the row's pending count drops to zero so
@@ -242,6 +245,7 @@ def test_pending_approval_surfaces_and_resolves_in_inbox(
     card.get_by_role("button", name="Approve").click()
     poll_until(lambda: not _pending_elicitations(base_url, session_id))
     expect(page.locator(_INBOX_ITEM)).to_have_count(0, timeout=30_000)
+    expect(page.get_by_label(re.compile(r"inbox items? waiting"))).to_have_count(0, timeout=30_000)
 
 
 @pytest.mark.nightly
@@ -262,7 +266,7 @@ def test_reused_elicitation_id_requires_approval_only_for_new_request(
     # in-memory page state, so a reload between retries would wash out the very
     # stale verdict the regression is about. Navigate once, never reload.
     page.goto(f"{base_url}/inbox")
-    expect(page.get_by_text("Nothing waiting on you")).to_be_visible(timeout=_REPARK_TIMEOUT_MS)
+    expect(page.get_by_text("No approvals waiting")).to_be_visible(timeout=_REPARK_TIMEOUT_MS)
 
     # Reuse one harness id for both retries and later, different requests.
     eid = f"elicit_claude_{secrets.token_hex(16)}"
