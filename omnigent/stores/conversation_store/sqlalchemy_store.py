@@ -408,13 +408,19 @@ def _bind_runner(meta: SqlConversationMetadata, runner_id: str | None) -> None:
     would be compared. The reset is written even when the row was read with no
     flag, since the old runner may have stored one after that read. Moving a
     session off a runner that still reported background work records the loss
-    in ``background_work_lost_at``, which the rebind leaves in place.
+    in ``background_work_lost_at`` unless an earlier loss is stored; the rebind
+    leaves it in place.
 
     :param meta: The session's metadata row, inside the write transaction.
     :param runner_id: The runner to bind, e.g. ``"runner_abc123"``, or ``None``.
     """
     if meta.runner_id != runner_id:
-        if meta.runner_id is not None and runner_id is not None and meta.background_work_running:
+        if (
+            meta.runner_id is not None
+            and runner_id is not None
+            and meta.background_work_running
+            and meta.background_work_lost_at is None
+        ):
             meta.background_work_lost_at = int(time.time())
         meta.background_work_running = None
         meta.background_work_reported_at = None
@@ -427,12 +433,19 @@ def _lost_at_if_running(lost_at: int) -> Any:
     """``background_work_lost_at`` for an UPDATE that drops a running background flag.
 
     :param lost_at: Epoch seconds to record when the flag being dropped is set.
-    :returns: A SQL expression keeping the stored value when no work was running.
+    :returns: A SQL expression keeping the stored value when no work was running,
+        or when an earlier loss the session was not told about is stored.
     """
-    from sqlalchemy import case
+    from sqlalchemy import and_, case
 
     return case(
-        (SqlConversationMetadata.background_work_running.is_(True), lost_at),
+        (
+            and_(
+                SqlConversationMetadata.background_work_running.is_(True),
+                SqlConversationMetadata.background_work_lost_at.is_(None),
+            ),
+            lost_at,
+        ),
         else_=SqlConversationMetadata.background_work_lost_at,
     )
 

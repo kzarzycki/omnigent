@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from omnigent.server import orphaned_background_work
 from omnigent.server.routes import sessions as sessions_module
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests._helpers.polling import poll_until_async
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,3 +78,30 @@ async def test_sessions_a_notice_must_not_resume_keep_their_flag(
     assert notices == []
     flagged = store.get_conversation(sub_agent)
     assert flagged is not None and flagged.background_work_lost_at == 1_000
+
+
+async def test_a_second_resume_while_the_first_posts_sends_nothing(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    session_id = _lost(store)
+    release = asyncio.Event()
+    posted: list[str] = []
+
+    async def slow_post(target: str, user_id: str | None, text: str) -> object:
+        posted.append(target)
+        # A relaunch to take the notice can take minutes.
+        await release.wait()
+        return {}
+
+    orphaned_background_work.configure(store, None, slow_post)
+    try:
+        first = asyncio.create_task(orphaned_background_work.resume(session_id))
+        await poll_until_async(lambda: posted, timeout_s=5)
+        second = asyncio.create_task(orphaned_background_work.resume(session_id))
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.wait_for(asyncio.gather(first, second), timeout=5) == [True, False]
+    finally:
+        orphaned_background_work.configure(None, None, None)
+
+    assert posted == [session_id]

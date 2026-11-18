@@ -2264,10 +2264,12 @@ async def test_runner_exit_resumes_only_the_session_with_pending_background_work
 ) -> None:
     """A runner that leaves with background work pending resumes that session.
 
-    Both sessions ended their turn; only one had a background shell running
-    when the tunnel dropped. That one gets the lost-work notice, or, when the
-    notice can't be delivered, stays flagged on the session list. The other
-    session is left alone.
+    Of two sessions that ended their turn, only one had a background shell
+    running when the tunnel dropped. That one gets the lost-work notice, or,
+    when the notice can't be delivered, stays flagged on the session list. The
+    other is left alone. So is a mid-turn session, which the runner revival
+    resumes, and one whose runner was stopped on purpose, though both had
+    background work too.
     """
     from omnigent.runtime import get_conversation_store
     from omnigent.server import orphaned_background_work
@@ -2294,7 +2296,7 @@ async def test_runner_exit_resumes_only_the_session_with_pending_background_work
 
     store = get_conversation_store()
     session_ids: list[str] = []
-    for _ in range(2):
+    for status in ("idle", "idle", "running", "idle"):
         create_resp = await ap_client.post(
             "/v1/sessions",
             data={"metadata": json.dumps({})},
@@ -2303,10 +2305,12 @@ async def test_runner_exit_resumes_only_the_session_with_pending_background_work
         assert create_resp.status_code == 201, create_resp.text
         session_id = create_resp.json()["session_id"]
         store.replace_runner_id(session_id, runner_id)
-        sessions_module._session_status_cache[session_id] = "idle"
+        sessions_module._session_status_cache[session_id] = status
         session_ids.append(session_id)
-    pending_id, quiet_id = session_ids
-    store.set_background_work_running(pending_id, True, runner_id=runner_id)
+    pending_id, quiet_id, mid_turn_id, stopped_id = session_ids
+    for session_id in (pending_id, mid_turn_id, stopped_id):
+        store.set_background_work_running(session_id, True, runner_id=runner_id)
+    sessions_module._intentional_stop_sessions[stopped_id] = runner_id
 
     try:
         await communicator.send_input({"type": "websocket.disconnect", "code": 1006})
@@ -2314,7 +2318,14 @@ async def test_runner_exit_resumes_only_the_session_with_pending_background_work
 
         def settled() -> bool:
             row = store.get_conversation(pending_id)
-            return row is not None and (row.background_work_lost_at is None) is delivered
+            others = [store.get_conversation(other) for other in (mid_turn_id, stopped_id)]
+            return (
+                row is not None
+                and (row.background_work_lost_at is None) is delivered
+                and all(
+                    other is not None and not other.background_work_running for other in others
+                )
+            )
 
         await poll_until_async(settled, timeout_s=budget(5.0))
 
@@ -2327,11 +2338,14 @@ async def test_runner_exit_resumes_only_the_session_with_pending_background_work
         assert listed[pending_id]["background_work_running"] is False
         # The notice clears the record; one that didn't land leaves it flagged.
         assert (listed[pending_id].get("background_work_lost_at") is not None) is not delivered
-        assert listed[quiet_id].get("background_work_lost_at") is None
         assert sessions_module._session_status_cache.get(quiet_id) == "idle"
+        # Revival or the stop owns these; a loss record would add a second notice.
+        for session_id in (quiet_id, mid_turn_id, stopped_id):
+            assert listed[session_id].get("background_work_lost_at") is None, session_id
     finally:
         with contextlib.suppress(asyncio.TimeoutError, Exception):
             await communicator.wait(timeout=budget(2.0))
+        sessions_module._intentional_stop_sessions.pop(stopped_id, None)
         for session_id in session_ids:
             sessions_module._session_status_cache.pop(session_id, None)
 

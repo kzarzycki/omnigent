@@ -407,3 +407,29 @@ async def test_swap_with_no_background_work_tells_the_session_nothing(
     swapped = store.get_conversation(session_id)
     assert swapped is not None and swapped.background_work_lost_at is None
     assert machinery.told_lost_background_work == []
+
+
+@pytest.mark.parametrize("earlier_loss", [False, True], ids=["fresh", "earlier_loss_kept"])
+async def test_rollback_to_a_connected_old_runner_clears_only_the_loss_its_launch_recorded(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery, earlier_loss: bool
+) -> None:
+    session_id = _bound_session(store)
+    if earlier_loss:
+        # A loss from an earlier runner the session was not yet told about.
+        store.set_background_work_running(session_id, True, runner_id=_OLD)
+        store.set_background_work_running(
+            session_id, False, runner_id=_OLD, unseen_since=2_000, lost_at=1_000
+        )
+    machinery.old_runner_background = NO_ROUTE
+    machinery.background_reported_before_rebind = True
+    machinery.new_runner_connects = False
+
+    result = await replace_stale_runner(_HOST, _request(session_id), machinery.deps())
+
+    assert result.status == "failed"
+    assert result.reason == "the new runner did not connect; the old runner was kept"
+    rolled_back = store.get_conversation(session_id)
+    assert rolled_back is not None and rolled_back.runner_id == _OLD
+    # The old runner still holds the work its launch's rebind recorded as lost.
+    assert rolled_back.background_work_lost_at == (1_000 if earlier_loss else None)
+    assert machinery.told_lost_background_work == []

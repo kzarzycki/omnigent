@@ -38,6 +38,9 @@ _permissions: PermissionStore | None = None
 _post: PostMessage | None = None
 # custom-lint: disable-next=workspace-scoped-cache -- task objects
 _tasks: set[asyncio.Task[bool]] = set()
+# Sessions a notice is being posted to; a relaunch can take minutes.
+# custom-lint: disable-next=workspace-scoped-cache -- keys are globally unique session ids
+_posting: set[str] = set()
 
 
 def configure(
@@ -48,6 +51,7 @@ def configure(
     """Bind the stores and the server's message poster; ``None`` turns resuming off."""
     global _store, _permissions, _post
     _store, _permissions, _post = store, permissions, post
+    _posting.clear()
 
 
 def _resumable(conv: Conversation | None) -> bool:
@@ -69,14 +73,16 @@ async def resume(session_id: str) -> bool:
     Tell *session_id* its background work was lost, if the row records a loss.
 
     Best-effort: never raises. The record is cleared only once the notice was
-    accepted, and only while it names the same loss.
+    accepted, and only while it names the same loss. A call while another is
+    posting to the session does nothing, so one loss gets one notice.
 
     :param session_id: The session whose runner went away.
     :returns: Whether the notice was posted.
     """
     store, post = _store, _post
-    if store is None or post is None:
+    if store is None or post is None or session_id in _posting:
         return False
+    _posting.add(session_id)
     try:
         conv = await asyncio.to_thread(store.get_conversation, session_id)
         if conv is None or not _resumable(conv):
@@ -101,6 +107,8 @@ async def resume(session_id: str) -> bool:
             extra={"session_id": session_id},
         )
         return False
+    finally:
+        _posting.discard(session_id)
 
 
 def resume_soon(session_id: str) -> None:
