@@ -33,6 +33,8 @@ _RECENT_MESSAGE_PAGE = 50
 _NEW_RUNNER_CONNECT_TIMEOUT_S = 120.0
 # How long the old runner gets to say whether it has background work.
 _BACKGROUND_PROBE_TIMEOUT_S = 10.0
+# A runner built before the background-work route answers 404.
+NO_ROUTE = "no_route"
 _MID_TURN_STATUSES = frozenset({"running", "waiting"})
 
 
@@ -51,8 +53,9 @@ class ReplacementDeps:
     :param has_queued_input: Whether the session has a message waiting for its turn.
     :param has_terminal_attach: Whether a viewer has its terminal open for input.
     :param runner_background_work: Asks the runner a session record is bound to
-        whether the session has a background shell or agent; ``None`` when the
-        runner can't answer.
+        whether the session has a background shell or agent: ``True``,
+        ``False``, :data:`NO_ROUTE` for a runner built before the route, or
+        ``None`` when the runner can't answer.
     """
 
     store: ConversationStore
@@ -64,7 +67,7 @@ class ReplacementDeps:
     status_of: Callable[[str], str | None]
     has_queued_input: Callable[[str], bool]
     has_terminal_attach: Callable[[str], bool]
-    runner_background_work: Callable[[Conversation], Awaitable[bool | None]]
+    runner_background_work: Callable[[Conversation], Awaitable[bool | str | None]]
 
 
 def _message_role(item: Any) -> str | None:
@@ -154,7 +157,8 @@ async def _old_runner_background_blocker(
         running = await deps.runner_background_work(conv)
         if running is None:
             return _BACKGROUND_UNKNOWN
-        if running:
+        # An older runner falls back to the server's stored flag, checked before the launch.
+        if running is True:
             return "background_work_running"
     return None
 
@@ -315,7 +319,7 @@ def server_replacement_deps(
             reason=reason,
         )
 
-    async def runner_background_work(conv: Conversation) -> bool | None:
+    async def runner_background_work(conv: Conversation) -> bool | str | None:
         router = get_runner_router()
         if router is None:
             return None
@@ -328,6 +332,8 @@ def server_replacement_deps(
                 f"/v1/sessions/{quote(conv.id, safe='')}/background-work",
                 timeout=_BACKGROUND_PROBE_TIMEOUT_S,
             )
+            if response.status_code == 404:
+                return NO_ROUTE
             running = response.json().get("running") if response.is_success else None
         except (OmnigentError, httpx.HTTPError, OSError, ValueError, AttributeError):
             return None

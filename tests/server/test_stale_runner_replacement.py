@@ -12,7 +12,11 @@ from omnigent.entities.conversation import Conversation, MessageData, NewConvers
 from omnigent.host.frames import HostReplaceRunnerFrame
 from omnigent.server import stale_runner_replacement
 from omnigent.server.routes import terminal_attach
-from omnigent.server.stale_runner_replacement import ReplacementDeps, replace_stale_runner
+from omnigent.server.stale_runner_replacement import (
+    NO_ROUTE,
+    ReplacementDeps,
+    replace_stale_runner,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
 pytestmark = pytest.mark.asyncio
@@ -34,7 +38,7 @@ class _FakeSessionMachinery:
     resumed: list[tuple[str, str | None]] = field(default_factory=list)
     on_new_runner_up: list[str] = field(default_factory=list)
     # What the old runner answers about background work; ``None`` is no answer.
-    old_runner_background: bool | None = False
+    old_runner_background: bool | str | None = False
     background_starts_during_boot: bool = False
     asked_background: list[tuple[str, str | None]] = field(default_factory=list)
 
@@ -57,7 +61,7 @@ class _FakeSessionMachinery:
     async def resume(self, conv: Conversation) -> None:
         self.resumed.append((conv.id, conv.runner_id))
 
-    async def runner_background_work(self, conv: Conversation) -> bool | None:
+    async def runner_background_work(self, conv: Conversation) -> bool | str | None:
         self.asked_background.append((conv.id, conv.runner_id))
         return self.old_runner_background
 
@@ -335,3 +339,24 @@ async def test_old_runner_that_cannot_answer_counts_as_busy(
     assert result.reason == "the old runner did not report its background work"
     assert machinery.launched == []
     assert machinery.stopped == []
+
+
+async def test_runner_without_the_background_route_falls_back_to_the_stored_flag(
+    store: SqlAlchemyConversationStore, machinery: _FakeSessionMachinery
+) -> None:
+    idle_id = _bound_session(store)
+    machinery.old_runner_background = NO_ROUTE
+
+    replaced = await replace_stale_runner(_HOST, _request(idle_id), machinery.deps())
+
+    assert (replaced.status, replaced.reason) == ("replaced", None)
+    assert machinery.stopped == [(_OLD, "superseded")]
+
+    busy_id = _bound_session(store)
+    store.set_background_work_running(busy_id, True, runner_id=_OLD)
+    machinery.launched.clear()
+
+    skipped = await replace_stale_runner(_HOST, _request(busy_id), machinery.deps())
+
+    assert (skipped.status, skipped.reason) == ("skipped", "background_work_running")
+    assert machinery.launched == []
