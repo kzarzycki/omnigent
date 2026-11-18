@@ -13,6 +13,7 @@ adopted and never signalled.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ import psutil
 from omnigent.host.daemon_lifecycle import _target_digest, daemon_registry_dir
 from omnigent.inner._proc import _process_start_stamp
 from omnigent.native.owner_claim import current_boot_id
+from omnigent.update_check import source_install_commit
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +52,8 @@ class RegisteredRunner:
     session_id: str | None
     log_path: str
     connect_marker: str | None
+    # Commit of the code the runner loaded; ``None`` from a build that did not record it.
+    commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,18 @@ def runner_registry_path(target: str, *, base_dir: Path | None = None) -> Path:
     """Return the registry path for a daemon *target*, e.g. ``"local"``."""
     # Not ``*.json``: the daemon record reader globs those.
     return daemon_registry_dir(base_dir) / f"{_target_digest(target)}.runners"
+
+
+@functools.cache
+def loaded_commit() -> str | None:
+    """The commit this process loaded, fixed at first use."""
+    return source_install_commit()
+
+
+def is_stale_runner(entry: RegisteredRunner) -> bool:
+    """Whether *entry* runs another commit than this process, or one that was not recorded."""
+    mine = loaded_commit()
+    return mine is not None and entry.commit != mine
 
 
 def process_start_stamp(pid: int) -> float | None:
@@ -211,6 +227,7 @@ class RunnerRegistry:
             session_id=session_id,
             log_path=str(log_path),
             connect_marker=str(connect_marker) if connect_marker is not None else None,
+            commit=loaded_commit(),
         )
         with self._lock:
             self._runners[runner_id] = entry

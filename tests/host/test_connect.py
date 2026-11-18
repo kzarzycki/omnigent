@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import errno
 import json
 import logging
@@ -4725,6 +4726,41 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
         if runner.poll() is None:
             runner.kill()
         runner.wait()
+
+
+@pytest.mark.parametrize(
+    ("recorded", "stale"), [("old000000", True), (None, True), ("new111111", False)]
+)
+async def test_adopting_a_runner_on_another_commit_warns_and_is_counted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    recorded: str | None,
+    stale: bool,
+) -> None:
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "new111111")
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: "new111111")
+    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        entry = dataclasses.replace(
+            _registered("runner_adopted", runner, tmp_path / "runner.log"), commit=recorded
+        )
+        host = _make_host_process()
+        with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+            _adopt_released(host, tmp_path / "target.runners", entry)
+        warnings = [r.getMessage() for r in caplog.records if "runs commit" in r.getMessage()]
+        if stale:
+            assert len(warnings) == 1
+            for part in ("runner_adopted", "session-adopted", recorded or "unknown", "new111111"):
+                assert part in warnings[0]
+        else:
+            assert warnings == []
+        assert len(host._stale_adopted_runner_ids & host._runners.keys()) == int(stale)
+    finally:
+        runner.kill()
+        runner.wait()
+        for task in list(host._watcher_tasks):
+            task.cancel()
 
 
 _SHUTDOWN_CHILD = """

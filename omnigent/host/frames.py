@@ -342,6 +342,8 @@ class HostHelloFrame:
         server diagnostics. Absent from older hosts.
     :param commit: Short git commit of a source install, e.g. ``"3609fea2a"``.
         ``None`` for an installed wheel or an older host.
+    :param stale_adopted_runners: Adopted runners that run another commit than
+        this host (or one that was not recorded); ``0`` from an older host.
     :param workspace_socket: Path of the host's workspace API socket, e.g.
         ``"/tmp/omnigent-workspace-ab12/workspace.sock"``. ``None`` when the host
         serves no direct workspace access.
@@ -363,6 +365,7 @@ class HostHelloFrame:
     capabilities: list[str] = field(default_factory=list)
     connection_id: str | None = None
     commit: str | None = None
+    stale_adopted_runners: int = 0
     workspace_socket: str | None = None
     workspace_token_key: str | None = field(default=None, repr=False)
 

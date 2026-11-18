@@ -373,6 +373,35 @@ async def test_the_runner_route_reads_the_listing_for_a_background_refresh(
     assert (fake_gh.calls["pr view"], fake_gh.calls["pr list"]) == (1, 1)
 
 
+async def test_background_refreshes_of_many_sessions_make_one_listing_and_no_pr_view(
+    fake_gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github, "_gh_installed", lambda: True)
+    sessions = [f"session-{index}" for index in range(5)]
+    for session_id in sessions:
+        SessionPrRegistry(session_id).record(
+            [PullRequestRef.from_url(f"{REPO}/pull/{number}") for number in OPEN_NUMBERS[:3]],
+            relationship="created",
+            source="test",
+        )
+    app = create_runner_app(
+        runner_workspace=tmp_path,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+        for session_id in sessions:
+            for number in OPEN_NUMBERS[:3]:
+                response = await client.get(
+                    f"/v1/sessions/{session_id}/resources/github",
+                    params={"pr_url": f"{REPO}/pull/{number}", "background": "1"},
+                )
+                assert response.status_code == 200
+    assert fake_gh.calls["pr list"] == 1
+    assert fake_gh.calls["pr view"] == 0
+    assert fake_gh.calls["api graphql"] == 0
+
+
 ANCHOR = {
     "path": "a.py",
     "side": "RIGHT",
