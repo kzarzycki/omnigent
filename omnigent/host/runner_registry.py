@@ -82,7 +82,7 @@ def runner_registry_path(target: str, *, base_dir: Path | None = None) -> Path:
 
 @functools.cache
 def loaded_commit() -> str | None:
-    """The commit this process loaded, fixed at first use."""
+    """The commit this process loaded, fixed at first call (the daemon calls it at start)."""
     return source_install_commit()
 
 

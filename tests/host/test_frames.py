@@ -64,6 +64,7 @@ from omnigent.host.frames import (
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
+    HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -903,6 +904,32 @@ def test_hello_frame_without_interactive_shells_is_backward_compatible() -> None
     assert decoded.commit is None
     assert decoded.workspace_socket is None
     assert decoded.workspace_token_key is None
+
+
+def test_stale_adopted_runner_count_round_trips_and_defaults_to_zero() -> None:
+    """The count survives hello and resources frames; a frame without it decodes as 0/None."""
+    hello = HostHelloFrame(
+        version="1.0", frame_protocol_version=1, name="h", stale_adopted_runners=3
+    )
+    decoded_hello = decode_host_frame(encode_host_frame(hello))
+    assert isinstance(decoded_hello, HostHelloFrame)
+    assert decoded_hello.stale_adopted_runners == 3
+
+    older = json.loads(encode_host_frame(hello))
+    del older["stale_adopted_runners"]
+    older_hello = decode_host_frame(json.dumps(older))
+    assert isinstance(older_hello, HostHelloFrame)
+    assert older_hello.stale_adopted_runners == 0
+
+    report = HostResourcesFrame(1.0, 4, 8000, 4000, stale_adopted_runners=2)
+    decoded_report = decode_host_frame(encode_host_frame(report))
+    assert isinstance(decoded_report, HostResourcesFrame)
+    assert decoded_report.stale_adopted_runners == 2
+    bare = json.loads(encode_host_frame(HostResourcesFrame(1.0, 4, 8000, 4000)))
+    del bare["stale_adopted_runners"]
+    bare_report = decode_host_frame(json.dumps(bare))
+    assert isinstance(bare_report, HostResourcesFrame)
+    assert bare_report.stale_adopted_runners is None
 
 
 def test_hello_frame_capabilities_round_trip() -> None:

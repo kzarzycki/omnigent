@@ -2475,6 +2475,10 @@ class HostProcess:
             return None
         return zygote
 
+    def _stale_adopted_runner_count(self) -> int:
+        """Adopted runners still tracked that run another commit than this host."""
+        return len(self._stale_adopted_runner_ids & self._runners.keys())
+
     def _forget_runner(self, runner_id: str) -> _RunnerHandle | None:
         """Drop a runner from the tracked set and from the on-disk registry."""
         self._stale_adopted_runner_ids.discard(runner_id)
@@ -5219,6 +5223,9 @@ class HostProcess:
         from omnigent.host.crash_reporting import host_asyncio_exception_handler
 
         asyncio.get_running_loop().set_exception_handler(host_asyncio_exception_handler)
+        # Fix the commit this daemon loaded now, so the zygote and later runner
+        # entries are compared against the code at start, not at first use.
+        loaded_commit()
         # Reap orphaned harness/tool grandchildren that reparent here when a
         # runner dies (this host is PID 1 in a container, or a subreaper
         # otherwise). Without this they pile up as <defunct> zombies and can
@@ -5939,7 +5946,7 @@ class HostProcess:
             capabilities=list(HOST_CAPABILITIES),
             connection_id=connection_id,
             commit=await asyncio.to_thread(source_install_commit),
-            stale_adopted_runners=len(self._stale_adopted_runner_ids & self._runners.keys()),
+            stale_adopted_runners=self._stale_adopted_runner_count(),
             workspace_socket=str(listener.path) if (listener := self._workspace_socket) else None,
             workspace_token_key=listener.token_key if listener else None,
         )
@@ -6067,6 +6074,7 @@ class HostProcess:
                 _logger.exception("Host resources sample failed")
                 report = None
             if report is not None:
+                report.stale_adopted_runners = self._stale_adopted_runner_count()
                 await self._send_text(ws, encode_host_frame(report))
             await asyncio.sleep(HOST_RESOURCES_INTERVAL_S)
 

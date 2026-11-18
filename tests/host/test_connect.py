@@ -89,6 +89,7 @@ from omnigent.host.frames import (
     HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
+    HostResourcesFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -4729,17 +4730,25 @@ async def test_run_adopts_the_runners_a_released_daemon_left(
 
 
 @pytest.mark.parametrize(
-    ("recorded", "stale"), [("old000000", True), (None, True), ("new111111", False)]
+    ("own", "recorded", "stale"),
+    [
+        ("new111111", "old000000", True),
+        ("new111111", None, True),
+        ("new111111", "new111111", False),
+        # A host whose own commit is unknown cannot call anything stale.
+        (None, "old000000", False),
+    ],
 )
 async def test_adopting_a_runner_on_another_commit_warns_and_is_counted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    own: str | None,
     recorded: str | None,
     stale: bool,
 ) -> None:
-    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "new111111")
-    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: "new111111")
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: own)
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: own)
     runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
         entry = dataclasses.replace(
@@ -4761,6 +4770,114 @@ async def test_adopting_a_runner_on_another_commit_warns_and_is_counted(
         runner.wait()
         for task in list(host._watcher_tasks):
             task.cancel()
+
+
+async def test_hello_and_resources_report_the_current_stale_adopted_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resources frame carries the live stale count, dropping it once a runner exits."""
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "new111111")
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: "new111111")
+    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    host = _make_host_process()
+    try:
+        entry = dataclasses.replace(
+            _registered("runner_adopted", runner, tmp_path / "runner.log"), commit="old000000"
+        )
+        _adopt_released(host, tmp_path / "target.runners", entry)
+        sent: list[str] = []
+
+        async def _send_text(ws: object, text: str) -> None:
+            sent.append(text)
+            if len(sent) == 1:
+                host._forget_runner("runner_adopted")
+            else:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(host, "_send_text", _send_text)
+        monkeypatch.setattr(
+            "omnigent.host.connect.sample_host_resources",
+            lambda: HostResourcesFrame(1.0, 4, 8000, 4000),
+        )
+        monkeypatch.setattr("omnigent.host.connect.HOST_RESOURCES_INTERVAL_S", 0.0)
+        assert host._stale_adopted_runner_count() == 1
+        with contextlib.suppress(asyncio.CancelledError):
+            await host._resources_loop(None)  # type: ignore[arg-type]
+        counts = [json.loads(text)["stale_adopted_runners"] for text in sent]
+        assert counts == [1, 0]
+    finally:
+        runner.kill()
+        runner.wait()
+        for task in list(host._watcher_tasks):
+            task.cancel()
+
+
+async def test_run_reports_adopted_stale_runners_in_hello(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("omnigent.host.crash_reporting._runner_release_hook", None)
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    monkeypatch.setattr(runner_registry, "loaded_commit", lambda: "new111111")
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: "new111111")
+    _patch_connect(monkeypatch, _ConnectSpy([None, asyncio.CancelledError()]))
+    hellos: list[HostHelloFrame] = []
+    real_hello = HostHelloFrame
+
+    def _record_hello(**kwargs: object) -> HostHelloFrame:
+        hellos.append(real_hello(**kwargs))
+        return hellos[-1]
+
+    monkeypatch.setattr("omnigent.host.connect.HostHelloFrame", _record_hello)
+    runner = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        entry = dataclasses.replace(
+            _registered("runner_adopted", runner, tmp_path / "runner.log"), commit="old000000"
+        )
+        _write_released_by_dead_daemon(runner_registry_path(_StubLifecycleLock.target), entry)
+        host = HostProcess(
+            HostIdentity(host_id="host_test_connect", name="test-laptop"),
+            "https://omnigent.example.com",
+            lifecycle_lock=_StubLifecycleLock(),  # type: ignore[arg-type]
+            keep_runners_on_restart=True,
+        )
+
+        await host.run()
+
+        assert [hello.stale_adopted_runners for hello in hellos] == [1]
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        runner.wait()
+
+
+async def test_run_fixes_its_commit_before_claiming_runners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daemon reads its loaded commit at start, before it adopts or prestarts anything."""
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("omnigent.host.crash_reporting._runner_release_hook", None)
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    _patch_connect(monkeypatch, _ConnectSpy([asyncio.CancelledError()]))
+    order: list[str] = []
+    monkeypatch.setattr("omnigent.host.connect.loaded_commit", lambda: order.append("commit"))
+    real_claim = RunnerRegistry.claim
+
+    def _claim(self: RunnerRegistry) -> list[RegisteredRunner]:
+        order.append("claim")
+        return real_claim(self)
+
+    monkeypatch.setattr(RunnerRegistry, "claim", _claim)
+    host = HostProcess(
+        HostIdentity(host_id="host_test_connect", name="test-laptop"),
+        "https://omnigent.example.com",
+        lifecycle_lock=_StubLifecycleLock(),  # type: ignore[arg-type]
+        keep_runners_on_restart=True,
+    )
+
+    await host.run()
+
+    assert order[:2] == ["commit", "claim"]
 
 
 _SHUTDOWN_CHILD = """

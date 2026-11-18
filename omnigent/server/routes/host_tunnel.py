@@ -920,6 +920,8 @@ async def _receive_loop(
         if isinstance(frame, HostResourcesFrame):
             conn.resources = frame
             conn.resources_at = time.time()
+            if frame.stale_adopted_runners is not None:
+                conn.hello.stale_adopted_runners = frame.stale_adopted_runners
             continue
 
         if isinstance(frame, HostLaunchRunnerResultFrame):

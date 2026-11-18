@@ -418,12 +418,16 @@ class HostResourcesFrame:
     :param memory_available_mb: Memory a new process can get without
         swapping, in MB: ``MemAvailable`` on Linux, free plus inactive
         pages on macOS.
+    :param stale_adopted_runners: Current count of adopted runners on another
+        commit than this host, refreshed with each report. ``None`` from an
+        older host or a sample that does not carry it.
     """
 
     load_1m: float
     cpu_count: int
     memory_total_mb: int
     memory_available_mb: int
+    stale_adopted_runners: int | None = None
 
 
 @dataclass
@@ -1851,6 +1855,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "capabilities": list(frame.capabilities),
                 "connection_id": frame.connection_id,
                 "commit": frame.commit,
+                "stale_adopted_runners": frame.stale_adopted_runners,
                 "workspace_socket": frame.workspace_socket,
                 "workspace_token_key": frame.workspace_token_key,
             }
@@ -1881,6 +1886,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "cpu_count": frame.cpu_count,
                 "memory_total_mb": frame.memory_total_mb,
                 "memory_available_mb": frame.memory_available_mb,
+                "stale_adopted_runners": frame.stale_adopted_runners,
             }
         )
     if isinstance(frame, HostLaunchRunnerFrame):
@@ -3060,6 +3066,7 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         capabilities=_optional_str_list(msg, "capabilities"),
         connection_id=_optional_nullable_str(msg, "connection_id"),
         commit=_optional_nullable_str(msg, "commit"),
+        stale_adopted_runners=_optional_count(msg, "stale_adopted_runners"),
         workspace_socket=_optional_nullable_str(msg, "workspace_socket"),
         workspace_token_key=_optional_nullable_str(msg, "workspace_token_key"),
     )
@@ -3094,6 +3101,7 @@ def _decode_resources(msg: _JsonObject) -> HostResourcesFrame:
         cpu_count=_required_int(msg, "cpu_count"),
         memory_total_mb=_required_int(msg, "memory_total_mb"),
         memory_available_mb=_required_int(msg, "memory_available_mb"),
+        stale_adopted_runners=_optional_nullable_int(msg, "stale_adopted_runners"),
     )
 
 
@@ -3978,6 +3986,12 @@ def _required_int(msg: _JsonObject, key: str) -> int:
     if not isinstance(val, int) or isinstance(val, bool):
         raise ValueError(f"frame missing required int field: {key!r}")
     return val
+
+
+def _optional_count(msg: _JsonObject, key: str) -> int:
+    """Return an optional integer field, ``0`` when absent (an older host)."""
+    val = _optional_nullable_int(msg, key)
+    return 0 if val is None else val
 
 
 def _optional_nullable_int(msg: _JsonObject, key: str) -> int | None:
