@@ -1182,52 +1182,38 @@ describe("Sidebar session list", () => {
     expect(badge.className).not.toContain("brand-accent");
   });
 
-  it.each([
-    { approvals: 0, automations: 0, label: "0 inbox items waiting", badge: "+" },
-    { approvals: 0, automations: 1, label: "1 inbox item waiting", badge: "1+" },
-    { approvals: 2, automations: 1, label: "3 inbox items waiting", badge: "3+" },
-  ])(
-    "combines $approvals approvals and $automations failures until all task pages are checked",
-    ({ approvals, automations, label, badge }) => {
-      const automationInbox = vi.spyOn(automationInboxHook, "useAutomationInbox");
-      const failure = {
-        taskId: "task",
-        taskName: "Report",
-        runId: "run",
-        scheduledAt: 100,
-        finishedAt: 101,
-        errorCode: "host_offline",
-      };
-      const state = {
-        items: automations ? [failure] : [],
-        hasNextPage: true,
-      } as unknown as ReturnType<typeof automationInboxHook.useAutomationInbox>;
-      automationInbox.mockReturnValue(state);
-      try {
-        mockConversations([
-          conv("conv_awaiting", "Claude Code", { pending_elicitations_count: approvals }),
-        ]);
-        const first = renderSidebar();
-        expect(
-          within(screen.getByTestId("inbox-button")).getByLabelText(
-            `${label}; more automations not yet checked`,
-          ),
-        ).toHaveTextContent(badge);
-        first.unmount();
-        automationInbox.mockReturnValue({ ...state, hasNextPage: false });
-        renderSidebar();
-        const inbox = within(screen.getByTestId("inbox-button"));
-        expect(inbox.queryByLabelText(/more automations/)).toBeNull();
-        if (approvals + automations) {
-          expect(inbox.getByLabelText(label)).toHaveTextContent(String(approvals + automations));
-        } else expect(inbox.queryByText("+")).toBeNull();
-      } finally {
-        automationInbox.mockRestore();
-      }
-    },
-  );
+  it("counts only pending approvals in the Inbox badge, not comments, unread sessions or failed automations", () => {
+    const automationInbox = vi.spyOn(automationInboxHook, "useAutomationInbox");
+    automationInbox.mockReturnValue({
+      items: [
+        {
+          taskId: "task",
+          taskName: "Report",
+          runId: "run",
+          scheduledAt: 100,
+          finishedAt: 101,
+          errorCode: "host_offline",
+        },
+      ],
+      hasNextPage: true,
+    } as unknown as ReturnType<typeof automationInboxHook.useAutomationInbox>);
+    try {
+      seedReadState([{ id: "conv_unread", viewer_last_seen: 199 }]);
+      mockConversations([
+        conv("conv_awaiting", "Claude Code", { pending_elicitations_count: 2 }),
+        conv("conv_unread", "Codex", { status: "idle", updated_at: 200 }),
+      ]);
+      renderSidebar();
+      const badge = within(screen.getByTestId("inbox-button")).getByLabelText(
+        "2 inbox items waiting",
+      );
+      expect(badge).toHaveTextContent(/^2$/);
+    } finally {
+      automationInbox.mockRestore();
+    }
+  });
 
-  it.each(["/", "/inbox"])("counts an unread session in the Inbox badge on %s", (route) => {
+  it.each(["/", "/inbox"])("shows no Inbox badge for unread sessions alone on %s", (route) => {
     seedReadState([{ id: "conv_unread", viewer_last_seen: 199 }]);
     mockConversations([conv("conv_unread", "Codex", { status: "idle", updated_at: 200 })]);
     renderSidebar(true, route);
@@ -1235,8 +1221,8 @@ describe("Sidebar session list", () => {
     const row = screen.getByRole("link", { name: /conv_unread/ }).closest("li")!;
     expect(within(row).getByRole("img", { name: "New messages" })).toBeInTheDocument();
     expect(
-      within(screen.getByTestId("inbox-button")).getByLabelText("1 inbox item waiting"),
-    ).toHaveTextContent("1");
+      within(screen.getByTestId("inbox-button")).queryByLabelText(/inbox items? waiting/),
+    ).toBeNull();
   });
 
   it("lets the active Inbox row show through the count badge", () => {
@@ -4062,22 +4048,6 @@ describe("Sidebar active-row auto-scroll", () => {
 
     const row = screen.getByText("Active draft").closest("li")!;
     expect(within(row).queryByTestId("conversation-draft-indicator")).toBeNull();
-    vi.restoreAllMocks();
-  });
-
-  it("leaves the open session out of the Inbox badge until it is marked unread", () => {
-    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
-    seedReadState([{ id: "conv_active", viewer_last_seen: 199 }]);
-    mockConversations([conv("conv_active", "Codex", { status: "idle", updated_at: 200 })]);
-
-    renderAtRoute("/c/conv_active");
-
-    const inbox = screen.getByTestId("inbox-button");
-    expect(within(inbox).queryByLabelText(/inbox items? waiting/)).toBeNull();
-    act(() => markConversationUnread("conv_active", 200));
-    expect(within(inbox).getByLabelText("1 inbox item waiting")).toHaveTextContent("1");
-    act(() => markConversationRead("conv_active", 200));
-    expect(within(inbox).queryByLabelText(/inbox items? waiting/)).toBeNull();
     vi.restoreAllMocks();
   });
 

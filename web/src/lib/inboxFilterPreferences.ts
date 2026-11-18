@@ -7,7 +7,7 @@ const STORAGE_KEY = "omnigent:inbox-filter";
 /** Which slice of the Inbox is shown. */
 export type InboxFilter = "all" | "unread" | "awaiting";
 
-export const DEFAULT_INBOX_FILTER: InboxFilter = "all";
+export const DEFAULT_INBOX_FILTER: InboxFilter = "awaiting";
 
 const INBOX_FILTERS = new Set<string>(["all", "unread", "awaiting"]);
 

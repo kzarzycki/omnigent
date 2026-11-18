@@ -262,7 +262,7 @@ def test_reused_elicitation_id_requires_approval_only_for_new_request(
     # in-memory page state, so a reload between retries would wash out the very
     # stale verdict the regression is about. Navigate once, never reload.
     page.goto(f"{base_url}/inbox")
-    expect(page.get_by_text("Nothing waiting on you")).to_be_visible(timeout=_REPARK_TIMEOUT_MS)
+    expect(page.get_by_text("No approvals waiting")).to_be_visible(timeout=_REPARK_TIMEOUT_MS)
 
     # Reuse one harness id for both retries and later, different requests.
     eid = f"elicit_claude_{secrets.token_hex(16)}"

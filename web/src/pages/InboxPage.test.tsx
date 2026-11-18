@@ -178,6 +178,21 @@ function renderPage(
   );
 }
 
+function commentItem(): CommentInbox["items"][number] {
+  return {
+    row: conversation({ id: "sess_comment", pending_elicitations_count: 0 }),
+    comment: {
+      id: "cm_1",
+      path: "src/app.ts",
+      body: "Please reconsider this line.",
+      created_by: "alice",
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000_000,
+      status: "draft",
+    } as CommentInbox["items"][number]["comment"],
+  };
+}
+
 function automationInboxStub(overrides: Record<string, unknown> = {}) {
   return {
     items: [],
@@ -192,6 +207,8 @@ function automationInboxStub(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Most tests exercise every kind together; the default-tab tests clear this.
+  localStorage.setItem("omnigent:inbox-filter", "all");
   vi.mocked(automationInboxHook.useAutomationInbox).mockReturnValue(automationInboxStub());
   vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([]));
   vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(commentInboxStub());
@@ -1719,6 +1736,38 @@ describe("InboxPage filter tabs", () => {
     renderPage();
   }
 
+  it("opens on Awaiting response with only approval cards when no tab is stored", async () => {
+    localStorage.clear();
+    renderMixedInbox();
+    expect(await screen.findByTestId("inbox-item")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Awaiting response" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument();
+  });
+
+  it("orders the tabs Awaiting response, Unread, All", () => {
+    renderPage();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Awaiting response",
+      "Unread",
+      "All",
+    ]);
+  });
+
+  it("counts only pending approvals in the header and keeps the full breakdown in its summary", async () => {
+    localStorage.clear();
+    vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(
+      commentInboxStub({ items: [commentItem()] }),
+    );
+    renderMixedInbox();
+    await screen.findByTestId("inbox-item");
+    const summary = screen.getByText("1 approval · 1 comment · 1 unread");
+    expect(summary.parentElement).toHaveAttribute("title", "1 approval · 1 comment · 1 unread");
+    expect(summary.previousElementSibling).toHaveTextContent(/^1$/);
+  });
+
   it("shows every kind under All, then narrows to one kind per tab", async () => {
     renderMixedInbox();
     expect(await screen.findByTestId("inbox-item")).toBeInTheDocument();
@@ -1751,6 +1800,7 @@ describe("InboxPage filter tabs", () => {
 
   it("shows a tab-specific empty state", async () => {
     renderPage();
+    selectTab("All");
     await screen.findByText("Nothing waiting on you");
     selectTab("Unread");
     expect(screen.getByText("You’re all caught up")).toBeInTheDocument();
