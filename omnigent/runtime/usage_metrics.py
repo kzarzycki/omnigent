@@ -63,6 +63,7 @@ def record_usage_growth(
     agent_name: str | None = None,
     project_name: str | None = None,
     role: str | None = None,
+    pr: str | None = None,
     user: str | None = None,
 ) -> None:
     """
@@ -78,6 +79,8 @@ def record_usage_growth(
     :param project_name: Name of the session's project; empty when it has none.
     :param role: The session's ``omni.role`` label, e.g. ``"verifier"``; ``other``
         when it has none.
+    :param pr: The session's ``omni.pr`` label, e.g. ``"123"``; empty when it has
+        none.
     :param user: The session owner's user id, e.g. ``"alice"``; ``unknown``
         when it has none.
     """
@@ -89,6 +92,7 @@ def record_usage_growth(
         "omnigent.agent.name": agent_name or "unknown",
         "omnigent.project.name": project_name or "",
         "omnigent.role": role or "other",
+        "omnigent.pr": pr or "",
         "omnigent.user": user or "unknown",
     }
     for key, token_type in _TOKEN_TYPES.items():
