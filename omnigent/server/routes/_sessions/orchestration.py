@@ -1974,6 +1974,7 @@ def _record_usage_metrics(
     if conv is not None:
         names["harness"] = _resolve_harness(conv)
         names["role"] = (conv.labels or {}).get("omni.role")
+        names["pr"] = (conv.labels or {}).get("omni.pr")
         if conv.host_id and _globals._host_store is not None:
             host = _globals._host_store.get_host(conv.host_id)
             names["host_name"] = host.name if host else None

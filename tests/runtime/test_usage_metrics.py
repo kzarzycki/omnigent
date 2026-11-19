@@ -15,6 +15,7 @@ _UNSPLIT = {
     "omnigent.agent.name": "unknown",
     "omnigent.project.name": "",
     "omnigent.role": "other",
+    "omnigent.pr": "",
     "omnigent.user": "unknown",
 }
 
@@ -60,7 +61,7 @@ def test_usage_growth_and_rate_limits_export(monkeypatch: pytest.MonkeyPatch) ->
     assert points[usage_metrics.RATE_LIMIT_RESETS_AT_METRIC_NAME] == [(window, 17)]
 
 
-def test_usage_growth_carries_harness_host_agent_project_role_and_user(
+def test_usage_growth_carries_harness_host_agent_project_role_pr_and_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = InMemoryMetricReader()
@@ -78,6 +79,7 @@ def test_usage_growth_carries_harness_host_agent_project_role_and_user(
             agent_name="claude",
             project_name="infra",
             role="verifier",
+            pr="123",
             user="alice",
         )
         points = _points(reader)
@@ -91,6 +93,7 @@ def test_usage_growth_carries_harness_host_agent_project_role_and_user(
         "omnigent.agent.name": "claude",
         "omnigent.project.name": "infra",
         "omnigent.role": "verifier",
+        "omnigent.pr": "123",
         "omnigent.user": "alice",
     }
     assert points[usage_metrics.TOKENS_METRIC_NAME] == [({**split, "token.type": "output"}, 3)]
