@@ -23,7 +23,8 @@ pick_approvals() {
 }
 # run_policy: the gate's policy step (POLICY_CMD swaps the policy test, for the check below). It runs "${policy_cmd[@]}" on the picked approvals.py, and fails when the
 # pick fails (a stale pin) or the policy test does; with no approvals.py it logs a skip.
-read -ra policy_cmd <<<"${POLICY_CMD:-uv run --no-sync python $here/gatekeeper-policy-test.py}"
+if [ -n "${POLICY_CMD:-}" ]; then read -ra policy_cmd <<<"$POLICY_CMD"
+else policy_cmd=(uv run --no-sync python "$here/gatekeeper-policy-test.py"); fi
 run_policy() {
   local approvals; approvals=$(pick_approvals) || return 1
   if [ -f "$approvals" ]; then
@@ -126,6 +127,18 @@ touch "$tmp/pin/approvals.py" "$checkout" "$tmp/override.py"
        "OMNIGENT_ENGINEERING_PACK has no approvals.py: $tmp/none/approvals.py
 exit 1" ] \
   || { echo "!! approvals.py selection through the gate's policy step"; exit 1; }
+# the default command keeps a script path with a space as one argument: a fake uv records its arguments
+spaced="$tmp/work tree/.claude/skills/cloud-dev"; mkdir -p "$spaced" "$tmp/fakebin"
+cp "$here/test.sh" "$here/fork-env.sh" "$spaced/"
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "$RECEIVED"\n' > "$tmp/fakebin/uv"; chmod +x "$tmp/fakebin/uv"
+rm -f "$tmp/received"
+env -u OMNIGENT_ENGINEERING_PACK -u OMNIGENT_AGENT_SKILLS OMNIGENT_FORK_OVERLAY=/dev/null POLICY_ONLY=1 \
+  APPROVALS_PY="$tmp/override.py" PATH="$tmp/fakebin:$PATH" RECEIVED="$tmp/received" bash "$spaced/test.sh" >/dev/null 2>&1
+[ "$(cat "$tmp/received" 2>/dev/null)" = "run
+--no-sync
+python
+$spaced/gatekeeper-policy-test.py
+$tmp/override.py" ] || { echo "!! default policy command splits a path with a space"; exit 1; }
 echo "cloud-dev approvals.py selection: ok"
 fi
 run_policy || exit 1
