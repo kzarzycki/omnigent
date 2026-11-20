@@ -63,12 +63,6 @@ async def test_claude_cloud_turn_fills_the_record_and_counters(
                 tracker.note(payload)
             usage = AcpExecutor._usage_from_result({"usage": tracker.take()})
             sessions_routes._accumulate_session_usage({"usage": usage}, session["id"], store)
-            usage_metrics.record_usage_growth(
-                {**usage, "total_cost_usd": usage["cost_usd"]},
-                model=usage["model"],
-                harness="acp:claude-cloud",
-                host_name="claude-cloud",
-            )
         data = reader.get_metrics_data()
     finally:
         usage_metrics._instruments.cache_clear()
@@ -79,16 +73,18 @@ async def test_claude_cloud_turn_fills_the_record_and_counters(
     assert (bucket["input_tokens"], bucket["output_tokens"]) == (40, 150)
     assert bucket["total_cost_usd"] == pytest.approx(0.75)
     assert data is not None
-    tokens = {
-        (
-            dict(p.attributes or {})["token.type"],
-            dict(p.attributes or {})["omnigent.harness"],
-        ): p.value
+    # The relay's own metric emission, not a second call here, produced these series.
+    points = {
+        (metric.name, dict(p.attributes or {}).get("token.type")): (dict(p.attributes), p.value)
         for resource in data.resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
-        if metric.name == usage_metrics.TOKENS_METRIC_NAME
         for p in metric.data.data_points
     }
-    assert tokens[("input", "acp:claude-cloud")] == 40
-    assert tokens[("output", "acp:claude-cloud")] == 150
+    tokens = usage_metrics.TOKENS_METRIC_NAME
+    assert points[(tokens, "input")][1] == 40
+    assert points[(tokens, "output")][1] == 150
+    assert points[(tokens, "cache_read")][1] == 9500
+    assert points[(tokens, "cache_creation")][1] == 800
+    assert points[(usage_metrics.COST_METRIC_NAME, None)][1] == pytest.approx(0.75)
+    assert points[(tokens, "input")][0]["model"] == "claude-opus-4-8[1m]"

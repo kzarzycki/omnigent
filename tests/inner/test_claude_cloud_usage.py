@@ -189,3 +189,19 @@ def test_the_baseline_survives_a_bridge_respawn(
     turn = respawned.usage.take()
     assert turn is not None
     assert (turn["inputTokens"], turn["outputTokens"], turn["costUsd"]) == (10, 30, 0.25)
+
+
+def test_a_cloud_session_adopted_mid_turn_loads_its_saved_baseline(
+    bridge: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh ACP session that learns its cloud id from the replay still reports only growth."""
+    bridge.remember("usage:session_u", json.dumps({"input_tokens": 30, "output_tokens": 120}))
+    adopted = bridge.Session("/", "acp-fresh")
+    adopted.reader = threading.current_thread()
+    adopted.cloud_id = "session_u"  # set by the replay, after the turn started
+    adopted.events.put({"sequence_num": "9", "payload": _STREAM[3]})
+    monkeypatch.setattr(bridge, "update", lambda *_: None)
+    assert bridge._mirror("acp-fresh", adopted, 0) == "end_turn"
+    turn = adopted.usage.take()
+    assert turn is not None
+    assert (turn["inputTokens"], turn["outputTokens"]) == (10, 30)

@@ -1356,6 +1356,8 @@ def _mirror(acp_id: str, s: Session, after: int) -> str:
             quiet = 0  # a CLI that starts before the turn does takes the message instead
         elif quiet is not None:
             quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
+        if s.cloud_id and not s.usage.loaded:  # adopted from the replay or the state file
+            s.usage.load(s.cloud_id)
         s.usage.note(payload)
         updates, done = to_updates(payload)
         for upd in updates:
