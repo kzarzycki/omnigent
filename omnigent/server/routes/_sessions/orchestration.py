@@ -13832,6 +13832,15 @@ async def _create_session_from_existing_agent(
                 runner_owner = runner_router.runner_owner(inherited_runner_id)
                 if runner_owner is not None and runner_owner != user_id:
                     inherited_runner_id = None
+            # An explicit host other than the parent's own places the child there.
+            if inherited_runner_id is not None and body.host_id is not None:
+                from omnigent.runner.routing import routing_host_id
+
+                parent_host_id = await asyncio.to_thread(
+                    routing_host_id, parent_conv, conversation_store, max_ancestor_reads=16
+                )
+                if parent_host_id != body.host_id:
+                    inherited_runner_id = None
 
     registry_labels: dict[str, str] = {}
     if body.mcp_registry_services:
