@@ -79,13 +79,34 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
-# gatekeeper.md as approvals.py reads it: APPROVALS_PY, else the pinned engineering pack's scripts dir
-# (OMNIGENT_ENGINEERING_PACK, so the gate moves only when the pin does), else the moving agent-skills checkout
-scripts=engineering/skills/engineering-loop/scripts
-pack=$("$here/fork-env.sh" OMNIGENT_ENGINEERING_PACK 2>/dev/null)
-if [ -n "$pack" ]; then default="$pack/approvals.py"
-else default=$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)/$scripts/approvals.py; fi
-approvals=${APPROVALS_PY:-$default}
+# gatekeeper.md as approvals.py reads it. pick_approvals prints the script to run: APPROVALS_PY as given,
+# else the pinned engineering pack's approvals.py (OMNIGENT_ENGINEERING_PACK, so the gate moves only when the pin
+# does; a pin without the file fails, never skips), else the moving agent-skills checkout's (empty when unset).
+pick_approvals() {
+  [ -n "${APPROVALS_PY:-}" ] && { echo "$APPROVALS_PY"; return; }
+  local pack; pack=$("$here/fork-env.sh" OMNIGENT_ENGINEERING_PACK 2>/dev/null)
+  if [ -n "$pack" ]; then
+    [ -f "$pack/approvals.py" ] || { echo "OMNIGENT_ENGINEERING_PACK has no approvals.py: $pack/approvals.py" >&2; return 1; }
+    echo "$pack/approvals.py"; return
+  fi
+  local skills; skills=$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)
+  [ -n "$skills" ] && echo "$skills/engineering/skills/engineering-loop/scripts/approvals.py"
+  return 0
+}
+# which approvals.py the gate selects: pin over checkout, checkout when no pin, override over both, a stale pin fails
+sel() { env -u APPROVALS_PY -u OMNIGENT_ENGINEERING_PACK -u OMNIGENT_AGENT_SKILLS OMNIGENT_FORK_OVERLAY=/dev/null "$@" bash -c "$(declare -f pick_approvals); here='$here'; pick_approvals" 2>&1; }
+mkdir -p "$tmp/pin" "$tmp/skills/engineering/skills/engineering-loop/scripts"
+checkout="$tmp/skills/engineering/skills/engineering-loop/scripts/approvals.py"
+touch "$tmp/pin/approvals.py" "$checkout"
+[ "$(sel OMNIGENT_ENGINEERING_PACK="$tmp/pin" OMNIGENT_AGENT_SKILLS="$tmp/skills")" = "$tmp/pin/approvals.py" ] \
+  && [ "$(sel OMNIGENT_AGENT_SKILLS="$tmp/skills")" = "$checkout" ] \
+  && [ "$(sel APPROVALS_PY=/x/override.py OMNIGENT_ENGINEERING_PACK="$tmp/pin")" = /x/override.py ] \
+  && [ -z "$(sel)" ] \
+  && { stale=$(sel OMNIGENT_ENGINEERING_PACK="$tmp/none" OMNIGENT_AGENT_SKILLS="$tmp/skills"); rc=$?; \
+       [ "$rc" != 0 ] && [ "$stale" = "OMNIGENT_ENGINEERING_PACK has no approvals.py: $tmp/none/approvals.py" ]; } \
+  || { echo "!! approvals.py selection"; exit 1; }
+echo "cloud-dev approvals.py selection: ok"
+approvals=$(pick_approvals) || exit 1
 if [ -f "$approvals" ]; then
   uv run --no-sync python "$here/gatekeeper-policy-test.py" "$approvals" >"$tmp/policy.log" 2>&1 \
     || { cat "$tmp/policy.log"; exit 1; }
