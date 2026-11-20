@@ -1741,6 +1741,8 @@ def _publish_elicitation_resolved_to_ancestors(
     elicitation_id: str,
     action: str | None = None,
     reason: str | None = None,
+    resolved_by: str | None = None,
+    choices: dict[str, str] | None = None,
 ) -> None:
     """
     Mirror an elicitation-resolved event into each ancestor stream.
@@ -1754,6 +1756,9 @@ def _publish_elicitation_resolved_to_ancestors(
         mirrors; see :func:`_publish_elicitation_resolved`.
     :param reason: Optional no-verdict reason carried through to the
         mirrors; see :func:`_publish_elicitation_resolved`.
+    :param resolved_by: Optional resolving ancestor session carried through
+        to the mirrors; see :func:`_publish_elicitation_resolved`.
+    :param choices: Optional choices carried through to the mirrors.
     """
     ancestor_ids = _ancestor_session_ids(conv_store, session_id)
     with _ancestor_elicitation_mirror_lock:
@@ -1761,7 +1766,12 @@ def _publish_elicitation_resolved_to_ancestors(
             return  # The child re-asked under this id; its request mirror owns the card.
         for ancestor_id in ancestor_ids:
             _publish_elicitation_resolved(
-                ancestor_id, elicitation_id, action=action, reason=reason
+                ancestor_id,
+                elicitation_id,
+                action=action,
+                reason=reason,
+                resolved_by=resolved_by,
+                choices=choices,
             )
 
 
@@ -3517,6 +3527,8 @@ def _publish_elicitation_resolved(
     elicitation_id: str,
     action: str | None = None,
     reason: str | None = None,
+    resolved_by: str | None = None,
+    choices: dict[str, str] | None = None,
 ) -> None:
     """
     Universal "approval done" signal — single publish drives both
@@ -3538,11 +3550,19 @@ def _publish_elicitation_resolved(
         it. Omitted when unknown, not a recognised reason, or when a
         verdict is present — a verdict and a no-verdict reason are
         mutually exclusive on the wire.
+    :param resolved_by: Ancestor session that resolved a question card
+        instead of its user, e.g. ``"conv_parent1"``, so the card can say so.
+    :param choices: With ``resolved_by``, the choice per question label, e.g.
+        ``{"Release": "Yes"}``, so the card can show what was chosen.
     """
     payload: dict[str, Any] = {
         "type": "response.elicitation_resolved",
         "elicitation_id": elicitation_id,
     }
+    if resolved_by:
+        payload["resolved_by"] = resolved_by
+        if choices:
+            payload["choices"] = choices
     if action in _VALID_ELICITATION_ACTIONS:
         payload["action"] = action
     elif reason in _VALID_ELICITATION_RESOLVED_REASONS:

@@ -34,6 +34,7 @@ from omnigent.tools.builtins import (
     SysProjectUpdateTool,
     SysReadAnswerTool,
     SysReadInboxTool,
+    SysResolveQuestionTool,
     SysScheduledTaskCreateTool,
     SysScheduledTaskDeleteTool,
     SysScheduledTaskListTool,
@@ -528,6 +529,7 @@ class ToolManager:
         for tool in (
             SysAskUserQuestionTool(),
             SysReadAnswerTool(),
+            SysResolveQuestionTool(),
             SysSessionKeepTool(),
             SysSessionSubscribeTool(),
             SysSessionUnsubscribeTool(),

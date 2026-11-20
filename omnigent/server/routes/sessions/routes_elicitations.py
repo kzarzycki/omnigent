@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
+    Body,
     Request,
 )
 
@@ -51,6 +52,7 @@ from omnigent.server.routes._sessions.helpers import (
     _targeted_elicitation_event,
 )
 from omnigent.server.routes._sessions.orchestration import (
+    _answer_question,
     _own_pending_question,
     _resolve_elicitation,
 )
@@ -71,6 +73,9 @@ from omnigent.tools.builtins.ask_user_question import QUESTION_ID_PREFIX, SysAsk
 # two paths must stay at the same level. Raising it to owner is a product
 # decision that needs a "waiting for the owner" UI state first.
 ELICITATION_RESOLVE_LEVEL: int = LEVEL_EDIT
+
+# Longest note an ancestor session may leave with a resolved question.
+MAX_RESOLVE_NOTE_CHARS = 500
 
 
 def register_elicitations_routes(
@@ -245,6 +250,108 @@ def register_elicitations_routes(
         )
         return {"question_id": question_id, "status": "waiting"}
 
+    @router.post(
+        "/sessions/{resolver_id}/questions/{question_id}/resolve",
+        # Runner-side tool endpoint — hidden from the public API reference.
+        include_in_schema=False,
+        status_code=202,
+        response_model=None,
+    )
+    async def resolve_descendant_question(
+        request: Request,
+        resolver_id: str,
+        question_id: str,
+        body: Annotated[Any, Body()] = None,
+    ) -> dict[str, bool]:
+        """
+        Resolve a descendant session's question card on behalf of an ancestor session.
+
+        The asking session is told in its message and in ``sys_read_answer`` that
+        another session, not its user, resolved the card.
+
+        :param request: The inbound request, used for identity extraction.
+        :param resolver_id: The ancestor session resolving, e.g. ``"conv_parent1"``.
+        :param question_id: The card's id, e.g. ``"question_0f3a..."``.
+        :param body: ``{"session_id", "action": "dismiss" | "answer", "answers"?, "note"?}``;
+            ``answers`` maps question text or header to a label (or list of labels).
+        :returns: ``{"queued": False}``.
+        :raises OmnigentError: 404 if a session is missing; 400 when the session is
+            not a descendant of the resolver, is the resolver itself, has no open card
+            with that id, or the body is malformed.
+        """
+        user_id = _get_user_id(request, auth_provider)
+        if not isinstance(body, dict):
+            raise OmnigentError("body must be a JSON object", code=ErrorCode.INVALID_INPUT)
+        child_id = body.get("session_id")
+        action = body.get("action")
+        answers = body.get("answers")
+        note = body.get("note")
+        if not isinstance(child_id, str) or not child_id:
+            raise OmnigentError("session_id is required", code=ErrorCode.INVALID_INPUT)
+        if action not in ("dismiss", "answer"):
+            raise OmnigentError(
+                "action must be 'dismiss' or 'answer'", code=ErrorCode.INVALID_INPUT
+            )
+        if action == "answer" and not (
+            isinstance(answers, dict)
+            and answers
+            and all(
+                isinstance(value, str)
+                or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+                for value in answers.values()
+            )
+        ):
+            raise OmnigentError(
+                "answer needs a non-empty 'answers' mapping to a label or a list of labels",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if note is not None and (not isinstance(note, str) or len(note) > MAX_RESOLVE_NOTE_CHARS):
+            raise OmnigentError(
+                f"note must be a string of at most {MAX_RESOLVE_NOTE_CHARS} characters",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        for session_id in (resolver_id, child_id):
+            access = await _require_access_and_level(
+                user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+            )
+            if access.conversation is None:
+                conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                if conv is None:
+                    raise _session_not_found()
+        if child_id == resolver_id:
+            raise OmnigentError(
+                "A session cannot resolve its own question; its user answers it",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        ancestors = await asyncio.to_thread(_ancestor_session_ids, conversation_store, child_id)
+        if resolver_id not in ancestors:
+            raise OmnigentError(
+                "Only an ancestor session can resolve a descendant's question",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if _own_pending_question(question_id, child_id) is None:
+            await open_questions.restore_session(conversation_store, child_id)
+        if _own_pending_question(question_id, child_id) is None:
+            raise OmnigentError(
+                "The session has no open question with that id", code=ErrorCode.INVALID_INPUT
+            )
+        verdict = (
+            {"action": "accept", "content": answers}
+            if action == "answer"
+            else {"action": "cancel"}
+        )
+        post_message = getattr(request.app.state, "post_server_message", None)
+        await _answer_question(
+            child_id,
+            question_id,
+            verdict,
+            conversation_store,
+            (lambda text: post_message(child_id, user_id, text)) if post_message else None,
+            resolved_by=resolver_id,
+            note=note or None,
+        )
+        return {"queued": False}
+
     @router.get(
         "/sessions/{session_id}/questions/{question_id}",
         # Runner-side tool endpoint — hidden from the public API reference.
@@ -267,7 +374,9 @@ def register_elicitations_routes(
         :param question_id: The id ``sys_ask_user_question`` returned,
             e.g. ``"question_0f3a..."``.
         :returns: ``{"question_id", "status"}`` with ``status`` ``"answered"``
-            (plus ``action`` and ``choices``, label to choice), ``"waiting"`` while the card is
+            (plus ``action`` and ``choices``, label to choice), ``"resolved_by_session"``
+            (the same fields plus ``resolved_by`` and ``note``) when an ancestor session
+            resolved the card instead of the user, ``"waiting"`` while the card is
             open, or ``"unknown"`` for an id this session's user never answered.
         :raises OmnigentError: 404 if no session exists.
         """
@@ -280,6 +389,16 @@ def register_elicitations_routes(
             if conv is None:
                 raise _session_not_found()
         answer = question_answers.lookup(question_id, session_id=session_id)
+        if answer is not None and answer.resolved_by:
+            # Another session resolved it: never ``answered``, which means the user did.
+            return {
+                "question_id": question_id,
+                "status": "resolved_by_session",
+                "resolved_by": answer.resolved_by,
+                "action": answer.action,
+                "choices": answer.choices,
+                **({"note": answer.note} if answer.note else {}),
+            }
         if answer is not None:
             return {
                 "question_id": question_id,

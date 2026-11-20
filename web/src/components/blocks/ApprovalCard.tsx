@@ -227,6 +227,8 @@ interface ApprovalCardProps {
     action: "accept" | "decline" | "cancel" | "auto_resolved";
     /** Why an `auto_resolved` card has no verdict; see `ElicitationBlock`. */
     reason?: "unanswered";
+    /** Ancestor session that resolved this card instead of the user. */
+    resolvedBy?: string;
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
   } | null;
@@ -793,7 +795,13 @@ export function ApprovalCard({
 
     let icon = <XIcon className="size-4 text-destructive" />;
     let label = isExitPlanMode ? "Plan rejected" : "Rejected";
-    if (promptExpired) {
+    if (response.resolvedBy) {
+      // Another session decided; never present it as the user's answer.
+      icon = <InfoIcon className="size-4 text-muted-foreground" />;
+      label = `Resolved by session ${response.resolvedBy} · ${
+        response.action === "cancel" ? "dismissed" : "answered"
+      }`;
+    } else if (promptExpired) {
       // The server cleared the prompt because the hook stopped waiting
       // before anyone answered (a severed poll never re-parked, the ask
       // timed out). Nothing was decided, so say so and tell the user how

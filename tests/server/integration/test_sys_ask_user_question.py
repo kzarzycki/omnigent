@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
@@ -20,7 +21,7 @@ from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store import MAX_OPEN_QUESTIONS
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
-from tests.server.helpers import create_test_session
+from tests.server.helpers import create_test_session, start_session_stream_collector
 from tests.server.integration import test_session_subscriptions as _subscriptions
 
 # The subscription scenario's fake runner records every message a session is sent.
@@ -479,6 +480,203 @@ async def test_a_descendants_question_is_no_ancestors_to_read_or_answer(
     assert (await _read_answer(client, asking, question_id))["status"] == "answered"
     for ancestor in (parent, grandparent["id"]):
         assert (await _read_answer(client, ancestor, question_id))["status"] == "unknown"
+
+
+async def _resolve(
+    client: httpx.AsyncClient, resolver: str, child: str, question_id: str, **body: Any
+) -> httpx.Response:
+    return await client.post(
+        f"/v1/sessions/{resolver}/questions/{question_id}/resolve",
+        json={"session_id": child, **body},
+    )
+
+
+async def test_an_ancestor_dismisses_a_descendants_card(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    grandparent = await create_test_session(client)
+    parent = _child_of(db_uri, grandparent)
+    asking = _child_of(db_uri, {"id": parent, "agent_id": grandparent["agent_id"]})
+    question_id = await _ask(client, asking, _question("Ship it?", "Yes", "No"))
+
+    response = await _resolve(
+        client, grandparent["id"], asking, question_id, action="dismiss", note="Not now"
+    )
+
+    assert response.status_code == 202, response.text
+    assert runner.notices(asking) == [
+        f"[answer to {question_id}] Not your user's answer: session {grandparent['id']} "
+        f"resolved this card.\n[answer to {question_id}] Ship it?: (dismissed without an answer)"
+        f"\n[answer to {question_id}] Note from that session: Not now"
+    ]
+    assert await _pending_questions(client, asking) == []
+    assert pending_elicitations.lookup(question_id, conversation_id=parent) is None
+    assert await _read_answer(client, asking, question_id) == {
+        "question_id": question_id,
+        "status": "resolved_by_session",
+        "resolved_by": grandparent["id"],
+        "action": "cancel",
+        "choices": {"Ship it?": "(dismissed without an answer)"},
+        "note": "Not now",
+    }
+
+
+async def test_an_ancestor_answers_a_descendants_card(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question_id = await _ask(client, asking, _question("Ship it?", "Yes", "No"))
+
+    response = await _resolve(
+        client, parent["id"], asking, question_id, action="answer", answers={"Ship it?": "Yes"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert runner.notices(asking) == [
+        f"[answer to {question_id}] Not your user's answer: session {parent['id']} "
+        f"resolved this card.\n[answer to {question_id}] Ship it?: Yes"
+    ]
+    status = await _read_answer(client, asking, question_id)
+    assert status["status"] == "resolved_by_session"
+    assert status["resolved_by"] == parent["id"]
+    assert status["choices"] == {"Ship it?": "Yes"}
+
+
+async def test_an_ancestor_answers_by_header_and_the_event_carries_the_choice(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question = {**_question("Ship it?", "Yes", "No"), "header": "Release"}
+    question_id = await _ask(client, asking, question)
+    collector = await start_session_stream_collector(asking)
+    parent_collector = await start_session_stream_collector(parent["id"])
+
+    response = await _resolve(
+        client, parent["id"], asking, question_id, action="answer", answers={"Release": "Yes"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert (await _read_answer(client, asking, question_id))["choices"] == {"Release": "Yes"}
+    async with asyncio.timeout(5):
+        event = await collector.next_event()
+        while event["type"] != "response.elicitation_resolved":
+            event = await collector.next_event()
+    assert (event["action"], event["resolved_by"], event["choices"]) == (
+        "accept",
+        parent["id"],
+        {"Release": "Yes"},
+    )
+    async with asyncio.timeout(5):
+        mirrored = await parent_collector.next_event()
+        while mirrored["type"] != "response.elicitation_resolved":
+            mirrored = await parent_collector.next_event()
+    assert mirrored["choices"] == {"Release": "Yes"}
+
+
+async def test_an_ancestor_answers_by_question_id(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question = {**_question("Ship it?", "Yes", "No"), "id": "pick"}
+    question_id = await _ask(client, asking, question)
+
+    response = await _resolve(
+        client, parent["id"], asking, question_id, action="answer", answers={"pick": "Yes"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert (await _read_answer(client, asking, question_id))["choices"] == {"Ship it?": "Yes"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {"action": "answer", "answers": {"Ship it?": 42}},
+        {"action": "dismiss", "note": "a" * 501},
+    ],
+)
+async def test_a_malformed_resolve_body_is_refused_and_the_card_stays_open(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str, payload: Any
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question_id = await _ask(client, asking, _question("Ship it?", "Yes", "No"))
+    if isinstance(payload, dict):
+        payload = {"session_id": asking, **payload}
+
+    response = await client.post(
+        f"/v1/sessions/{parent['id']}/questions/{question_id}/resolve", json=payload
+    )
+
+    assert response.status_code == 400, response.text
+    assert (await _read_answer(client, asking, question_id))["status"] == "waiting"
+
+
+async def test_a_500_character_note_is_accepted(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question_id = await _ask(client, asking, _question("Ship it?", "Yes", "No"))
+
+    response = await _resolve(
+        client, parent["id"], asking, question_id, action="dismiss", note="a" * 500
+    )
+
+    assert response.status_code == 202, response.text
+    assert (await _read_answer(client, asking, question_id))["note"] == "a" * 500
+
+
+async def test_resolving_is_refused_without_touching_the_card(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    other = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    own = await _ask(client, parent["id"], _question("Mine?", "Yes", "No"))
+    question_id = await _ask(client, asking, _question("Ship it?", "Yes", "No"))
+
+    refused = [
+        # Not a descendant: a sibling tree, and a child resolving its parent.
+        await _resolve(client, other["id"], asking, question_id, action="dismiss"),
+        await _resolve(client, asking, parent["id"], own, action="dismiss"),
+        # The caller's own card.
+        await _resolve(client, parent["id"], parent["id"], own, action="dismiss"),
+        # No such open card, and a malformed verdict.
+        await _resolve(client, parent["id"], asking, "question_nope", action="dismiss"),
+        await _resolve(client, parent["id"], asking, question_id, action="answer"),
+    ]
+
+    assert [response.status_code for response in refused] == [400] * 5
+    assert runner.notices(asking) == []
+    assert (await _read_answer(client, asking, question_id))["status"] == "waiting"
+    assert (await _read_answer(client, parent["id"], own))["status"] == "waiting"
+
+
+async def test_the_users_own_answer_is_not_marked_as_another_sessions(
+    client: httpx.AsyncClient, runner: _Runner
+) -> None:
+    session = (await create_test_session(client))["id"]
+    question_id = await _ask(client, session, _question("Ship it?", "Yes", "No"))
+
+    answered = await client.post(
+        f"/v1/sessions/{session}/elicitations/{question_id}/resolve",
+        json={"action": "accept", "content": {"Ship it?": "Yes"}},
+    )
+
+    assert answered.status_code == 202, answered.text
+    assert runner.notices(session) == [f"[answer to {question_id}] Ship it?: Yes"]
+    assert await _read_answer(client, session, question_id) == {
+        "question_id": question_id,
+        "status": "answered",
+        "action": "accept",
+        "choices": {"Ship it?": "Yes"},
+    }
 
 
 async def test_a_card_restored_after_a_restart_reads_back_as_waiting(

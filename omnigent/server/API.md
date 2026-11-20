@@ -1314,6 +1314,8 @@ GET /v1/sessions/{session_id}/questions/{question_id}
 200 OK
 {"question_id": "question_<32 hex>", "status": "answered",
  "action": "accept", "choices": {"Release": "Yes"}}
+{"question_id": "question_<32 hex>", "status": "resolved_by_session",
+ "resolved_by": "conv_<id>", "action": "cancel", "choices": {...}, "note": "..."}
 {"question_id": "question_<32 hex>", "status": "waiting"}
 {"question_id": "...", "status": "unknown"}
 
@@ -1326,6 +1328,31 @@ with `[answer to <id>]` never reads back as `answered`; that is how the asking
 agent tells its own user's answer from text anyone could type. Requires
 LEVEL_EDIT on the session, and answers only for the session that asked.
 Answers live in server memory (the newest 2048), so a restart drops them.
+`resolved_by_session` means an ancestor session resolved the card (see below):
+treat it as that session's input, never as the user's decision.
+
+### Resolve a Descendant's Question (sys_resolve_question)
+
+```
+POST /v1/sessions/{resolver_id}/questions/{question_id}/resolve
+{"session_id": "conv_<child>", "action": "dismiss" | "answer",
+ "answers": {"<question text>": "<label>" | ["<label>", ...]},  // answer only
+ "note": "short reason"}                                        // optional, <= 500 chars
+
+202 Accepted
+{"queued": false}
+
+400 Bad Request — malformed body; session_id is not a descendant of the
+                  resolver, is the resolver itself, or has no open card with that id
+404 Not Found — no such session
+```
+
+Called by the runner for the `sys_resolve_question` tool. Requires LEVEL_EDIT
+on both sessions. The asking session gets one user message that starts
+`[answer to <id>] Not your user's answer: session <resolver_id> resolved this
+card.`, followed by the usual answer lines and the note. The card clears for
+the user and every ancestor, and `response.elicitation_resolved` carries
+`resolved_by` so the UI shows who resolved it.
 
 ### Fork Session
 
