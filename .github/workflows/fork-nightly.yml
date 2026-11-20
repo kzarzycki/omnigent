@@ -1,6 +1,7 @@
 name: Fork nightly
 
-# Fork only. Runs the full unit suite on mine; a red run opens (or updates) a
+# Fork only. Runs the full unit suite on the commit the run starts from (mine on a
+# schedule; dispatch it with --ref mine); a red run opens (or updates) a
 # "Nightly red since <sha>" issue through the engineering pack's nightly.py
 # (vendored in .claude/skills/cloud-dev/nightly/, see SYNC.md there).
 
@@ -8,10 +9,6 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch or commit to run (default: mine)"
-        default: mine
 
 permissions:
   contents: read
@@ -22,12 +19,11 @@ permissions:
 jobs:
   full-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 300
     steps:
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ inputs.ref || 'mine' }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -56,7 +52,7 @@ jobs:
         run: |
           red=$(git rev-parse HEAD)
           # newest earlier green nightly's commit; none yet -> the oldest of the last 20 merges
-          green=$(gh run list --workflow fork-nightly.yml --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+          green=$(gh run list --workflow fork-nightly.yml --branch mine --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
           if [ -z "$green" ] || ! git merge-base --is-ancestor "$green" "$red"; then
             green=$(git rev-list --first-parent -n 20 "$red" | tail -1)
           fi
