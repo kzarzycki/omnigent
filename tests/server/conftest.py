@@ -453,8 +453,14 @@ def _reset_elicitation_state() -> Iterator[None]:
     all subsequent tests, which breaks tests whose stub stores
     don't implement ``list_conversations`` and adds spurious DB walks
     to everything else.
+
+    ``_intentional_stop_sessions`` is cleared before and after as well: a
+    successful stop leaves its marker until the TTL, and a later test that
+    asserts the cache's exact contents would otherwise see it.
     """
+    sessions_routes._intentional_stop_sessions.clear()
     yield
+    sessions_routes._intentional_stop_sessions.clear()
     pending_elicitations.reset_for_tests()
     _elicitation_registry.reset_for_tests()
     # create_app wires subscriptions to this test's stores; unwire them.
