@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from omnigent.llms.context_window import ModelPricing
+from omnigent.server.routes._sessions.orchestration import _context_labels_from_turn_usage
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.inner.claude_cloud_stream import STREAM
 from tests.server.helpers import create_test_agent
@@ -63,6 +64,8 @@ async def test_claude_cloud_turn_fills_the_record_and_counters(
                 tracker.note(payload)
             usage = AcpExecutor._usage_from_result({"usage": tracker.take()})
             sessions_routes._accumulate_session_usage({"usage": usage}, session["id"], store)
+            # The relay persists the window-fill labels beside the accumulation.
+            store.set_labels(session["id"], _context_labels_from_turn_usage(usage))
         data = reader.get_metrics_data()
     finally:
         usage_metrics._instruments.cache_clear()
@@ -72,6 +75,10 @@ async def test_claude_cloud_turn_fills_the_record_and_counters(
     bucket = recorded["by_model"]["claude-opus-4-8[1m]"]
     assert (bucket["input_tokens"], bucket["output_tokens"]) == (40, 150)
     assert bucket["total_cost_usd"] == pytest.approx(0.75)
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+    assert snapshot["last_total_tokens"] == 4510  # the last assistant message's window fill
+    assert snapshot["context_window"] == 1_000_000
+    assert snapshot["usage_by_model"]["claude-opus-4-8[1m]"]["output_tokens"] == 150
     assert data is not None
     # The relay's own metric emission, not a second call here, produced these series.
     points = {
