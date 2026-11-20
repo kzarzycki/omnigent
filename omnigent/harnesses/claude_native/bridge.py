@@ -11862,19 +11862,24 @@ def _assistant_transcript_items_from_entry(
             # same expandable reasoning context the TUI renders. Redacted
             # thinking carries no readable text anywhere, so it stays dropped.
             thinking = block.get("thinking")
-            if isinstance(thinking, str) and thinking.strip() and visible_summary:
+            if not isinstance(thinking, str) or not thinking.strip():
+                continue
+            if visible_summary:
                 # Claude Code shows "updates"-mode thinking as a progress
-                # line in the terminal, so mirror it as assistant text.
+                # line in the terminal, so mirror it as assistant text, verbatim.
                 items.append(
-                    _assistant_message_item(
-                        source_key=source_key,
-                        item_index=item_index,
-                        agent_name=agent_name,
+                    ClaudeTranscriptItem(
+                        source_id=_source_id(source_key, item_index, "message"),
+                        item_type="message",
+                        data={
+                            "role": "assistant",
+                            "agent": agent_name,
+                            "content": [{"type": "output_text", "text": thinking.strip()}],
+                        },
                         response_id=response_id,
-                        text=thinking.strip(),
                     )
                 )
-            elif isinstance(thinking, str) and thinking.strip():
+            else:
                 items.append(
                     ClaudeTranscriptItem(
                         source_id=_source_id(source_key, item_index, "reasoning"),

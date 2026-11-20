@@ -1439,6 +1439,12 @@ def test_read_transcript_items_since_shows_updates_thinking_as_assistant_text(
                     thinkingDisplay="updates",
                     apiBlockIndex=1,
                 ),
+                entry(
+                    "a-1b",
+                    "Prompt is too long to test in one pass. I will split it into cases.",
+                    thinkingDisplay="updates",
+                    apiBlockIndex=2,
+                ),
                 entry("a-2", "plain hidden thought"),
             ]
         )
@@ -1452,8 +1458,8 @@ def test_read_transcript_items_since_shows_updates_thinking_as_assistant_text(
         agent_name="claude-native-ui",
     )
 
-    assert [item.item_type for item in items] == ["message", "reasoning"]
-    summary, hidden = items
+    assert [item.item_type for item in items] == ["message", "message", "reasoning"]
+    summary, verbatim, hidden = items
     assert summary.data == {
         "role": "assistant",
         "agent": "claude-native-ui",
@@ -1464,6 +1470,12 @@ def test_read_transcript_items_since_shows_updates_thinking_as_assistant_text(
             }
         ],
     }
+    assert verbatim.data["content"] == [
+        {
+            "type": "output_text",
+            "text": "Prompt is too long to test in one pass. I will split it into cases.",
+        }
+    ], "a summary must not be rewritten into the context-limit error"
     assert hidden.data["content"] == [{"type": "reasoning_text", "text": "plain hidden thought"}]
 
 
