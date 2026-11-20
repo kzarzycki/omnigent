@@ -74,6 +74,7 @@ def test_misconfiguration_refuses_to_start(
         (["-c", 'sandbox_mode="danger-full-access"'], True),
         (["--config=sandbox_mode=danger-full-access"], True),
         (["-c", 'default_permissions=":danger-full-access"'], True),
+        (["-c", 'default_permissions=":danger-full-access"', "-a", "on-request"], True),
         (["-a", "never"], True),
         (["--ask-for-approval=never"], True),
         (["-c", 'approval_policy="never"'], True),
