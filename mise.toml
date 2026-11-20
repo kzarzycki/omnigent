@@ -24,3 +24,8 @@ run = [
   "bash .claude/skills/cloud-dev/test.sh",
   "python3 integrations/claude-cloud-acp/claude_cloud_acp.py --self-check",
 ]
+
+[tasks."check-fast"]
+depends = ["check:all"]
+description = "check:all, then pytest on the tests the change touches (.claude/skills/cloud-dev/affected_tests.py: from GATE_BASE, else the merge base with origin/mine). loop.md's `Affected tests:` command; the full suite is `uv run pytest -n auto --dist=loadfile`."
+run = "bash .claude/skills/cloud-dev/run-affected-tests.sh"

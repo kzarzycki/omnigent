@@ -78,6 +78,7 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
   || { echo "!! fork-env.sh: $(cat "$tmp/err" 2>/dev/null)"; exit 1; }
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
+python3 "$here/affected-tests-test.py" || exit 1
 # gatekeeper.md as approvals.py reads it: the host's agent-skills checkout, or APPROVALS_PY
 approvals=${APPROVALS_PY:-$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)/engineering/skills/engineering-loop/scripts/approvals.py}
 if [ -f "$approvals" ]; then
