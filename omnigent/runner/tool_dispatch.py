@@ -74,7 +74,11 @@ from omnigent.runtime.mcp_tool_result import encode_mcp_image_result, native_ima
 from omnigent.tools import ToolManager
 from omnigent.tools.base import Tool, ToolContext
 from omnigent.tools.builtins._arguments import parse_json_object_arguments
-from omnigent.tools.builtins.ask_user_question import SysAskUserQuestionTool, SysReadAnswerTool
+from omnigent.tools.builtins.ask_user_question import (
+    SysAskUserQuestionTool,
+    SysReadAnswerTool,
+    SysResolveQuestionTool,
+)
 from omnigent.tools.builtins.async_inbox import (
     SysCallAsyncTool,
     SysCancelAsyncTool,
@@ -361,7 +365,9 @@ _PROJECT_TOOLS = frozenset(
 _UI_TOOLS = frozenset({UiOpenFileTool.name()})
 
 _SESSION_KEEP_TOOLS = frozenset({SysSessionKeepTool.name()})
-_ASK_USER_QUESTION_TOOLS = frozenset({SysAskUserQuestionTool.name(), SysReadAnswerTool.name()})
+_ASK_USER_QUESTION_TOOLS = frozenset(
+    {SysAskUserQuestionTool.name(), SysReadAnswerTool.name(), SysResolveQuestionTool.name()}
+)
 
 _SESSION_SUBSCRIPTION_TOOLS = frozenset(
     {
@@ -663,6 +669,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionKeepTool,
             SysAskUserQuestionTool,
             SysReadAnswerTool,
+            SysResolveQuestionTool,
             SysSessionSubscribeTool,
             SysSessionUnsubscribeTool,
             SysSessionSubscriptionsTool,
@@ -6896,6 +6903,37 @@ async def _read_answer_via_rest(
         return json.dumps({"error": f"{tool_name} returned invalid JSON: {exc}"})
 
 
+async def _resolve_question_via_rest(
+    args: _JsonObject,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """Ask the server to resolve a descendant's card on behalf of the calling session."""
+    tool_name = SysResolveQuestionTool.name()
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": f"{tool_name} requires a session id"})
+    question_id = args.get("question_id")
+    if not isinstance(question_id, str) or not question_id.strip():
+        return json.dumps({"error": f"{tool_name} requires a string 'question_id'"})
+    body = {key: args[key] for key in ("session_id", "action", "answers", "note") if key in args}
+    path = quote(question_id.strip(), safe="")
+    try:
+        response = await server_client.post(
+            f"{_session_url(conversation_id)}/questions/{path}/resolve",
+            json=body,
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if response.status_code >= 400:
+        return json.dumps(
+            {"error": f"{tool_name} returned {response.status_code}: {response.text[:500]}"}
+        )
+    return json.dumps({"status": "resolved", "question_id": question_id.strip()})
+
+
 async def _rename_current_session_via_rest(
     args: _JsonObject,
     conversation_id: str | None,
@@ -7838,6 +7876,8 @@ async def execute_tool(
             output = await _keep_current_session_via_rest(args, conversation_id, server_client)
         elif tool_name == SysReadAnswerTool.name():
             output = await _read_answer_via_rest(args, conversation_id, server_client)
+        elif tool_name == SysResolveQuestionTool.name():
+            output = await _resolve_question_via_rest(args, conversation_id, server_client)
         elif tool_name in _ASK_USER_QUESTION_TOOLS:
             output = await _ask_user_question_via_rest(args, conversation_id, server_client)
         elif tool_name in _SESSION_SUBSCRIPTION_TOOLS:

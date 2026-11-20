@@ -1192,6 +1192,9 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       // Only a verdict-less clear may say why: "unanswered" means the
       // prompt expired, so the card can tell the user what to do next.
       ...(!hasVerdict && data.reason === "unanswered" ? { reason: data.reason } : {}),
+      ...(typeof data.resolved_by === "string" && data.resolved_by
+        ? { resolvedBy: data.resolved_by }
+        : {}),
     } satisfies ElicitationResolved;
   }
 

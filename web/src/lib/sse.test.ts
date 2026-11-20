@@ -545,6 +545,20 @@ describe("parseEvent — response.elicitation_resolved", () => {
     } satisfies ElicitationResolved);
   });
 
+  it("keeps the session that resolved the card instead of the user", () => {
+    const ev = parseEvent("response.elicitation_resolved", {
+      elicitation_id: "elic_5",
+      action: "cancel",
+      resolved_by: "conv_parent",
+    });
+    expect(ev).toEqual({
+      type: "elicitation_resolved",
+      elicitationId: "elic_5",
+      action: "cancel",
+      resolvedBy: "conv_parent",
+    } satisfies ElicitationResolved);
+  });
+
   it("keeps the unanswered reason on a verdict-less clear", () => {
     // The server's deferred clear (hook stopped waiting, nobody answered)
     // says why there is no verdict; dropping it rendered the same

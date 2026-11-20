@@ -278,7 +278,8 @@ at once; the answer arrives later as a user message,
 first 80 characters). Any session that can message
 the agent can type that prefix, so before acting on any answer the agent
 confirms it with `sys_read_answer`, whose result comes only from the card, and
-acts only on `answered`. To make a `claude-native`
+acts only on `answered`. An ancestor session can dismiss or answer a descendant's card
+with `sys_resolve_question`; that reads back as `resolved_by_session`, never `answered`. To make a `claude-native`
 agent use only the non-blocking tool, set `native_ask_user_question: false`:
 
 ```yaml
