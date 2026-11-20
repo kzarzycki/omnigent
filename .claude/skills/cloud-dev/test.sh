@@ -7,6 +7,34 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# gatekeeper.md as approvals.py reads it. pick_approvals prints the script to run: APPROVALS_PY as given,
+# else the pinned engineering pack's approvals.py (OMNIGENT_ENGINEERING_PACK, so the gate moves only when the pin
+# does; a pin without the file fails, never skips), else the moving agent-skills checkout's (empty when unset).
+pick_approvals() {
+  [ -n "${APPROVALS_PY:-}" ] && { echo "$APPROVALS_PY"; return; }
+  local pack; pack=$("$here/fork-env.sh" OMNIGENT_ENGINEERING_PACK 2>/dev/null)
+  if [ -n "$pack" ]; then
+    [ -f "$pack/approvals.py" ] || { echo "OMNIGENT_ENGINEERING_PACK has no approvals.py: $pack/approvals.py" >&2; return 1; }
+    echo "$pack/approvals.py"; return
+  fi
+  local skills; skills=$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)
+  [ -n "$skills" ] && echo "$skills/engineering/skills/engineering-loop/scripts/approvals.py"
+  return 0
+}
+# run_policy: the gate's policy step (POLICY_CMD swaps the policy test, for the check below). It runs "${policy_cmd[@]}" on the picked approvals.py, and fails when the
+# pick fails (a stale pin) or the policy test does; with no approvals.py it logs a skip.
+if [ -n "${POLICY_CMD:-}" ]; then read -ra policy_cmd <<<"$POLICY_CMD"
+else policy_cmd=(uv run --no-sync python "$here/gatekeeper-policy-test.py"); fi
+run_policy() {
+  local approvals; approvals=$(pick_approvals) || return 1
+  if [ -f "$approvals" ]; then
+    "${policy_cmd[@]}" "$approvals" >"$tmp/policy.log" 2>&1 || { cat "$tmp/policy.log"; return 1; }
+    tail -1 "$tmp/policy.log"
+  else
+    echo "gatekeeper policy: skipped, no approvals.py (set APPROVALS_PY or OMNIGENT_AGENT_SKILLS)"
+  fi
+}
+if [ -z "${POLICY_ONLY:-}" ]; then
 run() {  # run <bin dir>: setup.sh with only that dir on PATH, so installed tools can't count
   sed -e "s#/tmp/omnigent-dev-init.log#$tmp/init.log#" -e '/^export PATH=/d' \
     -e "s#/home/user#$tmp/user#g" -e 's#^warm_up_seconds=.*#warm_up_seconds=1#' "$here/setup.sh" > "$tmp/setup.sh"
@@ -79,12 +107,38 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
-# gatekeeper.md as approvals.py reads it: the host's agent-skills checkout, or APPROVALS_PY
-approvals=${APPROVALS_PY:-$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)/engineering/skills/engineering-loop/scripts/approvals.py}
-if [ -f "$approvals" ]; then
-  uv run --no-sync python "$here/gatekeeper-policy-test.py" "$approvals" >"$tmp/policy.log" 2>&1 \
-    || { cat "$tmp/policy.log"; exit 1; }
-  tail -1 "$tmp/policy.log"
-else
-  echo "gatekeeper policy: skipped, no approvals.py (set APPROVALS_PY or OMNIGENT_AGENT_SKILLS)"
+# the approvals.py the policy test receives through the gate's own last line (POLICY_ONLY=1 skips the rest of
+# this script): pin over checkout, checkout when no pin, override over both, a stale pin exits nonzero
+printf 'echo "$1" > "$RECEIVED"\n' > "$tmp/stub.sh"
+got() {  # got <env assignments>: this script's policy step with a stub policy test; prints what the stub received
+  rm -f "$tmp/received"
+  env -u APPROVALS_PY -u OMNIGENT_ENGINEERING_PACK -u OMNIGENT_AGENT_SKILLS OMNIGENT_FORK_OVERLAY=/dev/null \
+    POLICY_ONLY=1 POLICY_CMD="bash $tmp/stub.sh" RECEIVED="$tmp/received" "$@" bash "$here/test.sh" 2>&1 \
+    || { echo "exit $?"; return 0; }
+  cat "$tmp/received" 2>/dev/null
+}
+mkdir -p "$tmp/pin" "$tmp/skills/engineering/skills/engineering-loop/scripts"
+checkout="$tmp/skills/engineering/skills/engineering-loop/scripts/approvals.py"
+touch "$tmp/pin/approvals.py" "$checkout" "$tmp/override.py"
+[ "$(got OMNIGENT_ENGINEERING_PACK="$tmp/pin" OMNIGENT_AGENT_SKILLS="$tmp/skills")" = "$tmp/pin/approvals.py" ] \
+  && [ "$(got OMNIGENT_AGENT_SKILLS="$tmp/skills")" = "$checkout" ] \
+  && [ "$(got APPROVALS_PY="$tmp/override.py" OMNIGENT_ENGINEERING_PACK="$tmp/pin")" = "$tmp/override.py" ] \
+  && [ "$(got OMNIGENT_ENGINEERING_PACK="$tmp/none" OMNIGENT_AGENT_SKILLS="$tmp/skills")" = \
+       "OMNIGENT_ENGINEERING_PACK has no approvals.py: $tmp/none/approvals.py
+exit 1" ] \
+  || { echo "!! approvals.py selection through the gate's policy step"; exit 1; }
+# the default command keeps a script path with a space as one argument: a fake uv records its arguments
+spaced="$tmp/work tree/.claude/skills/cloud-dev"; mkdir -p "$spaced" "$tmp/fakebin"
+cp "$here/test.sh" "$here/fork-env.sh" "$spaced/"
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "$RECEIVED"\n' > "$tmp/fakebin/uv"; chmod +x "$tmp/fakebin/uv"
+rm -f "$tmp/received"
+env -u OMNIGENT_ENGINEERING_PACK -u OMNIGENT_AGENT_SKILLS OMNIGENT_FORK_OVERLAY=/dev/null POLICY_ONLY=1 \
+  APPROVALS_PY="$tmp/override.py" PATH="$tmp/fakebin:$PATH" RECEIVED="$tmp/received" bash "$spaced/test.sh" >/dev/null 2>&1
+[ "$(cat "$tmp/received" 2>/dev/null)" = "run
+--no-sync
+python
+$spaced/gatekeeper-policy-test.py
+$tmp/override.py" ] || { echo "!! default policy command splits a path with a space"; exit 1; }
+echo "cloud-dev approvals.py selection: ok"
 fi
+run_policy || exit 1

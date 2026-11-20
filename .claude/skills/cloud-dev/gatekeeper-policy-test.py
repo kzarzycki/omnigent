@@ -72,11 +72,18 @@ def pull(*files: str, moved: dict | None = None, marks: tuple = ()) -> dict:
     nodes = [
         {"path": f, "changeType": "RENAMED" if f in (moved or {}) else "MODIFIED"} for f in files
     ]
+    # old names: older approvals.py reads `previousPaths`, newer reads `changes` (REST list)
+    changes = [
+        {"filename": f, "status": "renamed", "previous_filename": (moved or {})[f]}
+        for f in files
+        if f in (moved or {})
+    ]
     return {
         "number": 1,
         "labels": labels(*marks),
         "files": {"totalCount": len(nodes), "nodes": nodes},
         "previousPaths": moved or {},
+        "changes": changes,
     }
 
 
