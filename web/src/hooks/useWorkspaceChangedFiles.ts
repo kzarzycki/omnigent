@@ -86,7 +86,13 @@ export function useTrailingInvalidate(
     const justWentIdle = sameSession && prev.current.active && !sessionActive;
     prev.current = { id: conversationId, active: sessionActive };
     if (justWentIdle && conversationId) {
-      queryClient.invalidateQueries({ queryKey: [queryKeyPrefix, conversationId] });
+      // Every mounted hook for the session fires on the same transition (a PR
+      // panel mounts one per linked PR); skip queries a sibling already
+      // invalidated and is refetching, or N hooks restart N² fetches.
+      queryClient.invalidateQueries({
+        queryKey: [queryKeyPrefix, conversationId],
+        predicate: (q) => !(q.state.isInvalidated && q.state.fetchStatus === "fetching"),
+      });
     }
   }, [conversationId, sessionActive, queryClient, queryKeyPrefix]);
 }

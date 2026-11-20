@@ -172,4 +172,36 @@ describe("usePullRequestInfo turn-end invalidate", () => {
       expect(fetchMock).toHaveBeenCalledTimes(4);
     },
   );
+
+  it("refetches each query once when many PR rows share the turn end", async () => {
+    // Each row mounts its own hook; sibling invalidations must not restart
+    // the refetch the first one started (that was N² requests per turn end).
+    const urls = Array.from({ length: 10 }, (_, i) => `https://github.com/org/repo/pull/${i}`);
+    function Row({ prUrl }: { prUrl?: string }) {
+      usePullRequestInfo("conv_live", { prUrl });
+      return null;
+    }
+    const tree = (qc: QueryClient) => (
+      <QueryClientProvider client={qc}>
+        <Row />
+        {urls.map((url) => (
+          <Row key={url} prUrl={url} />
+        ))}
+      </QueryClientProvider>
+    );
+    stubChatStore("conv_live", "running");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(tree(qc));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(11));
+
+    stubChatStore("conv_live", "idle");
+    rerender(tree(qc));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(22));
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      });
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(22);
+  });
 });
