@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_aliases import is_claude_sdk_harness_name, native_terminal_name
 from omnigent.inner.datamodel import (
     DEFAULT_BASIC_USERNAME,
     CredentialProxyEntry,
@@ -120,11 +121,18 @@ _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
     "max_iterations",
 )
 
-# Executor kinds (``executor.type`` or ``config.harness``) that read these only
-# from the top-level fields; other harnesses read ``config`` keys such as ``model``.
-_CLAUDE_EXECUTOR_KINDS: frozenset[str] = frozenset(
-    {"claude_sdk", "claude-sdk", "claude-native", "native-claude", "claude"}
-)
+def _is_claude_executor_kind(kind: str) -> bool:
+    """
+    Whether an executor type or ``config.harness`` names a Claude executor.
+
+    Other harnesses (e.g. codex-native) read ``executor.config`` keys such as ``model``.
+    """
+    return (
+        kind == "claude_sdk"
+        or is_claude_sdk_harness_name(kind)
+        or native_terminal_name(kind) == "claude"
+    )
+
 
 # Copy the resolver dict onto the subclass before mutating — it's inherited
 # from SafeLoader by reference, so in-place edits below would strip
@@ -795,7 +803,7 @@ def _parse_executor(
     raw_config = raw.get("config")
     config: dict[str, object] = {}
     claude_kind = str(raw_config.get("harness") or etype) if isinstance(raw_config, dict) else ""
-    if isinstance(raw_config, dict) and claude_kind in _CLAUDE_EXECUTOR_KINDS:
+    if isinstance(raw_config, dict) and _is_claude_executor_kind(claude_kind):
         for key in _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG:
             if key in raw_config:
                 raise OmnigentError(
