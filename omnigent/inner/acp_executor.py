@@ -1555,6 +1555,16 @@ class AcpExecutor(Executor):
             value = usage.get(acp_key)
             if isinstance(value, int) and not isinstance(value, bool):
                 out[omni_key] = value
+        # Optional extras: window fill, an authoritative priced cost, the model that ran.
+        context_tokens = usage.get("contextTokens")
+        if isinstance(context_tokens, int) and not isinstance(context_tokens, bool):
+            out["context_tokens"] = context_tokens
+        cost = usage.get("costUsd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            out["cost_usd"] = cost
+        model = usage.get("model")
+        if isinstance(model, str) and model:
+            out["model"] = model
         return out or None
 
     def _usage_with_active_model(self, result: _AcpJsonObject) -> dict[str, Any] | None:
