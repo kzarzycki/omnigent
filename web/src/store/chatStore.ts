@@ -9746,6 +9746,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             action: event.action ?? "auto_resolved",
             ...(event.reason ? { reason: event.reason } : {}),
             ...(event.resolvedBy ? { resolvedBy: event.resolvedBy } : {}),
+            ...(event.choices ? { content: event.choices } : {}),
           },
         };
         return {

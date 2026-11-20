@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
+    Body,
     Request,
 )
 
@@ -260,7 +261,7 @@ def register_elicitations_routes(
         request: Request,
         resolver_id: str,
         question_id: str,
-        body: dict[str, Any],
+        body: Annotated[Any, Body()],
     ) -> dict[str, bool]:
         """
         Resolve a descendant session's question card on behalf of an ancestor session.
@@ -279,6 +280,8 @@ def register_elicitations_routes(
             with that id, or the body is malformed.
         """
         user_id = _get_user_id(request, auth_provider)
+        if not isinstance(body, dict):
+            raise OmnigentError("body must be a JSON object", code=ErrorCode.INVALID_INPUT)
         child_id = body.get("session_id")
         action = body.get("action")
         answers = body.get("answers")
@@ -289,8 +292,19 @@ def register_elicitations_routes(
             raise OmnigentError(
                 "action must be 'dismiss' or 'answer'", code=ErrorCode.INVALID_INPUT
             )
-        if action == "answer" and not (isinstance(answers, dict) and answers):
-            raise OmnigentError("answer needs a non-empty 'answers'", code=ErrorCode.INVALID_INPUT)
+        if action == "answer" and not (
+            isinstance(answers, dict)
+            and answers
+            and all(
+                isinstance(value, str)
+                or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+                for value in answers.values()
+            )
+        ):
+            raise OmnigentError(
+                "answer needs a non-empty 'answers' mapping to a label or a list of labels",
+                code=ErrorCode.INVALID_INPUT,
+            )
         if note is not None and (not isinstance(note, str) or len(note) > MAX_RESOLVE_NOTE_CHARS):
             raise OmnigentError(
                 f"note must be a string of at most {MAX_RESOLVE_NOTE_CHARS} characters",

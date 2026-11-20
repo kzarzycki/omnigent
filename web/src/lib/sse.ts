@@ -1195,6 +1195,9 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       ...(typeof data.resolved_by === "string" && data.resolved_by
         ? { resolvedBy: data.resolved_by }
         : {}),
+      ...(data.choices && typeof data.choices === "object" && !Array.isArray(data.choices)
+        ? { choices: data.choices as Record<string, string> }
+        : {}),
     } satisfies ElicitationResolved;
   }
 

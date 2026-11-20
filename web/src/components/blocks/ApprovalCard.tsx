@@ -798,7 +798,9 @@ export function ApprovalCard({
     if (response.resolvedBy) {
       // Another session decided; never present it as the user's answer.
       icon = <InfoIcon className="size-4 text-muted-foreground" />;
-      label = `Resolved by session ${response.resolvedBy}`;
+      label = `Resolved by session ${response.resolvedBy} · ${
+        response.action === "cancel" ? "dismissed" : "answered"
+      }`;
     } else if (promptExpired) {
       // The server cleared the prompt because the hook stopped waiting
       // before anyone answered (a severed poll never re-parked, the ask

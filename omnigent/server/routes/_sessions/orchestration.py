@@ -2857,7 +2857,7 @@ def _question_choices(questions: list[Any], data: dict[str, Any]) -> dict[str, s
 
     :param questions: The published ``ask_user_question`` questions.
     :param data: The verdict: ``action`` plus, on accept, ``content`` keyed by
-        question id or text, e.g. ``{"action": "accept", "content": {"Which?": "A"}}``.
+        question id, text or header, e.g. ``{"action": "accept", "content": {"Which?": "A"}}``.
     :returns: Labels to choices in question order, e.g. ``{"Release": "Yes"}``.
     """
     content = data.get("content") if data.get("action") == "accept" else None
@@ -2871,7 +2871,14 @@ def _question_choices(questions: list[Any], data: dict[str, Any]) -> dict[str, s
         if not isinstance(content, dict):
             choice = "(dismissed without an answer)"
         else:
-            value = content.get(question.get("id") or text)
+            value = next(
+                (
+                    content[key]
+                    for key in (question.get("id"), text, header)
+                    if isinstance(key, str) and key in content
+                ),
+                None,
+            )
             if isinstance(value, list):
                 choice = ", ".join(str(item) for item in value) or "(no answer)"
             else:
@@ -3005,7 +3012,11 @@ async def _answer_question(
                 ),
             )
         _publish_elicitation_resolved(
-            session_id, question_id, action=data.get("action"), resolved_by=resolved_by
+            session_id,
+            question_id,
+            action=data.get("action"),
+            resolved_by=resolved_by,
+            choices=choices if data.get("action") == "accept" else None,
         )
         if conversation_store is not None:
             await asyncio.to_thread(
@@ -3015,6 +3026,7 @@ async def _answer_question(
                 question_id,
                 data.get("action"),
                 resolved_by=resolved_by,
+                choices=choices if data.get("action") == "accept" else None,
             )
     finally:
         _answering_questions.discard(question_id)

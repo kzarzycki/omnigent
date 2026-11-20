@@ -548,14 +548,16 @@ describe("parseEvent — response.elicitation_resolved", () => {
   it("keeps the session that resolved the card instead of the user", () => {
     const ev = parseEvent("response.elicitation_resolved", {
       elicitation_id: "elic_5",
-      action: "cancel",
+      action: "accept",
       resolved_by: "conv_parent",
+      choices: { Release: "Yes" },
     });
     expect(ev).toEqual({
       type: "elicitation_resolved",
       elicitationId: "elic_5",
-      action: "cancel",
+      action: "accept",
       resolvedBy: "conv_parent",
+      choices: { Release: "Yes" },
     } satisfies ElicitationResolved);
   });
 
