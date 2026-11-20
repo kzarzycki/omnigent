@@ -4122,7 +4122,7 @@ def test_parse_executor_auth_unknown_type_raises(tmp_path: Path) -> None:
 )
 def test_parse_executor_config_rejects_misplaced_executor_field(tmp_path: Path, key: str) -> None:
     """A field that lives directly under ``executor:`` is refused inside ``config``."""
-    config = {"spec_version": 1, "executor": {"config": {key: "x"}}}
+    config = {"spec_version": 1, "executor": {"type": "claude_sdk", "config": {key: "x"}}}
     (tmp_path / "config.yaml").write_text(yaml.dump(config))
     with pytest.raises(OmnigentError, match=rf"executor\.config\.{key}.*executor\.{key}"):
         parse(tmp_path)
@@ -4130,10 +4130,23 @@ def test_parse_executor_config_rejects_misplaced_executor_field(tmp_path: Path, 
 
 def test_parse_executor_config_rejects_setting_sources(tmp_path: Path) -> None:
     """``setting_sources`` in ``executor.config`` points to top-level ``skills: none``."""
-    config = {"spec_version": 1, "executor": {"config": {"setting_sources": []}}}
+    config = {
+        "spec_version": 1,
+        "executor": {"config": {"harness": "claude-native", "setting_sources": []}},
+    }
     (tmp_path / "config.yaml").write_text(yaml.dump(config))
     with pytest.raises(OmnigentError, match=r"executor\.config\.setting_sources.*skills: none"):
         parse(tmp_path)
+
+
+def test_parse_executor_config_model_allowed_for_codex_native(tmp_path: Path) -> None:
+    """Non-Claude harnesses read ``executor.config.model``, so it still parses."""
+    config = {
+        "spec_version": 1,
+        "executor": {"config": {"harness": "codex-native", "model": "gpt-x"}},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    assert parse(tmp_path).executor.config["model"] == "gpt-x"
 
 
 def test_parse_executor_config_profile_still_allowed(tmp_path: Path) -> None:

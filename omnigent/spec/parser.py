@@ -120,6 +120,12 @@ _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
     "max_iterations",
 )
 
+# Executor kinds (``executor.type`` or ``config.harness``) that read these only
+# from the top-level fields; other harnesses read ``config`` keys such as ``model``.
+_CLAUDE_EXECUTOR_KINDS: frozenset[str] = frozenset(
+    {"claude_sdk", "claude-sdk", "claude-native", "claude"}
+)
+
 # Copy the resolver dict onto the subclass before mutating — it's inherited
 # from SafeLoader by reference, so in-place edits below would strip
 # SafeLoader's bool resolver process-wide.
@@ -788,7 +794,8 @@ def _parse_executor(
     # harness/profile fields are both strings in the source YAML).
     raw_config = raw.get("config")
     config: dict[str, object] = {}
-    if isinstance(raw_config, dict):
+    claude_kind = str(raw_config.get("harness") or etype) if isinstance(raw_config, dict) else ""
+    if isinstance(raw_config, dict) and claude_kind in _CLAUDE_EXECUTOR_KINDS:
         for key in _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG:
             if key in raw_config:
                 raise OmnigentError(
@@ -802,6 +809,7 @@ def _parse_executor(
                 "use top-level `skills: none` (or a skill list) instead",
                 code=ErrorCode.INVALID_INPUT,
             )
+    if isinstance(raw_config, dict):
         config = {
             str(k): (v if k in _STRUCTURED_EXECUTOR_CONFIG_KEYS else str(v))
             for k, v in raw_config.items()
