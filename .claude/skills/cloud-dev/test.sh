@@ -79,8 +79,13 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
-# gatekeeper.md as approvals.py reads it: the host's agent-skills checkout, or APPROVALS_PY
-approvals=${APPROVALS_PY:-$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)/engineering/skills/engineering-loop/scripts/approvals.py}
+# gatekeeper.md as approvals.py reads it: APPROVALS_PY, else the pinned engineering pack's scripts dir
+# (OMNIGENT_ENGINEERING_PACK, so the gate moves only when the pin does), else the moving agent-skills checkout
+scripts=engineering/skills/engineering-loop/scripts
+pack=$("$here/fork-env.sh" OMNIGENT_ENGINEERING_PACK 2>/dev/null)
+if [ -n "$pack" ]; then default="$pack/approvals.py"
+else default=$("$here/fork-env.sh" OMNIGENT_AGENT_SKILLS 2>/dev/null)/$scripts/approvals.py; fi
+approvals=${APPROVALS_PY:-$default}
 if [ -f "$approvals" ]; then
   uv run --no-sync python "$here/gatekeeper-policy-test.py" "$approvals" >"$tmp/policy.log" 2>&1 \
     || { cat "$tmp/policy.log"; exit 1; }

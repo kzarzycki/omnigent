@@ -72,11 +72,18 @@ def pull(*files: str, moved: dict | None = None, marks: tuple = ()) -> dict:
     nodes = [
         {"path": f, "changeType": "RENAMED" if f in (moved or {}) else "MODIFIED"} for f in files
     ]
+    # `previousPaths` is how older approvals.py reads old names; `changes` is the REST file list newer ones read
+    changes = [
+        {"filename": f, "status": "renamed", "previous_filename": (moved or {})[f]}
+        for f in files
+        if f in (moved or {})
+    ]
     return {
         "number": 1,
         "labels": labels(*marks),
         "files": {"totalCount": len(nodes), "nodes": nodes},
         "previousPaths": moved or {},
+        "changes": changes,
     }
 
 
