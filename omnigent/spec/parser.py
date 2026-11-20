@@ -123,7 +123,7 @@ _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
 # Executor kinds (``executor.type`` or ``config.harness``) that read these only
 # from the top-level fields; other harnesses read ``config`` keys such as ``model``.
 _CLAUDE_EXECUTOR_KINDS: frozenset[str] = frozenset(
-    {"claude_sdk", "claude-sdk", "claude-native", "claude"}
+    {"claude_sdk", "claude-sdk", "claude-native", "native-claude", "claude"}
 )
 
 # Copy the resolver dict onto the subclass before mutating — it's inherited

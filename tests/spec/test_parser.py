@@ -4128,6 +4128,18 @@ def test_parse_executor_config_rejects_misplaced_executor_field(tmp_path: Path, 
         parse(tmp_path)
 
 
+@pytest.mark.parametrize("harness", ["claude", "claude-sdk", "claude-native", "native-claude"])
+def test_parse_executor_config_rejects_misplaced_keys_for_claude_harness_spellings(
+    tmp_path: Path, harness: str
+) -> None:
+    """Every Claude harness spelling gets both diagnostics."""
+    for key, hint in (("model", r"executor\.model"), ("setting_sources", r"skills: none")):
+        config = {"spec_version": 1, "executor": {"config": {"harness": harness, key: "x"}}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+        with pytest.raises(OmnigentError, match=rf"executor\.config\.{key}.*{hint}"):
+            parse(tmp_path)
+
+
 def test_parse_executor_config_rejects_setting_sources(tmp_path: Path) -> None:
     """``setting_sources`` in ``executor.config`` points to top-level ``skills: none``."""
     config = {
