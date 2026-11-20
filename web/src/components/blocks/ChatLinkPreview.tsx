@@ -19,7 +19,7 @@ import { useFileViewerConversationId } from "@/shell/FileViewerContext";
  */
 export const LinkPreviewSessionContext = createContext<string | undefined>(undefined);
 
-// A preview's state and checks change; a minute keeps them close to live.
+// A preview older than this is read again when its card opens.
 const PREVIEW_STALE_MS = 60_000;
 
 const SUBJECT: Record<GithubLinkPreview["kind"], string> = {
@@ -48,37 +48,50 @@ function useSeen(ref: React.RefObject<HTMLElement | null>, active: boolean): boo
   return seen;
 }
 
-// Re-read each minute while shown; a failed read hides the preview rather than
+// Read once when the link is seen, then again only when its card opens and the read is stale:
+// a chat can hold many links, and polling each one, or re-reading them all on window focus,
+// costs the server a request per link per minute. A failed read hides the preview rather than
 // keeping what an earlier read returned, so revoked access shows nothing.
 const PREVIEW_QUERY = {
   staleTime: PREVIEW_STALE_MS,
-  refetchInterval: PREVIEW_STALE_MS,
+  refetchOnWindowFocus: false,
   retry: false,
 } as const;
+
+/** Re-reads `query` when `open` turns true and its data is older than `PREVIEW_STALE_MS`. */
+function useRefreshOnOpen(query: { isStale: boolean; refetch: () => unknown }, open: boolean) {
+  const { isStale, refetch } = query;
+  useEffect(() => {
+    if (open && isStale) void refetch();
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- on opening only
+}
 
 function useGithubPreview(
   sessionId: string | undefined,
   link: GithubLinkRef | null,
   enabled: boolean,
+  open: boolean,
 ) {
-  const { data, isError } = useQuery({
+  const query = useQuery({
     queryKey: ["github-link-preview", sessionId, link?.owner, link?.repo, link?.kind, link?.ref],
     queryFn: () => fetchGithubLinkPreview(sessionId as string, link as GithubLinkRef),
     enabled: enabled && link !== null && sessionId !== undefined,
     ...PREVIEW_QUERY,
   });
-  return isError ? null : (data?.preview ?? null);
+  useRefreshOnOpen(query, open && enabled);
+  return query.isError ? null : (query.data?.preview ?? null);
 }
 
 // Its own query rather than the open session's never-stale cache.
-function useSessionPreview(sessionId: string | null, enabled: boolean) {
-  const { data, isError } = useQuery({
+function useSessionPreview(sessionId: string | null, enabled: boolean, open: boolean) {
+  const query = useQuery({
     queryKey: ["session-link-preview", sessionId],
     queryFn: () => getSessionSlim(sessionId as string),
     enabled: enabled && sessionId !== null,
     ...PREVIEW_QUERY,
   });
-  return isError ? null : (data ?? null);
+  useRefreshOnOpen(query, open && enabled);
+  return query.isError ? null : (query.data ?? null);
 }
 
 function ChecksSummary({ checks }: { checks: NonNullable<GithubLinkPreview["checks"]> }) {
@@ -115,7 +128,7 @@ function GithubPreviewCard({ preview }: { preview: GithubLinkPreview }) {
 /**
  * Wraps a chat link: a previewable one gets its state beside it and a card
  * with the details, opened by hover or by tapping the state, loaded once the
- * link scrolls into view; any other link is returned unchanged and nothing is
+ * link scrolls into view and refreshed when the card opens; any other link is returned unchanged and nothing is
  * fetched for it.
  *
  * @param href - The link's destination, already rebased under the base path.
@@ -137,8 +150,8 @@ export function ChatLinkPreview({
   // GitHub is read through the asking session's host, else the open chat's; with neither, ask nothing.
   const fileViewerSessionId = useFileViewerConversationId();
   const chatSessionId = useContext(LinkPreviewSessionContext) ?? fileViewerSessionId;
-  const preview = useGithubPreview(chatSessionId, github, seen);
-  const session = useSessionPreview(sessionId, seen);
+  const preview = useGithubPreview(chatSessionId, github, seen, open);
+  const session = useSessionPreview(sessionId, seen, open);
 
   if (!github && !sessionId) return children;
 

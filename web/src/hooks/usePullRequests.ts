@@ -498,8 +498,10 @@ export function computePullRequestPollInterval(
   info: PullRequestInfo | undefined,
   listRow = false,
 ): number | false {
-  // List rows refresh less often and rest once closed; explicit Refresh still refetches them.
-  if (listRow) return info?.pr && info.pr.state !== "OPEN" ? false : PULL_REQUEST_LIST_POLL_MS;
+  // List rows never interval-poll: the session's linked query re-reads every linked PR's state in
+  // one call, and a row's details (checks) refresh on the turn-end invalidate and explicit Refresh.
+  // One poll per linked PR cost the server a request per PR every 30 s for state it already had.
+  if (listRow) return false;
   // No usable info yet — an initial error, or a transient fetch failure with no
   // cached data. Keep trying; runner-offline is gated off by `enabled`.
   if (!info) return PULL_REQUEST_POLL_MS;

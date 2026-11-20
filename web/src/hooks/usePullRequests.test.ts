@@ -296,14 +296,13 @@ describe("computePullRequestPollInterval", () => {
     ...over,
   });
 
-  it("refreshes list rows slowly and rests closed or merged rows", () => {
-    expect(computePullRequestPollInterval(undefined, true)).toBe(30_000);
-    expect(computePullRequestPollInterval(ready(), true)).toBe(30_000);
-    for (const state of ["CLOSED", "MERGED"]) {
+  it("never interval-polls list rows", () => {
+    for (const state of ["OPEN", "CLOSED", "MERGED"]) {
       expect(computePullRequestPollInterval(ready({ pr: { ...ready().pr!, state } }), true)).toBe(
         false,
       );
     }
+    expect(computePullRequestPollInterval(undefined, true)).toBe(false);
   });
 
   it("does not poll for linked PRs before receiving metadata", () => {
