@@ -683,6 +683,8 @@ export interface ElicitationBlock {
      * answered, so the card says the prompt expired and how to resume.
      */
     reason?: "unanswered";
+    /** Ancestor session that resolved this card instead of the user. */
+    resolvedBy?: string;
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
   } | null;

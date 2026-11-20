@@ -20,7 +20,7 @@ from omnigent.tools.manager import ToolManager
 _QUESTIONS = [{"question": "Ship it?", "options": [{"label": "Yes"}, {"label": "No"}]}]
 
 
-_TOOLS = ("sys_ask_user_question", "sys_read_answer")
+_TOOLS = ("sys_ask_user_question", "sys_read_answer", "sys_resolve_question")
 
 
 @pytest.mark.parametrize("spec", [AgentSpec(spec_version=1), None])
@@ -117,6 +117,32 @@ async def test_reading_an_answer_returns_what_the_server_recorded() -> None:
     assert [(r.method, r.url.path) for r in requests] == [
         ("GET", "/v1/sessions/conv_1/questions/question_1")
     ]
+
+
+async def test_resolving_a_descendants_card_posts_to_the_resolvers_route() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(202, json={"queued": False})
+
+    args = {"session_id": "conv_child", "question_id": "question_1", "action": "dismiss"}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
+        output = await execute_tool(
+            tool_name="sys_resolve_question",
+            arguments=json.dumps(args),
+            server_client=client,
+            conversation_id="conv_1",
+            agent_spec=AgentSpec(spec_version=1),
+        )
+
+    assert json.loads(output) == {"status": "resolved", "question_id": "question_1"}
+    assert [(r.method, r.url.path) for r in requests] == [
+        ("POST", "/v1/sessions/conv_1/questions/question_1/resolve")
+    ]
+    assert json.loads(requests[0].content) == {"session_id": "conv_child", "action": "dismiss"}
 
 
 @pytest.mark.parametrize(

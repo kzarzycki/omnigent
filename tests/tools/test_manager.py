@@ -73,6 +73,7 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_session_keep",
         "sys_ask_user_question",
         "sys_read_answer",
+        "sys_resolve_question",
         # Every session may watch the sessions it can read.
         "sys_session_subscribe",
         "sys_session_unsubscribe",

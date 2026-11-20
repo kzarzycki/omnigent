@@ -2884,18 +2884,31 @@ def _question_choices(questions: list[Any], data: dict[str, Any]) -> dict[str, s
     return choices
 
 
-def _question_answer_text(question_id: str, choices: dict[str, str]) -> str:
+def _question_answer_text(
+    question_id: str,
+    choices: dict[str, str],
+    resolved_by: str | None = None,
+    note: str | None = None,
+) -> str:
     """
     Render a ``sys_ask_user_question`` verdict as the user message the session gets.
 
     :param question_id: The question's id, e.g. ``"question_0f3a..."``.
     :param choices: Label to choice per question, from :func:`_question_choices`.
+    :param resolved_by: Ancestor session that resolved the card instead of the
+        user, e.g. ``"conv_parent1"``; adds a line saying it is not the user's answer.
+    :param note: That session's short note, added as its own line.
     :returns: One ``[answer to <id>] <label>: <choice>`` line per question.
     """
-    return "\n".join(
-        f"{ANSWER_LINE_PREFIX}{question_id}] {label}: {choice}"
-        for label, choice in choices.items()
-    )
+    prefix = f"{ANSWER_LINE_PREFIX}{question_id}] "
+    lines = [f"{prefix}{label}: {choice}" for label, choice in choices.items()]
+    if resolved_by:
+        lines.insert(
+            0, f"{prefix}Not your user's answer: session {resolved_by} resolved this card."
+        )
+        if note:
+            lines.append(f"{prefix}Note from that session: {note}")
+    return "\n".join(lines)
 
 
 def _own_pending_question(question_id: str, session_id: str) -> dict[str, Any] | None:
@@ -2927,6 +2940,8 @@ async def _answer_question(
     data: dict[str, Any],
     conversation_store: ConversationStore | None,
     post_answer: Callable[[str], Awaitable[object]] | None,
+    resolved_by: str | None = None,
+    note: str | None = None,
 ) -> None:
     """
     Deliver a ``sys_ask_user_question`` verdict as one user message, then clear its card.
@@ -2943,6 +2958,9 @@ async def _answer_question(
     :param data: The verdict payload.
     :param conversation_store: Store used to clear ancestor mirrors, or ``None``.
     :param post_answer: Posts text into the session as the answering user's message.
+    :param resolved_by: Ancestor session resolving the card instead of the user,
+        e.g. ``"conv_parent1"``; the answer is then recorded and worded as not the user's.
+    :param note: That session's short note for the asking session.
     :raises OmnigentError: When this server cannot post the answer.
     """
     card = _own_pending_question(question_id, session_id)
@@ -2958,14 +2976,18 @@ async def _answer_question(
         )
     ask = card.get("params", {}).get("ask_user_question") or {}
     choices = _question_choices(ask.get("questions") or [], data)
-    text = _question_answer_text(question_id, choices)
+    text = _question_answer_text(question_id, choices, resolved_by, note)
     _answering_questions.add(question_id)
     try:
         # Recorded first: the session may call sys_read_answer as soon as the message lands.
         question_answers.record(
             question_id,
             question_answers.QuestionAnswer(
-                session_id=session_id, action=str(data.get("action")), choices=choices
+                session_id=session_id,
+                action=str(data.get("action")),
+                choices=choices,
+                resolved_by=resolved_by,
+                note=note if resolved_by else None,
             ),
         )
         try:
@@ -2982,7 +3004,9 @@ async def _answer_question(
                     _ancestor_session_ids, conversation_store, session_id
                 ),
             )
-        _publish_elicitation_resolved(session_id, question_id, action=data.get("action"))
+        _publish_elicitation_resolved(
+            session_id, question_id, action=data.get("action"), resolved_by=resolved_by
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_resolved_to_ancestors,
@@ -2990,6 +3014,7 @@ async def _answer_question(
                 session_id,
                 question_id,
                 data.get("action"),
+                resolved_by=resolved_by,
             )
     finally:
         _answering_questions.discard(question_id)

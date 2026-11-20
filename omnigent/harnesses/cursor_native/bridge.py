@@ -63,6 +63,7 @@ _CURSOR_AUTO_APPROVE_TOOLS = [
     "sys_project_list",
     "sys_project_update",
     "sys_read_answer",
+    "sys_resolve_question",
     "sys_session_close",
     "sys_session_create",
     "sys_session_get_history",

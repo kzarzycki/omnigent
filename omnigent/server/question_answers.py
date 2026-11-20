@@ -3,7 +3,8 @@
 The answer also reaches the session as a user message, but any session that can
 message it can type the same ``[answer to <id>]`` text. Only the server records an
 entry here, when the session's user answers the card, so ``sys_read_answer`` is the
-proof that an answer came through the card.
+proof that an answer came through the card. An ancestor session's resolution is
+recorded too, marked with ``resolved_by`` so it never reads as the user's answer.
 """
 
 from __future__ import annotations
@@ -25,11 +26,16 @@ class QuestionAnswer:
     :param action: The card verdict: ``"accept"``, ``"decline"`` or ``"cancel"``.
     :param choices: Question label to the choice. The label is the question's header,
         else its first 80 characters, never the full text, e.g. ``{"Release": "Yes"}``.
+    :param resolved_by: The ancestor session that resolved the card instead of its user,
+        e.g. ``"conv_parent1"``; ``None`` when the card's own user answered.
+    :param note: The resolving session's short note, only with ``resolved_by``.
     """
 
     session_id: str
     action: str
     choices: dict[str, str]
+    resolved_by: str | None = None
+    note: str | None = None
 
 
 # custom-lint: disable-next=workspace-scoped-cache -- ids are unique, lookups session-checked
