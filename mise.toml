@@ -27,12 +27,12 @@ run = [
 
 [tasks."check-fast"]
 depends = ["check:all"]
-description = "check:all, then pytest on the tests the change touches (.claude/skills/cloud-dev/affected_tests.py: from GATE_BASE, else the merge base with origin/mine). loop.md's `Affected tests:` command; the full suite is `uv run pytest -n auto`."
+description = "check:all, then pytest on the tests the change touches (.claude/skills/cloud-dev/affected_tests.py: from GATE_BASE, else the merge base with origin/mine). loop.md's `Affected tests:` command; the full suite is `uv run pytest -n auto --dist=loadfile`."
 run = """
 set -e
 targets=$(python3 .claude/skills/cloud-dev/affected_tests.py)
 if [ -z "$targets" ]; then echo "check-fast: no tests touched"; exit 0; fi
 echo "check-fast: $targets"
 # shellcheck disable=SC2086 -- one target per word
-OMNIGENT_SKIP_WEB_UI=true uv run --no-sync pytest -n auto $targets
+OMNIGENT_SKIP_WEB_UI=true uv run --no-sync pytest -n auto --dist=loadfile $targets
 """

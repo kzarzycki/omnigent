@@ -18,7 +18,9 @@ def run(*cmd: str) -> None:
     subprocess.run(cmd, check=True, capture_output=True)
 
 
-def select(repo: Path, files: dict[str, str]) -> list[str]:
+def select(
+    repo: Path, files: dict[str, str], args: tuple[str, ...] = ("base",), **env: str
+) -> list[str]:
     """Commit `files` (path -> text) on the base commit; return what the selector prints."""
     run("git", "checkout", "-q", "-B", "work", "base")
     for name, text in files.items():
@@ -28,7 +30,8 @@ def select(repo: Path, files: dict[str, str]) -> list[str]:
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", "change")
     out = subprocess.run(
-        [sys.executable, str(HERE / "affected_tests.py"), "base"],
+        [sys.executable, str(HERE / "affected_tests.py"), *args],
+        env={**{k: v for k, v in os.environ.items() if k != "GATE_BASE"}, **env},
         capture_output=True,
         text=True,
         check=True,
@@ -47,7 +50,9 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "server" / "test_widget.py").write_text(
         "from omnigent.widgets import frob\n"
     )
-    (repo / "tests" / "server" / "test_other.py").write_text("import omnigent.gadget\n")
+    (repo / "tests" / "server" / "test_other.py").write_text(
+        "import omnigent.gadget  # see README.md\n"
+    )
     (repo / "omnigent" / "widgets" / "frob.py").write_text("x = 1\n")
     (repo / "omnigent" / "widgets" / "__init__.py").write_text("")
     (repo / "README.md").write_text("hi\n")
@@ -71,6 +76,14 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "commit", "-q", "-m", "e2e")
     run("git", "tag", "-f", "base")
     assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
+    # no argument: GATE_BASE, else the merge base with origin/mine, else everything
+    change = {"omnigent/widgets/frob.py": "x = 4\n"}
+    assert select(repo, change, (), GATE_BASE="base") == [widget]
+    assert select(repo, change, (), GATE_BASE="nonexistent") == ["tests"]
+    run("git", "update-ref", "refs/remotes/origin/mine", "base")
+    assert select(repo, change, ()) == [widget]
+    run("git", "update-ref", "-d", "refs/remotes/origin/mine")
+    assert select(repo, change, ()) == ["tests"]
     assert affected_tests.targets(None) == ["tests"]  # no base to diff
     # a deleted test file selects nothing, not a path pytest can't find
     run("git", "checkout", "-q", "-B", "work", "base")
