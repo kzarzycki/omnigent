@@ -82,7 +82,9 @@ class Usage(Exception):
 def git(*args: str) -> str:
     result = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise Usage(f"git {' '.join(args)}: {result.stderr.strip() or f'exit {result.returncode}'}")
+        raise Usage(
+            f"git {' '.join(args)}: {result.stderr.strip() or f'exit {result.returncode}'}"
+        )
     return result.stdout
 
 
@@ -140,7 +142,9 @@ def commit(ref: str) -> str:
 
 def ancestor(older: str, newer: str) -> bool:
     return (
-        subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], check=False).returncode
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", older, newer], check=False
+        ).returncode
         == 0
     )
 
