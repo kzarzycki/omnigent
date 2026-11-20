@@ -506,7 +506,7 @@ async def test_an_ancestor_dismisses_a_descendants_card(
     assert runner.notices(asking) == [
         f"[answer to {question_id}] Not your user's answer: session {grandparent['id']} "
         f"resolved this card.\n[answer to {question_id}] Ship it?: (dismissed without an answer)"
-        "\nNote from that session: Not now"
+        f"\n[answer to {question_id}] Note from that session: Not now"
     ]
     assert await _pending_questions(client, asking) == []
     assert pending_elicitations.lookup(question_id, conversation_id=parent) is None
