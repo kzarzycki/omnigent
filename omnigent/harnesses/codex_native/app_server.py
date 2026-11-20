@@ -5471,22 +5471,22 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
         elif arg in {"--ask-for-approval", "-a", "--sandbox", "-s"}:
             if index + 1 >= len(args):
                 raise ValueError(f"{arg} needs a value")
-            value = args[index + 1]
+            value = _require_permission_value(arg, args[index + 1])
             index += 1
             field = "approvalPolicy" if arg in {"--ask-for-approval", "-a"} else "sandbox"
             typed_params[field] = value
         elif arg.startswith(("--ask-for-approval=", "-a=")):
-            typed_params["approvalPolicy"] = arg.split("=", 1)[1]
+            typed_params["approvalPolicy"] = _require_permission_value(arg, arg.split("=", 1)[1])
         elif arg.startswith(("--sandbox=", "-s=")):
-            typed_params["sandbox"] = arg.split("=", 1)[1]
+            typed_params["sandbox"] = _require_permission_value(arg, arg.split("=", 1)[1])
         elif arg in {"--config", "-c"}:
             if index + 1 >= len(args):
                 raise ValueError(f"{arg} needs a value")
             index += 1
-            key, _, value = args[index].partition("=")
+            key, _, value = _require_permission_value(arg, args[index]).partition("=")
             _set_codex_resume_config_param(params, key, value)
         elif arg.startswith(("--config=", "-c=")):
-            key, _, value = arg.split("=", 1)[1].partition("=")
+            key, _, value = _require_permission_value(arg, arg.split("=", 1)[1]).partition("=")
             _set_codex_resume_config_param(params, key, value)
         index += 1
     if "--approve-for-me" in args:
@@ -5499,6 +5499,12 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
     if "permissions" in params:
         params.pop("sandbox", None)
     return params
+
+
+def _require_permission_value(option: str, value: str) -> str:
+    if not value:
+        raise ValueError(f"{option} needs a value")
+    return value
 
 
 def codex_launch_args_grant_full_access(terminal_launch_args: Sequence[str] | None) -> bool:
