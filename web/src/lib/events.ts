@@ -319,6 +319,10 @@ export interface ElicitationResolved {
    * is gone rather than decided. Never present alongside `action`.
    */
   reason?: "unanswered";
+  /** Ancestor session that resolved the card instead of the user. */
+  resolvedBy?: string;
+  /** Choice per question, when that session answered the card. */
+  choices?: Record<string, string>;
 }
 
 /** A provider-native tool output (web_search, mcp, etc.). */

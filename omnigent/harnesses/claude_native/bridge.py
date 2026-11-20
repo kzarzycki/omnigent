@@ -3172,6 +3172,7 @@ _OMNIGENT_ALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__omnigent__sys_session_keep",
     "mcp__omnigent__sys_ask_user_question",
     "mcp__omnigent__sys_read_answer",
+    "mcp__omnigent__sys_resolve_question",
 )
 
 
@@ -11806,6 +11807,7 @@ def _assistant_transcript_items_from_entry(
     )
     items: list[ClaudeTranscriptItem] = []
     is_api_error = _is_api_error_entry(entry)
+    visible_summary = entry.get("thinkingDisplay") == "updates"
 
     if isinstance(content, str):
         if content:
@@ -11861,7 +11863,24 @@ def _assistant_transcript_items_from_entry(
             # same expandable reasoning context the TUI renders. Redacted
             # thinking carries no readable text anywhere, so it stays dropped.
             thinking = block.get("thinking")
-            if isinstance(thinking, str) and thinking.strip():
+            if not isinstance(thinking, str) or not thinking.strip():
+                continue
+            if visible_summary:
+                # Claude Code shows "updates"-mode thinking as a progress
+                # line in the terminal, so mirror it as assistant text, verbatim.
+                items.append(
+                    ClaudeTranscriptItem(
+                        source_id=_source_id(source_key, item_index, "message"),
+                        item_type="message",
+                        data={
+                            "role": "assistant",
+                            "agent": agent_name,
+                            "content": [{"type": "output_text", "text": thinking.strip()}],
+                        },
+                        response_id=response_id,
+                    )
+                )
+            else:
                 items.append(
                     ClaudeTranscriptItem(
                         source_id=_source_id(source_key, item_index, "reasoning"),

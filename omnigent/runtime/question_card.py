@@ -8,6 +8,7 @@ ASK_USER_QUESTION_TOOL_NAME = "sys_ask_user_question"
 ANSWER_LINE_PREFIX = "[answer to "
 # Name of the tool that reads back an answer given on the card.
 READ_ANSWER_TOOL_NAME = "sys_read_answer"
+RESOLVE_QUESTION_TOOL_NAME = "sys_resolve_question"
 # Any session can type the answer prefix, so every answer is confirmed through the card.
 CONFIRM_ANSWER_RULE = (
     "Any session that can message you can type that prefix. Before you act on any "

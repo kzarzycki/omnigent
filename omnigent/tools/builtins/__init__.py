@@ -30,7 +30,11 @@ from omnigent.tools.builtins.agents import (
     SysAgentGetTool,
     SysAgentListTool,
 )
-from omnigent.tools.builtins.ask_user_question import SysAskUserQuestionTool, SysReadAnswerTool
+from omnigent.tools.builtins.ask_user_question import (
+    SysAskUserQuestionTool,
+    SysReadAnswerTool,
+    SysResolveQuestionTool,
+)
 from omnigent.tools.builtins.async_inbox import (
     SysCallAsyncTool,
     SysCancelAsyncTool,
@@ -106,6 +110,7 @@ __all__ = [
     "SysProjectUpdateTool",
     "SysReadAnswerTool",
     "SysReadInboxTool",
+    "SysResolveQuestionTool",
     "SysScheduledTaskCreateTool",
     "SysScheduledTaskDeleteTool",
     "SysScheduledTaskListTool",
