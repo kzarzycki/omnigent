@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -10,6 +9,7 @@ import pytest
 
 from omnigent.llms.context_window import ModelPricing
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.inner.claude_cloud_stream import STREAM
 from tests.server.helpers import create_test_agent
 
 
@@ -40,7 +40,7 @@ async def test_claude_cloud_turn_fills_the_record_and_counters(
     assert spec is not None and spec.loader is not None
     bridge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge)
-    stream = json.loads((root / "tests/fixtures/claude_cloud_turn_stream.json").read_text())
+    stream = STREAM
     monkeypatch.setattr(
         "omnigent.llms.context_window.fetch_model_pricing",
         lambda model: ModelPricing(input_per_token=1e-6, output_per_token=2e-6),

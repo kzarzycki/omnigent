@@ -17,14 +17,13 @@ from omnigent.inner.acp_executor import AcpExecutor
 from omnigent.llms.context_window import DEFAULT_CONTEXT_WINDOW
 from omnigent.runtime import usage_metrics
 from omnigent.server.routes._sessions.orchestration import _context_labels_from_turn_usage
+from tests.inner.claude_cloud_stream import STREAM
 
 _BRIDGE_PATH = Path(__file__).parents[2] / "integrations/claude-cloud-acp/claude_cloud_acp.py"
 
 # A cloud turn as the stream delivers it (sanitized): the result's usage is cumulative and
 # its modelUsage names a helper model beside the session's own.
-_STREAM = json.loads(
-    (Path(__file__).parents[1] / "fixtures/claude_cloud_turn_stream.json").read_text()
-)
+_STREAM = STREAM
 _MODEL = "claude-opus-4-8[1m]"
 _TURN_STREAM = _STREAM[:3]
 
