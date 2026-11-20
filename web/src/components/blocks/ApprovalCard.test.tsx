@@ -1759,6 +1759,30 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     expect(screen.queryByText(/wants to call/)).toBeNull();
   });
 
+  it.each([
+    ["accept", { Release: "Yes" }, "answered"],
+    ["cancel", undefined, "dismissed"],
+  ] as const)(
+    "names the session, the verdict and the choice when another session %s",
+    (action, content, verdict) => {
+      render(
+        <ApprovalCard
+          elicitationId="elic_by_session"
+          message="Claude wants to call AskUserQuestion"
+          phase="pre_tool_use"
+          policyName="claude_native_permission"
+          contentPreview={sampleSinglePreview}
+          requestedSchema={{}}
+          status="responded"
+          response={{ action, resolvedBy: "conv_parent", ...(content ? { content } : {}) }}
+        />,
+      );
+
+      expect(screen.getByText(`Resolved by session conv_parent · ${verdict}`)).toBeDefined();
+      expect(screen.queryByText(/Yes/) !== null).toBe(content !== undefined);
+    },
+  );
+
   describe("unsent answers across a remount", () => {
     const draftQuestions: ClaudeQuestion[] = [
       {
