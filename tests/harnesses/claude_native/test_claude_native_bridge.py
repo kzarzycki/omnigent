@@ -1402,6 +1402,71 @@ def test_read_transcript_items_since_mirrors_thinking_as_reasoning(tmp_path: Pat
     assert current_response_id == answer.response_id
 
 
+def test_read_transcript_items_since_shows_updates_thinking_as_assistant_text(
+    tmp_path: Path,
+) -> None:
+    """
+    Claude Code's "updates" thinking is a progress line, so it mirrors as text.
+
+    The recorded shape: one response written as an empty signed thinking
+    entry, then a non-empty one, both with ``thinkingDisplay: "updates"``.
+    The terminal shows the second as a visible summary line; plain thinking
+    (no ``thinkingDisplay``) still mirrors as folded ``reasoning``.
+    """
+    transcript_path = tmp_path / "session.jsonl"
+
+    def entry(uuid: str, thinking: str, **extra: object) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "uuid": uuid,
+                "requestId": "req-1",
+                **extra,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": thinking, "signature": "sig"}],
+                },
+            }
+        )
+
+    transcript_path.write_text(
+        "\n".join(
+            [
+                entry("a-0", "", thinkingDisplay="updates", apiBlockIndex=0),
+                entry(
+                    "a-1",
+                    "Nothing arrived yet, so I am trying a smaller upload.\n\n",
+                    thinkingDisplay="updates",
+                    apiBlockIndex=1,
+                ),
+                entry("a-2", "plain hidden thought"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _cursor, _response_id, items = read_transcript_items_since(
+        transcript_path,
+        0,
+        agent_name="claude-native-ui",
+    )
+
+    assert [item.item_type for item in items] == ["message", "reasoning"]
+    summary, hidden = items
+    assert summary.data == {
+        "role": "assistant",
+        "agent": "claude-native-ui",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "Nothing arrived yet, so I am trying a smaller upload.",
+            }
+        ],
+    }
+    assert hidden.data["content"] == [{"type": "reasoning_text", "text": "plain hidden thought"}]
+
+
 def test_read_transcript_items_since_skips_unreadable_thinking(tmp_path: Path) -> None:
     """
     Thinking with no readable text mirrors nothing.
