@@ -6,9 +6,13 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { writeKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 import { ReasoningView } from "./ReasoningView";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe("ReasoningView — expandable gating", () => {
   it("a settled section with empty text is NOT expandable", () => {
@@ -59,5 +63,21 @@ describe("ReasoningView — expandable gating", () => {
     expect(screen.queryByText("Considered the options.")).toBeNull(); // collapsed
     fireEvent.click(trigger);
     expect(screen.getByText("Considered the options.")).toBeTruthy(); // expanded
+  });
+});
+
+describe("ReasoningView — keep thinking expanded", () => {
+  it("shows a settled section's text without a click when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="Considered the options." isStreaming={false} duration={2.5} />);
+    expect(screen.getByText("Considered the options.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.queryByText("Considered the options.")).toBeNull();
+  });
+
+  it("keeps a settled empty section a flat header when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="" isStreaming={false} duration={undefined} />);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });
