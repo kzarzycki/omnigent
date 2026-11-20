@@ -1587,35 +1587,66 @@ async def test_a_held_notice_is_delivered_by_the_sweep_after_a_restart(
     assert restarted.posted == [(watcher, _completed(target))]
 
 
-@pytest.mark.parametrize(
-    ("edge", "archived", "posts"),
-    [
-        ("completed", True, False),
-        ("completed", False, True),
-        ("failed", True, True),
-        ("cancelled", True, True),
-    ],
-)
-async def test_only_a_held_completed_notice_is_dropped_for_an_archived_target(
+@pytest.mark.parametrize(("archived", "posts"), [(True, False), (False, True)])
+async def test_a_held_completed_notice_is_dropped_only_for_an_archived_target(
     quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
-    edge: str,
     archived: bool,
     posts: bool,
 ) -> None:
     store, watcher, target = quiet_outbox
     poster = _Poster()
     session_subscriptions.configure(store, None, poster)
-    if edge != "completed":  # not held: it posts at once, so the target is archived first
-        store.update_conversation(target, archived=archived)
-    await _at(0, lambda: _turn_end(target, edge, "resp_1"))
-    if edge == "completed":
-        store.update_conversation(target, archived=archived)
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    store.update_conversation(target, archived=archived)
 
     await _sweep(_QUIET_S)
     await _sweep(10**6)
 
-    expected = [(watcher, session_subscriptions.turn_notice("worker", target, edge))]
-    assert poster.posted == (expected if posts else [])
+    assert poster.posted == ([(watcher, _completed(target))] if posts else [])
+    # Settled either way: the row is not left pending for another sweep.
+    assert _deliveries(store)[session_subscriptions._event_key("turn", "resp_1")][0] == 1
+
+
+@pytest.mark.parametrize("edge", ["failed", "cancelled", "prompt"])
+async def test_an_immediate_notice_retried_after_archival_still_posts(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+    edge: str,
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster(failures=1)
+    session_subscriptions.configure(store, None, poster)
+    if edge == "prompt":
+        await _at(0, lambda: _prompt_edge(target, "elicit_1"))
+    else:
+        await _at(0, lambda: _turn_end(target, edge, "resp_1"))
+    assert poster.posted == []  # the first post failed; the row waits for a retry
+    store.update_conversation(target, archived=True)
+
+    await _sweep(10**6)
+
+    text = (
+        _waiting("worker", target)
+        if edge == "prompt"
+        else (session_subscriptions.turn_notice("worker", target, edge))
+    )
+    assert poster.posted == [(watcher, text)]
+
+
+async def test_a_turn_recorded_after_the_target_is_restored_posts(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    store.update_conversation(target, archived=True)
+    await _at(0, lambda: _turn_end(target, "completed", "resp_1"))
+    store.update_conversation(target, archived=False)
+    await _at(0, lambda: _turn_end(target, "completed", "resp_2"))
+
+    await _sweep(_QUIET_S)
+    await _sweep(10**6)
+
+    assert poster.posted == [(watcher, _completed(target))]
 
 
 async def test_a_held_notice_waits_for_a_restored_target_that_runs_again(
