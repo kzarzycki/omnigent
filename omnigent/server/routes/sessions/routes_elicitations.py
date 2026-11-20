@@ -261,7 +261,7 @@ def register_elicitations_routes(
         request: Request,
         resolver_id: str,
         question_id: str,
-        body: Annotated[Any, Body()],
+        body: Annotated[Any, Body()] = None,
     ) -> dict[str, bool]:
         """
         Resolve a descendant session's question card on behalf of an ancestor session.

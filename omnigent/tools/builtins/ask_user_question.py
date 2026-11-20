@@ -191,8 +191,8 @@ class SysResolveQuestionTool(Tool):
                         "answers": {
                             "type": "object",
                             "description": (
-                                "For answer: each question's text to the chosen option "
-                                "label, or a list of labels for multi-select."
+                                "For answer: each question's id, text or header to the chosen "
+                                "option label, or a list of labels for multi-select."
                             ),
                             "additionalProperties": {
                                 "anyOf": [

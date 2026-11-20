@@ -551,6 +551,7 @@ async def test_an_ancestor_answers_by_header_and_the_event_carries_the_choice(
     question = {**_question("Ship it?", "Yes", "No"), "header": "Release"}
     question_id = await _ask(client, asking, question)
     collector = await start_session_stream_collector(asking)
+    parent_collector = await start_session_stream_collector(parent["id"])
 
     response = await _resolve(
         client, parent["id"], asking, question_id, action="answer", answers={"Release": "Yes"}
@@ -567,11 +568,33 @@ async def test_an_ancestor_answers_by_header_and_the_event_carries_the_choice(
         parent["id"],
         {"Release": "Yes"},
     )
+    async with asyncio.timeout(5):
+        mirrored = await parent_collector.next_event()
+        while mirrored["type"] != "response.elicitation_resolved":
+            mirrored = await parent_collector.next_event()
+    assert mirrored["choices"] == {"Release": "Yes"}
+
+
+async def test_an_ancestor_answers_by_question_id(
+    client: httpx.AsyncClient, runner: _Runner, db_uri: str
+) -> None:
+    parent = await create_test_session(client)
+    asking = _child_of(db_uri, parent)
+    question = {**_question("Ship it?", "Yes", "No"), "id": "pick"}
+    question_id = await _ask(client, asking, question)
+
+    response = await _resolve(
+        client, parent["id"], asking, question_id, action="answer", answers={"pick": "Yes"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert (await _read_answer(client, asking, question_id))["choices"] == {"Ship it?": "Yes"}
 
 
 @pytest.mark.parametrize(
     "payload",
     [
+        None,
         [],
         {"action": "answer", "answers": {"Ship it?": 42}},
         {"action": "dismiss", "note": "a" * 501},

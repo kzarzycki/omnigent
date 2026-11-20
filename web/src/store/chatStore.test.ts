@@ -12257,6 +12257,20 @@ describe("chatStore — elicitation_resolved", () => {
     };
   }
 
+  it("carries resolvedBy and the chosen options onto the card", () => {
+    useChatStore.setState({ blocks: [elicitationBlock("elic_resolved")] });
+
+    handleSessionEvent({
+      ...elicitationResolvedEvent("elic_resolved", "accept"),
+      resolvedBy: "conv_parent",
+      choices: { Release: "Yes" },
+    } as StreamEvent);
+
+    const card = useChatStore.getState().blocks[0] as ElicitationBlock;
+    expect(card.response?.resolvedBy).toBe("conv_parent");
+    expect(card.response?.content).toEqual({ Release: "Yes" });
+  });
+
   it("flips the matching card to auto_resolved by elicitation_id", () => {
     // The server emits this event when an approval is cleared via
     // any path (second tab, REPL TUI, PermissionRequest hook's
