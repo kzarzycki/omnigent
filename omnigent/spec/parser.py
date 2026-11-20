@@ -121,6 +121,7 @@ _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
     "max_iterations",
 )
 
+
 def _is_claude_executor_kind(kind: str) -> bool:
     """
     Whether an executor type or ``config.harness`` names a Claude executor.
