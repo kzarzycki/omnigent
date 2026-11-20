@@ -36,8 +36,10 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  send(): void {
-    // The watch-set send is irrelevant to the watchdog; ignore it.
+  readonly sent: unknown[] = [];
+
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
   }
 
   close(): void {
@@ -310,6 +312,24 @@ describe("sessionUpdatesSocket visibility-aware reconnect", () => {
     fireVisibilityChange(true);
     fireVisibilityChange(false);
     expect(FakeWebSocket.instances.length).toBe(1);
+  });
+
+  it("tells the server when the page hides and shows, and on opening while hidden", () => {
+    setPageHidden(true);
+    sessionUpdatesSocket.start();
+    latestWs().open();
+    expect(latestWs().sent[0]).toEqual({ type: "visibility", hidden: true });
+
+    fireVisibilityChange(false);
+    fireVisibilityChange(true);
+    const visibility = latestWs().sent.filter(
+      (frame) => (frame as { type: string }).type === "visibility",
+    );
+    expect(visibility).toEqual([
+      { type: "visibility", hidden: true },
+      { type: "visibility", hidden: false },
+      { type: "visibility", hidden: true },
+    ]);
   });
 
   it("keeps backing off when every socket is dropped right after it opens", () => {

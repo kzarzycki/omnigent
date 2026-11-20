@@ -214,6 +214,7 @@ class SessionUpdatesSocket {
       // Start the silence watchdog: from here we expect at least a
       // heartbeat within the window or we treat the link as dead.
       this.armWatchdog();
+      if (isPageHidden()) this.sendVisibility();
       this.sendWatch();
     };
     ws.onmessage = (event) => this.handleMessage(event);
@@ -274,7 +275,11 @@ class SessionUpdatesSocket {
    * bypass the backoff.
    */
   private readonly onVisibilityChange = (): void => {
-    if (document.hidden || !this.started) return;
+    if (!this.started) return;
+    // A hidden tab keeps the stream (it feeds desktop notifications) but asks
+    // the server to rescan it less often; showing the tab catches up at once.
+    this.sendVisibility();
+    if (document.hidden) return;
     if (this.reconnectTimer !== null && this.ws === null && this.hiddenRetryPending) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -299,6 +304,12 @@ class SessionUpdatesSocket {
       this.hiddenRetryPending = false;
       if (this.started) this.connect();
     }, delay);
+  }
+
+  private sendVisibility(): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "visibility", hidden: isPageHidden() }));
+    }
   }
 
   private sendWatch(): void {

@@ -3231,6 +3231,7 @@ def register_core_routes(
         # by currently-watched ids; pruned when the watch-set narrows.
         last_sent: dict[str, dict[str, Any]] = {}
         last_send_monotonic = time.monotonic()
+        client_hidden = False
         # Serializes the read-diff-send-update critical section between the
         # reader (snapshot on watch) and the ticker (interval deltas) so
         # they never interleave updates to ``last_sent``.
@@ -3292,14 +3293,24 @@ def register_core_routes(
 
         async def _reader() -> None:
             """Apply incoming watch-set updates and snapshot each one."""
-            nonlocal watched
+            nonlocal watched, client_hidden
             while True:
                 raw = await websocket.receive_text()
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(msg, dict) or msg.get("type") != "watch":
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "visibility":
+                    was_hidden = client_hidden
+                    client_hidden = msg.get("hidden") is True
+                    if was_hidden and not client_hidden:
+                        # Shown again: catch up now instead of on the next tick.
+                        async with emit_lock:
+                            await _emit_deltas()
+                    continue
+                if msg.get("type") != "watch":
                     # Forward-compatible: ignore frames we don't understand.
                     continue
                 ids = msg.get("session_ids")
@@ -3349,11 +3360,16 @@ def register_core_routes(
                         await _emit_snapshot()
 
         async def _ticker() -> None:
-            """Emit deltas / heartbeats on a fixed interval."""
+            """Emit deltas / heartbeats on a fixed interval (every Nth tick
+            while the client reports a hidden tab)."""
+            tick = 0
             while True:
                 from omnigent.server.routes import sessions as _sf
 
                 await asyncio.sleep(_sf._SESSION_UPDATES_RESCAN_INTERVAL_S)
+                tick += 1
+                if client_hidden and tick % _sf._SESSION_UPDATES_HIDDEN_TICK_STRIDE:
+                    continue
                 async with emit_lock:
                     try:
                         await _emit_deltas()

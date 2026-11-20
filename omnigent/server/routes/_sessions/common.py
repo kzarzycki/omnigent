@@ -732,6 +732,13 @@ _FENCE_EXEMPT_EVENT_TYPES: frozenset[str] = frozenset(
 _SESSION_UPDATES_RESCAN_INTERVAL_S: float = 4.0
 
 
+# A client in a hidden tab says so (``{"type": "visibility", "hidden": true}``)
+# and is rescanned on every Nth tick only. Hidden tabs still need the stream
+# (it feeds their desktop notifications), but not at foreground latency; the
+# client's notification settle window is longer than the slower cadence.
+_SESSION_UPDATES_HIDDEN_TICK_STRIDE: int = 4
+
+
 _SESSION_UPDATES_HEARTBEAT_INTERVAL_S: float = 30.0
 
 
@@ -1255,6 +1262,7 @@ __all__ = [
     "_SERVER_STREAM_EVENT_ADAPTER",
     "_SESSION_STREAM_HEARTBEAT_INTERVAL_S",
     "_SESSION_UPDATES_HEARTBEAT_INTERVAL_S",
+    "_SESSION_UPDATES_HIDDEN_TICK_STRIDE",
     "_SESSION_UPDATES_MAX_WATCHED",
     "_SESSION_UPDATES_RESCAN_INTERVAL_S",
     "_SHARED_DISCOVERY_KEY",

@@ -328,6 +328,35 @@ def test_title_change_pushes_changed_frame(app: FastAPI, stores, fast_rescan: No
         assert items[s1]["title"] == "after"
 
 
+def test_hidden_client_is_not_rescanned_until_shown(
+    app: FastAPI, stores, fast_rescan: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that reports a hidden tab skips rescans (stride patched huge
+    here), and showing the tab resumes the per-tick diff."""
+    import time
+
+    monkeypatch.setattr(sessions_routes, "_SESSION_UPDATES_HIDDEN_TICK_STRIDE", 10**6)
+    conversation_store = stores[0]
+    s1 = _seed_session(stores, owner=ALICE, title="before")
+    with TestClient(app).websocket_connect(
+        "/v1/sessions/updates", headers={"X-Forwarded-Email": ALICE}
+    ) as ws:
+        ws.send_text(json.dumps({"type": "watch", "session_ids": [s1]}))
+        _recv_until(ws, {"snapshot"})
+        ws.send_text(json.dumps({"type": "visibility", "hidden": True}))
+        time.sleep(0.1)
+        # A change and its revert, both while hidden: a rescan in between
+        # would push "during"; a hidden client must see neither.
+        conversation_store.update_conversation(s1, title="during")
+        time.sleep(0.3)
+        conversation_store.update_conversation(s1, title="before")
+        ws.send_text(json.dumps({"type": "visibility", "hidden": False}))
+        conversation_store.update_conversation(s1, title="after")
+        changed = _recv_until(ws, {"changed"})
+        titles = [item["title"] for item in changed["items"]]  # type: ignore[index]
+        assert titles == ["after"]
+
+
 def test_share_change_pushes_owner_shared_flag(app: FastAPI, stores, fast_rescan: None) -> None:
     """Granting and revoking another user reaches the owner's watched row on rescan,
     with no other change to the session."""
