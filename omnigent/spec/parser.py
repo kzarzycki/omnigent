@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_aliases import is_claude_sdk_harness_name, native_terminal_name
 from omnigent.inner.datamodel import (
     DEFAULT_BASIC_USERNAME,
     CredentialProxyEntry,
@@ -108,6 +109,31 @@ _YAML_1_2_BOOL_RE = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 _STRUCTURED_EXECUTOR_CONFIG_KEYS: frozenset[str] = frozenset(
     {"context_files", "system_prompt_mode", "allowed_tools", "disallowed_tools"}
 )
+
+# Keys that belong directly under ``executor:``, not inside ``executor.config``.
+_EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
+    "model",
+    "reasoning_effort",
+    "context_window",
+    "connection",
+    "auth",
+    "timeout",
+    "max_iterations",
+)
+
+
+def _is_claude_executor_kind(kind: str) -> bool:
+    """
+    Whether an executor type or ``config.harness`` names a Claude executor.
+
+    Other harnesses (e.g. codex-native) read ``executor.config`` keys such as ``model``.
+    """
+    return (
+        kind == "claude_sdk"
+        or is_claude_sdk_harness_name(kind)
+        or native_terminal_name(kind) == "claude"
+    )
+
 
 # Copy the resolver dict onto the subclass before mutating — it's inherited
 # from SafeLoader by reference, so in-place edits below would strip
@@ -777,6 +803,21 @@ def _parse_executor(
     # harness/profile fields are both strings in the source YAML).
     raw_config = raw.get("config")
     config: dict[str, object] = {}
+    claude_kind = str(raw_config.get("harness") or etype) if isinstance(raw_config, dict) else ""
+    if isinstance(raw_config, dict) and _is_claude_executor_kind(claude_kind):
+        for key in _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG:
+            if key in raw_config:
+                raise OmnigentError(
+                    f"executor.config.{key} is not read there; "
+                    f"set executor.{key} directly under executor:",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+        if "setting_sources" in raw_config:
+            raise OmnigentError(
+                "executor.config.setting_sources is not read there; "
+                "use top-level `skills: none` (or a skill list) instead",
+                code=ErrorCode.INVALID_INPUT,
+            )
     if isinstance(raw_config, dict):
         config = {
             str(k): (v if k in _STRUCTURED_EXECUTOR_CONFIG_KEYS else str(v))
