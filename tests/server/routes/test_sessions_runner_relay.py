@@ -885,6 +885,128 @@ async def test_relay_persists_context_window_labels_for_inprocess_turn(db_uri: s
         session_stream.close(session_id)
 
 
+@pytest.mark.asyncio
+async def test_claude_cloud_turns_fill_the_record_the_counters_and_the_session_get(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claude-cloud stream, translated by the bridge, fills everything through the relay.
+
+    Two turns go through the relay's completion path. The session record gets one model
+    bucket with the cloud's cumulative totals counted once, the relay's own metric emission
+    grows the counters, and ``GET /v1/sessions/{id}`` shows the window fill and window.
+    """
+    import importlib.util
+
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from omnigent.inner.acp_executor import AcpExecutor
+    from omnigent.llms.context_window import ModelPricing
+    from omnigent.runtime import session_stream, usage_metrics
+    from omnigent.server.routes import sessions as sessions_module
+    from tests.inner.claude_cloud_stream import STREAM
+    from tests.server.helpers import create_test_agent
+
+    bridge_path = Path(__file__).parents[3] / "integrations/claude-cloud-acp/claude_cloud_acp.py"
+    spec = importlib.util.spec_from_file_location("claude_cloud_acp_relay", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: ModelPricing(input_per_token=1e-6, output_per_token=2e-6),
+    )
+    reader = InMemoryMetricReader()
+    monkeypatch.setenv("OMNIGENT_TELEMETRY_ENABLED", "true")
+    monkeypatch.setattr(
+        usage_metrics.otel_metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter
+    )
+    usage_metrics._instruments.cache_clear()
+    created = await client.post(
+        "/v1/sessions", json={"agent_id": (await create_test_agent(client))["id"]}
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+
+    tracker = bridge.UsageTracker()
+    turn_events: list[dict[str, Any]] = []
+    for number, payloads in enumerate((STREAM[:3], STREAM[3:]), start=1):
+        for payload in payloads:
+            tracker.note(payload)
+        usage = AcpExecutor._usage_from_result({"usage": tracker.take()})
+        turn_events.append(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": f"resp_cloud_{number}",
+                    "model": "claude-cloud",
+                    "usage": usage,
+                },
+            }
+        )
+    release = asyncio.Event()
+    store = SqlAlchemyConversationStore(db_uri)
+    sessions_module._runner_relay_tasks.clear()
+    collector = None
+    try:
+        handle = await sessions_module._ensure_runner_relay_ready(
+            session_id,
+            "runner_relay_cloud_usage",
+            _ScriptedRunnerClient(release, turn_events),  # type: ignore[arg-type]
+            conversation_store=store,
+        )
+        assert handle is not None
+        collector = await start_session_stream_collector(session_id)
+        release.set()
+        completed = 0
+        for _ in range(100):
+            event = await collector.next_event()
+            completed += event["type"] == "response.completed"
+            if completed == 2:
+                break
+        assert completed == 2
+        for _ in range(100):  # the relay's usage write follows each completion
+            await asyncio.sleep(0.05)
+            used = (store.get_conversation(session_id) or Conversation()).session_usage or {}
+            if used.get("by_model", {}).get("claude-opus-4-8[1m]", {}).get("output_tokens") == 150:
+                break
+        data = reader.get_metrics_data()
+    finally:
+        release.set()
+        if collector is not None:
+            await collector.stop()
+        handle = sessions_module._runner_relay_tasks.get(session_id)
+        if handle is not None:
+            await asyncio.wait_for(handle.task, timeout=1.0)
+        sessions_module._runner_relay_tasks.clear()
+        session_stream.close(session_id)
+        usage_metrics._instruments.cache_clear()
+
+    snapshot = (await client.get(f"/v1/sessions/{session_id}")).json()
+    assert snapshot["last_total_tokens"] == 4510  # the last assistant message's window fill
+    assert snapshot["context_window"] == 1_000_000
+    bucket = snapshot["usage_by_model"]["claude-opus-4-8[1m]"]
+    assert (bucket["input_tokens"], bucket["output_tokens"]) == (40, 150)
+    assert bucket["total_cost_usd"] == pytest.approx(0.75)
+    assert data is not None
+    points = {
+        (metric.name, dict(p.attributes or {}).get("token.type")): (dict(p.attributes), p.value)
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        for p in metric.data.data_points
+    }
+    tokens = usage_metrics.TOKENS_METRIC_NAME
+    assert points[(tokens, "input")][1] == 40
+    assert points[(tokens, "output")][1] == 150
+    assert points[(tokens, "cache_read")][1] == 9500
+    assert points[(tokens, "cache_creation")][1] == 800
+    assert points[(usage_metrics.COST_METRIC_NAME, None)][1] == pytest.approx(0.75)
+    assert points[(tokens, "input")][0]["model"] == "claude-opus-4-8[1m]"
+
+
 class _TunnelCloseStreamResponse:
     """
     Async context manager that raises ``ConnectionError`` mid-stream.
