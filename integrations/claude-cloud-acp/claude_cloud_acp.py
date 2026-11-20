@@ -799,6 +799,7 @@ class UsageTracker:
         self.context_tokens: int | None = None
         self.context_window: int | None = None
         self.seen: dict[str, float] = {}
+        self.loaded = False  # ``seen`` holds the baseline a previous bridge saved
         self.turn: dict | None = None
 
     def note(self, payload: dict) -> None:
@@ -825,12 +826,11 @@ class UsageTracker:
         usage = payload.get("usage")
         by_model = payload.get("modelUsage")
         if isinstance(by_model, dict) and by_model:
-            # The model that did most of the work names the turn.
-            self.model = max(
-                by_model,
-                key=lambda name: (by_model[name] or {}).get("outputTokens") or 0,
-            )
-            window = (by_model[self.model] or {}).get("contextWindow")
+            # The session's own model names the window; a helper model's bucket does not.
+            main = by_model.get(self.model) if self.model else None
+            if main is None and len(by_model) == 1:
+                self.model, main = next(iter(by_model.items()))
+            window = (main or {}).get("contextWindow")
             if isinstance(window, int) and window > 0:
                 self.context_window = window
         totals: dict[str, float] = {}
@@ -858,6 +858,13 @@ class UsageTracker:
         if self.model:
             out["model"] = self.model
         self.turn = out
+
+    def load(self, cloud_id: str) -> None:
+        """Take the baseline a previous bridge of this cloud session saved."""
+        self.loaded = True
+        with contextlib.suppress(ValueError, TypeError):
+            saved = json.loads(recall().get(f"usage:{cloud_id}") or "{}")
+            self.seen = {k: v for k, v in saved.items() if isinstance(v, (int, float))}
 
     def take(self) -> dict | None:
         """The usage of the turn just mirrored, once."""
@@ -1177,6 +1184,8 @@ def update(acp_id: str, upd: dict) -> None:
 
 def run_turn(acp_id: str, text: str) -> str:
     s = session_for(acp_id)
+    if s.cloud_id and not s.usage.loaded:
+        s.usage.load(s.cloud_id)
     s.cancelled.clear()
     s.interrupted = False
     s.running = True
@@ -1470,6 +1479,9 @@ def handle_prompt(msg: dict) -> None:
         tracker = session_for(params["sessionId"]).usage
         if (usage := tracker.take()) is not None:
             result["usage"] = usage
+            cloud_id = session_for(params["sessionId"]).cloud_id
+            if cloud_id:
+                remember(f"usage:{cloud_id}", json.dumps(tracker.seen))
             if tracker.context_window:
                 update(
                     params["sessionId"],

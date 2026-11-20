@@ -1,0 +1,54 @@
+[
+ {
+  "type": "system",
+  "subtype": "init",
+  "model": "claude-opus-4-8[1m]"
+ },
+ {
+  "type": "assistant",
+  "message": {
+   "content": [
+    {
+     "type": "text",
+     "text": "done"
+    }
+   ],
+   "usage": {
+    "input_tokens": 10,
+    "cache_read_input_tokens": 4000,
+    "cache_creation_input_tokens": 500,
+    "output_tokens": 20
+   }
+  }
+ },
+ {
+  "type": "result",
+  "total_cost_usd": 0.5,
+  "usage": {
+   "input_tokens": 30,
+   "cache_read_input_tokens": 9000,
+   "cache_creation_input_tokens": 800,
+   "output_tokens": 120
+  },
+  "modelUsage": {
+   "claude-opus-4-8[1m]": {
+    "outputTokens": 20,
+    "contextWindow": 1000000
+   },
+   "claude-haiku-5-5": {
+    "outputTokens": 100,
+    "contextWindow": 200000
+   }
+  }
+ },
+ {
+  "type": "result",
+  "total_cost_usd": 0.75,
+  "usage": {
+   "input_tokens": 40,
+   "cache_read_input_tokens": 9500,
+   "cache_creation_input_tokens": 800,
+   "output_tokens": 150
+  }
+ }
+]

@@ -20,44 +20,24 @@ from omnigent.server.routes._sessions.orchestration import _context_labels_from_
 
 _BRIDGE_PATH = Path(__file__).parents[2] / "integrations/claude-cloud-acp/claude_cloud_acp.py"
 
-# One cloud turn as the stream delivers it. The result's usage is cumulative.
+# A cloud turn as the stream delivers it (sanitized): the result's usage is cumulative and
+# its modelUsage names a helper model beside the session's own.
+_STREAM = json.loads(
+    (Path(__file__).parents[1] / "fixtures/claude_cloud_turn_stream.json").read_text()
+)
 _MODEL = "claude-opus-4-8[1m]"
-_TURN_STREAM = [
-    {"type": "system", "subtype": "init", "model": _MODEL},
-    {
-        "type": "assistant",
-        "message": {
-            "content": [{"type": "text", "text": "done"}],
-            "usage": {
-                "input_tokens": 10,
-                "cache_read_input_tokens": 4000,
-                "cache_creation_input_tokens": 500,
-                "output_tokens": 20,
-            },
-        },
-    },
-    {
-        "type": "result",
-        "total_cost_usd": 0.5,
-        "usage": {
-            "input_tokens": 30,
-            "cache_read_input_tokens": 9000,
-            "cache_creation_input_tokens": 800,
-            "output_tokens": 120,
-        },
-        "modelUsage": {_MODEL: {"outputTokens": 120, "contextWindow": 1_000_000}},
-    },
-]
+_TURN_STREAM = _STREAM[:3]
 
 
 @pytest.fixture
-def bridge() -> ModuleType:
+def bridge(tmp_path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "claude_cloud_acp_usage_under_test", _BRIDGE_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.STATE_FILE = tmp_path / "state.json"
     return module
 
 
@@ -181,3 +161,32 @@ def test_a_result_without_usage_leaves_usage_unknown(
     )
     assert "usage" not in response
     assert AcpExecutor._usage_from_result(response) is None
+
+
+def test_a_helper_model_does_not_take_over_the_session_model_or_window(bridge: ModuleType) -> None:
+    """The init model and its window stay, though a helper wrote more of the output."""
+    tracker = bridge.UsageTracker()
+    for payload in _TURN_STREAM:
+        tracker.note(payload)
+    turn = tracker.take()
+    assert turn is not None and turn["model"] == _MODEL
+    assert tracker.context_window == 1_000_000
+
+
+def test_the_baseline_survives_a_bridge_respawn(
+    bridge: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A respawned bridge reports a turn's growth, not the cloud session's whole total again."""
+    first = bridge.Session("/", "acp-usage")
+    first.cloud_id = "session_u"
+    first.usage.load("session_u")
+    for payload in _STREAM[:3]:
+        first.usage.note(payload)
+    first.usage.take()
+    bridge.remember("usage:session_u", json.dumps(first.usage.seen))
+    respawned = bridge.Session("/", "acp-usage")
+    respawned.usage.load("session_u")
+    respawned.usage.note(_STREAM[3])
+    turn = respawned.usage.take()
+    assert turn is not None
+    assert (turn["inputTokens"], turn["outputTokens"], turn["costUsd"]) == (10, 30, 0.25)
