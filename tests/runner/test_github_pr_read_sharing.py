@@ -125,7 +125,9 @@ class FakeGh:
             login = argv[argv.index("--user") + 1]
             if login in self.tokens:
                 return 0, self.tokens[login], ""
-            if self.active_tokens and any(a["login"] == login and a["active"] for a in self.accounts):
+            if self.active_tokens and any(
+                a["login"] == login and a["active"] for a in self.accounts
+            ):
                 return 0, f"active-token-{login}", ""
             return 1, "", "no token"
         if argv[:2] == ["pr", "list"]:
