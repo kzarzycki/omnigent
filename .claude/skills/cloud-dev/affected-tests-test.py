@@ -64,6 +64,13 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, {"tests/server/conftest.py": "# c\n"}) == ["tests"]
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]
     assert select(repo, {"tests/helpers/util.py": "z = 1\n"}) == ["tests"]
+    # suites the default addopts ignore are never selected
+    (repo / "tests" / "e2e").mkdir()
+    (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "e2e")
+    run("git", "tag", "-f", "base")
+    assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
     assert affected_tests.targets(None) == ["tests"]  # no base to diff
     # a deleted test file selects nothing, not a path pytest can't find
     run("git", "checkout", "-q", "-B", "work", "base")
