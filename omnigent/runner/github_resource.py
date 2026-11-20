@@ -1286,37 +1286,61 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     return authenticated, accounts
 
 
+def _ambient_token(host: str) -> str | None:
+    """The token ``gh`` takes from the environment for *host*, by its own host rules.
+
+    github.com and ``*.ghe.com`` read ``GH_TOKEN`` then ``GITHUB_TOKEN``; any other
+    (Enterprise Server) host reads ``GH_ENTERPRISE_TOKEN`` then ``GITHUB_ENTERPRISE_TOKEN``.
+    A sandbox scrubs them all.
+    """
+    if _in_sandbox():
+        return None
+    hostname = host.lower()
+    names = (
+        ("GH_TOKEN", "GITHUB_TOKEN")
+        if hostname == "github.com" or hostname.endswith(".ghe.com")
+        else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    )
+    return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
 def _resolve_read(
-    token: str | None, host: str, accounts: Callable[[], list[dict[str, Any]]]
+    root: str,
+    token: str | None,
+    host: str,
+    accounts: Callable[[], list[dict[str, Any]]],
 ) -> tuple[str | None, str | None]:
     """Decide once who a read is made as: ``(token, cache_identity)``.
 
     The read and its cache key both come from this, so they cannot disagree. ``token``,
     the preferred account's (``None`` when it has none readable), is passed to ``gh`` as
-    given and keyed by its hash. Without one ``gh``
-    uses an ambient ``GH_TOKEN`` / ``GITHUB_TOKEN`` (a sandbox scrubs them), keyed by its
-    hash, and otherwise its active account, keyed by that login, read from ``accounts()``.
-    A preferred account whose token can't be read falls through to those, as ``gh``
-    does. When the active account can't be named the identity is ``None``: don't cache.
+    given and keyed by its hash. Without one ``gh`` uses the environment token for the
+    host (see :func:`_ambient_token`), keyed by its hash, and otherwise its active
+    account. That account's own token is then passed explicitly, so a ``gh auth switch``
+    between this and the read cannot change who answers. A preferred account whose token
+    can't be read falls through to those, as ``gh`` does. When no credential can be
+    bound the identity is ``None``: don't cache.
     """
     if token:
         return token, "token:" + hashlib.sha256(token.encode()).hexdigest()
-    ambient = (
-        None if _in_sandbox() else os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    )
+    ambient = _ambient_token(host)
     if ambient:
         return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
     # gh reads as the active account even when its auth check failed; only a
     # working active account names the identity.
     active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
-    if active is None or active.get("state") != "success":
+    if active is None or active.get("state") != "success" or not active.get("login"):
         return None, None
-    return None, f"active:{host}:{active.get('login')}"
+    active_token = _gh_auth_token(root, str(active["login"]), host)
+    if not active_token:
+        return None, None
+    return active_token, "token:" + hashlib.sha256(active_token.encode()).hexdigest()
 
 
 def _pr_read(root: str, reference: PullRequestRef) -> tuple[str | None, str | None]:
     """``(token, cache_identity)`` for a PR read, with the accounts read fresh."""
     return _resolve_read(
+        root,
         _pr_token(root, reference),
         reference.host,
         lambda: _cached_accounts(root)[1],
@@ -3350,7 +3374,7 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     if (accounts and not logins) or (not authenticated and not accounts):
         return False, None, ""
     token, identity = _resolve_read(
-        _repo_token(root, f"github.com/{owner}/{repo}"), "github.com", lambda: accounts
+        root, _repo_token(root, f"github.com/{owner}/{repo}"), "github.com", lambda: accounts
     )
     return True, token, identity
 

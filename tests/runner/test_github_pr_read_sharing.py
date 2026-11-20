@@ -25,6 +25,7 @@ from tests._helpers.polling import poll_until
 from tests.runner.helpers import NullServerClient
 
 REPO = "https://github.com/acme/widgets"
+ENTERPRISE_HOST = "ghe.example.com"
 OPEN_NUMBERS = (1, 2, 3, 4, 5)
 MERGED_NUMBER = 9
 CLOSED_NUMBER = 10
@@ -58,6 +59,7 @@ class FakeGh:
         self.quota_remaining = 0  # ``gh api rate_limit``'s graphql remaining
         self.conversation_rate_limited = False  # the conversation query fails as above
         self.argvs: list[list[str]] = []
+        self.active_tokens = True  # ``gh auth token`` hands the active account's token out
 
     @property
     def accounts(self) -> list[dict[str, Any]]:
@@ -78,6 +80,10 @@ class FakeGh:
         for login, known in self.tokens.items():
             if token is not None and known == token:
                 return login
+        if token is not None and token.startswith("active-token-"):
+            return token.removeprefix("active-token-")
+        if token is None and ENTERPRISE_HOST in " ".join(self.argvs[-1]):
+            return "enterprise:" + os.environ.get("GH_ENTERPRISE_TOKEN", "")
         if token is None and os.environ.get("GH_TOKEN"):
             return "ambient"
         return next(account["login"] for account in self.accounts if account["active"])
@@ -111,11 +117,17 @@ class FakeGh:
         if argv[0] == "api" and "graphql" in argv and self.conversation_rate_limited:
             return 1, "", self.rate_limit_message
         if argv[:2] == ["auth", "status"]:
-            hosts = {"github.com": [dict(account) for account in self.accounts]}
+            hosts: dict[str, list[dict[str, Any]]] = {}
+            for account in self.accounts:
+                hosts.setdefault(account["host"], []).append(dict(account))
             return 0, json.dumps({"hosts": hosts}), ""
         if argv[:2] == ["auth", "token"]:
             login = argv[argv.index("--user") + 1]
-            return (0, self.tokens[login], "") if login in self.tokens else (1, "", "no token")
+            if login in self.tokens:
+                return 0, self.tokens[login], ""
+            if self.active_tokens and any(a["login"] == login and a["active"] for a in self.accounts):
+                return 0, f"active-token-{login}", ""
+            return 1, "", "no token"
         if argv[:2] == ["pr", "list"]:
             time.sleep(self.delay)
             if self.fail:
@@ -177,14 +189,14 @@ def test_sessions_without_a_viewer_share_one_listing_per_repository(fake_gh: Fak
     for _ in range(3):  # three refresh rounds inside one window
         for number in OPEN_NUMBERS:
             assert _read(number, background=True)["pr"]["number"] == number
-    assert fake_gh.calls == {"auth status": 1, "pr list": 1}
+    assert fake_gh.calls == {"auth status": 1, "auth token": 1, "pr list": 1}
 
 
 def test_five_sessions_viewing_their_prs_make_one_read_each_per_window(fake_gh: FakeGh) -> None:
     for _ in range(3):
         for number in OPEN_NUMBERS:
             assert _read(number, background=False)["pr"]["number"] == number
-    assert fake_gh.calls == {"auth status": 1, "pr view": 5, "api --hostname": 5}
+    assert fake_gh.calls == {"auth status": 1, "auth token": 1, "pr view": 5, "api --hostname": 5}
 
 
 def test_background_refreshes_within_120_seconds_share_one_listing(
@@ -275,6 +287,73 @@ def test_every_identity_reads_its_own_data(
         "carol": "read as carol",
         "dave": "read as dave",
     }
+
+
+def test_enterprise_reads_with_one_shared_public_token_are_keyed_by_the_enterprise_token(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.accounts = [
+        *_accounts("reader"),
+        {"login": "reader", "active": True, "state": "success", "host": ENTERPRISE_HOST},
+    ]
+    monkeypatch.setenv("GH_TOKEN", "shared-public-token")
+    reference = PullRequestRef.from_url(f"https://{ENTERPRISE_HOST}/acme/widgets/pull/1")
+
+    def read_title() -> str:
+        github._preview_cache.clear()  # a second runner: empty memory, same data directory
+        return github._reference_pr_data("/work", reference, background=False)["title"]
+
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "first")
+    assert read_title() == "read as enterprise:first"
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "second")
+    assert read_title() == "read as enterprise:second"  # not the first one's cached entry
+    assert fake_gh.calls["pr view"] == 2
+    assert len({tuple(key) for key in _cached_keys() if key[0] == "pr"}) == 2
+
+
+@pytest.mark.parametrize(
+    ("host", "variable"),
+    [
+        ("github.com", "GH_TOKEN"),
+        ("octo.ghe.com", "GITHUB_TOKEN"),
+        (ENTERPRISE_HOST, "GH_ENTERPRISE_TOKEN"),
+        (ENTERPRISE_HOST, "GITHUB_ENTERPRISE_TOKEN"),
+    ],
+)
+def test_the_environment_credential_follows_ghs_rules_for_the_host(
+    monkeypatch: pytest.MonkeyPatch, host: str, variable: str
+) -> None:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.setenv(name, "unrelated")
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    assert github._ambient_token(host) is None
+    monkeypatch.setenv(variable, "wanted")
+    assert github._ambient_token(host) == "wanted"
+    other = "GH_TOKEN" if variable.endswith("ENTERPRISE_TOKEN") else "GH_ENTERPRISE_TOKEN"
+    monkeypatch.delenv(variable)
+    monkeypatch.setenv(other, "other-kind")
+    assert github._ambient_token(host) is None  # the other kind is not what gh uses here
+
+
+def test_an_account_switch_after_the_key_is_resolved_cannot_change_who_reads(
+    fake_gh: FakeGh,
+) -> None:
+    fake_gh.accounts = _accounts("carol", "dave")
+    reference = PullRequestRef.from_url(f"{REPO}/pull/1")
+    token, identity = github._pr_read("/work", reference)
+    fake_gh.accounts = _accounts("dave", "carol")  # `gh auth switch` between key and read
+    data = github._pr_json("/work", reference, "title", token)
+    assert data is not None
+    assert data["title"] == "read as carol"  # the credential named by the key did the read
+    assert identity is not None
+    fake_gh.accounts = _accounts("carol")
+    assert github._pr_read("/work", reference)[1] == identity
+
+
+def test_an_active_account_whose_token_cannot_be_read_is_not_cached(fake_gh: FakeGh) -> None:
+    fake_gh.active_tokens = False
+    assert github._pr_read("/work", PullRequestRef.from_url(f"{REPO}/pull/1")) == (None, None)
 
 
 def test_a_preferred_account_without_a_token_does_not_share_its_key_with_a_working_one(
@@ -870,7 +949,7 @@ def test_one_refresh_wave_of_35_sessions_linking_3_prs_through_the_host(
     for index in range(35):
         monkeypatch.setattr(github.time, "time", lambda index=index: started + index)
         _host_refresh(tmp_path, f"session-{index}")
-    assert fake_gh.calls == {"auth status": 2, "pr list": 1}
+    assert fake_gh.calls == {"auth status": 2, "auth token": 1, "pr list": 1}
 
 
 def test_background_reads_pause_until_the_rate_limit_resets(
