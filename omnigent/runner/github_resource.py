@@ -1286,11 +1286,17 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     return authenticated, accounts
 
 
+# Hosts ``gh`` reads GH_TOKEN for: github.com and github.localhost with their subdomains
+# (``gh`` canonicalizes those), and the ``*.ghe.com`` tenancy hosts.
+_PUBLIC_TOKEN_HOSTS = ("github.com", "github.localhost")
+_PUBLIC_TOKEN_HOST_SUFFIXES = (".github.com", ".github.localhost", ".ghe.com")
+
+
 def _ambient_token(host: str) -> str | None:
     """The token ``gh`` takes from the environment for *host*, by its own host rules.
 
-    github.com, ``github.localhost`` and ``*.ghe.com`` read ``GH_TOKEN`` then
-    ``GITHUB_TOKEN``; any other
+    github.com, ``github.localhost`` (and any subdomain of either, which ``gh``
+    canonicalizes) and ``*.ghe.com`` read ``GH_TOKEN`` then ``GITHUB_TOKEN``; any other
     (Enterprise Server) host reads ``GH_ENTERPRISE_TOKEN`` then ``GITHUB_ENTERPRISE_TOKEN``.
     A sandbox scrubs them all.
     """
@@ -1299,7 +1305,7 @@ def _ambient_token(host: str) -> str | None:
     hostname = host.lower()
     names = (
         ("GH_TOKEN", "GITHUB_TOKEN")
-        if hostname in ("github.com", "github.localhost") or hostname.endswith(".ghe.com")
+        if hostname in _PUBLIC_TOKEN_HOSTS or hostname.endswith(_PUBLIC_TOKEN_HOST_SUFFIXES)
         else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
     )
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
