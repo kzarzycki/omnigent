@@ -18,4 +18,8 @@ Cloud verifier: worker session
 
 The Codex verifier of a cloud worker's PR runs in that worker's VM, on its checkout, build and proof logs (the engineering loop's Cloud worker section, "Verifier in the worker's VM"), so a pass doesn't pay for a fresh host worktree, install and build again. The `omnigent-dev` environment therefore holds a ChatGPT access token (`CODEX_AUTH_JSON`, up to 10 days, no refresh token), a copy of a Codex login with the refresh token removed: taken from the host's own Codex login when that has a day left (read only, never refreshed), else from a dedicated seed login that `cloud_verifier.py` keeps fresh. An Omnigent scheduled task reseeds the environment every 2 days. The worker is started with `--keep` and closed when its PR lands. Undo: delete the line.
 
+Affected tests: mise run check-fast
+
+`check:all` plus pytest on the tests the change touches, picked from the git diff alone by `.claude/skills/cloud-dev/affected_tests.py` (the changed tests and the tests that name a changed module; the whole `tests` tree when a conftest, the test helpers or the dependency files change), so it runs the same on a fresh clone, in a cloud VM and in CI. It reads `GATE_BASE`, else the merge base with `origin/mine`. Narrowed gates (`local-ci`, worker heads, `land`) run it in place of the full check; `ci: false` stays, so the narrowed `local-ci` pass is the landing proof. Undo: delete the line, and every gate runs `check:all` again.
+
 The loop's policy (`approvals.py`'s settings block) is in `docs/agents/gatekeeper.md` under `## Policy`.
