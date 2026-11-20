@@ -1587,6 +1587,37 @@ async def test_a_held_notice_is_delivered_by_the_sweep_after_a_restart(
     assert restarted.posted == [(watcher, _completed(target))]
 
 
+@pytest.mark.parametrize(
+    ("edge", "archived", "posts"),
+    [
+        ("completed", True, False),
+        ("completed", False, True),
+        ("failed", True, True),
+        ("cancelled", True, True),
+    ],
+)
+async def test_only_a_held_completed_notice_is_dropped_for_an_archived_target(
+    quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
+    edge: str,
+    archived: bool,
+    posts: bool,
+) -> None:
+    store, watcher, target = quiet_outbox
+    poster = _Poster()
+    session_subscriptions.configure(store, None, poster)
+    if edge != "completed":  # not held: it posts at once, so the target is archived first
+        store.update_conversation(target, archived=archived)
+    await _at(0, lambda: _turn_end(target, edge, "resp_1"))
+    if edge == "completed":
+        store.update_conversation(target, archived=archived)
+
+    await _sweep(_QUIET_S)
+    await _sweep(10**6)
+
+    expected = [(watcher, session_subscriptions.turn_notice("worker", target, edge))]
+    assert poster.posted == (expected if posts else [])
+
+
 async def test_a_held_notice_waits_for_a_restored_target_that_runs_again(
     quiet_outbox: tuple[SqlAlchemyConversationStore, str, str],
 ) -> None:
