@@ -318,6 +318,8 @@ def test_enterprise_reads_with_one_shared_public_token_are_keyed_by_the_enterpri
     [
         ("github.com", "GH_TOKEN"),
         ("octo.ghe.com", "GITHUB_TOKEN"),
+        ("github.localhost", "GH_TOKEN"),
+        ("github.localhost", "GITHUB_TOKEN"),
         (ENTERPRISE_HOST, "GH_ENTERPRISE_TOKEN"),
         (ENTERPRISE_HOST, "GITHUB_ENTERPRISE_TOKEN"),
     ],
@@ -336,6 +338,18 @@ def test_the_environment_credential_follows_ghs_rules_for_the_host(
     monkeypatch.delenv(variable)
     monkeypatch.setenv(other, "other-kind")
     assert github._ambient_token(host) is None  # the other kind is not what gh uses here
+
+
+def test_github_localhost_reads_with_different_public_tokens_get_different_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "fixed-enterprise-token")
+    identities = set()
+    for public_token in ("first", "second"):
+        monkeypatch.setenv("GH_TOKEN", public_token)
+        identities.add(github._resolve_read("/work", None, "github.localhost", list)[1])
+    assert len(identities) == 2
 
 
 def test_an_account_switch_after_the_key_is_resolved_cannot_change_who_reads(

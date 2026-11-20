@@ -1289,7 +1289,8 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
 def _ambient_token(host: str) -> str | None:
     """The token ``gh`` takes from the environment for *host*, by its own host rules.
 
-    github.com and ``*.ghe.com`` read ``GH_TOKEN`` then ``GITHUB_TOKEN``; any other
+    github.com, ``github.localhost`` and ``*.ghe.com`` read ``GH_TOKEN`` then
+    ``GITHUB_TOKEN``; any other
     (Enterprise Server) host reads ``GH_ENTERPRISE_TOKEN`` then ``GITHUB_ENTERPRISE_TOKEN``.
     A sandbox scrubs them all.
     """
@@ -1298,7 +1299,7 @@ def _ambient_token(host: str) -> str | None:
     hostname = host.lower()
     names = (
         ("GH_TOKEN", "GITHUB_TOKEN")
-        if hostname == "github.com" or hostname.endswith(".ghe.com")
+        if hostname in ("github.com", "github.localhost") or hostname.endswith(".ghe.com")
         else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
     )
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
