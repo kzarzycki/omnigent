@@ -368,10 +368,22 @@ async def test_machine_cannot_arm_bypass_through_native_setting_events(
     assert after.terminal_launch_args == before.terminal_launch_args
 
 
+@pytest.mark.parametrize(
+    "stored_args",
+    [
+        ["--permission-mode", "bypassPermissions"],
+        ["-s", "danger-full-access"],
+        ["-s=danger-full-access"],
+        ["-c", 'sandbox_mode="danger-full-access"'],
+        ["-c", 'default_permissions=":danger-full-access"'],
+        ["-a", "never"],
+    ],
+)
 async def test_runner_launch_refuses_a_machine_session_with_bypass_args_stored(
     host_perm_app: FastAPI,
     host_perm_client: httpx.AsyncClient,
     agents: dict[str, str],
+    stored_args: list[str],
 ) -> None:
     """Whatever wrote bypass into the stored row, a relaunch of a machine session refuses it."""
     from omnigent.server.routes._sessions.orchestration import ensure_runner_connected
@@ -381,9 +393,7 @@ async def test_runner_launch_refuses_a_machine_session_with_bypass_args_stored(
         host_perm_app, host_perm_client, agents["listed"]
     )
     store = host_perm_app.state.conversation_store
-    store.update_conversation(
-        session_id, terminal_launch_args=["--permission-mode", "bypassPermissions"]
-    )
+    store.update_conversation(session_id, terminal_launch_args=stored_args)
     queue = host_perm_app.state.host_registry.get(_NAMED_HOST).outbound_queue
     while not queue.empty():
         queue.get_nowait()
