@@ -5499,6 +5499,24 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
     return params
 
 
+def codex_launch_args_grant_full_access(terminal_launch_args: Sequence[str] | None) -> bool:
+    """Whether Codex launch args run with full access or without approval prompts.
+
+    Decided from the same effective stance the harness applies on launch and
+    resume, so every spelling of it (flags, ``-s``/``-a`` forms, ``-c`` overrides,
+    legacy Full Access profile) is covered. Args that can't be read count as full access.
+    """
+    try:
+        params = _codex_resume_permission_params(terminal_launch_args)
+    except ValueError:
+        return True
+    return (
+        params.get("approvalPolicy") == "never"
+        or params.get("sandbox") == "danger-full-access"
+        or params.get("permissions") == ":danger-full-access"
+    )
+
+
 _CODEX_RESUME_PERMISSION_CONFIG_FIELDS = {
     "approval_policy": "approvalPolicy",
     "approvals_reviewer": "approvalsReviewer",
