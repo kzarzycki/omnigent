@@ -1,5 +1,0 @@
-- Selector (.claude/skills/cloud-dev/affected_tests.py): run `python3 .claude/skills/cloud-dev/affected-tests-test.py`; then try selecting for a changed module, a changed conftest/pyproject.toml (selects `tests`), a Markdown-only change (selects nothing), a deleted test (not selected), and check no e2e/e2e_ui/browser_ui/e2e_live/integration test is ever selected.
-- It uses only the git diff: no cache, map or local state (works on a fresh clone with origin/mine fetched; base is GATE_BASE else merge-base origin/mine).
-- `mise run check-fast` depends on check:all, runs pytest on the targets only, and exits 0 with "no tests touched" when none are selected; a failing selected test exits non-zero.
-- docs/agents/loop.md has the `Affected tests: mise run check-fast` line; `ci: false` and gatekeeper.md are unchanged; no GitHub Actions workflow is touched.
-- Spec: issue #486 (Before merge list). Known: the full `check:all` gate passed on the head via local-ci (loop.md is read from origin/mine, so it ran full, not narrowed); a sample check-fast on a one-module change selected 11 test files and one host test failed under xdist but passes alone (flake, not this change).
