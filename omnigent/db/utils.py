@@ -1252,6 +1252,49 @@ def _is_serialization_failure(exc: DBAPIError) -> bool:
     )
 
 
+class WriteInvalidatedCache:
+    """Short-lived read cache that its owning store clears on every write.
+
+    For hot per-request reads (auth revocation state) on a single-process
+    server: a write through the same store applies on the next read; a write
+    from another process (a replica, a direct database edit) applies within
+    ``ttl_s``. A read that overlaps a write is not stored, so it can never
+    re-cache the pre-write value.
+    """
+
+    def __init__(self, ttl_s: float = 5.0, max_entries: int = 4096) -> None:
+        self._ttl_s = ttl_s
+        self._max_entries = max_entries
+        self._entries: dict[tuple[str, ...], tuple[Any, float]] = {}
+        self._writes = 0
+        self._lock = threading.Lock()
+
+    def get_or_load(self, key: tuple[str, ...], load: Callable[[], Any]) -> Any:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None and hit[1] > now:
+                return hit[0]
+            writes_before = self._writes
+        value = load()
+        with self._lock:
+            if self._writes == writes_before:
+                if len(self._entries) >= self._max_entries:
+                    self._entries.clear()
+                self._entries[key] = (value, now + self._ttl_s)
+        return value
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._writes += 1
+            self._entries.clear()
+
+
+# Shared by the account and device-grant stores: either one's writes can
+# change the other's revocation answer (an account reset revokes its grants).
+AUTH_READ_CACHE = WriteInvalidatedCache()
+
+
 def run_write_transaction(
     session_maker: NamedManagedSessionMaker,
     operation_name: str,

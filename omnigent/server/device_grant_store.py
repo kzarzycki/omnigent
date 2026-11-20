@@ -26,7 +26,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from typing import cast
+from collections.abc import Callable
+from typing import TypeVar, cast
 
 from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -36,11 +37,14 @@ from omnigent.db.account_authority import require_active_account
 from omnigent.db.db_models import SqlDeviceGrant, current_workspace_id
 from omnigent.db.enum_codecs import decode_device_grant_status, encode_device_grant_status
 from omnigent.db.utils import (
+    AUTH_READ_CACHE,
     get_or_create_engine,
     make_named_managed_session_maker,
     run_write_transaction,
 )
 from omnigent.entities import DeviceGrant
+
+_T = TypeVar("_T")
 
 
 def hash_secret(secret: str, key: bytes) -> str:
@@ -105,6 +109,13 @@ class DeviceGrantStore:
             immediate=True,
         )
 
+    def _write(self, operation_name: str, callback: Callable[[Session], _T]) -> _T:
+        """Run a write transaction, then drop cached auth reads it may change."""
+        try:
+            return run_write_transaction(self._session_immediate, operation_name, callback)
+        finally:
+            AUTH_READ_CACHE.invalidate()
+
     def create_grant(
         self,
         grant_id: str,
@@ -151,7 +162,7 @@ class DeviceGrantStore:
             session.flush()
             return _to_device_grant(row)
 
-        return run_write_transaction(self._session_immediate, "insert_device_grant", write)
+        return self._write("insert_device_grant", write)
 
     def create_redeemed_grant(
         self,
@@ -208,8 +219,7 @@ class DeviceGrantStore:
             session.flush()
             return _to_device_grant(row)
 
-        return run_write_transaction(
-            self._session_immediate,
+        return self._write(
             "insert_redeemed_device_grant",
             write,
         )
@@ -239,7 +249,7 @@ class DeviceGrantStore:
                 return None
             return _to_device_grant(row)
 
-        return run_write_transaction(self._session_immediate, "authorize_grant_access", write)
+        return self._write("authorize_grant_access", write)
 
     def get_by_user_code(self, user_code: str) -> DeviceGrant | None:
         """Look up a grant by its short verification code.
@@ -334,7 +344,7 @@ class DeviceGrantStore:
             row = session.get(SqlDeviceGrant, (current_workspace_id(), grant_id))
             return _to_device_grant(row) if row is not None else None
 
-        return run_write_transaction(self._session_immediate, "approve_device_grant", write)
+        return self._write("approve_device_grant", write)
 
     def deny(self, grant_id: str) -> bool:
         """Mark a ``pending`` grant ``denied``. Returns True if it flipped."""
@@ -356,7 +366,7 @@ class DeviceGrantStore:
             )
             return result.rowcount == 1
 
-        return run_write_transaction(self._session_immediate, "deny_device_grant", write)
+        return self._write("deny_device_grant", write)
 
     def poll_for_token(
         self,
@@ -410,7 +420,7 @@ class DeviceGrantStore:
                 return ("approved", grant)
             return ("pending", grant)
 
-        return run_write_transaction(self._session_immediate, "poll_device_grant", write)
+        return self._write("poll_device_grant", write)
 
     def redeem_approved(
         self,
@@ -454,7 +464,7 @@ class DeviceGrantStore:
             row = session.get(SqlDeviceGrant, (current_workspace_id(), grant_id))
             return _to_device_grant(row) if row is not None else None
 
-        return run_write_transaction(self._session_immediate, "redeem_device_grant", write)
+        return self._write("redeem_device_grant", write)
 
     def rotate_refresh_token(
         self,
@@ -514,7 +524,7 @@ class DeviceGrantStore:
             row = session.get(SqlDeviceGrant, (current_workspace_id(), grant_id))
             return _to_device_grant(row) if row is not None else None
 
-        return run_write_transaction(self._session_immediate, "rotate_refresh_token", write)
+        return self._write("rotate_refresh_token", write)
 
     def get_by_prev_refresh_hash(self, refresh_token_hash: str) -> DeviceGrant | None:
         """Look up a live grant whose *previous* refresh token was this one.
@@ -567,7 +577,7 @@ class DeviceGrantStore:
             )
             return result.rowcount == 1
 
-        return run_write_transaction(self._session_immediate, "revoke_device_grant", write)
+        return self._write("revoke_device_grant", write)
 
     def is_revoked(self, grant_id: str) -> bool:
         """Return True if the grant is unknown or revoked.
@@ -577,11 +587,21 @@ class DeviceGrantStore:
         Consulted by the auth layer's revocation check for delegated
         access tokens.
         """
-        with self._session("select_device_grant_revocation_status") as session:
-            row = session.get(SqlDeviceGrant, (current_workspace_id(), grant_id))
-            if row is None:
-                return True
-            return decode_device_grant_status(row.status) == "revoked"
+        workspace_id = current_workspace_id()
+
+        def load() -> bool:
+            with self._session("select_device_grant_revocation_status") as session:
+                row = session.get(SqlDeviceGrant, (workspace_id, grant_id))
+                if row is None:
+                    return True
+                return decode_device_grant_status(row.status) == "revoked"
+
+        # Runs on every delegated request; cached briefly, cleared by every write here.
+        return bool(
+            AUTH_READ_CACHE.get_or_load(
+                ("grant", str(self._session.engine.url), workspace_id, grant_id), load
+            )
+        )
 
     def purge_expired(
         self, now_epoch_seconds: int, *, max_lifetime_seconds: int | None = None
@@ -640,8 +660,7 @@ class DeviceGrantStore:
             )
             return result.rowcount
 
-        return run_write_transaction(
-            self._session_immediate,
+        return self._write(
             "purge_expired_device_grants",
             write,
         )
