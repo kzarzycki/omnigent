@@ -4108,6 +4108,41 @@ def test_parse_executor_auth_unknown_type_raises(tmp_path: Path) -> None:
         parse(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model",
+        "reasoning_effort",
+        "context_window",
+        "connection",
+        "auth",
+        "timeout",
+        "max_iterations",
+    ],
+)
+def test_parse_executor_config_rejects_misplaced_executor_field(tmp_path: Path, key: str) -> None:
+    """A field that lives directly under ``executor:`` is refused inside ``config``."""
+    config = {"spec_version": 1, "executor": {"config": {key: "x"}}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError, match=rf"executor\.config\.{key}.*executor\.{key}"):
+        parse(tmp_path)
+
+
+def test_parse_executor_config_rejects_setting_sources(tmp_path: Path) -> None:
+    """``setting_sources`` in ``executor.config`` points to top-level ``skills: none``."""
+    config = {"spec_version": 1, "executor": {"config": {"setting_sources": []}}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError, match=r"executor\.config\.setting_sources.*skills: none"):
+        parse(tmp_path)
+
+
+def test_parse_executor_config_profile_still_allowed(tmp_path: Path) -> None:
+    """``profile`` stays valid under ``executor.config``."""
+    config = {"spec_version": 1, "executor": {"config": {"profile": "p"}}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    assert parse(tmp_path).executor.config["profile"] == "p"
+
+
 def test_parse_executor_auth_api_key_missing_key_raises(tmp_path: Path) -> None:
     """
     ``type: api_key`` without an ``api_key`` field raises

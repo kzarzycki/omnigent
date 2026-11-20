@@ -109,6 +109,17 @@ _STRUCTURED_EXECUTOR_CONFIG_KEYS: frozenset[str] = frozenset(
     {"context_files", "system_prompt_mode", "allowed_tools", "disallowed_tools"}
 )
 
+# Keys that belong directly under ``executor:``, not inside ``executor.config``.
+_EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG: tuple[str, ...] = (
+    "model",
+    "reasoning_effort",
+    "context_window",
+    "connection",
+    "auth",
+    "timeout",
+    "max_iterations",
+)
+
 # Copy the resolver dict onto the subclass before mutating — it's inherited
 # from SafeLoader by reference, so in-place edits below would strip
 # SafeLoader's bool resolver process-wide.
@@ -778,6 +789,19 @@ def _parse_executor(
     raw_config = raw.get("config")
     config: dict[str, object] = {}
     if isinstance(raw_config, dict):
+        for key in _EXECUTOR_FIELD_KEYS_MISPLACED_IN_CONFIG:
+            if key in raw_config:
+                raise OmnigentError(
+                    f"executor.config.{key} is not read there; "
+                    f"set executor.{key} directly under executor:",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+        if "setting_sources" in raw_config:
+            raise OmnigentError(
+                "executor.config.setting_sources is not read there; "
+                "use top-level `skills: none` (or a skill list) instead",
+                code=ErrorCode.INVALID_INPUT,
+            )
         config = {
             str(k): (v if k in _STRUCTURED_EXECUTOR_CONFIG_KEYS else str(v))
             for k, v in raw_config.items()
