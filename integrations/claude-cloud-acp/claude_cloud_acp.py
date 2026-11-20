@@ -775,6 +775,101 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
     return updates, False
 
 
+# ── Usage ──────────────────────────────────────────────────
+
+
+_TOKEN_FIELDS = (
+    ("input_tokens", "inputTokens"),
+    ("output_tokens", "outputTokens"),
+    ("cache_read_input_tokens", "cachedReadTokens"),
+    ("cache_creation_input_tokens", "cachedWriteTokens"),
+)
+
+
+class UsageTracker:
+    """Turn the cloud stream's usage into one ACP ``usage`` object per turn.
+
+    A ``result`` event carries the cloud CLI's cumulative usage and cost, so a turn's
+    share is the growth since the previous ``result``. Window fill comes from the last
+    top-level assistant message. Nothing is reported when the stream carries no usage.
+    """
+
+    def __init__(self) -> None:
+        self.model: str | None = None
+        self.context_tokens: int | None = None
+        self.context_window: int | None = None
+        self.seen: dict[str, float] = {}
+        self.turn: dict | None = None
+
+    def note(self, payload: dict) -> None:
+        kind = payload.get("type")
+        if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
+            self.model = str(payload["model"])
+        elif kind == "assistant" and not payload.get("parent_tool_use_id"):
+            usage = (payload.get("message") or {}).get("usage") or {}
+            fill = sum(
+                usage.get(key) or 0
+                for key in (
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+                if isinstance(usage.get(key), int)
+            )
+            if fill > 0:
+                self.context_tokens = fill
+        elif kind == "result" and not payload.get("parent_tool_use_id"):
+            self._note_result(payload)
+
+    def _note_result(self, payload: dict) -> None:
+        usage = payload.get("usage")
+        by_model = payload.get("modelUsage")
+        if isinstance(by_model, dict) and by_model:
+            # The model that did most of the work names the turn.
+            self.model = max(
+                by_model,
+                key=lambda name: (by_model[name] or {}).get("outputTokens") or 0,
+            )
+            window = (by_model[self.model] or {}).get("contextWindow")
+            if isinstance(window, int) and window > 0:
+                self.context_window = window
+        totals: dict[str, float] = {}
+        if isinstance(usage, dict):
+            for key, _ in _TOKEN_FIELDS:
+                if isinstance(usage.get(key), int):
+                    totals[key] = usage[key]
+        cost = payload.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            totals["cost"] = float(cost)
+        if not totals:
+            self.turn = None  # the stream carried no usage: unknown, not zero
+            return
+        out: dict = {}
+        for key, acp_key in _TOKEN_FIELDS:
+            if key in totals:
+                out[acp_key] = _growth(totals[key], self.seen.get(key))
+        if "cost" in totals:
+            out["costUsd"] = round(_growth(totals["cost"], self.seen.get("cost")), 6)
+        self.seen.update(totals)
+        if "inputTokens" in out or "outputTokens" in out:
+            out["totalTokens"] = out.get("inputTokens", 0) + out.get("outputTokens", 0)
+        if self.context_tokens is not None:
+            out["contextTokens"] = self.context_tokens
+        if self.model:
+            out["model"] = self.model
+        self.turn = out
+
+    def take(self) -> dict | None:
+        """The usage of the turn just mirrored, once."""
+        turn, self.turn = self.turn, None
+        return turn
+
+
+def _growth(total: float, before: float | None) -> float:
+    """Growth of a cumulative counter; a counter that went down restarted."""
+    return total if before is None or total < before else total - before
+
+
 # ── ACP server ─────────────────────────────────────────────
 
 
@@ -795,6 +890,7 @@ class Session:
         # The effort the cloud session was created with ("" = default); None if adopted.
         self.started_effort: str | None = None
         self.mcp: dict[str, McpProxy] = {}
+        self.usage = UsageTracker()
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
         # Events the turns since the last completed one took off the queue. Omnigent
@@ -1251,6 +1347,7 @@ def _mirror(acp_id: str, s: Session, after: int) -> str:
             quiet = 0  # a CLI that starts before the turn does takes the message instead
         elif quiet is not None:
             quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
+        s.usage.note(payload)
         updates, done = to_updates(payload)
         for upd in updates:
             update(acp_id, upd)
@@ -1369,7 +1466,16 @@ def handle_prompt(msg: dict) -> None:
     params = msg.get("params") or {}
     try:
         stop = run_turn(params["sessionId"], prompt_text(params.get("prompt") or []))
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"stopReason": stop}})
+        result: dict = {"stopReason": stop}
+        tracker = session_for(params["sessionId"]).usage
+        if (usage := tracker.take()) is not None:
+            result["usage"] = usage
+            if tracker.context_window:
+                update(
+                    params["sessionId"],
+                    {"sessionUpdate": "usage_update", "size": tracker.context_window},
+                )
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
