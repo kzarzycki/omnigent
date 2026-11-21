@@ -1484,7 +1484,6 @@ async def test_permission_request_hook_bypass_session_shows_question_with_option
     assert decision["updatedInput"]["answers"] == {"Which database?": "SQLite"}
     publish.assert_awaited_once()
     params = publish.await_args.kwargs["params"]
-    assert params.message == "Claude asks a question"
     assert params.model_extra["ask_user_question"]["questions"][0]["options"][0] == {
         "label": "Postgres"
     }
@@ -1507,21 +1506,6 @@ async def test_permission_request_hook_bypass_session_denies_unshowable_question
     assert decision["behavior"] == "deny"
     assert "normal chat message" in decision["message"]
     publish.assert_not_awaited()
-
-
-async def test_permission_request_hook_ordinary_session_keeps_question_permission_wording(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Outside bypass a question card is unchanged."""
-    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
-    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
-
-    response = await _post_bypass_question(client, {}, _QUESTION_INPUT)
-
-    assert response.status_code == 200, response.text
-    assert (
-        publish.await_args.kwargs["params"].message == "Claude wants to call **AskUserQuestion**"
-    )
 
 
 @pytest.mark.parametrize("request_mode", ["bypassPermissions", "default", None])

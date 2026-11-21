@@ -536,11 +536,7 @@ def register_hooks_routes(
         )
         params = ElicitationRequestParams(
             mode="form",
-            message=(
-                f"{asking_name} asks a question"
-                if "ask_user_question" in extras and _claude_session_runs_in_bypass(conv)
-                else f"{asking_name} wants to call **{tool_name}**"
-            ),
+            message=f"{asking_name} wants to call **{tool_name}**",
             requestedSchema=None,
             url=None,
             phase="pre_tool_use",
