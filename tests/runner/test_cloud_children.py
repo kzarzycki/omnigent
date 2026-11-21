@@ -45,7 +45,11 @@ def _server(requests: list[httpx.Request], *, scripted: bool = True, builtin_cou
             return httpx.Response(200, json={"id": agent_id, "harness": HARNESSES[agent_id]})
         if path == "/v1/agents":
             rows = [
-                {"id": f"ag_local{i or ''}", "name": "claude-native-ui", "harness": "claude-native"}
+                {
+                    "id": f"ag_local{i or ''}",
+                    "name": "claude-native-ui",
+                    "harness": "claude-native",
+                }
                 for i in range(builtin_count)
             ]
             return httpx.Response(

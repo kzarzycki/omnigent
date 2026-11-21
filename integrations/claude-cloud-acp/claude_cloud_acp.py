@@ -730,7 +730,9 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
         cut_off = [i for i, background in _open_subagents.items() if not background]
         for call_id in cut_off:
             del _open_subagents[call_id]
-        return [_subagent_end(i, False, "The turn ended before it finished.") for i in cut_off], True
+        return [
+            _subagent_end(i, False, "The turn ended before it finished.") for i in cut_off
+        ], True
     if kind == "system" and payload.get("subtype") == "task_notification":
         call_id = payload.get("tool_use_id")
         if call_id in _open_subagents:
@@ -2234,7 +2236,12 @@ def self_check() -> None:
     # The legacy tool name, a colon in the title, and a background helper that fails later.
     for name in ("Agent", "Task"):
         _open_subagents.clear()
-        block = {"type": "tool_use", "id": "b1", "name": name, "input": spawn | {"description": "ui: a:b"}}
+        block = {
+            "type": "tool_use",
+            "id": "b1",
+            "name": name,
+            "input": spawn | {"description": "ui: a:b"},
+        }
         upd, _ = to_updates({"type": "assistant", "message": {"content": [block]}})
         assert upd[0]["_meta"][SUBAGENT_META]["title"] == "ui - a -b", name
     _open_subagents.clear()
