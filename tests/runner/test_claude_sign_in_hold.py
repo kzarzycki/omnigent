@@ -77,18 +77,14 @@ def _sign_in_refusal(*, undelivered: bool = True, message: str = _OWN_SIGN_IN_ME
     return _sse({"type": "response.failed", "response": {"status": "failed"}, "error": error})
 
 
-def _not_accepted_refusal() -> str:
-    return _sse(
-        {
-            "type": "response.failed",
-            "response": {"status": "failed"},
-            "error": {
-                "code": "claude_submit_not_accepted",
-                "message": "Claude Code did not accept the submitted message within 20.0s.",
-                "undelivered": True,
-            },
-        }
-    )
+def _not_accepted_refusal(*, undelivered: bool = True) -> str:
+    error: dict[str, Any] = {
+        "code": "claude_submit_not_accepted",
+        "message": "Claude Code did not accept the submitted message within 20.0s.",
+    }
+    if undelivered:
+        error["undelivered"] = True
+    return _sse({"type": "response.failed", "response": {"status": "failed"}, "error": error})
 
 
 _NOT_ACCEPTED = [
@@ -96,6 +92,20 @@ _NOT_ACCEPTED = [
     _not_accepted_refusal(),
 ]
 _REFUSED = [_sse({"type": "response.created", "response": {"id": "resp_1"}}), _sign_in_refusal()]
+# Both refusal codes the runner holds a main-session Claude message for.
+_REFUSAL_CODES = ["databricks_sign_in_pending", "claude_submit_not_accepted"]
+
+
+def _refused_frames(code: str, *, undelivered: bool = True) -> list[str]:
+    """One refused turn's frames for *code*."""
+    refusal = (
+        _sign_in_refusal(undelivered=undelivered)
+        if code == "databricks_sign_in_pending"
+        else _not_accepted_refusal(undelivered=undelivered)
+    )
+    return [_REFUSED[0], refusal]
+
+
 _DELIVERED = [
     _sse({"type": "response.created", "response": {"id": "resp_2"}}),
     _sse({"type": "response.completed", "response": {"id": "resp_2"}}),
@@ -128,8 +138,8 @@ class _TurnScriptHarness(_ScriptedHarnessClient):
 class _TakeoverScript(list[str]):
     """The refused turn's frames; streaming them runs ``take_over`` before frame ``at``."""
 
-    def __init__(self, at: int) -> None:
-        super().__init__(_REFUSED)
+    def __init__(self, at: int, code: str = "databricks_sign_in_pending") -> None:
+        super().__init__(_refused_frames(code))
         self._at = at
         self.take_over: Callable[[], None] = lambda: None
 
@@ -501,9 +511,10 @@ async def test_pane_that_keeps_asking_after_it_looked_ready_fails_instead_of_loo
 
 
 @pytest.mark.asyncio
-async def test_refusal_without_undelivered_evidence_fails_as_before() -> None:
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
+async def test_refusal_without_undelivered_evidence_fails_as_before(code: str) -> None:
     """Only a message that provably never reached the pane is held."""
-    app, harness, _server = _build_app([[_REFUSED[0], _sign_in_refusal(undelivered=False)]])
+    app, harness, _server = _build_app([_refused_frames(code, undelivered=False)])
     sid = uuid.uuid4().hex
     async with _runner_client(app) as client:
         await _create_session(client, sid)
@@ -581,9 +592,10 @@ async def test_wait_is_shortened_by_the_time_the_server_already_queued_the_messa
 
 
 @pytest.mark.asyncio
-async def test_message_the_server_queued_longer_than_the_wait_fails_at_once() -> None:
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
+async def test_message_the_server_queued_longer_than_the_wait_fails_at_once(code: str) -> None:
     """With no time left to wait, the refusal stands while the server can still record it."""
-    app, harness, server = _build_app([_REFUSED])
+    app, harness, server = _build_app([_refused_frames(code)])
     sid = uuid.uuid4().hex
     queued_at_ms = int((time.time() - runner_app._SIGN_IN_HOLD_MAX_S - 1) * 1000)
     async with _runner_client(app) as client:
@@ -600,7 +612,7 @@ async def test_message_the_server_queued_longer_than_the_wait_fails_at_once() ->
         for e in _published(app, sid)
         if e.get("type") == "session.status" and e.get("status") == "failed"
     ]
-    assert [e["error"]["code"] for e in failed] == ["databricks_sign_in_pending"]
+    assert [e["error"]["code"] for e in failed] == [code]
     assert sid not in app.state.sign_in_holds
     assert not server.notices("databricks_sign_in_pending")
 
@@ -650,13 +662,17 @@ async def test_messages_queued_during_a_wait_that_ran_out_fail_with_it(
     ],
 )
 @pytest.mark.parametrize("stream_end", ["eof", "broken", "split"])
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
 async def test_refusal_on_a_stream_a_newer_turn_took_over_is_reported_not_held(
     take_over_at: int,
     new_epoch: bool,
     stream_end: str,
+    code: str,
 ) -> None:
     """Only the stream that owns the live turn may hold; an older one reports its failure."""
-    script = _TakeoverScript(3 if stream_end == "split" and take_over_at == 2 else take_over_at)
+    script = _TakeoverScript(
+        3 if stream_end == "split" and take_over_at == 2 else take_over_at, code
+    )
     if stream_end == "split":
         refusal = script[1]
         midpoint = len(refusal) // 2
@@ -695,7 +711,7 @@ async def test_refusal_on_a_stream_a_newer_turn_took_over_is_reported_not_held(
         app.state.active_turns.pop(sid, None)
 
     (failed,) = [e for e in _published(app, sid) if e.get("type") == "response.failed"]
-    assert failed["error"]["code"] == "databricks_sign_in_pending"
+    assert failed["error"]["code"] == code
     assert failed["input_stable_id"] == _STABLE_ID
     assert sid not in app.state.sign_in_holds
     assert not app.state.session_message_buffers.get(sid)
@@ -924,16 +940,17 @@ async def test_resend_that_is_not_refused_ends_the_wait_even_with_messages_still
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
 @pytest.mark.parametrize(
     ("action", "control"),
     [("interrupt", "inject_interrupt"), ("stop_session", "kill_session")],
 )
 async def test_interrupt_or_stop_during_the_hold_drops_the_held_message(
-    action: str, control: str, monkeypatch: pytest.MonkeyPatch
+    action: str, control: str, code: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A control sent while the message waits on the sign-in keeps it from ever being sent."""
     monkeypatch.setattr(claude_native_bridge, control, lambda *_a, **_k: None)
-    app, harness, _server = _build_app([_REFUSED, _DELIVERED])
+    app, harness, _server = _build_app([_refused_frames(code), _DELIVERED])
     sid = uuid.uuid4().hex
     async with _runner_client(app) as client:
         await _create_session(client, sid)
@@ -952,16 +969,17 @@ async def test_interrupt_or_stop_during_the_hold_drops_the_held_message(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
 @pytest.mark.parametrize(
     ("action", "control"),
     [("interrupt", "inject_interrupt"), ("stop_session", "kill_session")],
 )
 async def test_interrupt_or_stop_before_the_refused_stream_ends_is_never_undone(
-    action: str, control: str, monkeypatch: pytest.MonkeyPatch
+    action: str, control: str, code: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A control that lands after the refusal but before the stream ends drops the message."""
     monkeypatch.setattr(claude_native_bridge, control, lambda *_a, **_k: None)
-    harness = _PausedStreamHarness([_REFUSED, _DELIVERED])
+    harness = _PausedStreamHarness([_refused_frames(code), _DELIVERED])
     app, _harness, server = _build_app([], harness=harness)
     sid = uuid.uuid4().hex
     async with _runner_client(app) as client:
@@ -989,13 +1007,14 @@ async def test_interrupt_or_stop_before_the_refused_stream_ends_is_never_undone(
         return
     # The refusal is reported as it was before messages were held.
     (failed,) = failures
-    assert failed["error"]["code"] == "databricks_sign_in_pending"
+    assert failed["error"]["code"] == code
 
 
 @pytest.mark.asyncio
-async def test_child_agent_dispatch_refused_by_a_sign_in_fails_at_once() -> None:
+@pytest.mark.parametrize("code", _REFUSAL_CODES)
+async def test_child_agent_dispatch_refused_by_a_sign_in_fails_at_once(code: str) -> None:
     """A sub-agent dispatch is never held: its launch bookkeeping fails it as before."""
-    app, harness, server = _build_app([_REFUSED, _DELIVERED])
+    app, harness, server = _build_app([_refused_frames(code), _DELIVERED])
     parent, sid = uuid.uuid4().hex, uuid.uuid4().hex
     entry = subagent_work.register_subagent_work(
         parent_session_id=parent, child_session_id=sid, agent="worker", title="child"
@@ -1014,7 +1033,7 @@ async def test_child_agent_dispatch_refused_by_a_sign_in_fails_at_once() -> None
     assert not app.state.session_message_buffers.get(sid)
     assert not server.notices("databricks_sign_in_pending")
     (failed,) = [e for e in _published(app, sid) if e.get("type") == "response.failed"]
-    assert failed["error"]["code"] == "databricks_sign_in_pending"
+    assert failed["error"]["code"] == code
 
 
 @pytest.mark.asyncio

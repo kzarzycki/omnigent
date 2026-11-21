@@ -5223,24 +5223,30 @@ class _SubmittedPrompt:
 _UNACCEPTED_SUBMITS: dict[Path, _SubmittedPrompt] = {}
 
 
-def _unaccepted_submit_landed_late(bridge_dir: Path, text: str) -> _SubmittedPrompt | None:
-    """
-    Return the remembered unaccepted submit of *text* when Claude recorded it after all.
-
-    The entry is consumed either way: a resend that finds nothing recorded types again.
-
-    :param bridge_dir: The pane's bridge directory.
-    :param text: The text about to be pasted.
-    :returns: The earlier submit to wait on, or ``None`` when the resend must type.
-    """
-    earlier = _UNACCEPTED_SUBMITS.pop(bridge_dir, None)
-    if earlier is None or earlier.text != text:
+def _unaccepted_submit_of(bridge_dir: Path, text: str) -> _SubmittedPrompt | None:
+    """Return the remembered unaccepted submit of *text*; a submit of other text is forgotten."""
+    earlier = _UNACCEPTED_SUBMITS.get(bridge_dir)
+    if earlier is not None and earlier.text != text:
+        # Another message went first: the old one is no longer the resend's concern.
+        del _UNACCEPTED_SUBMITS[bridge_dir]
         return None
-    boundary = earlier.boundary or _transcript_start_boundary(bridge_dir, earlier.submitted_at)
-    if boundary is None or not has_recorded_prompt(
-        boundary, text, normalize_prompt=_recorded_prompt_text
-    ):
-        return None
+    return earlier
+
+
+def _submit_recorded(submitted: _SubmittedPrompt) -> bool:
+    """Return whether Claude recorded *submitted*, which it did not accept in time."""
+    boundary = submitted.boundary or _transcript_start_boundary(
+        submitted.bridge_dir, submitted.submitted_at
+    )
+    return boundary is not None and has_recorded_prompt(
+        boundary, submitted.text, normalize_prompt=_recorded_prompt_text
+    )
+
+
+def _landed_late(earlier: _SubmittedPrompt) -> _SubmittedPrompt:
+    """Forget *earlier* and return it as the submit a resend waits on instead of typing."""
+    _UNACCEPTED_SUBMITS.pop(earlier.bridge_dir, None)
+    _logger.info("claude-native: an unaccepted submit landed late; not typing it again")
     return earlier
 
 
@@ -5365,10 +5371,10 @@ def _paste_and_submit(
         prompt appears after the submit Enter.
     """
     delivery_diagnostics.start_attempt()
-    if (landed := _unaccepted_submit_landed_late(bridge_dir, text)) is not None:
+    earlier = _unaccepted_submit_of(bridge_dir, text)
+    if earlier is not None and _submit_recorded(earlier):
         # The original Enter landed late: type nothing, wait on that submit.
-        _logger.info("claude-native: an unaccepted submit landed late; not typing it again")
-        return landed
+        return _landed_late(earlier)
     delivery_diagnostics.set_stage("checking_pending_prompt")
     if has_pending_user_prompt(bridge_dir):
         raise ClaudeUserPromptPending(
@@ -5388,10 +5394,31 @@ def _paste_and_submit(
         # Append a CR only when a trailing backslash would consume the submit Enter.
         payload += b"\r"
     tail_needle = _submit_tail_needle(text) if needle else ""
+    if earlier is not None and needle:
+        # A draft that left the box was submitted; Claude records it once its hooks finish.
+        shown = _capture_pane(socket_path, tmux_target)
+        if shown.strip() and not _draft_in_input_box(shown, needle, tail_needle=tail_needle):
+            return _landed_late(earlier)
     delivery_diagnostics.set_stage("pasting")
     # Clear stale text first, or the paste lands inside the person's draft and
     # Enter submits both together.
-    _clear_composer(socket_path, tmux_target, bridge_dir=bridge_dir)
+    try:
+        _clear_composer(socket_path, tmux_target, bridge_dir=bridge_dir)
+    except ClaudeComposerNotCleared as not_cleared:
+        if earlier is None:
+            raise
+        if _submit_recorded(earlier):
+            return _landed_late(earlier)
+        # The pane is still stuck on the unaccepted draft: that refusal stands.
+        raise ClaudeSubmitNotAccepted(
+            "Claude Code still has not accepted the submitted message "
+            "(the draft is still in the input box). The message was not delivered."
+        ) from not_cleared
+    if earlier is not None:
+        # The original may have landed while the box was cleared; typing now would double it.
+        if _submit_recorded(earlier):
+            return _landed_late(earlier)
+        _UNACCEPTED_SUBMITS.pop(bridge_dir, None)
     transcript_before_paste = _capture_pane(socket_path, tmux_target)
     draft_seen, pane, polls, empty_captures, paste_wait_started = _paste_and_await_draft(
         bridge_dir,

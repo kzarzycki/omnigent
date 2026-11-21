@@ -255,7 +255,7 @@ _CLAUDE_RESUBMIT_WAITS_S = (5.0, 15.0, 45.0, 120.0)
 @dataclasses.dataclass
 class _SignInHold:
     """
-    One session's wait for a launcher sign-in that refused its queued message.
+    One session's wait for a launcher sign-in, or a timed resend, of a refused queued message.
 
     :param deadline: ``time.monotonic()`` at which the wait gives up.
     :param holds: Refusals absorbed so far.
@@ -5394,8 +5394,8 @@ def create_runner_app(
             exhausted = hold.resubmits >= len(_CLAUDE_RESUBMIT_WAITS_S)
         else:
             exhausted = hold.holds >= _SIGN_IN_HOLD_MAX_REPEATS
-        # The wait ran out, or the pane kept refusing: this refusal stands, and so do
-        # those of the messages queued during the wait.
+        # The wait ran out, or the pane kept refusing: this refusal stands. A sign-in's
+        # queue fails with it; a resubmit refusal ends the hold, so the queue waits afresh.
         return not exhausted and time.monotonic() < hold.deadline
 
     def _is_sub_agent_session(conv_id: str) -> bool:
