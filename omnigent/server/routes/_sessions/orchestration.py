@@ -3032,12 +3032,66 @@ async def _answer_question(
         _answering_questions.discard(question_id)
 
 
+async def _is_resolvable_descendant(
+    session_id: str,
+    target_session_id: str,
+    conversation_store: ConversationStore | None,
+    user_id: str | None,
+    permission_store: PermissionStore | None,
+) -> bool:
+    """
+    Whether a mirrored card's target may receive a verdict sent to ``session_id``.
+
+    The target is named inside the card, which a hook can write, so it counts only when
+    it is a strict descendant of the session being resolved and, when users are
+    tracked, owned by the resolving user.
+
+    :param session_id: The session whose resolve URL was called, e.g. ``"conv_parent"``.
+    :param target_session_id: The ``target_session_id`` the mirrored card names.
+    :param conversation_store: Store used to walk the target's parents.
+    :param user_id: The resolving user, or ``None`` in an unauthenticated server.
+    :param permission_store: Store for the ownership check, or ``None`` to skip it.
+    :returns: ``True`` only for an owned strict descendant.
+    """
+    if conversation_store is None:
+        return False
+
+    def _walk_to_ancestor() -> bool:
+        seen: set[str] = set()
+        current = conversation_store.get_conversation(target_session_id)
+        while current is not None and current.id not in seen and len(seen) < 32:
+            seen.add(current.id)
+            parent = current.parent_conversation_id
+            if parent is None:
+                return False
+            if parent == session_id:
+                return True
+            current = conversation_store.get_conversation(parent)
+        return False
+
+    if not await asyncio.to_thread(_walk_to_ancestor):
+        return False
+    if user_id is None or permission_store is None:
+        return True
+    from omnigent.server.session_orchestration import require_owned_session
+
+    try:
+        await asyncio.to_thread(
+            require_owned_session, target_session_id, user_id, conversation_store, permission_store
+        )
+    except OmnigentError:
+        return False
+    return True
+
+
 async def _resolve_elicitation(
     session_id: str,
     data: dict[str, Any],
     runner_router: RunnerRouter | None,
     conversation_store: ConversationStore | None = None,
     post_answer: Callable[[str], Awaitable[object]] | None = None,
+    user_id: str | None = None,
+    permission_store: PermissionStore | None = None,
 ) -> None:
     """
     Resolve one outstanding elicitation from an approval payload.
@@ -3085,6 +3139,9 @@ async def _resolve_elicitation(
     :param post_answer: Posts text into the session as the answering
         user's message; a ``sys_ask_user_question`` verdict goes there
         instead of through the three effects above.
+    :param user_id: The resolving user, used to check they own a child a mirrored
+        card is forwarded to; ``None`` in an unauthenticated local server.
+    :param permission_store: Store for that ownership check; ``None`` skips it.
     """
     # Empty-string default is intentional, NOT a fail-loud miss: the
     # resolve-URL caller always supplies the id (it comes from the URL
@@ -3110,9 +3167,18 @@ async def _resolve_elicitation(
             and target
             and target != session_id
             and not (isinstance(mirror_params, dict) and mirror_params.get("native_delivery"))
+            and await _is_resolvable_descendant(
+                session_id, target, conversation_store, user_id, permission_store
+            )
         ):
             await _resolve_elicitation(
-                target, data, runner_router, conversation_store, post_answer=post_answer
+                target,
+                data,
+                runner_router,
+                conversation_store,
+                post_answer=post_answer,
+                user_id=user_id,
+                permission_store=permission_store,
             )
             _publish_elicitation_resolved(session_id, elicitation_id, action=data.get("action"))
             return

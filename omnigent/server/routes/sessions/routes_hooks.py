@@ -56,7 +56,6 @@ from omnigent.server.auth import (
     LEVEL_READ,
     AuthProvider,
 )
-from omnigent.server.machine_access import conversation_bypasses_permissions
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
@@ -91,6 +90,7 @@ from omnigent.server.routes._sessions.helpers import (
     _claude_native_permission_directories,
     _claude_native_remember_host,
     _client_supplied_hook_elicitation_id,
+    _codex_session_never_asks,
     _emit_server_routing_decision,
     _forward_session_change_to_runner,
     _get_runner_client,
@@ -394,9 +394,7 @@ def register_hooks_routes(
 
         # Bypass mode asks nobody: answer Claude's own safety prompt with a deny it can read.
         bypass_denial = (
-            _claude_bypass_safety_denial(payload, tool_name, permission_mode)
-            if is_claude
-            else None
+            _claude_bypass_safety_denial(payload, tool_name, conv) if is_claude else None
         )
         if bypass_denial is not None:
             return Response(
@@ -1346,7 +1344,7 @@ def register_hooks_routes(
         if codex_request.is_command_approval:
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             # A bypass session asked nobody: decline instead of raising a card.
-            if conv is not None and conversation_bypasses_permissions(conv):
+            if conv is not None and _codex_session_never_asks(conv):
                 return Response(
                     content=json.dumps(
                         codex_request.build_response(ElicitationResult(action="decline"))

@@ -162,6 +162,8 @@ def register_elicitations_routes(
                 if post_message is not None
                 else None
             ),
+            user_id=user_id,
+            permission_store=permission_store,
         )
         # Apply any policy writes deferred by the relay tool-call ASK gate
         # (e.g. a cost-budget checkpoint) now that the verdict is in.

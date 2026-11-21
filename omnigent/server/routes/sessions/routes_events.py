@@ -2435,6 +2435,8 @@ def register_events_routes(
                 post_answer=lambda text: post_server_message(
                     app=request.app, session_id=session_id, user_id=user_id, text=text
                 ),
+                user_id=user_id,
+                permission_store=permission_store,
             )
             # Apply any policy writes deferred by the relay tool-call ASK gate
             # (e.g. a cost-budget checkpoint) now that the verdict is in.

@@ -5526,6 +5526,24 @@ def codex_launch_args_grant_full_access(terminal_launch_args: Sequence[str] | No
     )
 
 
+def codex_launch_args_never_ask(terminal_launch_args: Sequence[str] | None) -> bool:
+    """Whether Codex launch args make Codex run commands with no approval prompt.
+
+    Parsed as the launcher parses them (args after ``--`` are the prompt, not
+    options). A full-access sandbox alone still asks under ``on-request`` or
+    ``untrusted``, so only ``approval_policy=never`` counts, including the legacy
+    Full Access profile that implies it. Unreadable args count as asking.
+    """
+    try:
+        params = _codex_resume_permission_params(terminal_launch_args)
+    except ValueError:
+        return False
+    policy = params.get("approvalPolicy")
+    return policy == "never" or (
+        policy is None and params.get("permissions") == ":danger-full-access"
+    )
+
+
 _CODEX_RESUME_PERMISSION_CONFIG_FIELDS = {
     "approval_policy": "approvalPolicy",
     "approvals_reviewer": "approvalsReviewer",
