@@ -700,8 +700,18 @@ def _text_of(content: object) -> str:
 SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
 # Omnigent's ACP sub-agent dialect (omnigent/inner/acp_bridge_subagents.py).
 SUBAGENT_META = "omnigent/subagent"
-# Ids of the sub-agent calls still running, so their result ends the child session.
-_open_subagents: set[str] = set()
+# Sub-agent calls still running, mapped to whether they run in the background: a foreground
+# call's result ends its child session, a background one's task notification does.
+_open_subagents: dict[str, bool] = {}
+
+
+def _subagent_end(call_id: str, ok: bool, summary: str) -> dict:
+    """The update that ends a child session, for a call still open."""
+    return {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": call_id,
+        "status": "completed" if ok else "failed",
+    } | _subagent({"event": "end", "id": call_id, "ok": ok, "summary": summary})
 
 
 def _subagent(tag: dict) -> dict:
@@ -716,7 +726,18 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
     parent = payload.get("parent_tool_use_id")
     sub = "[sub-agent] " if parent else ""
     if kind == "result" and not sub:
-        return [], True
+        # A foreground helper still open when its turn ends was cut off.
+        cut_off = [i for i, background in _open_subagents.items() if not background]
+        for call_id in cut_off:
+            del _open_subagents[call_id]
+        return [_subagent_end(i, False, "The turn ended before it finished.") for i in cut_off], True
+    if kind == "system" and payload.get("subtype") == "task_notification":
+        call_id = payload.get("tool_use_id")
+        if call_id in _open_subagents:
+            del _open_subagents[call_id]
+            ok = payload.get("status") == "completed"
+            return [_subagent_end(call_id, ok, str(payload.get("summary") or ""))], False
+        return [], False
     if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
         return (
             [
@@ -784,8 +805,11 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
                 }
                 upd |= _subagent(tag)
             elif name in SUBAGENT_TOOLS and call_id:
-                _open_subagents.add(call_id)
+                _open_subagents[call_id] = bool(tool_input.get("run_in_background"))
                 title = tool_input.get("description") or tool_input.get("subagent_type") or name
+                # The server splits a child's title at its first colon, and "ui:" marks a
+                # user-added row.
+                title = str(title).replace(":", " -")
                 tag = {
                     "event": "start",
                     "id": call_id,
@@ -802,8 +826,8 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
                 "status": "failed" if block.get("is_error") else "completed",
                 "content": [{"type": "content", "content": {"type": "text", "text": text}}],
             }
-            if call_id in _open_subagents:
-                _open_subagents.discard(call_id)
+            if call_id in _open_subagents and not _open_subagents[call_id]:
+                del _open_subagents[call_id]
                 tag = {
                     "event": "end",
                     "id": call_id,
@@ -2207,6 +2231,27 @@ def self_check() -> None:
         "ok": True,
         "summary": "3",
     }
+    # The legacy tool name, a colon in the title, and a background helper that fails later.
+    for name in ("Agent", "Task"):
+        _open_subagents.clear()
+        block = {"type": "tool_use", "id": "b1", "name": name, "input": spawn | {"description": "ui: a:b"}}
+        upd, _ = to_updates({"type": "assistant", "message": {"content": [block]}})
+        assert upd[0]["_meta"][SUBAGENT_META]["title"] == "ui - a -b", name
+    _open_subagents.clear()
+    background = {"description": "build", "prompt": "go", "run_in_background": True}
+    block = {"type": "tool_use", "id": "g1", "name": "Agent", "input": background}
+    to_updates({"type": "assistant", "message": {"content": [block]}})
+    ack = {"type": "tool_result", "tool_use_id": "g1", "content": "started"}
+    upd, _ = to_updates({"type": "user", "message": {"content": [ack]}})
+    assert SUBAGENT_META not in upd[0].get("_meta", {}), "a launch acknowledgement is not an end"
+    upd, _ = to_updates(
+        {"type": "system", "subtype": "task_notification", "tool_use_id": "g1", "status": "failed"}
+    )
+    assert upd[0]["_meta"][SUBAGENT_META]["ok"] is False and not _open_subagents
+    block = {"type": "tool_use", "id": "f1", "name": "Agent", "input": spawn}
+    to_updates({"type": "assistant", "message": {"content": [block]}})
+    upd, done = to_updates({"type": "result"})
+    assert done and upd[0]["_meta"][SUBAGENT_META]["ok"] is False, "a cut-off helper ends"
     assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
     assert split_replay("fix the bug", "/") == (None, "fix the bug")
     replay = (

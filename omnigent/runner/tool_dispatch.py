@@ -6040,6 +6040,7 @@ async def _execute_agent_tool(
     agent_spec: AgentSpec | None,
     conversation_id: str | None,
     runner_workspace: Path | None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Runner-local handler for ``sys_agent_get`` / ``sys_agent_download``.
@@ -6069,6 +6070,8 @@ async def _execute_agent_tool(
         resolution, e.g. ``"conv_abc123"``.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param effective_harness: The session's harness override, so a cloud caller is
+        recognized through it.
     :returns: Tool output JSON string.
     """
     if server_client is None:
@@ -6091,6 +6094,7 @@ async def _execute_agent_tool(
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
+            effective_harness=effective_harness,
         )
     session_id = args.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -6504,6 +6508,7 @@ async def _agent_list_via_rest(
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
+    effective_harness: str | None = None,
 ) -> str:
     """
     List agents across built-ins, session-bound, and local, with host readiness.
@@ -6581,11 +6586,15 @@ async def _agent_list_via_rest(
     from omnigent.runner import cloud_children
     from omnigent.server.machine_access import spec_harness_id
 
-    if not continued and conversation_id and cloud_children.is_cloud_session(agent_spec):
+    if (
+        not continued
+        and conversation_id
+        and agent_spec is not None
+        and cloud_children.is_cloud_session(agent_spec, effective_harness)
+    ):
         # A cloud session's own agent is the one its cloud children start from, though a
         # user or session-bound agent is not among the server's agents. Its own field, so
         # paging never trims it or puts a cursor on it.
-        assert agent_spec is not None
         own_agent = (await cloud_children.read_caller(server_client, conversation_id)).agent_id
         if own_agent:
             listing["caller_agent"] = [
@@ -8053,6 +8062,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 conversation_id=conversation_id,
                 runner_workspace=runner_workspace,
+                effective_harness=effective_harness,
             )
         elif tool_name in _POLICY_TOOLS:
             output = await _execute_policy_tool(

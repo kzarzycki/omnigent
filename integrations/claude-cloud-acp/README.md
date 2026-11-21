@@ -176,8 +176,10 @@ read-only, such as `Read` and `Grep`, never ask.
 - **Stream reader:** one per cloud session for the bridge's life, so control
   requests are answered between turns too. MCP requests to one server are
   handled one at a time.
-- **Sub-agents:** a sub-agent's steps appear inline, its text as thoughts and
-  its tool calls titled `[sub-agent] <tool>`, not as a separate Omnigent session.
+- **Sub-agents:** each `Agent` call (`Task` before its rename) is an Omnigent child
+  session of its own, titled by the call's description (colons replaced) and ended by
+  its result, or for a background call by its task notification. The helper's tool calls go
+  to that child; its text stays inline as thoughts.
 - **Forks (untested):** a forked Omnigent conversation carries the marker
   line, so both forks should drive the same cloud session.
 - **Workspace:** a child session started with `sys_session_create` runs the

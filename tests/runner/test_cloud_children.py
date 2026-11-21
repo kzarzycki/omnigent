@@ -32,7 +32,7 @@ PARENT_WORKSPACE = "/work/parent"
 HARNESSES = {"ag_cloud_copy": "acp:claude-cloud", "ag_local": "claude-native"}
 
 
-def _server(requests: list[httpx.Request], *, scripted: bool = True):
+def _server(requests: list[httpx.Request], *, scripted: bool = True, builtin_count: int = 1):
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         path = request.url.path
@@ -44,9 +44,12 @@ def _server(requests: list[httpx.Request], *, scripted: bool = True):
                 return httpx.Response(404)
             return httpx.Response(200, json={"id": agent_id, "harness": HARNESSES[agent_id]})
         if path == "/v1/agents":
-            row = {"id": "ag_local", "name": "claude-native-ui", "harness": "claude-native"}
+            rows = [
+                {"id": f"ag_local{i or ''}", "name": "claude-native-ui", "harness": "claude-native"}
+                for i in range(builtin_count)
+            ]
             return httpx.Response(
-                200, json={"data": [] if "after" in request.url.params else [row]}
+                200, json={"data": [] if "after" in request.url.params else rows}
             )
         if path.endswith("/child_sessions"):
             return httpx.Response(200, json={"data": []})
@@ -88,10 +91,13 @@ async def _call(
     requests: list,
     *,
     scripted: bool = True,
+    builtin_count: int = 1,
     **options: object,
 ) -> dict:
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_server(requests, scripted=scripted)),
+        transport=httpx.MockTransport(
+            _server(requests, scripted=scripted, builtin_count=builtin_count)
+        ),
         base_url="http://server",
     ) as client:
         output = await execute_tool(
@@ -282,3 +288,64 @@ async def test_the_agent_list_names_a_cloud_sessions_own_agent(
         )
         # Listed once, on the first page.
         assert "caller_agent" not in later
+
+
+@pytest.mark.asyncio
+async def test_a_second_page_of_the_agent_list_omits_the_callers_agent(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    first = await _call(
+        "sys_agent_list",
+        {"limit": 1},
+        CLOUD_SPEC,
+        requests,
+        builtin_count=3,
+        runner_workspace=tmp_path,
+    )
+    cursor = first["page"]["next_cursor"]
+    later = await _call(
+        "sys_agent_list",
+        {"limit": 1, "cursor": cursor},
+        CLOUD_SPEC,
+        requests,
+        builtin_count=3,
+        runner_workspace=tmp_path,
+    )
+
+    assert "caller_agent" in first
+    assert "caller_agent" not in later
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec", [LOCAL_SPEC, CLOUD_SPEC], ids=["local-spec", "cloud-spec"])
+async def test_the_relays_canonical_acp_harness_defers_to_the_spec(
+    spec: AgentSpec, tmp_path: Path
+) -> None:
+    """The MCP relay reports a cloud session's harness as the canonical ``acp``."""
+    requests: list[httpx.Request] = []
+
+    created = await _call(
+        "sys_session_create", {"title": "helper"}, spec, requests, effective_harness="acp"
+    )
+    listed = await _call(
+        "sys_agent_list", {}, spec, [], effective_harness="acp", runner_workspace=tmp_path
+    )
+
+    assert ("caller_agent" in listed) is (spec is CLOUD_SPEC)
+    if spec is CLOUD_SPEC:
+        assert created["conversation_id"] == "conv_child", created
+        (create,) = _creates(requests)
+        assert json.loads(create.content)["agent_id"] == OWN_AGENT
+    else:
+        assert "error" in created  # the host default still needs an agent
+
+
+def test_a_spec_without_an_executor_is_not_a_cloud_session() -> None:
+    from types import SimpleNamespace
+
+    from omnigent.runner.cloud_children import is_cloud_session
+
+    assert not is_cloud_session(SimpleNamespace(name="stub"))  # type: ignore[arg-type]
+    assert not is_cloud_session(None)
+    assert is_cloud_session(None, "acp:claude-cloud")
+    assert not is_cloud_session(CLOUD_SPEC, "claude-native")

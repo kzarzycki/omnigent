@@ -41,8 +41,11 @@ def is_cloud_session(agent_spec: AgentSpec | None, effective_harness: str | None
     :param effective_harness: The session's harness override, which wins over the spec's.
     :returns: ``True`` for a session on the ``acp:claude-cloud`` harness.
     """
-    if effective_harness:
-        return effective_harness == CLOUD_SESSION_HARNESS
+    if effective_harness == CLOUD_SESSION_HARNESS:
+        return True
+    # The runner canonicalizes ``acp:<slug>`` to ``acp``, so that value defers to the spec.
+    if effective_harness and effective_harness != "acp":
+        return False
     if agent_spec is None or getattr(agent_spec, "executor", None) is None:
         return False
     return spec_harness_id(agent_spec) == CLOUD_SESSION_HARNESS

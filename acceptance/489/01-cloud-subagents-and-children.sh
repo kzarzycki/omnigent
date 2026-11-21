@@ -1,5 +1,5 @@
 #!/bin/sh
-# Spec of #489: a claude-cloud session's sub-agents show as its child sessions, its
+# A claude-cloud session's sub-agents show as its child sessions, its
 # default child runs in the cloud, and a local child on the bridge host names its host.
 set -e
 uv run --no-sync pytest -q -p no:cacheprovider --reruns 0 \
