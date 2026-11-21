@@ -696,12 +696,25 @@ def _text_of(content: object) -> str:
     return ""
 
 
+# The cloud CLI's tool that starts a sub-agent ("Task" before it was renamed).
+SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
+# Omnigent's ACP sub-agent dialect (omnigent/inner/acp_bridge_subagents.py).
+SUBAGENT_META = "omnigent/subagent"
+# Ids of the sub-agent calls still running, so their result ends the child session.
+_open_subagents: set[str] = set()
+
+
+def _subagent(tag: dict) -> dict:
+    return {"_meta": {SUBAGENT_META: tag}}
+
+
 def to_updates(payload: dict) -> tuple[list[dict], bool]:
     """Map one cloud-session event payload to ACP updates; True ends the turn."""
     kind = payload.get("type")
-    # Sub-agent steps carry the id of the Agent tool call that started them.
-    # ponytail: mirrored inline with a label, not as nested cards; ACP has no nesting.
-    sub = "[sub-agent] " if payload.get("parent_tool_use_id") else ""
+    # Sub-agent steps carry the id of the Agent tool call that started them. Their
+    # tool calls go to the sub-agent's child session; their text stays inline, labelled.
+    parent = payload.get("parent_tool_use_id")
+    sub = "[sub-agent] " if parent else ""
     if kind == "result" and not sub:
         return [], True
     if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
@@ -748,30 +761,57 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
                 }
             )
         elif kind == "assistant" and btype == "tool_use":
-            updates.append(
-                {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": block.get("id"),
-                    "title": sub + str(block.get("name")),
-                    "kind": "other",
-                    "status": "in_progress",
-                    "rawInput": block.get("input") or {},
-                }
+            call_id, name, tool_input = (
+                block.get("id"),
+                str(block.get("name")),
+                block.get("input") or {},
             )
-        elif kind == "user" and btype == "tool_result":
-            updates.append(
-                {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": block.get("tool_use_id"),
-                    "status": "failed" if block.get("is_error") else "completed",
-                    "content": [
-                        {
-                            "type": "content",
-                            "content": {"type": "text", "text": _text_of(block.get("content"))},
-                        }
-                    ],
+            upd = {
+                "sessionUpdate": "tool_call",
+                "toolCallId": call_id,
+                "title": sub + name,
+                "kind": "other",
+                "status": "in_progress",
+                "rawInput": tool_input,
+            }
+            if parent:
+                tag = {
+                    "event": "tool",
+                    "id": parent,
+                    "callId": call_id,
+                    "name": name,
+                    "args": tool_input,
                 }
-            )
+                upd |= _subagent(tag)
+            elif name in SUBAGENT_TOOLS and call_id:
+                _open_subagents.add(call_id)
+                title = tool_input.get("description") or tool_input.get("subagent_type") or name
+                tag = {
+                    "event": "start",
+                    "id": call_id,
+                    "title": title,
+                    "task": tool_input.get("prompt") or "",
+                }
+                upd |= _subagent(tag)
+            updates.append(upd)
+        elif kind == "user" and btype == "tool_result" and not parent:  # a sub-agent's has no card
+            call_id, text = block.get("tool_use_id"), _text_of(block.get("content"))
+            upd = {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call_id,
+                "status": "failed" if block.get("is_error") else "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+            }
+            if call_id in _open_subagents:
+                _open_subagents.discard(call_id)
+                tag = {
+                    "event": "end",
+                    "id": call_id,
+                    "ok": not block.get("is_error"),
+                    "summary": text,
+                }
+                upd |= _subagent(tag)
+            updates.append(upd)
     return updates, False
 
 
@@ -2139,6 +2179,34 @@ def self_check() -> None:
         upd[0]["content"]["text"] == "[sub-agent] looking"
         and upd[1]["title"] == "[sub-agent] Read"
     )
+    assert upd[1]["_meta"][SUBAGENT_META] == {
+        "event": "tool",
+        "id": "x",
+        "callId": "t2",
+        "name": "Read",
+        "args": {},
+    }
+    sub_result = {"type": "tool_result", "tool_use_id": "t2", "content": "file"}
+    assert to_updates(
+        {"type": "user", "parent_tool_use_id": "x", "message": {"content": [sub_result]}}
+    ) == ([], False)
+    spawn = {"description": "find callers", "prompt": "grep for foo", "subagent_type": "Explore"}
+    block = {"type": "tool_use", "id": "a1", "name": "Agent", "input": spawn}
+    upd, _ = to_updates({"type": "assistant", "message": {"content": [block]}})
+    assert upd[0]["_meta"][SUBAGENT_META] == {
+        "event": "start",
+        "id": "a1",
+        "title": "find callers",
+        "task": "grep for foo",
+    }
+    done = {"type": "tool_result", "tool_use_id": "a1", "content": [{"type": "text", "text": "3"}]}
+    upd, _ = to_updates({"type": "user", "message": {"content": [done]}})
+    assert upd[0]["_meta"][SUBAGENT_META] == {
+        "event": "end",
+        "id": "a1",
+        "ok": True,
+        "summary": "3",
+    }
     assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
     assert split_replay("fix the bug", "/") == (None, "fix the bug")
     replay = (

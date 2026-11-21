@@ -3787,10 +3787,26 @@ async def _execute_session_create(
         return json.dumps({"error": "sys_session_create requires server access"})
     if conversation_id is None:
         return json.dumps({"error": "sys_session_create requires a session id"})
+    from omnigent.runner import cloud_children
+
     agent_id = args.get("agent_id")
     config_path = args.get("config_path")
     has_agent_id = isinstance(agent_id, str) and bool(agent_id)
     has_config_path = isinstance(config_path, str) and bool(config_path)
+    cloud_caller = cloud_children.is_cloud_session(agent_spec)
+    own_agent: str | None = None
+    if cloud_caller:
+        if has_config_path:
+            return json.dumps(
+                {
+                    "error": "config_path reads the bridge host's disk, not this claude-cloud "
+                    "session's; name a registered agent with agent_id"
+                }
+            )
+        own_agent = await cloud_children.own_agent_id(server_client, conversation_id)
+        if not has_agent_id and own_agent is not None:
+            # A cloud session's default child is another session of its own cloud agent.
+            agent_id, has_agent_id = own_agent, True
     if has_agent_id == has_config_path:
         # Fail loud on both-or-neither: the two modes create different
         # agents, so silently preferring one would mislaunch.
@@ -3834,6 +3850,12 @@ async def _execute_session_create(
     project_error = _project_argument_error(args, placement)
     if project_error is not None:
         return project_error
+    if cloud_caller:
+        refusal = await cloud_children.bridge_host_refusal(
+            server_client, placement=placement, agent_id=str(agent_id), own_agent=own_agent
+        )
+        if refusal is not None:
+            return json.dumps({"error": refusal + "; no session was created"})
     message = args.get("message")
     profile_fields = ("sandbox_provider", "sandbox_profile_id", "sandbox_profile_revision")
     selection = {key: args[key] for key in profile_fields if args.get(key) is not None}
@@ -3926,7 +3948,8 @@ async def _execute_session_create(
             return json.dumps(
                 {
                     "error": "Scripted session options are unavailable on this server; "
-                    "no session was created"
+                    "no session was created. The server enables them with the "
+                    "scripted_sessions release flag (OMNIGENT_FEATURES=scripted_sessions)"
                 }
             )
         if placement == "host":
@@ -6533,6 +6556,23 @@ async def _agent_list_via_rest(
         remaining_configs[:source_limit],
     )
     listing["builtins"] = _in_spawn_family(listing["builtins"], family)
+    from omnigent.runner import cloud_children
+    from omnigent.server.machine_access import spec_harness_id
+
+    if not continued and conversation_id and cloud_children.is_cloud_session(agent_spec):
+        # A cloud session's own agent is the one its cloud children start from,
+        # though a user or session-bound agent is not among the server's agents.
+        assert agent_spec is not None
+        own_agent = await cloud_children.own_agent_id(server_client, conversation_id)
+        if own_agent and all(row.get("agent_id") != own_agent for row in listing["builtins"]):
+            listing["builtins"].append(
+                {
+                    "agent_id": own_agent,
+                    "name": agent_spec.name,
+                    "description": agent_spec.description,
+                    "harness": spec_harness_id(agent_spec),
+                }
+            )
     from omnigent.harness_availability import harness_launch_availability
 
     for row in listing["builtins"]:

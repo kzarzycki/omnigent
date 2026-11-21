@@ -73,3 +73,12 @@ class AcpExtension:
 # The generic ACP harness and every builtin ACP CLI row that declares no vendor
 # behavior. Reads as "protocol only".
 NO_ACP_EXTENSION = AcpExtension(name="acp")
+
+
+def generic_acp_extension() -> AcpExtension:
+    """What the generic ACP harness runs with: protocol only, plus Omnigent's own
+    sub-agent dialect, which only a bridge Omnigent ships emits.
+    """
+    from omnigent.inner.acp_bridge_subagents import BridgeSubAgentSource
+
+    return AcpExtension(name="acp", subagent_sources=(BridgeSubAgentSource(),))
