@@ -936,17 +936,23 @@ def test_stale_adopted_runner_count_round_trips_and_defaults_to_zero() -> None:
 
 def test_hello_frame_capabilities_round_trip() -> None:
     """Advertised capability tokens survive encode → decode."""
-    from omnigent.host.frames import CAP_CODEX_SIDE_CHAT
+    from omnigent.host.frames import (
+        CAP_CODEX_SIDE_CHAT,
+        CAP_CODEX_SIDE_CHAT_RESUME,
+        HOST_CAPABILITIES,
+    )
+
+    assert CAP_CODEX_SIDE_CHAT_RESUME in HOST_CAPABILITIES
 
     original = HostHelloFrame(
         version="0.1.0",
         frame_protocol_version=1,
         name="new-host",
-        capabilities=[CAP_CODEX_SIDE_CHAT],
+        capabilities=[CAP_CODEX_SIDE_CHAT, CAP_CODEX_SIDE_CHAT_RESUME],
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostHelloFrame)
-    assert decoded.capabilities == [CAP_CODEX_SIDE_CHAT]
+    assert decoded.capabilities == [CAP_CODEX_SIDE_CHAT, CAP_CODEX_SIDE_CHAT_RESUME]
 
 
 def test_hello_frame_empty_runners() -> None:

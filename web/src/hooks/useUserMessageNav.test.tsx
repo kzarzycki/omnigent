@@ -245,7 +245,7 @@ describe("scrollToMessage with a focus range", () => {
     range.selectNodeContents(panel.querySelector("pre")!.firstChild!);
     range.getBoundingClientRect = box(500, 20);
 
-    scrollToMessage("resp_1", undefined, undefined, () => range);
+    scrollToMessage("resp_1", undefined, undefined, document, () => range);
 
     // 500 - 100 - (200 - 20) / 2, then 500 - 0 - (800 - 20) / 2 in the transcript.
     expect(panelScrollTop).toBe(310);
@@ -254,7 +254,7 @@ describe("scrollToMessage with a focus range", () => {
 
     // A row above re-measured during the scroll and moved the word off screen.
     const flash = vi.fn();
-    scrollToMessage("resp_1", flash, undefined, () => range);
+    scrollToMessage("resp_1", flash, undefined, document, () => range);
     range.getBoundingClientRect = box(3000, 20);
     act(() => vi.advanceTimersByTime(SETTLE_MS));
     expect(scrollBy).toHaveBeenLastCalledWith({ top: 2610, behavior: "auto" });
@@ -283,9 +283,52 @@ describe("scrollToMessage across the bubbles of one response", () => {
       delete (Range.prototype as Partial<Range>).getBoundingClientRect;
     });
 
-    scrollToMessage("resp_1", undefined, undefined, (el) => firstFindRange(el, "zorblat"));
+    scrollToMessage("resp_1", undefined, undefined, document, (el) => firstFindRange(el, "zorblat"));
 
     expect(scrollBy).toHaveBeenCalledWith({ top: 2610, behavior: "smooth" });
     expect(scrollSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("scrollToMessage", () => {
+  it("flashes as soon as the target is in view, not after the scroll settles", () => {
+    let report: IntersectionObserverCallback = () => {};
+    const observed: Element[] = [];
+    const original = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class {
+      constructor(callback: IntersectionObserverCallback) {
+        report = callback;
+      }
+      observe(element: Element) {
+        observed.push(element);
+      }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return [];
+      }
+      root = null;
+      rootMargin = "";
+      thresholds = [];
+    } as unknown as typeof IntersectionObserver;
+    try {
+      document.body.innerHTML = `<div data-message-id="journal-e2">Completed Deploy</div>`;
+      const flash = vi.fn();
+      scrollToMessage("journal-e2", flash);
+      expect(observed.map((element) => element.textContent)).toEqual(["Completed Deploy"]);
+      expect(flash).not.toHaveBeenCalled();
+      act(() =>
+        report(
+          [{ target: observed[0], isIntersecting: true, intersectionRatio: 1 } as never],
+          {} as never,
+        ),
+      );
+      expect(flash).toHaveBeenCalledWith("journal-e2");
+      // The settle timer that would have flashed later finds it already done.
+      act(() => vi.advanceTimersByTime(SETTLE_MS));
+      expect(flash).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.IntersectionObserver = original;
+    }
   });
 });
