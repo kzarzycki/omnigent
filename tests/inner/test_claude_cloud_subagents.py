@@ -131,3 +131,17 @@ def test_other_tool_calls_stay_cards_in_the_parent(bridge: ModuleType) -> None:
     events = _events(bridge, stream, executor)
 
     assert [type(event) for event in events] == [ToolCallRequest, ToolCallComplete]
+
+
+def test_the_generic_acp_harness_reads_the_bridge_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.inner import acp_harness
+    from omnigent.inner.acp_bridge_subagents import BridgeSubAgentSource
+
+    monkeypatch.setenv("HARNESS_ACP_COMMAND", "example-agent")
+
+    executor = acp_harness._build_acp_executor()
+
+    assert isinstance(executor, AcpExecutor)
+    assert any(
+        isinstance(source, BridgeSubAgentSource) for source in executor._extension.subagent_sources
+    )

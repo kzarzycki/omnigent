@@ -6560,19 +6560,20 @@ async def _agent_list_via_rest(
     from omnigent.server.machine_access import spec_harness_id
 
     if not continued and conversation_id and cloud_children.is_cloud_session(agent_spec):
-        # A cloud session's own agent is the one its cloud children start from,
-        # though a user or session-bound agent is not among the server's agents.
+        # A cloud session's own agent is the one its cloud children start from, though a
+        # user or session-bound agent is not among the server's agents. Its own field, so
+        # paging never trims it or puts a cursor on it.
         assert agent_spec is not None
         own_agent = await cloud_children.own_agent_id(server_client, conversation_id)
-        if own_agent and all(row.get("agent_id") != own_agent for row in listing["builtins"]):
-            listing["builtins"].append(
+        if own_agent:
+            listing["caller_agent"] = [
                 {
                     "agent_id": own_agent,
                     "name": agent_spec.name,
                     "description": agent_spec.description,
                     "harness": spec_harness_id(agent_spec),
                 }
-            )
+            ]
     from omnigent.harness_availability import harness_launch_availability
 
     for row in listing["builtins"]:
@@ -6588,6 +6589,7 @@ async def _agent_list_via_rest(
         continued=continued,
         tool_name="sys_agent_list",
         filters={},
+        page_sections=("builtins", "session_agents", "local_configs"),
         source_pages={
             "builtins": builtins_page,
             "session_agents": sessions_page,

@@ -204,9 +204,10 @@ async def test_a_host_create_names_the_flag_that_enables_it() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ["{}", '{"limit": 1}'], ids=["complete", "paged"])
 @pytest.mark.parametrize(("spec", "listed"), [(CLOUD_SPEC, True), (LOCAL_SPEC, False)])
 async def test_the_agent_list_names_a_cloud_sessions_own_agent(
-    spec: AgentSpec, listed: bool, tmp_path: Path
+    spec: AgentSpec, listed: bool, arguments: str, tmp_path: Path
 ) -> None:
     requests: list[httpx.Request] = []
     async with httpx.AsyncClient(
@@ -215,7 +216,7 @@ async def test_the_agent_list_names_a_cloud_sessions_own_agent(
         result = json.loads(
             await execute_tool(
                 tool_name="sys_agent_list",
-                arguments="{}",
+                arguments=arguments,
                 server_client=client,
                 conversation_id="lead",
                 agent_spec=spec,
@@ -223,10 +224,13 @@ async def test_the_agent_list_names_a_cloud_sessions_own_agent(
             )
         )
 
-    rows = {row["agent_id"]: row for row in result["builtins"]}
-    assert "ag_local" in rows
+    assert [row["agent_id"] for row in result["builtins"]] == ["ag_local"]
     if listed:
-        assert rows["ag_cloud"]["name"] == "claude-cloud"
-        assert rows["ag_cloud"]["harness"] == "acp:claude-cloud"
+        (own,) = result["caller_agent"]
+        assert (own["agent_id"], own["name"], own["harness"]) == (
+            "ag_cloud",
+            "claude-cloud",
+            "acp:claude-cloud",
+        )
     else:
-        assert "ag_cloud" not in rows
+        assert "caller_agent" not in result
