@@ -815,7 +815,7 @@ async def test_message_destination_accepts_supported_session_ids(spelling):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
-    [None, 123, "", " ", "a" * 8001],
+    [None, 123, "", " ", "a" * 32001],
     ids=["missing", "non_text", "empty", "blank", "oversize"],
 )
 async def test_message_content_validation_is_distinct_from_invalid_id(message):
@@ -833,7 +833,7 @@ async def test_message_content_validation_is_distinct_from_invalid_id(message):
                 conversation_id="manager",
             )
         )
-    assert result == {"error": "Provide a non-blank message of 1–8000 characters"}
+    assert result == {"error": "Provide a non-blank message of 1–32000 characters"}
 
 
 @pytest.mark.asyncio
@@ -891,7 +891,7 @@ async def test_managed_message_resolves_host_after_wrong_replica(target_kind):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("placement", ["same_host", "managed"])
-@pytest.mark.parametrize("message", [" ", "a" * 8001, 123], ids=["blank", "oversize", "non_text"])
+@pytest.mark.parametrize("message", [" ", "a" * 32001, 123], ids=["blank", "oversize", "non_text"])
 async def test_independent_initial_message_is_validated_before_creation(placement, message):
     def unexpected(request):
         pytest.fail("Invalid first task must not create a worker")
@@ -909,7 +909,7 @@ async def test_independent_initial_message_is_validated_before_creation(placemen
                 conversation_id="manager",
             )
         )
-    assert "initial message of 1–8000 characters" in result["error"]
+    assert "initial message of 1–32000 characters" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1527,3 +1527,10 @@ async def test_pr_link_uncertain_delivery_is_not_retried(failure):
         )
     assert len(posts) == 1
     assert ("refused" if failure == "forbidden" else "could not be confirmed") in result["error"]
+
+
+def test_orchestration_message_accepts_a_long_worker_brief() -> None:
+    """A brief of about 19,000 characters fits the first-message limit."""
+    from omnigent.server.session_orchestration import orchestration_message
+
+    assert orchestration_message("conv_source", "a" * 19_000).type == "message"

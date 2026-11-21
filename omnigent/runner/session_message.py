@@ -13,7 +13,10 @@ from omnigent.runner.session_requests import (
     post_on_host,
     session_host_id,
 )
-from omnigent.tools.builtins.session_message import peer_session_messaging_enabled
+from omnigent.tools.builtins.session_message import (
+    SESSION_MESSAGE_MAX_CHARS,
+    peer_session_messaging_enabled,
+)
 
 # A queued message older than this is dropped instead of landing out of context.
 DEFAULT_MESSAGE_TTL_SECONDS = 3600
@@ -28,8 +31,14 @@ async def execute_message_tool(
     except ValueError:
         return json.dumps({"error": "Provide a valid session_id (UUID or numeric managed ID)"})
     message = args.get("message")
-    if not isinstance(message, str) or not message.strip() or len(message) > 8000:
-        return json.dumps({"error": "Provide a non-blank message of 1–8000 characters"})
+    if (
+        not isinstance(message, str)
+        or not message.strip()
+        or len(message) > SESSION_MESSAGE_MAX_CHARS
+    ):
+        return json.dumps(
+            {"error": f"Provide a non-blank message of 1–{SESSION_MESSAGE_MAX_CHARS} characters"}
+        )
     if client is None or source_id is None:
         return json.dumps({"error": "Session messaging requires an authenticated runner"})
     if not peer_session_messaging_enabled():
