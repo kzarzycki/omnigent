@@ -3104,7 +3104,13 @@ async def _resolve_elicitation(
         target = (
             mirror_params.get("target_session_id") if isinstance(mirror_params, dict) else None
         )
-        if isinstance(target, str) and target and target != session_id:
+        # A native-delivery card keeps its own receipt protocol, so it is not forwarded.
+        if (
+            isinstance(target, str)
+            and target
+            and target != session_id
+            and not (isinstance(mirror_params, dict) and mirror_params.get("native_delivery"))
+        ):
             await _resolve_elicitation(
                 target, data, runner_router, conversation_store, post_answer=post_answer
             )
