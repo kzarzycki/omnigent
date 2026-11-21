@@ -11,8 +11,13 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
+from omnigent.runner import create_runner_app
+from omnigent.runner import tool_dispatch as _tool_dispatch
+from omnigent.runner.native import ResolvedSpec
 from omnigent.runner.tool_dispatch import execute_tool
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from tests.runner.conftest import _FakeProcessManager, _runner_client, _ScriptedHarnessClient, _sse
+from tests.runner.helpers import NullServerClient
 
 CLOUD_SPEC = AgentSpec(
     spec_version=1,
@@ -375,3 +380,68 @@ def test_dispatch_keeps_a_cloud_sessions_full_harness(
 
     assert seen == expected
     assert is_cloud_session(LOCAL_SPEC, seen) is (expected == "acp:claude-cloud")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("spec", "harness", "expected"),
+    [
+        (LOCAL_SPEC, "acp:claude-cloud", "acp:claude-cloud"),
+        (CLOUD_SPEC, None, "acp:claude-cloud"),
+        (LOCAL_SPEC, None, "claude-native"),
+    ],
+    ids=["override-on-local-spec", "cloud-spec", "local-session"],
+)
+async def test_the_runners_mcp_route_hands_dispatch_a_cloud_sessions_full_harness(
+    spec: AgentSpec,
+    harness: str | None,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str | None] = []
+
+    async def _spy(*, effective_harness: str | None = None, **_: object) -> str:
+        seen.append(effective_harness)
+        return "ok"
+
+    monkeypatch.setattr(_tool_dispatch, "execute_tool", _spy)
+    harness_client = _ScriptedHarnessClient(
+        [_sse({"type": "response.completed", "response": {"id": "resp_1"}})]
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> ResolvedSpec:
+        return ResolvedSpec(spec=spec, workdir=tmp_path)
+
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(harness_client),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        runner_workspace=tmp_path,
+    )
+    session = "38f6cf055029a2a23b227a8305f76c9d"
+    event = {
+        "type": "message",
+        "role": "user",
+        "agent_id": "31ebfedf721b44dabd76f662cb70a400",
+        "model": spec.name,
+        "content": [{"type": "input_text", "text": "seed"}],
+        "harness": spec.executor.config["harness"],
+        **({"harness_override": harness} if harness else {}),
+    }
+    async with _runner_client(app) as client:
+        assert (await client.post(f"/v1/sessions/{session}/events", json=event)).status_code == 202
+        for _ in range(100):
+            if harness_client.posted_bodies:
+                break
+            await asyncio.sleep(0.05)
+        reply = await client.post(
+            f"/v1/sessions/{session}/mcp/execute",
+            json={
+                "method": "tools/call",
+                "params": {"name": "sys_session_create", "arguments": {}},
+            },
+        )
+
+    assert reply.status_code == 200, reply.text
+    assert seen == [expected]
