@@ -11253,8 +11253,10 @@ def _derive_terminal_launch_args_from_spec(
     this returns ``None`` so no terminal args are set. ``None`` is also
     returned when the relevant field is absent / falsey.
 
-    ``headless_defaults`` selects the stance for a spec that declares
-    nothing: named-worker / bundled-child creates keep the headless
+    codex-native bypasses by default for every create, headless or not
+    (``permission_mode`` or ``yolo: false`` opts into a stricter stance).
+    ``headless_defaults`` selects the stance of the other harnesses for a
+    spec that declares nothing: named-worker / bundled-child creates keep the headless
     default above (codex-native / cursor-native bypass by DEFAULT, because
     nobody can answer their prompts). Top-level and self-resolved-agent
     creates pass ``headless_defaults=False``: those sessions are
@@ -11307,9 +11309,9 @@ def _derive_terminal_launch_args_from_spec(
                 "falling back to the yolo / headless default.",
                 mode,
             )
+        # Interactive creates bypass too: a session asks for a stricter stance
+        # with ``permission_mode`` or ``yolo: false``.
         if _spec_config_flag_explicitly_disabled(spec, "yolo"):
-            return None
-        if not headless_defaults and not _spec_config_flag_explicitly_enabled(spec, "yolo"):
             return None
         return _validate_terminal_launch_args(["--dangerously-bypass-approvals-and-sandbox"])
     if harness == _CURSOR_NATIVE_HARNESS:
