@@ -3489,6 +3489,7 @@ _SESSION_CREATE_FIELDS = (
     ("model", "model_override"),
     ("reasoning_effort", "reasoning_effort"),
     ("permission_mode", "permission_mode"),
+    ("cloud_environment_id", "cloud_environment_id"),
 )
 
 
@@ -3515,6 +3516,7 @@ def _build_session_create_body(
     model: object = None,
     reasoning_effort: object = None,
     permission_mode: object = None,
+    cloud_environment_id: object = None,
 ) -> _JsonObject:
     """
     Build the JSON ``POST /v1/sessions`` body for ``sys_session_create``.
@@ -3541,6 +3543,8 @@ def _build_session_create_body(
         written as ``reasoning_effort`` on the session.
     :param permission_mode: Optional native permission mode, e.g.
         ``"approve-for-me"``; the server maps it to the harness's launch args.
+    :param cloud_environment_id: Optional Claude cloud environment id, e.g.
+        ``"env_01AbCdEfGhIjKlMn"``, for an ``acp:claude-cloud`` agent.
     :returns: The JSON request body.
     """
     return {
@@ -3552,6 +3556,7 @@ def _build_session_create_body(
                 "model": model,
                 "reasoning_effort": reasoning_effort,
                 "permission_mode": permission_mode,
+                "cloud_environment_id": cloud_environment_id,
             }
         ),
     }
@@ -3853,6 +3858,16 @@ async def _execute_session_create(
         if has_config_path:
             # A new agent's own config sets its permission mode.
             return json.dumps({"error": "permission_mode requires agent_id"})
+    cloud_environment_id = args.get("cloud_environment_id")
+    if cloud_environment_id is not None:
+        from omnigent.acp_cloud_environment import validate_cloud_environment_id
+
+        if has_config_path:
+            return json.dumps({"error": "cloud_environment_id requires agent_id"})
+        try:
+            validate_cloud_environment_id(str(cloud_environment_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
     if has_config_path:
         return await _session_create_from_config_path(
             str(config_path),
@@ -3870,6 +3885,7 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
         permission_mode=permission_mode,
+        cloud_environment_id=cloud_environment_id,
     )
     headers: dict[str, str] = {}
     # A project named by environment_id places a same_host create on its pinned host.
