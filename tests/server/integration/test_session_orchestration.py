@@ -233,7 +233,7 @@ async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, 
             "data": {
                 "message": {
                     "blank": " ",
-                    "oversize": "a" * 8001,
+                    "oversize": "a" * 32001,
                 }.get(condition, "DO_NOT_DELIVER")
             },
         },
