@@ -94,6 +94,11 @@ async def _mint_acp_subagent_child(
         await _post_acp_subagent_message(
             client, child_id=child_id, child_key=child_key, role="user", text=task
         )
+    # The row shows Working until the end edge, not Idle from the moment it appears.
+    try:
+        await post_external_session_status(client, session_id=child_id, status="running")
+    except Exception as exc:  # noqa: BLE001 — a status edge failure must not break the turn
+        _logger.warning("acp sub-agent running status failed (child_key=%s): %s", child_key, exc)
 
 
 async def _post_acp_subagent_message(
