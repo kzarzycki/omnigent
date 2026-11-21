@@ -3242,9 +3242,7 @@ async def test_codex_command_approval_resolved_through_ancestor_mirror_reaches_c
         "params": {"threadId": "thread_1", "itemId": "item_1", "command": "pytest"},
     }
     drain_task = asyncio.create_task(_drain_until_elicitation(child_id))
-    await asyncio.sleep(
-        0.05
-    )  # custom-lint: disable=sleep-then-assert -- subscribe first
+    await asyncio.sleep(0.05)  # custom-lint: disable=sleep-then-assert -- subscribe first
     hook_task = asyncio.create_task(
         client.post(f"/v1/sessions/{child_id}/hooks/codex-elicitation-request", json=payload)
     )
