@@ -1734,7 +1734,7 @@ def register_core_routes(
         launcher_id = None
         if source is None and body.created_by_session_id is not None:
             # A launcher outside a tool call names itself; it must own that session.
-            if permission_store is None:
+            if permission_store is None or user_id is None:
                 raise OmnigentError(
                     "created_by_session_id needs a server with session permissions",
                     code=ErrorCode.INVALID_INPUT,

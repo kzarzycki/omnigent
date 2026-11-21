@@ -14162,8 +14162,9 @@ async def _create_session_from_existing_agent(
         requested_labels=initial_labels,
     )
     initial_labels[CLIENT_SURFACE_LABEL_KEY] = client_surface
-    if created_by_session_id is not None or launcher_session_id is not None:
-        initial_labels[CREATED_BY_SESSION_LABEL_KEY] = created_by_session_id or launcher_session_id
+    creator_session_id = created_by_session_id or launcher_session_id
+    if creator_session_id is not None:
+        initial_labels[CREATED_BY_SESSION_LABEL_KEY] = creator_session_id
     initial_labels.update(registry_labels)
     initial_labels.update(automation_permission_labels)
     initial_labels.update(inherited_mcp_labels)
