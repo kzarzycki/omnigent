@@ -11190,6 +11190,11 @@ def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
 _CODEX_DEFAULT_LAUNCH_ARGS: tuple[str, ...] = ("--dangerously-bypass-approvals-and-sandbox",)
 
 
+_DECLARED_MODE_LAUNCH_HARNESSES = frozenset(
+    {"cursor-native", "devin-native", "antigravity-native"}
+)
+
+
 def _derive_terminal_launch_args_from_spec(
     spec: AgentSpec, *, headless_defaults: bool = True, harness: str | None = None
 ) -> list[str] | None:
@@ -11288,6 +11293,16 @@ def _derive_terminal_launch_args_from_spec(
     from omnigent.harness_aliases import canonicalize_harness
 
     harness = (canonicalize_harness(harness) or harness) if harness else _spec_harness(spec)
+    # A declared mode of these harnesses launches in that mode, whatever the headless default.
+    declared_mode = spec.executor.config.get("permission_mode")
+    if (
+        harness in _DECLARED_MODE_LAUNCH_HARNESSES
+        and isinstance(declared_mode, str)
+        and declared_mode in PERMISSION_LAUNCH_ARGS[harness]
+    ):
+        return _validate_terminal_launch_args(
+            list(PERMISSION_LAUNCH_ARGS[harness][declared_mode]) or None
+        )
     if harness == _CLAUDE_NATIVE_HARNESS:
         permission_mode = spec.executor.config.get("permission_mode")
         if permission_mode:
@@ -11415,6 +11430,9 @@ def _agent_default_permission_mode(
         )
     except ValueError:
         return None
+    if canonical == _CODEX_NATIVE_HARNESS and not args:
+        # Codex bypasses unless the spec opts out, so no args is the opted-out default.
+        return "default"
     return mode_for_launch_args(canonical, args) if args else None
 
 

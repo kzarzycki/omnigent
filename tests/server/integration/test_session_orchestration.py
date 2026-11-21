@@ -652,6 +652,7 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             {},
             id="looser-than-agent-default",
         ),
+        pytest.param("bypass", True, "running", {"yolo": False}, None, {}, id="opt-out-default"),
     ],
 )
 async def test_scheduled_origin_workers_use_the_automation_permission_mode(

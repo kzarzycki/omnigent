@@ -4215,6 +4215,69 @@ async def test_named_cursor_child_ceiling_matches_its_headless_default(
     assert top_level.status_code == 400, top_level.text
 
 
+@pytest.mark.parametrize("placement", ["top-level", "named-child"])
+@pytest.mark.parametrize(
+    ("harness", "mode"),
+    [
+        ("cursor-native", "plan"),
+        ("cursor-native", "ask"),
+        ("cursor-native", "auto-review"),
+        ("devin-native", "smart"),
+        ("devin-native", "accept-edits"),
+        ("antigravity-native", "skip"),
+    ],
+)
+async def test_declared_native_mode_is_the_launch_default(
+    client: httpx.AsyncClient, harness: str, mode: str, placement: str
+) -> None:
+    """A session started with no mode launches in the mode its agent declares."""
+    config = {"harness": harness, "permission_mode": mode}
+    agent = await create_test_agent(
+        client,
+        name=f"{harness}-{mode}-{placement}",
+        executor={"type": "omnigent", "config": config},
+        sub_agents=[{"name": "worker", "executor": {"type": "omnigent", "config": config}}],
+    )
+    parent = await _create_session(client, agent["id"])
+    fields = {"agent_id": agent["id"]}
+    if placement == "named-child":
+        fields |= {"parent_session_id": parent["id"], "sub_agent_name": "worker"}
+    response = await client.post("/v1/sessions", json=fields)
+    assert response.status_code == 201, response.text
+    expected = PERMISSION_LAUNCH_ARGS[harness][mode] or None
+    assert response.json()["terminal_launch_args"] == expected
+
+
+async def test_named_child_overridden_to_codex_keeps_an_explicit_default_mode(
+    client: httpx.AsyncClient,
+) -> None:
+    """An explicit stricter mode is not replaced by the codex bypass fallback."""
+    agent = await create_test_agent(
+        client,
+        name="codex-override-explicit-default",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        sub_agents=[
+            {
+                "name": "worker",
+                "executor": {"type": "omnigent", "config": {"harness": "claude-sdk"}},
+            }
+        ],
+    )
+    parent = await _create_session(client, agent["id"])
+    response = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+            "harness_override": "codex-native",
+            "permission_mode": "default",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["terminal_launch_args"] is None
+
+
 _CODEX_OPT_OUTS = [{"yolo": False}, {"permission_mode": "default"}]
 
 

@@ -14172,6 +14172,7 @@ async def _create_session_from_existing_agent(
         selected_harness == _CODEX_NATIVE_HARNESS
         and validated_launch_args is None
         and not launch_args_spec_consulted
+        and body.permission_mode is None
         and (body.sub_agent_name or needs_launch_args_from_spec)
     ):
         validated_launch_args = list(_CODEX_DEFAULT_LAUNCH_ARGS)
