@@ -1336,14 +1336,17 @@ async def test_native_pane_with_live_work_holds_watchdog_despite_idle_edge(
             background(conv_id, True)
         assert app.state.native_pane_status[conv_id] == "idle"
         assert app.state.has_active_work() is (evidence != "no_evidence")
-        assert app.state.active_work_hold() == {
-            "permission_prompt": "human_wait",
-            "background_agent": "background_agents",
-            "background_shell": "background_shell",
-            "pane_output": "pane_output",
-            "pane_input": "pane_input",
-            "no_evidence": None,
-        }[evidence]
+        assert (
+            app.state.active_work_hold()
+            == {
+                "permission_prompt": "human_wait",
+                "background_agent": "background_agents",
+                "background_shell": "background_shell",
+                "pane_output": "pane_output",
+                "pane_input": "pane_input",
+                "no_evidence": None,
+            }[evidence]
+        )
         # Sandbox keepalive counts agent work only: recent pane input or output
         # also comes from someone viewing the pane, so only the prompt, a
         # background agent and a background shell count.

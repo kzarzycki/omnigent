@@ -2199,10 +2199,10 @@ async def _run_tunnel_from_env() -> None:
     # Reuse the tunnel's token factory for the app's httpx client so the
     # runner resolves Databricks auth once at boot, not twice.
     app = create_app(auth_token_factory=auth_token_factory, auth_resolved=True)
-    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
     from omnigent.native._native_forwarder_health import (
         last_post_at as native_forwarder_last_post_at,
     )
+    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
     from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 
     event_dispatcher = RunnerEventDispatcher()
@@ -2264,7 +2264,7 @@ async def _run_tunnel_from_env() -> None:
             return "event_dispatch"
         hold_callback = getattr(app.state, "active_work_hold", None)
         if callable(hold_callback):
-            return hold_callback()
+            return cast("str | None", hold_callback())
         return "active_work" if _has_active_work() else None
 
     def _keeps_idle_runner() -> bool:
@@ -2278,7 +2278,7 @@ async def _run_tunnel_from_env() -> None:
         if callable(attached) and attached():
             return True
         served = getattr(app.state, "served_session_ids", None)
-        session_ids = set(served()) if callable(served) else set()
+        session_ids = set(cast("Iterable[str]", served())) if callable(served) else set()
         primary = runner_primary_session_id()
         if primary:
             session_ids.add(primary)

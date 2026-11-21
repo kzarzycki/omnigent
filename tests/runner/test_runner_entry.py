@@ -2472,7 +2472,7 @@ def test_idle_hold_max_defaults_to_four_hours_and_zero_disables(
     assert _load_runner_idle_hold_max_s_from_config() == 90.0
     for bad in ("-1", "true", "soon"):
         config.write_text(f"runner:\n  idle_hold_max_s: {bad}\n", encoding="utf-8")
-        with pytest.raises(RuntimeError, match="runner.idle_hold_max_s"):
+        with pytest.raises(RuntimeError, match=r"runner\.idle_hold_max_s"):
             _load_runner_idle_hold_max_s_from_config()
 
 
@@ -2488,9 +2488,7 @@ def test_exclude_list_keeps_a_listed_session_and_an_unreadable_list_keeps_all(
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     config = tmp_path / "config.yaml"
     assert _runner_keeps_idle_session(["conv_a"]) is False
-    config.write_text(
-        "host:\n  replace_stale_runners_exclude: [conv_keep]\n", encoding="utf-8"
-    )
+    config.write_text("host:\n  replace_stale_runners_exclude: [conv_keep]\n", encoding="utf-8")
     assert _runner_keeps_idle_session(["conv_a", "conv_keep"]) is True
     assert _runner_keeps_idle_session(["conv_a"]) is False
     config.write_text("host:\n  replace_stale_runners_exclude: conv_keep\n", encoding="utf-8")
