@@ -20,6 +20,7 @@ queue_rules:
   - name: default
     queue_conditions:
       - base=mine
+      - status-success=land
       - -head~=^sync/
     merge_conditions:
       - check-success=gate
@@ -29,6 +30,7 @@ queue_rules:
   - name: sync
     queue_conditions:
       - base=mine
+      - status-success=land
       - head~=^sync/
     merge_conditions:
       - check-success=gate
