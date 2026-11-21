@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 
 from omnigent.errors import OmnigentError
 from omnigent.server.orchestration_hosts import OrchestrationHosts, OrchestrationLaunchGuard
+from tests.server.helpers import build_agent_bundle
 from tests.server.integration.test_machine_session_access import (
     _NAMED_HOST,
     _NAMED_USER,
@@ -132,6 +134,9 @@ async def test_binding_an_existing_work_session_to_a_marked_host_is_refused(
 async def test_a_relaunch_on_a_marked_host_is_refused(
     host_perm_app: FastAPI, host_perm_client: httpx.AsyncClient, agents: dict[str, str]
 ) -> None:
+    """A runner relaunched from the stored session row meets the mark."""
+    from omnigent.server.routes._sessions.helpers import _launch_runner_on_host_impl
+
     _mark(host_perm_app, {_NAMED_HOST})
     await _connect_host(host_perm_app, _NAMED_HOST, _NAMED_USER)
     created = await host_perm_client.post(
@@ -139,8 +144,34 @@ async def test_a_relaunch_on_a_marked_host_is_refused(
         json={"agent_id": agents["unlisted"]},
         headers={"X-Forwarded-Email": _NAMED_USER},
     )
-    conv = host_perm_app.state.conversation_store.get_conversation(created.json()["id"])
-    guard = host_perm_app.state.host_registry.orchestration_launch_guard
+    store = host_perm_app.state.conversation_store
+    conv = store.get_conversation(created.json()["id"])
+    registry = host_perm_app.state.host_registry
 
     with pytest.raises(OmnigentError, match="orchestration-only"):
-        await guard(conv, _NAMED_HOST)
+        await _launch_runner_on_host_impl(conv, store, registry, registry.get(_NAMED_HOST))
+
+    assert registry.get(_NAMED_HOST).outbound_queue.empty()
+
+
+async def test_an_uploaded_agent_is_refused_on_a_marked_host(
+    host_perm_app: FastAPI, host_perm_client: httpx.AsyncClient
+) -> None:
+    """An uploaded bundle is never an allow-listed agent, so its create is refused."""
+    _mark(host_perm_app, {_NAMED_HOST})
+    await _connect_host(host_perm_app, _NAMED_HOST, _NAMED_USER)
+    metadata = {"host_id": _NAMED_HOST, "workspace": _WORKSPACE}
+    bundle = build_agent_bundle(name="listed-agent")
+
+    response = await host_perm_client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps(metadata)},
+        files={
+            "bundle": ("agent.tar.gz", build_agent_bundle(name="listed-agent"), "application/gzip")
+        },
+        headers={"X-Forwarded-Email": _NAMED_USER},
+    )
+
+    assert response.status_code == 403, response.text
+    assert "orchestration-only" in response.text
+    assert host_perm_app.state.host_registry.get(_NAMED_HOST).outbound_queue.empty()
