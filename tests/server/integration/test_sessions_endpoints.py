@@ -4089,7 +4089,7 @@ async def test_create_session_codex_with_unloadable_spec_defaults_to_bypass(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the spec load for launch args fails, a resolved codex-native create still gets the default."""
+    """If the launch-args spec load fails, a resolved codex-native create keeps the default."""
     import threading
 
     from omnigent.runtime.agent_cache import AgentCache
