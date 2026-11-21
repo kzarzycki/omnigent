@@ -12,7 +12,7 @@ MCP independent creation.
 
 - `message`: sender without edit-level sharing, same owner and workspace; shared destinations are
   allowed and their readers see the message. Normal queue/steering applies.
-- `sender-attribution`: a delivered message starts with `[Message from session <id>]`.
+- `sender-attribution`: a delivered message starts with `[Message from session <id>]`.  A sessionless sender (supervisor, relay) may start with `[Message from <label>]` instead; the web draws the same chip with the label.
   The destination's Chat drops that line from the user bubble and shows "From
   @<sender>" as a session pill that opens the sender; the agent still receives
   the prefix. The title comes from sessions the sidebar, the viewed session's
