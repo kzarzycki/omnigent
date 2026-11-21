@@ -1733,19 +1733,26 @@ def register_core_routes(
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         launcher_id = None
         if source is None and body.created_by_session_id is not None:
-            # A launcher outside a tool call names itself; it must own that session.
+            # A launcher outside a tool call names itself; it must own that session. A
+            # server without session permissions has no owners, so it must just exist.
             if permission_store is None or user_id is None:
-                raise OmnigentError(
-                    "created_by_session_id needs a server with session permissions",
-                    code=ErrorCode.INVALID_INPUT,
+                launcher = await asyncio.to_thread(
+                    conversation_store.get_conversation,
+                    normalize_uuid(body.created_by_session_id) or body.created_by_session_id,
                 )
-            launcher = await asyncio.to_thread(
-                require_owned_session,
-                body.created_by_session_id,
-                user_id,
-                conversation_store,
-                permission_store,
-            )
+                if launcher is None:
+                    raise OmnigentError(
+                        f"Session not found: {body.created_by_session_id!r}",
+                        code=ErrorCode.NOT_FOUND,
+                    )
+            else:
+                launcher = await asyncio.to_thread(
+                    require_owned_session,
+                    body.created_by_session_id,
+                    user_id,
+                    conversation_store,
+                    permission_store,
+                )
             launcher_id = launcher.id
         resp, conv, resolved_body = await _create_session_from_existing_agent(
             conversation_store,

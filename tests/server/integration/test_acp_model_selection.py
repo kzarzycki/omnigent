@@ -728,3 +728,24 @@ async def test_a_session_created_by_another_session_cannot_bypass_acp_approval(
     assert "skips approval" in refused.json()["error"]["message"]
     allowed = await client.post("/v1/sessions", json=child("auto"))
     assert allowed.status_code == 201, allowed.text
+
+
+async def test_a_launcher_keeps_its_acp_permission_mode_choice(client: httpx.AsyncClient) -> None:
+    """A session launched outside a tool call may still ask for ``bypassPermissions``."""
+    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+    launcher = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "initial_items": []}
+    )
+    assert launcher.status_code == 201, launcher.text
+    launched = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "initial_items": [],
+            "created_by_session_id": launcher.json()["id"],
+            "permission_mode": "bypassPermissions",
+        },
+    )
+    assert launched.status_code == 201, launched.text
+    assert launched.json()["labels"]["omnigent.acp.permission_mode"] == "bypassPermissions"
+    assert launched.json()["labels"]["omnigent.created_by_session_id"] == launcher.json()["id"]
