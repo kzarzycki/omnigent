@@ -534,6 +534,29 @@ describe("SettingsPage", () => {
     expect(localStorage.getItem(BACKGROUND_SESSION_TITLES_STORAGE_KEY)).toBe("off");
   });
 
+  it("shows and persists the keep-thinking-expanded switch, off by default", async () => {
+    renderPage("/settings/general");
+    const toggle = await screen.findByTestId("keep-thinking-expanded-toggle");
+    expect(screen.getByTestId("settings-group-general-chat")).toContainElement(toggle);
+    expect(toggle).toHaveAccessibleName("Keep thinking expanded");
+    expect(toggle).toHaveAttribute("data-component-id", "settings.general.keep_thinking_expanded");
+    expect(toggle).not.toBeChecked();
+
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(localStorage.getItem("omnigent:keep-thinking-expanded")).toBe("true");
+
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    expect(localStorage.getItem("omnigent:keep-thinking-expanded")).toBe("false");
+  });
+
+  it("reflects a stored keep-thinking-expanded preference", async () => {
+    localStorage.setItem("omnigent:keep-thinking-expanded", "true");
+    renderPage("/settings/general");
+    expect(await screen.findByTestId("keep-thinking-expanded-toggle")).toBeChecked();
+  });
+
   it("opens sub-agents full screen by default and persists the panel setting", async () => {
     renderPage("/settings/general");
     const toggle = await screen.findByTestId("open-subagents-in-panel-toggle");
