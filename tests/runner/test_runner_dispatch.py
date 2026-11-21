@@ -7945,6 +7945,19 @@ async def test_session_create_refuses_a_malformed_cloud_environment_id() -> None
     assert "cloud_environment_id" in out["error"]
 
 
+def test_session_create_body_carries_the_cloud_environment_id() -> None:
+    """A valid ``cloud_environment_id`` is part of the create request; an omitted one is not."""
+    from omnigent.runner.tool_dispatch import _build_session_create_body
+
+    with_environment = _build_session_create_body(
+        "ag_worker", "conv_caller", "t", cloud_environment_id="env_01ExampleExample"
+    )
+    assert with_environment["cloud_environment_id"] == "env_01ExampleExample"
+    assert "cloud_environment_id" not in _build_session_create_body(
+        "ag_worker", "conv_caller", "t"
+    )
+
+
 def test_agent_tools_are_runner_local() -> None:
     """
     ``sys_agent_get`` / ``sys_agent_download`` dispatch locally in the
