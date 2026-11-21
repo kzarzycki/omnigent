@@ -579,6 +579,13 @@ class SysSessionListTool(Tool):
                                 "sessions. Sub_agents is unchanged."
                             ),
                         },
+                        "created_by_session_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional: keep only global sessions created by this "
+                                "session id (see created_by_session_id on each row)."
+                            ),
+                        },
                         "agent_name": {
                             "type": "string",
                             "description": (
