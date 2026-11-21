@@ -5974,6 +5974,54 @@ def test_paste_file_is_removed_when_payload_write_fails(
     run_tmux.assert_not_called()
 
 
+@pytest.mark.parametrize("landed_late", [True, False], ids=["landed-late", "never-landed"])
+def test_resend_of_an_unaccepted_submit_checks_whether_it_landed_late(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, landed_late: bool
+) -> None:
+    """A resend waits on the original submit when Claude recorded it; otherwise it types again."""
+    native_session_id = "11111111-2222-4333-8444-555555555555"
+    transcript = tmp_path / "native.jsonl"
+    transcript.write_text('{"type":"system","content":"prefix"}\n')
+    boundary = claude_native_bridge.capture_submit_boundary(transcript, native_session_id)
+    assert boundary is not None
+    unaccepted = claude_native_bridge._SubmittedPrompt(
+        bridge_dir=tmp_path, boundary=boundary, text="synthetic prompt", submitted_at=time.time()
+    )
+    claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path] = unaccepted
+    if landed_late:
+        record = {
+            "type": "user",
+            "sessionId": native_session_id,
+            "isSidechain": False,
+            "promptSource": "typed",
+            "message": {"role": "user", "content": "synthetic prompt"},
+        }
+        with transcript.open("a") as handle:
+            handle.write(json.dumps(record) + "\n")
+    typed: list[str] = []
+
+    def clear_composer(*_args: object, **_kwargs: object) -> None:
+        typed.append("typing")
+        raise RuntimeError("stop after typing starts")
+
+    monkeypatch.setattr(claude_native_bridge, "has_pending_user_prompt", lambda _dir: False)
+    monkeypatch.setattr(claude_native_bridge, "_clear_composer", clear_composer)
+
+    def resend() -> object:
+        return claude_native_bridge._paste_and_submit(
+            tmp_path, "synthetic.sock", "claude:0.0", text="synthetic prompt", needle="synthetic"
+        )
+
+    if landed_late:
+        assert resend() is unaccepted
+        assert typed == []
+    else:
+        with pytest.raises(RuntimeError, match="typing starts"):
+            resend()
+        assert typed == ["typing"]
+    assert tmp_path not in claude_native_bridge._UNACCEPTED_SUBMITS
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [

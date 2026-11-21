@@ -810,7 +810,19 @@ class ClaudeUserPromptPending(RuntimeError):
 
 
 class ClaudeMessageNotAccepted(RuntimeError):
+    """
+    Claude refused the message before accepting it.
+
+    :cvar code: Semantic failure code the turn error carries, or ``None``.
+    """
+
+    code: str | None = None
+
+
+class ClaudeSubmitNotAccepted(ClaudeMessageNotAccepted):
     """The submitted draft remained in Claude's input box until the deadline."""
+
+    code = "claude_submit_not_accepted"
 
 
 class ClaudeComposerNotCleared(ClaudeMessageNotAccepted):
@@ -5207,6 +5219,31 @@ class _SubmittedPrompt:
     submitted_at: float
 
 
+# The last submit per bridge whose draft Claude never accepted in time; its Enter may still land.
+_UNACCEPTED_SUBMITS: dict[Path, _SubmittedPrompt] = {}
+
+
+def _unaccepted_submit_landed_late(bridge_dir: Path, text: str) -> _SubmittedPrompt | None:
+    """
+    Return the remembered unaccepted submit of *text* when Claude recorded it after all.
+
+    The entry is consumed either way: a resend that finds nothing recorded types again.
+
+    :param bridge_dir: The pane's bridge directory.
+    :param text: The text about to be pasted.
+    :returns: The earlier submit to wait on, or ``None`` when the resend must type.
+    """
+    earlier = _UNACCEPTED_SUBMITS.pop(bridge_dir, None)
+    if earlier is None or earlier.text != text:
+        return None
+    boundary = earlier.boundary or _transcript_start_boundary(bridge_dir, earlier.submitted_at)
+    if boundary is None or not has_recorded_prompt(
+        boundary, text, normalize_prompt=_recorded_prompt_text
+    ):
+        return None
+    return earlier
+
+
 @_serialize_bridge_injection
 def _deliver_user_message(bridge_dir: Path, *, content: str, timeout_s: float) -> _SubmittedPrompt:
     """
@@ -5328,6 +5365,10 @@ def _paste_and_submit(
         prompt appears after the submit Enter.
     """
     delivery_diagnostics.start_attempt()
+    if (landed := _unaccepted_submit_landed_late(bridge_dir, text)) is not None:
+        # The original Enter landed late: type nothing, wait on that submit.
+        _logger.info("claude-native: an unaccepted submit landed late; not typing it again")
+        return landed
     delivery_diagnostics.set_stage("checking_pending_prompt")
     if has_pending_user_prompt(bridge_dir):
         raise ClaudeUserPromptPending(
@@ -5450,7 +5491,8 @@ def _paste_and_submit(
         ) from exc
     if accepted:
         return submitted
-    raise ClaudeMessageNotAccepted(
+    _UNACCEPTED_SUBMITS[bridge_dir] = submitted
+    raise ClaudeSubmitNotAccepted(
         f"Claude Code did not accept the submitted message within {_SUBMIT_VERIFY_TIMEOUT_S}s "
         "(the draft is still in the input box). The message was not delivered."
     )

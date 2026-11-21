@@ -77,6 +77,24 @@ def _sign_in_refusal(*, undelivered: bool = True, message: str = _OWN_SIGN_IN_ME
     return _sse({"type": "response.failed", "response": {"status": "failed"}, "error": error})
 
 
+def _not_accepted_refusal() -> str:
+    return _sse(
+        {
+            "type": "response.failed",
+            "response": {"status": "failed"},
+            "error": {
+                "code": "claude_submit_not_accepted",
+                "message": "Claude Code did not accept the submitted message within 20.0s.",
+                "undelivered": True,
+            },
+        }
+    )
+
+
+_NOT_ACCEPTED = [
+    _sse({"type": "response.created", "response": {"id": "resp_1"}}),
+    _not_accepted_refusal(),
+]
 _REFUSED = [_sse({"type": "response.created", "response": {"id": "resp_1"}}), _sign_in_refusal()]
 _DELIVERED = [
     _sse({"type": "response.created", "response": {"id": "resp_2"}}),
@@ -1099,3 +1117,82 @@ async def test_sign_in_refusal_is_reported_when_a_resync_cancels_the_turn() -> N
     assert sid not in app.state.sign_in_holds
     assert not app.state.session_message_buffers.get(sid)
     assert not server.notices("databricks_sign_in_pending")
+
+
+@pytest.mark.asyncio
+async def test_submit_claude_did_not_accept_is_resent_after_a_wait(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A message Claude missed is held, not failed, then resent; a later one queues behind it."""
+    monkeypatch.setattr(runner_app, "_CLAUDE_RESUBMIT_WAITS_S", (0.3, 0.3))
+    app, harness, server = _build_app([_NOT_ACCEPTED, _DELIVERED])
+    sid = uuid.uuid4().hex
+    with caplog.at_level(logging.INFO):
+        async with _runner_client(app) as client:
+            await _create_session(client, sid)
+            await client.post(f"/v1/sessions/{sid}/events", json=_message("first"))
+            await _until(
+                lambda: sid in app.state.sign_in_holds and sid not in app.state.active_turns
+            )
+
+            assert [m["content"][0]["text"] for m in app.state.session_message_buffers[sid]] == [
+                "first"
+            ]
+            second = await client.post(f"/v1/sessions/{sid}/events", json=_message("second"))
+            assert second.status_code == 202
+            assert second.json()["detail"] == "Message buffered until Claude Code accepts input."
+            assert len(harness.posted_bodies) == 1
+
+            await _until(
+                lambda: (
+                    len(harness.posted_bodies) == 3
+                    and not app.state.session_message_buffers.get(sid)
+                    and sid not in app.state.active_turns
+                )
+            )
+
+    assert [_sent_text(body) for body in harness.posted_bodies] == ["first", "first", "second"]
+    published = _published(app, sid)
+    assert not [e for e in published if e.get("type") == "response.failed"]
+    assert not [
+        e for e in published if e.get("type") == "session.status" and e["status"] == "failed"
+    ]
+    assert not server.notices("databricks_sign_in_pending")
+    assert not server.notices("databricks_sign_in_completed")
+    assert sid not in app.state.sign_in_holds
+    assert [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", "") == "native_input_held_for_resubmit"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_submit_refused_past_every_wait_fails_once_with_its_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the last wait the refusal is reported as before, once, with its code."""
+    waits = (0.01, 0.01, 0.01, 0.01)
+    monkeypatch.setattr(runner_app, "_CLAUDE_RESUBMIT_WAITS_S", waits)
+    app, harness, _server = _build_app([_NOT_ACCEPTED])
+    sid = uuid.uuid4().hex
+    async with _runner_client(app) as client:
+        await _create_session(client, sid)
+        await client.post(f"/v1/sessions/{sid}/events", json=_message("first"))
+        await _until(
+            lambda: (
+                len(harness.posted_bodies) == len(waits) + 1 and sid not in app.state.active_turns
+            )
+        )
+        await asyncio.sleep(0.1)
+
+    failed = [
+        e
+        for e in _published(app, sid)
+        if e.get("type") == "session.status" and e.get("status") == "failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["error"]["code"] == "claude_submit_not_accepted"
+    assert len(harness.posted_bodies) == len(waits) + 1
+    assert not app.state.session_message_buffers.get(sid)
+    assert sid not in app.state.sign_in_holds
