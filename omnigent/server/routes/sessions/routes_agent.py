@@ -16,6 +16,10 @@ from fastapi import (
 )
 from fastapi.responses import Response
 
+from omnigent.acp_cloud_environment import (
+    CLOUD_ENVIRONMENT_HEADER,
+    CLOUD_ENVIRONMENT_LABEL_KEY,
+)
 from omnigent.acp_permission_mode import (
     ACP_PERMISSION_MODE_HEADER,
     ACP_PERMISSION_MODE_LABEL_KEY,
@@ -293,6 +297,9 @@ def register_agent_routes(
         automations_available = getattr(request.app.state, "automations_available", None)
         if automations_available is not None:
             selection_headers[AUTOMATIONS_HEADER] = "1" if automations_available() else "0"
+        session_cloud_environment = conv.labels.get(CLOUD_ENVIRONMENT_LABEL_KEY)
+        if session_cloud_environment:
+            selection_headers[CLOUD_ENVIRONMENT_HEADER] = session_cloud_environment
         session_permission_mode = conv.labels.get(ACP_PERMISSION_MODE_LABEL_KEY)
         if session_permission_mode:
             selection_headers[ACP_PERMISSION_MODE_HEADER] = session_permission_mode

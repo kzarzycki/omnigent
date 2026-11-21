@@ -1145,6 +1145,15 @@ class SysSessionCreateTool(Tool):
                                 "agent's default."
                             ),
                         },
+                        "cloud_environment_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional Claude cloud environment id (form 'env_01...', "
+                                "agent_id only) for an acp:claude-cloud agent: the cloud "
+                                "session starts in that environment. Omit to use the "
+                                "bridge's default. A malformed id is refused."
+                            ),
+                        },
                         "permission_mode": {
                             "type": "string",
                             "description": (
