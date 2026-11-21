@@ -1749,6 +1749,10 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         reaches its ``HARNESS_ACP_PERMISSION_MODE``; a session another session
         creates can use ``bypassPermissions`` only when its creator runs in
         it too. ``None`` keeps the agent's mode.
+    :param cloud_environment_id: Optional Claude cloud environment id for an
+        ACP cloud agent (``acp:claude-cloud``), e.g. ``"env_01AbCdEfGhIjKlMn"``. The
+        cloud session starts in that environment; a malformed id or another harness
+        is a 400.
     :param model_override: Optional per-session LLM model override to
         persist at create time, e.g. ``"databricks-claude-sonnet-4-6"``.
         Set by ``sys_session_send``'s per-dispatch ``model`` arg so the
@@ -1830,6 +1834,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     git: SessionGitOptions | None = None
     terminal_launch_args: list[str] | None = None
     permission_mode: str | None = Field(default=None, min_length=1, max_length=64)
+    cloud_environment_id: str | None = Field(default=None, min_length=1, max_length=128)
     model_override: str | None = None
     reasoning_effort: str | None = None
     cost_control_mode_override: str | None = None

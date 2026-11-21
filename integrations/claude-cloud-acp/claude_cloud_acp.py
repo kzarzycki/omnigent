@@ -368,6 +368,17 @@ NO_ATTRIBUTION_SETTINGS = json.dumps(
 )
 
 
+def launch_settings() -> str:
+    """The ``--settings`` JSON: attribution off, and the session's cloud environment if set.
+
+    ``CLAUDE_CLOUD_ENVIRONMENT_ID`` is the Omnigent session's ``cloud_environment_id``.
+    """
+    settings = json.loads(NO_ATTRIBUTION_SETTINGS)
+    if environment_id := os.environ.get("CLAUDE_CLOUD_ENVIRONMENT_ID", "").strip():
+        settings["remote"] = {"defaultEnvironmentId": environment_id}
+    return json.dumps(settings)
+
+
 def create_cloud_session(
     text: str, cwd: str, model: str | None = None, effort: str | None = None
 ) -> str:
@@ -390,7 +401,7 @@ def create_cloud_session(
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     proc = subprocess.Popen(
-        [CLAUDE_CLI, "--cloud", text, "--settings", NO_ATTRIBUTION_SETTINGS]
+        [CLAUDE_CLI, "--cloud", text, "--settings", launch_settings()]
         + (["--model", model] if model else [])
         + (["--effort", effort or EFFORT] if effort or EFFORT else []),
         cwd=cwd,

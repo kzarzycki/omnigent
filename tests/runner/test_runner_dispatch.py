@@ -8430,6 +8430,26 @@ async def test_sys_session_get_info_reports_the_acp_permission_mode() -> None:
     assert info["permission_mode"] == "auto"
 
 
+@pytest.mark.asyncio
+async def test_session_create_refuses_a_malformed_cloud_environment_id() -> None:
+    """``sys_session_create`` names ``cloud_environment_id`` in its error, before any request."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        out = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "ag_x", "cloud_environment_id": "oops"}),
+                server_client=client,
+                conversation_id="conv_caller",
+            )
+        )
+    assert "cloud_environment_id" in out["error"]
+
+
 def test_agent_tools_are_runner_local() -> None:
     """
     ``sys_agent_get`` / ``sys_agent_download`` dispatch locally in the
