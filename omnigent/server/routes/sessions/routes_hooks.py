@@ -86,6 +86,7 @@ from omnigent.server.routes._sessions.helpers import (
     _allow_remember_eligible,
     _build_actor,
     _build_evaluation_context,
+    _claude_bypass_safety_denial,
     _claude_native_permission_directories,
     _claude_native_remember_host,
     _client_supplied_hook_elicitation_id,
@@ -387,6 +388,23 @@ def register_hooks_routes(
                 f"{hook_label} permission hook does not match the session's "
                 f"{native_agent.display_name} harness.",
                 code=ErrorCode.CONFLICT,
+            )
+
+        # Bypass mode asks nobody: answer Claude's own safety prompt with a deny it can read.
+        bypass_denial = (
+            _claude_bypass_safety_denial(payload, tool_name, permission_mode) if is_claude else None
+        )
+        if bypass_denial is not None:
+            return Response(
+                content=json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": bypass_denial,
+                        }
+                    }
+                ),
+                media_type="application/json",
             )
 
         try:

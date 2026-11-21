@@ -841,7 +841,7 @@ async def test_permission_request_hook_auto_mode_round_trip(
         ("ExitPlanMode", "plan"),
         ("Bash", "plan"),
         ("Bash", "auto"),
-        ("Bash", "bypassPermissions"),
+        ("AskUserQuestion", "bypassPermissions"),
         ("Bash", "dontAsk"),
         ("Bash", "unknown"),
     ],
@@ -1393,6 +1393,37 @@ async def test_permission_request_hook_remember_webfetch_no_host_tool_wide(
             "destination": "session",
         }
     ]
+
+
+async def test_permission_request_hook_bypass_mode_denies_without_card(
+    client: httpx.AsyncClient,
+) -> None:
+    """Bypass mode answers Claude's own safety prompt with a readable deny, no card."""
+    agent = await create_test_agent(client, "test-permission-bypass-deny")
+    session_id = await _create_session(client, agent["id"])
+    payload = await _claude_permission_payload()
+    payload["permission_mode"] = "bypassPermissions"
+    payload["decision_reason"] = "dangerousRemoval"
+    events: list[dict[str, Any]] = []
+
+    async def collect() -> None:
+        async for event in session_stream.subscribe(session_id):
+            events.append(event)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0.05)
+    response = await client.post(
+        f"/v1/sessions/{session_id}/hooks/permission-request", json=payload
+    )
+    await asyncio.sleep(0.05)
+    collector.cancel()
+
+    assert response.status_code == 200, response.text
+    output = response.json()["hookSpecificOutput"]
+    assert output["hookEventName"] == "PermissionRequest"
+    assert output["decision"]["behavior"] == "deny"
+    assert "dangerousRemoval" in output["decision"]["message"]
+    assert not [e for e in events if e.get("type") == "response.elicitation_request"]
 
 
 async def test_permission_request_hook_forwards_cwd_and_permission_mode(

@@ -478,6 +478,43 @@ def _claude_native_permission_directories(suggestions: Any) -> list[str] | None:
     return directories or None
 
 
+def _claude_bypass_safety_denial(
+    payload: dict[str, Any], tool_name: str, permission_mode: str | None
+) -> dict[str, Any] | None:
+    """
+    Deny decision for a permission prompt Claude still raises under bypassPermissions.
+
+    A session in bypass mode chose not to be asked, so Claude's own safety check
+    (for example the dangerous-removal breaker) must not become an approval card.
+    ``AskUserQuestion`` is a question, not a permission, and keeps its flow.
+
+    :param payload: Claude's PermissionRequest hook body.
+    :param tool_name: The gated tool, e.g. ``"Bash"``.
+    :param permission_mode: Claude's current permission mode, or None when absent.
+    :returns: A ``decision`` dict with ``behavior`` and ``message``, or None when
+        the request should follow the normal card flow.
+    """
+    if permission_mode != "bypassPermissions" or tool_name == "AskUserQuestion":
+        return None
+    flagged = next(
+        (
+            payload[key].strip()
+            for key in ("decision_reason", "reason", "safety_check")
+            if isinstance(payload.get(key), str) and payload[key].strip()
+        ),
+        None,
+    )
+    cause = f"Claude Code's safety check ({flagged})" if flagged else "Claude Code's safety check"
+    return {
+        "behavior": "deny",
+        "message": (
+            f"{cause} blocked this {tool_name} call, and this session runs in bypass mode, "
+            "so there is nobody to approve it. Rewrite the command without the flagged part "
+            "(for example a broad rm), or split it into smaller steps, then try again."
+        ),
+    }
+
+
 def _allow_auto_mode_eligible(tool_name: str, permission_mode: str | None) -> bool:
     """
     Whether a regular Claude permission prompt may offer a session-scoped auto-mode switch.
