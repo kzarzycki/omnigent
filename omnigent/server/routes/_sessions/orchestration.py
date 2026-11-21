@@ -13392,7 +13392,9 @@ async def _inherited_mcp_labels(
     return inherited
 
 
-def _checked_cloud_environment_id(body: SessionCreateRequest, selected_harness: str) -> str | None:
+def _checked_cloud_environment_id(
+    body: SessionCreateInput, selected_harness: str | None
+) -> str | None:
     """Return the request's Claude cloud environment id after checking it.
 
     :raises OmnigentError: 400 when the id is malformed or the agent is not a cloud agent.
@@ -13401,7 +13403,7 @@ def _checked_cloud_environment_id(body: SessionCreateRequest, selected_harness: 
         return None
     from omnigent.harness_aliases import canonicalize_harness
 
-    if canonicalize_harness(selected_harness) != "acp":
+    if selected_harness is None or canonicalize_harness(selected_harness) != "acp":
         raise OmnigentError(
             "cloud_environment_id applies only to ACP agents such as acp:claude-cloud",
             code=ErrorCode.INVALID_INPUT,

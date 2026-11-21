@@ -1649,9 +1649,13 @@ def _load_agent_spec_bundle(
     cloud_environment = resp.headers.get(CLOUD_ENVIRONMENT_HEADER)
     if cloud_environment:
         try:
-            spec = with_cloud_environment_id(spec, validate_cloud_environment_id(cloud_environment))
+            spec = with_cloud_environment_id(
+                spec, validate_cloud_environment_id(cloud_environment)
+            )
         except ValueError:
-            _logger.warning("ignoring a malformed cloud environment id", extra={"session_id": session_id})
+            _logger.warning(
+                "ignoring a malformed cloud environment id", extra={"session_id": session_id}
+            )
     _apply_host_interactive_shells(spec)
     return ResolvedSpec(spec=spec, workdir=dest)
 
