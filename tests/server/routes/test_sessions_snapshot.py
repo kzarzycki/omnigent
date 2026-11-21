@@ -507,6 +507,10 @@ async def test_session_snapshot_reads_agent_row_once_off_event_loop(
 
     class _AgentCache:
         @staticmethod
+        def load_spec(agent_id: str, bundle_location: str, *, expand_env: bool = False) -> Any:
+            return spec
+
+        @staticmethod
         def load(agent_id: str, bundle_location: str, *, expand_env: bool = False) -> Any:
             return SimpleNamespace(spec=spec)
 

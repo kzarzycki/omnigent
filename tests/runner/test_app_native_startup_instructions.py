@@ -101,7 +101,7 @@ async def test_startup_instructions_join_stable_text_notes_and_memory_in_order(
     )
 
     assert text == (
-        f"Be a concise assistant.\n\n{WORKSPACE_IMAGE_INSTRUCTION}"
+        f"Be a concise assistant.\n\n{_STARTUP_GUIDANCE}"
         "\n\nROUTING NOTE\n\nMEMORY GUIDANCE"
     )
     # The workspace reaches the guidance, which names the session's project from it.

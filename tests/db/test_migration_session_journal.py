@@ -135,6 +135,6 @@ def test_upgrade_matches_models_and_downgrade_drops_tables(tmp_path: Path) -> No
     with engine.connect() as connection:
         assert connection.execute(
             sa.text("SELECT version_num FROM alembic_version")
-        ).scalars().all() == ["27d16059fab9"]
+        ).scalars().all() == ["zc4f8a1b6e02"]
     engine.dispose()
     clear_engine_cache()

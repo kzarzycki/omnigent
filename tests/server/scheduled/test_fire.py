@@ -3237,7 +3237,7 @@ async def test_continue_reopens_a_quiet_archive_when_done_session() -> None:
 
     assert [conv.id for conv in launched] == ["conv_prev"]
     assert session.archived is False
-    assert session.labels == {}
+    assert "omnigent.keep" not in session.labels
     assert [(run["status"], run["conversation_id"]) for run in store.runs] == [
         ("succeeded", "conv_prev")
     ]

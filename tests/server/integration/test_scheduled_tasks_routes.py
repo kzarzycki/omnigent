@@ -2977,7 +2977,11 @@ async def test_list_tasks_leaves_young_running_run_untouched(
 
 
 def _seed_running_run_for_conv(
-    db_uri: str, conversation_id: str, *, agent_replied: bool = True
+    db_uri: str,
+    conversation_id: str,
+    *,
+    agent_replied: bool = True,
+    harness_override: str | None = None,
 ) -> tuple[str, str]:
     """Create a task + a ``running`` run bound to ``conversation_id``.
 
@@ -2994,7 +2998,9 @@ def _seed_running_run_for_conv(
     )
 
     conversations = SqlAlchemyConversationStore(db_uri)
-    conversations.create_conversation(conversation_id=conversation_id)
+    conversations.create_conversation(
+        conversation_id=conversation_id, harness_override=harness_override
+    )
     store = SqlAlchemyScheduledTaskStore(db_uri)
     task_id = uuid.uuid4().hex
     store.create(
@@ -3166,6 +3172,7 @@ async def test_a_native_run_completes_on_its_forwarders_idle_not_the_runners(
     """A native runner's idle follows prompt delivery; the forwarder reports the turn end."""
     import asyncio
     import threading
+    import uuid
 
     from omnigent.server import session_live_state
     from omnigent.server.routes._sessions.orchestration import _relay_runner_stream_once
@@ -3173,8 +3180,8 @@ async def test_a_native_run_completes_on_its_forwarders_idle_not_the_runners(
     from tests.server.routes.test_sessions_runner_relay import _ScriptedRunnerClient
 
     conversations = SqlAlchemyConversationStore(db_uri)
-    conv = conversations.create_conversation(harness_override=harness)
-    task_id, run_id = _seed_running_run_for_conv(db_uri, conv.id)
+    conv_id = uuid.uuid4().hex
+    task_id, run_id = _seed_running_run_for_conv(db_uri, conv_id, harness_override=harness)
     tasks = SqlAlchemyScheduledTaskStore(db_uri)
     session_live_state.configure(conversations, tasks)
     release = asyncio.Event()
@@ -3187,7 +3194,7 @@ async def test_a_native_run_completes_on_its_forwarders_idle_not_the_runners(
     ]
     try:
         await _relay_runner_stream_once(
-            conv.id,
+            conv_id,
             _ScriptedRunnerClient(release, turn),  # type: ignore[arg-type]
             conversations,
         )
@@ -3195,11 +3202,11 @@ async def test_a_native_run_completes_on_its_forwarders_idle_not_the_runners(
         session_live_state.submit("test_barrier", flushed.set)
         assert await asyncio.to_thread(flushed.wait, 10)
         after_relay = next(r for r in tasks.list_runs(task_id)[0] if r.id == run_id).status
-        _publish_status(conv.id, "idle")
+        _publish_status(conv_id, "idle")
         final = _wait_for_run_status(db_uri, task_id, run_id, "succeeded")
     finally:
         session_live_state.configure(None)
-        _session_status_cache.pop(conv.id, None)
+        _session_status_cache.pop(conv_id, None)
 
     assert after_relay == ("succeeded" if relayed_idle_completes else "running")
     assert final is not None and final.status == "succeeded"

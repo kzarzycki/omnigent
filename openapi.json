@@ -6665,6 +6665,18 @@
             "default": null,
             "title": "Cost Control Mode Override"
           },
+          "environment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Environment Id"
+          },
           "git": {
             "anyOf": [
               {
@@ -9453,6 +9465,18 @@
             "default": null,
             "title": "Cost Control Mode Override"
           },
+          "environment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Environment Id"
+          },
           "git": {
             "anyOf": [
               {
@@ -9977,6 +10001,21 @@
             "title": "Data",
             "type": "object"
           },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "double",
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional unix time in seconds after which a message still waiting in the session's pending inputs is dropped instead of delivered, e.g. `1767225600`. Ignored when the message is dispatched immediately.",
+            "title": "Expires At"
+          },
           "model_override": {
             "anyOf": [
               {
@@ -9989,6 +10028,19 @@
             "default": null,
             "description": "Optional per-event LLM model override used when this event starts a fresh agent turn. Distinct from the session's bound agent; it substitutes for the agent spec's `llm.model` for that turn.",
             "title": "Model Override"
+          },
+          "sender_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional id of the session that sent the message. A pending input whose sender has ended (closed, archived, failed or deleted) is dropped instead of delivered. Peer messages (`session_message`) take it from the authenticated sender.",
+            "title": "Sender Session Id"
           },
           "tools": {
             "anyOf": [
@@ -10023,7 +10075,7 @@
               }
             ],
             "default": null,
-            "description": "Optional plan-entry ID limiting a user message to that workflow run. A superseded run is rejected with HTTP 409.",
+            "description": "Optional plan-entry ID limiting a user message to that workflow run. A superseded run is rejected with HTTP 409. Each dropped input posts one notice to the sender's parent session, or to the sender itself when it has no parent and is still alive, naming the first 200 characters, the target session and the reason.",
             "title": "Workflow Run Id"
           }
         },
@@ -14003,6 +14055,20 @@
             "title": "Data",
             "type": "object"
           },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "double",
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expires At"
+          },
           "model_override": {
             "anyOf": [
               {
@@ -14014,6 +14080,18 @@
             ],
             "default": null,
             "title": "Model Override"
+          },
+          "sender_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sender Session Id"
           },
           "tools": {
             "anyOf": [
