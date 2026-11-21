@@ -1,0 +1,89 @@
+# Spike for kzarzycki/agent-skills#1647: Claude Code on a free NVIDIA NIM model
+# through free-claude-code (FCC), isolated in a GitHub-hosted runner.
+# The agent job's token is read-only; nothing here talks to Omnigent or a tailnet.
+name: FCC spike
+on:
+  push:
+    branches: [spike/fcc-1647]
+    paths: [.github/workflows/fcc-spike.yml]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Task for the agent
+        required: false
+      model:
+        description: FCC model ref
+        required: false
+permissions:
+  contents: read
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FCC_VERSION: v6.19.44
+      MODEL: ${{ inputs.model || 'nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b' }}
+      TASK: ${{ inputs.task || 'List the directories under omnigent/harnesses. Then create a file SPIKE.md at the repo root containing a markdown table with one row per directory and, for each, the name of its main Python module (main.py or bridge.py if present). Do not change any other file.' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Token can't push
+        run: |
+          set +e
+          git -c credential.helper= push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:refs/heads/spike/fcc-push-probe 2>&1 | tail -3
+          rc=${PIPESTATUS[0]}
+          echo "push exit code: $rc"
+          test "$rc" -ne 0
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code and FCC
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          uv tool install --python 3.14.10 "git+https://github.com/Alishahryar1/free-claude-code@${FCC_VERSION}"
+          claude --version
+          ls "$(dirname "$(command -v fcc-server)")" | grep fcc
+      - name: Start FCC
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+        run: |
+          nohup fcc-server > "$RUNNER_TEMP/fcc.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:8082/ 2>/dev/null && break
+            curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/ | grep -qv '^000$' && break
+            sleep 2
+          done
+          echo "--- fcc.log"; tail -40 "$RUNNER_TEMP/fcc.log"
+      - name: Run the agent
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+        run: |
+          set +e
+          start=$(date +%s)
+          fcc-claude -p "$TASK" --permission-mode bypassPermissions --output-format stream-json --verbose > "$RUNNER_TEMP/agent.jsonl" 2> "$RUNNER_TEMP/agent.err"
+          rc=$?
+          echo "agent exit code: $rc, seconds: $(( $(date +%s) - start ))"
+          echo "--- stderr"; tail -40 "$RUNNER_TEMP/agent.err"
+          echo "--- tool calls"; grep -o '"type":"tool_use","id":"[^"]*","name":"[^"]*"' "$RUNNER_TEMP/agent.jsonl" | sed 's/.*"name":"//;s/"$//' | sort | uniq -c
+          echo "--- result"; tail -1 "$RUNNER_TEMP/agent.jsonl" | head -c 3000; echo
+          echo "--- fcc.log tail"; tail -30 "$RUNNER_TEMP/fcc.log"
+          exit $rc
+      - name: Patch
+        if: always()
+        run: |
+          git add -A
+          git -c user.name=fcc-spike -c user.email=fcc-spike@users.noreply.github.com commit -q -m "FCC spike output" || echo "no changes"
+          git format-patch -1 --stdout > "$RUNNER_TEMP/spike.patch" || true
+          git show --stat HEAD | head -20
+          cp "$RUNNER_TEMP"/agent.jsonl "$RUNNER_TEMP"/agent.err "$RUNNER_TEMP"/fcc.log . 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fcc-spike
+          path: |
+            ${{ runner.temp }}/spike.patch
+            ${{ runner.temp }}/agent.jsonl
+            ${{ runner.temp }}/agent.err
+            ${{ runner.temp }}/fcc.log
