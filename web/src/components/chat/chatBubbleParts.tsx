@@ -157,10 +157,12 @@ function userMarkdownText(content: MessageContentBlock[]): string {
 /** "From @<sender>" above a message another session sent with ``sys_session_message``. */
 function SessionMessageOriginLine({
   sourceId,
+  senderLabel,
   currentSessionId,
   className,
 }: {
-  sourceId: string;
+  sourceId: string | null;
+  senderLabel: string | null;
   currentSessionId: string | null;
   className?: string;
 }) {
@@ -172,7 +174,9 @@ function SessionMessageOriginLine({
     >
       <CornerDownRightIcon className="size-3 shrink-0" />
       <span>From</span>
-      {label ? (
+      {sourceId === null ? (
+        <span>{senderLabel}</span>
+      ) : label ? (
         <SessionMentionPill id={sourceId} isSubagent={label.isSubagent}>
           @{label.title}
         </SessionMentionPill>
@@ -211,7 +215,11 @@ function CollapsedSessionMessage({
         data-testid="collapsed-session-message"
         className="ml-auto flex w-fit max-w-full items-center gap-2 rounded-lg bg-muted px-3 py-1.5"
       >
-        <SessionMessageOriginLine sourceId={origin.sourceId} currentSessionId={currentSessionId} />
+        <SessionMessageOriginLine
+          sourceId={origin.sourceId}
+          senderLabel={origin.label}
+          currentSessionId={currentSessionId}
+        />
         <button
           type="button"
           onClick={onExpand}
@@ -1232,6 +1240,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                   <div className="mb-1 flex items-center justify-between gap-2">
                     <SessionMessageOriginLine
                       sourceId={origin.sourceId}
+                      senderLabel={origin.label}
                       currentSessionId={sessionId ?? null}
                     />
                     {collapsesOrigin && (
