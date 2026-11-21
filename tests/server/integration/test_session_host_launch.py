@@ -507,6 +507,65 @@ async def test_inline_launch_binds_runner_and_returns_host(
     assert conv.workspace == _WORKSPACE
 
 
+@pytest.mark.parametrize(
+    ("harness", "readiness_key"),
+    [("jcode", "jcode"), ("acp", "acp"), ("acp:example", "acp")],
+)
+async def test_child_naming_another_ready_host_launches_there_not_on_parent_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    harness: str,
+    readiness_key: str,
+) -> None:
+    """A child naming a different host launches its own runner on that host.
+
+    The parent's host lacks the child's harness (jcode, ACP, or a namespaced ACP
+    id, which reports under ``acp``); the named host reports it ready.
+    Creation succeeds (201) with the child bound to the named host, not to the
+    parent's runner.
+    """
+    parent_host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    comm = await _connect_host(app)
+    hosts = HostStore(db_uri)
+    hosts.upsert_on_connect(
+        parent_host_id, "parent-host", "local", configured_harnesses={readiness_key: False}
+    )
+    hosts.upsert_on_connect(
+        _HOST_ID, "laptop", "local", configured_harnesses={readiness_key: True}
+    )
+    parent_agent = await create_test_agent(client)
+    child_agent = await create_test_agent(
+        client,
+        name="child-worker",
+        executor={"type": "omnigent", "config": {"harness": harness}},
+    )
+    parent = (await client.post("/v1/sessions", json={"agent_id": parent_agent["id"]})).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(parent["id"], parent_host_id, workspace=_WORKSPACE)
+    store.set_runner_id(parent["id"], "runner_test")
+
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": child_agent["id"],
+            "parent_session_id": parent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+        },
+    )
+    await responder
+
+    assert resp.status_code == 201, resp.text
+    child = store.get_conversation(resp.json()["id"])
+    assert child is not None
+    assert child.host_id == _HOST_ID
+    assert child.runner_id is not None
+    assert child.runner_id != "runner_test"
+    assert child.runner_id.startswith("runner_token_")
+
+
 async def test_inline_launch_files_the_session_by_its_workspace(
     client: httpx.AsyncClient,
     app: FastAPI,
