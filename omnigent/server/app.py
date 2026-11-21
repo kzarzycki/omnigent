@@ -2659,9 +2659,11 @@ def create_app(
 
     app.state.orchestration_hosts = OrchestrationHosts.from_env()
     if app.state.orchestration_hosts is not None:
-        host_registry.orchestration_launch_guard = OrchestrationLaunchGuard(
+        orchestration_guard = OrchestrationLaunchGuard(
             app.state.orchestration_hosts, host_store, agent_store, agent_cache
         )
+        host_registry.orchestration_launch_guard = orchestration_guard
+        host_registry.orchestration_host_check = orchestration_guard.check
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
     app.state.picker_curation = picker_curation

@@ -74,7 +74,7 @@ def refusal(host: Host) -> OmnigentError:
     )
 
 
-async def require_host_allows_agent(
+def check_host_allows_agent(
     marks: OrchestrationHosts | None,
     host: Host | None,
     agent: Agent | None,
@@ -94,11 +94,8 @@ async def require_host_allows_agent(
         return
     if agent is not None and agent_cache is not None and agent.bundle_location is not None:
         try:
-            loaded = await asyncio.to_thread(
-                agent_cache.load,
-                agent.id,
-                agent.bundle_location,
-                expand_env=agent.operator_authored,
+            loaded = agent_cache.load(
+                agent.id, agent.bundle_location, expand_env=agent.operator_authored
             )
             if spec_harness_id(loaded.spec) == CLOUD_SESSION_HARNESS:
                 return
@@ -106,6 +103,16 @@ async def require_host_allows_agent(
             # A spec that can't be read can't be shown to be a cloud bridge.
             _logger.warning("orchestration host: agent %s failed to load", agent.id, exc_info=True)
     raise refusal(host)
+
+
+async def require_host_allows_agent(
+    marks: OrchestrationHosts | None,
+    host: Host | None,
+    agent: Agent | None,
+    agent_cache: Any,
+) -> None:
+    """Async form of :func:`check_host_allows_agent` for route code."""
+    await asyncio.to_thread(check_host_allows_agent, marks, host, agent, agent_cache)
 
 
 class OrchestrationLaunchGuard:
@@ -119,19 +126,24 @@ class OrchestrationLaunchGuard:
         self._agent_store = agent_store
         self._agent_cache = agent_cache
 
-    async def __call__(self, conv: Any, host_id: str) -> None:
-        """Refuse the launch of *conv* on *host_id* when it is not allowed there.
+    def check(self, host: Host, conv: Any) -> None:
+        """Refuse the launch of *conv* on *host* when it is not allowed there.
 
-        :param conv: The session a runner is about to launch for.
-        :param host_id: The host the runner would run on.
+        :param host: The host a runner would run on.
+        :param conv: The session the runner is for.
         :raises OmnigentError: 403 naming the mark.
         """
-        host = await asyncio.to_thread(self._host_store.get_host, host_id)
-        if host is None or not self._marks.marks(host):
+        if not self._marks.marks(host):
             return
         agent = (
-            await asyncio.to_thread(self._agent_store.get, conv.agent_id)
+            self._agent_store.get(conv.agent_id)
             if self._agent_store is not None and conv.agent_id is not None
             else None
         )
-        await require_host_allows_agent(self._marks, host, agent, self._agent_cache)
+        check_host_allows_agent(self._marks, host, agent, self._agent_cache)
+
+    async def __call__(self, conv: Any, host_id: str) -> None:
+        """Async form for the relaunch path, which has the host's id only."""
+        host = await asyncio.to_thread(self._host_store.get_host, host_id)
+        if host is not None:
+            await asyncio.to_thread(self.check, host, conv)

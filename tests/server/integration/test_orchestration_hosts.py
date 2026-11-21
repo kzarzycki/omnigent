@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from omnigent.errors import OmnigentError
 from omnigent.server.orchestration_hosts import OrchestrationHosts, OrchestrationLaunchGuard
 from tests.server.integration.test_machine_session_access import (
     _NAMED_HOST,
@@ -31,9 +32,11 @@ pytestmark = pytest.mark.asyncio
 def _mark(app: FastAPI, hosts: set[str]) -> None:
     marks = OrchestrationHosts(hosts=frozenset(hosts), allowed_agents=frozenset({"listed-agent"}))
     app.state.orchestration_hosts = marks
-    app.state.host_registry.orchestration_launch_guard = OrchestrationLaunchGuard(
+    guard = OrchestrationLaunchGuard(
         marks, app.state.host_store, app.state.agent_store, app.state.agent_cache
     )
+    app.state.host_registry.orchestration_launch_guard = guard
+    app.state.host_registry.orchestration_host_check = guard.check
 
 
 async def _create(client: httpx.AsyncClient, agent_id: str, host_id: str) -> httpx.Response:
@@ -101,3 +104,43 @@ def test_marks_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("OMNIGENT_ORCHESTRATION_ALLOWED_AGENTS", "a, b")
     marks = OrchestrationHosts.from_env()
     assert marks == OrchestrationHosts(frozenset({"host-a", "laptop"}), frozenset({"a", "b"}))
+
+
+async def test_binding_an_existing_work_session_to_a_marked_host_is_refused(
+    host_perm_app: FastAPI, host_perm_client: httpx.AsyncClient, agents: dict[str, str]
+) -> None:
+    """The runner-launch route, which the CLI and web UI use, meets the mark too."""
+    _mark(host_perm_app, {_NAMED_HOST})
+    await _connect_host(host_perm_app, _NAMED_HOST, _NAMED_USER)
+    headers = {"X-Forwarded-Email": _NAMED_USER}
+    created = await host_perm_client.post(
+        "/v1/sessions", json={"agent_id": agents["unlisted"]}, headers=headers
+    )
+    assert created.status_code == 201, created.text
+
+    response = await host_perm_client.post(
+        f"/v1/hosts/{_NAMED_HOST}/runners",
+        json={"session_id": created.json()["id"], "workspace": _WORKSPACE},
+        headers=headers,
+    )
+
+    assert response.status_code == 403, response.text
+    assert "orchestration-only" in response.text
+    assert host_perm_app.state.host_registry.get(_NAMED_HOST).outbound_queue.empty()
+
+
+async def test_a_relaunch_on_a_marked_host_is_refused(
+    host_perm_app: FastAPI, host_perm_client: httpx.AsyncClient, agents: dict[str, str]
+) -> None:
+    _mark(host_perm_app, {_NAMED_HOST})
+    await _connect_host(host_perm_app, _NAMED_HOST, _NAMED_USER)
+    created = await host_perm_client.post(
+        "/v1/sessions",
+        json={"agent_id": agents["unlisted"]},
+        headers={"X-Forwarded-Email": _NAMED_USER},
+    )
+    conv = host_perm_app.state.conversation_store.get_conversation(created.json()["id"])
+    guard = host_perm_app.state.host_registry.orchestration_launch_guard
+
+    with pytest.raises(OmnigentError, match="orchestration-only"):
+        await guard(conv, _NAMED_HOST)
