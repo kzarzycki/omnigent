@@ -728,3 +728,29 @@ async def test_a_session_created_by_another_session_cannot_bypass_acp_approval(
     assert "skips approval" in refused.json()["error"]["message"]
     allowed = await client.post("/v1/sessions", json=child("auto"))
     assert allowed.status_code == 201, allowed.text
+
+
+async def test_a_child_may_bypass_acp_approval_when_its_creator_does(
+    client: httpx.AsyncClient,
+) -> None:
+    """A child's ``bypassPermissions`` is allowed only under a creator in the same mode."""
+    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+    parent = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "initial_items": [],
+            "permission_mode": "bypassPermissions",
+        },
+    )
+    assert parent.status_code == 201, parent.text
+    child = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "initial_items": [],
+            "parent_session_id": parent.json()["id"],
+            "permission_mode": "bypassPermissions",
+        },
+    )
+    assert child.status_code == 201, child.text

@@ -13947,15 +13947,19 @@ async def _create_session_from_existing_agent(
             acp_permission_mode = validate_acp_permission_mode(body.permission_mode)
         except ValueError as exc:
             raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
-        # An agent picks this value, and text it reads can steer it, so it can't skip approval.
-        if acp_permission_mode in APPROVAL_SKIPPING_PERMISSION_MODES and (
-            created_by_session_id is not None or body.parent_session_id is not None
-        ):
-            raise OmnigentError(
-                f"permission_mode {acp_permission_mode!r} skips approval, which a session "
-                "created by another session can't use",
-                code=ErrorCode.INVALID_INPUT,
-            )
+        # An agent picks this value, and text it reads can steer it, so it can't skip
+        # approval, unless its creator already runs without approval.
+        creator_id = created_by_session_id or body.parent_session_id
+        if acp_permission_mode in APPROVAL_SKIPPING_PERMISSION_MODES and creator_id is not None:
+            creator = await asyncio.to_thread(conversation_store.get_conversation, creator_id)
+            creator_mode = creator.labels.get(ACP_PERMISSION_MODE_LABEL_KEY) if creator else None
+            if creator_mode != acp_permission_mode:
+                raise OmnigentError(
+                    f"permission_mode {acp_permission_mode!r} skips approval, which a session "
+                    "created by another session can use only when its creator runs in the "
+                    "same mode",
+                    code=ErrorCode.INVALID_INPUT,
+                )
     elif body.permission_mode is not None:
         from omnigent.native.permission_modes import created_session_launch_args
 
