@@ -43,7 +43,9 @@ def is_cloud_session(agent_spec: AgentSpec | None, effective_harness: str | None
     """
     if effective_harness:
         return effective_harness == CLOUD_SESSION_HARNESS
-    return agent_spec is not None and spec_harness_id(agent_spec) == CLOUD_SESSION_HARNESS
+    if agent_spec is None or getattr(agent_spec, "executor", None) is None:
+        return False
+    return spec_harness_id(agent_spec) == CLOUD_SESSION_HARNESS
 
 
 async def read_caller(server_client: httpx.AsyncClient, conversation_id: str) -> CloudCaller:
