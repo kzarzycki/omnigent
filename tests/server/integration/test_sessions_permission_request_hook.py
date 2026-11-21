@@ -1438,28 +1438,90 @@ async def test_permission_request_hook_bypass_session_denies_without_card(
     publish.assert_not_awaited()
 
 
-@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
-async def test_permission_request_hook_bypass_session_keeps_question_card(
-    client: httpx.AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-    session_fields: dict[str, Any],
-) -> None:
-    """A question in a session stored in bypass is still shown, not denied."""
-    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
-    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+_QUESTION_INPUT = {
+    "questions": [
+        {
+            "question": "Which database?",
+            "header": "DB",
+            "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+            "multiSelect": False,
+        }
+    ]
+}
+
+
+async def _post_bypass_question(
+    client: httpx.AsyncClient, session_fields: dict[str, Any], tool_input: dict[str, Any]
+) -> httpx.Response:
     agent = await create_test_agent(client, "test-permission-bypass-question")
     created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
     assert created.status_code == 201, created.text
     payload = await _claude_permission_payload(tool_name="AskUserQuestion")
     payload["permission_mode"] = "bypassPermissions"
-
-    response = await client.post(
+    payload["tool_input"] = tool_input
+    return await client.post(
         f"/v1/sessions/{created.json()['id']}/hooks/permission-request", json=payload
     )
 
+
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+async def test_permission_request_hook_bypass_session_shows_question_with_options(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """A question in a bypass session reaches the owner as the question, with its options."""
+    publish = AsyncMock(
+        return_value=ElicitationResult(action="accept", content={"Which database?": "SQLite"})
+    )
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    response = await _post_bypass_question(client, session_fields, _QUESTION_INPUT)
+
     assert response.status_code == 200, response.text
-    assert response.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    decision = response.json()["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "allow"
+    assert decision["updatedInput"]["answers"] == {"Which database?": "SQLite"}
     publish.assert_awaited_once()
+    params = publish.await_args.kwargs["params"]
+    assert params.message == "Claude asks a question"
+    assert params.model_extra["ask_user_question"]["questions"][0]["options"][0] == {
+        "label": "Postgres"
+    }
+
+
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+async def test_permission_request_hook_bypass_session_denies_unshowable_question(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """A question with no options to show raises no permission card; the agent asks in chat."""
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    response = await _post_bypass_question(client, session_fields, {"questions": []})
+
+    assert response.status_code == 200, response.text
+    decision = response.json()["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "deny"
+    assert "normal chat message" in decision["message"]
+    publish.assert_not_awaited()
+
+
+async def test_permission_request_hook_ordinary_session_keeps_question_permission_wording(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside bypass a question card is unchanged."""
+    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    response = await _post_bypass_question(client, {}, _QUESTION_INPUT)
+
+    assert response.status_code == 200, response.text
+    assert (
+        publish.await_args.kwargs["params"].message == "Claude wants to call **AskUserQuestion**"
+    )
 
 
 @pytest.mark.parametrize("request_mode", ["bypassPermissions", "default", None])
