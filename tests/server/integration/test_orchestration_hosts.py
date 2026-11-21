@@ -166,9 +166,7 @@ async def test_an_uploaded_agent_is_refused_on_a_marked_host(
     response = await host_perm_client.post(
         "/v1/sessions",
         data={"metadata": json.dumps(metadata)},
-        files={
-            "bundle": ("agent.tar.gz", build_agent_bundle(name="listed-agent"), "application/gzip")
-        },
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
         headers={"X-Forwarded-Email": _NAMED_USER},
     )
 
