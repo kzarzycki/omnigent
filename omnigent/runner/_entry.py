@@ -25,7 +25,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Generator, Iterable
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import psutil
@@ -324,6 +324,88 @@ def _runner_last_activity(
     )
 
 
+def _app_active_work_hold(app: FastAPI, event_dispatcher: Any) -> str | None:
+    """Name what keeps the runner busy, or ``None`` when it is idle.
+
+    :param app: Runner app whose ``state.active_work_hold`` names its own holds.
+    :param event_dispatcher: Dispatcher whose undelivered batches hold the runner.
+    :returns: A hold name, e.g. ``"turn"`` or ``"pane_output"``.
+    """
+    if event_dispatcher.has_pending:
+        return "event_dispatch"
+    hold_callback = getattr(app.state, "active_work_hold", None)
+    if callable(hold_callback):
+        return cast("str | None", hold_callback())
+    callback = getattr(app.state, "has_active_work", None)
+    return "active_work" if callable(callback) and callback() else None
+
+
+def _app_keeps_idle_runner(app: FastAPI) -> bool:
+    """Whether an attached client or the host's exclude list keeps this runner up.
+
+    Blocking (tmux probe and a config read); run off the event loop.
+
+    :param app: Runner app exposing the pane and session probes on its state.
+    :returns: ``True`` to keep the runner past the soft-hold ceiling.
+    """
+    attached = getattr(app.state, "native_pane_has_attached_client", None)
+    if callable(attached) and attached():
+        return True
+    served = getattr(app.state, "served_session_ids", None)
+    session_ids = set(cast("Iterable[str]", served())) if callable(served) else set()
+    primary = runner_primary_session_id()
+    if primary:
+        session_ids.add(primary)
+    return _runner_keeps_idle_session(session_ids)
+
+
+def _start_idle_monitor(
+    *,
+    app: FastAPI,
+    event_dispatcher: Any,
+    idle_timeout_s: float,
+    idle_hold_max_s: float,
+    get_last_activity: Callable[[], float],
+    get_work_progress: Callable[[], float | None],
+    request_shutdown: Callable[[], None],
+    name: str,
+    poll_interval_s: float | None = None,
+) -> asyncio.Task[None]:
+    """Start the idle monitor wired to the runner app's holds and owner probes.
+
+    :param app: Runner app.
+    :param event_dispatcher: Runner event dispatcher.
+    :param idle_timeout_s: ``runner.idle_timeout_s``.
+    :param idle_hold_max_s: ``runner.idle_hold_max_s``.
+    :param get_last_activity: Newest real activity time (loop clock).
+    :param get_work_progress: Newest work-progress time (loop clock) or ``None``.
+    :param request_shutdown: Graceful shutdown request.
+    :param name: Task name.
+    :param poll_interval_s: Test override for the monitor cadence.
+    :returns: The running monitor task.
+    """
+    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
+
+    def _hold() -> str | None:
+        return _app_active_work_hold(app, event_dispatcher)
+
+    return asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=idle_timeout_s,
+            get_last_activity=get_last_activity,
+            has_active_work=lambda: _hold() is not None,
+            request_shutdown=request_shutdown,
+            poll_interval_s=poll_interval_s,
+            get_hold=_hold,
+            soft_holds=SOFT_ACTIVE_WORK_HOLDS,
+            idle_hold_max_s=idle_hold_max_s,
+            get_work_progress=get_work_progress,
+            keeps_runner=lambda: _app_keeps_idle_runner(app),
+        ),
+        name=name,
+    )
+
+
 async def _run_inactivity_monitor(
     *,
     idle_timeout_s: float,
@@ -379,13 +461,20 @@ async def _run_inactivity_monitor(
             max(1.0, idle_timeout_s / 30.0),
         )
     logged_hold: str | None = None
+
+    def _progress_free_s() -> float:
+        progress_at = get_work_progress() if get_work_progress is not None else None
+        return loop.time() - max(progress_at or started_at, started_at)
+
+    def _current_hold() -> str | None:
+        if get_hold is not None:
+            return get_hold()
+        return "active_work" if has_active_work() else None
+
     while True:
         elapsed_s = loop.time() - get_last_activity()
         if elapsed_s >= idle_timeout_s:
-            if get_hold is not None:
-                hold = get_hold()
-            else:
-                hold = "active_work" if has_active_work() else None
+            hold = _current_hold()
             if hold is not None:
                 if hold != logged_hold:
                     logged_hold = hold
@@ -396,21 +485,27 @@ async def _run_inactivity_monitor(
                         extra={"session_id": runner_primary_session_id()},
                     )
                 if hold in soft_holds and idle_hold_max_s > 0:
-                    progress_at = get_work_progress() if get_work_progress is not None else None
-                    stale_s = loop.time() - max(progress_at or started_at, started_at)
+                    stale_s = _progress_free_s()
                     if stale_s >= idle_hold_max_s and not (
                         keeps_runner is not None and await asyncio.to_thread(keeps_runner)
                     ):
-                        _logger.info(
-                            "runner idle timeout reached with only the %s hold and no work "
-                            "progress for %.1fs (ceiling %.1fs); shutting down",
-                            hold,
-                            stale_s,
-                            idle_hold_max_s,
-                            extra={"session_id": runner_primary_session_id()},
-                        )
-                        request_shutdown()
-                        return
+                        # The probe ran off the loop: work may have started meanwhile.
+                        stale_s = _progress_free_s()
+                        if (
+                            stale_s >= idle_hold_max_s
+                            and loop.time() - get_last_activity() >= idle_timeout_s
+                            and _current_hold() in soft_holds
+                        ):
+                            _logger.info(
+                                "runner idle timeout reached with only the %s hold and no work "
+                                "progress for %.1fs (ceiling %.1fs); shutting down",
+                                hold,
+                                stale_s,
+                                idle_hold_max_s,
+                                extra={"session_id": runner_primary_session_id()},
+                            )
+                            request_shutdown()
+                            return
                 await asyncio.sleep(poll_interval_s)
                 continue
             _logger.info(
@@ -2202,7 +2297,6 @@ async def _run_tunnel_from_env() -> None:
     from omnigent.native._native_forwarder_health import (
         last_post_at as native_forwarder_last_post_at,
     )
-    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
     from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
 
     event_dispatcher = RunnerEventDispatcher()
@@ -2254,35 +2348,6 @@ async def _run_tunnel_from_env() -> None:
         """
         callback = getattr(app.state, "has_active_work", None)
         return event_dispatcher.has_pending or (callable(callback) and bool(callback()))
-
-    def _active_work_hold() -> str | None:
-        """Name what keeps the runner busy, or ``None`` when it is idle.
-
-        :returns: A hold name, e.g. ``"turn"`` or ``"pane_output"``.
-        """
-        if event_dispatcher.has_pending:
-            return "event_dispatch"
-        hold_callback = getattr(app.state, "active_work_hold", None)
-        if callable(hold_callback):
-            return cast("str | None", hold_callback())
-        return "active_work" if _has_active_work() else None
-
-    def _keeps_idle_runner() -> bool:
-        """Whether an attached client or the exclude list keeps this runner up.
-
-        Blocking (tmux probe and a config read); run off the event loop.
-
-        :returns: ``True`` to keep the runner past the soft-hold ceiling.
-        """
-        attached = getattr(app.state, "native_pane_has_attached_client", None)
-        if callable(attached) and attached():
-            return True
-        served = getattr(app.state, "served_session_ids", None)
-        session_ids = set(cast("Iterable[str]", served())) if callable(served) else set()
-        primary = runner_primary_session_id()
-        if primary:
-            session_ids.add(primary)
-        return _runner_keeps_idle_session(session_ids)
 
     def _last_work_progress() -> float | None:
         """Return the newest work progress, independently of tunnel polling.
@@ -2432,18 +2497,14 @@ async def _run_tunnel_from_env() -> None:
             _record_exit_reason("idle timeout reached")
             tunnel_shutdown_event.set()
 
-        idle_task = asyncio.create_task(
-            _run_inactivity_monitor(
-                idle_timeout_s=idle_timeout_s,
-                get_last_activity=_last_activity,
-                has_active_work=_has_active_work,
-                request_shutdown=_request_idle_shutdown,
-                get_hold=_active_work_hold,
-                soft_holds=SOFT_ACTIVE_WORK_HOLDS,
-                idle_hold_max_s=idle_hold_max_s,
-                get_work_progress=_last_work_progress,
-                keeps_runner=_keeps_idle_runner,
-            ),
+        idle_task = _start_idle_monitor(
+            app=app,
+            event_dispatcher=event_dispatcher,
+            idle_timeout_s=idle_timeout_s,
+            idle_hold_max_s=idle_hold_max_s,
+            get_last_activity=_last_activity,
+            get_work_progress=_last_work_progress,
+            request_shutdown=_request_idle_shutdown,
             name=f"runner-idle-monitor:{runner_id}",
         )
     if parent_pid is not None:

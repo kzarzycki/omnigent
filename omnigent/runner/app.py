@@ -2082,6 +2082,8 @@ def create_runner_app(
 
     app.state.has_active_work = _has_active_work
     app.state.active_work_hold = _active_work_hold
+    app.state.undelivered_input_reports = _undelivered_input_reports
+    app.state.session_async_tasks = _session_async_tasks
     # Agent work only, for keeping a managed sandbox awake: a native pane's recent
     # input or output also comes from someone just viewing it. A prompt typed into
     # the pane still counts once the harness reports its turn in flight.
@@ -2100,13 +2102,13 @@ def create_runner_app(
 
         Blocking (runs ``tmux``); call it off the event loop.
         """
-        from omnigent.native.native_cost_popup import _list_tmux_clients
+        from omnigent.native.native_cost_popup import tmux_client_attached
 
         terminals = resource_registry.terminal_registry
         if terminals is None:
             return False
         return any(
-            _list_tmux_clients(str(socket_path), "main")
+            tmux_client_attached(str(socket_path), "main")
             for _, _, socket_path in terminals.native_panes()
         )
 
