@@ -4121,6 +4121,52 @@ async def test_create_session_codex_with_unloadable_spec_defaults_to_bypass(
     assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
+_CODEX_OPT_OUTS = [{"yolo": False}, {"permission_mode": "default"}]
+
+
+@pytest.mark.parametrize("opt_out", _CODEX_OPT_OUTS)
+async def test_create_session_codex_spec_opt_out_keeps_launch_args_unset(
+    client: httpx.AsyncClient, opt_out: dict[str, Any]
+) -> None:
+    """A matching codex spec that opts out of the bypass is not defaulted into it."""
+    agent = await create_test_agent(
+        client,
+        name="codex-spec-opt-out",
+        executor={"type": "omnigent", "config": {"harness": "codex-native", **opt_out}},
+    )
+    session = await _create_session(client, agent["id"])
+    assert session["terminal_launch_args"] is None
+
+
+@pytest.mark.parametrize("opt_out", _CODEX_OPT_OUTS)
+async def test_create_named_codex_child_spec_opt_out_keeps_launch_args_unset(
+    client: httpx.AsyncClient, opt_out: dict[str, Any]
+) -> None:
+    """A named codex child whose own spec opts out keeps its launch args unset."""
+    agent = await create_test_agent(
+        client,
+        name="codex-child-opt-out-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        sub_agents=[
+            {
+                "name": "worker",
+                "executor": {"type": "omnigent", "config": {"harness": "codex-native", **opt_out}},
+            }
+        ],
+    )
+    parent = await _create_session(client, agent["id"])
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] is None
+
+
 async def test_create_session_codex_explicit_stricter_stance_keeps_it(
     client: httpx.AsyncClient,
 ) -> None:
