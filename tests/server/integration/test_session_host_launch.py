@@ -130,6 +130,22 @@ def _runner_hello() -> HelloFrame:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_intentional_stop_markers() -> Iterator[None]:
+    """
+    Clear the module-level intentional-stop markers around every test.
+
+    A successful host stop keeps its marker until the TTL, so without this the
+    stop and relaunch tests here leave markers that later tests on the same
+    xdist worker see.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    sessions_module._intentional_stop_sessions.clear()
+    yield
+    sessions_module._intentional_stop_sessions.clear()
+
+
 @pytest.fixture()
 def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     """FastAPI app wired WITH ``host_store`` so the inline host-launch
