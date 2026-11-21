@@ -4054,6 +4054,73 @@ async def test_create_session_codex_harness_override_without_stance_defaults_to_
     assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
+async def test_create_named_child_overridden_to_codex_defaults_to_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A named child whose spec names another harness gets the codex default when overridden."""
+    agent = await create_test_agent(
+        client,
+        name="codex-override-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        sub_agents=[
+            {
+                "name": "worker",
+                "executor": {"type": "omnigent", "config": {"harness": "claude-sdk"}},
+            }
+        ],
+    )
+    parent = await _create_session(client, agent["id"])
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+            "harness_override": "codex-native",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+    snap = await client.get(f"/v1/sessions/{resp.json()['id']}")
+    assert snap.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+async def test_create_session_codex_with_unloadable_spec_defaults_to_bypass(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the spec load for launch args fails, a resolved codex-native create still gets the default."""
+    import threading
+
+    from omnigent.runtime.agent_cache import AgentCache
+
+    agent = await create_test_agent(
+        client,
+        name="codex-unloadable-spec",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    real_load = AgentCache.load
+    worker_thread_loads: list[int] = []
+
+    class _SpecUnavailable(OSError, RuntimeError):
+        """Caught by each off-thread create-time spec load, whichever errors it tolerates."""
+
+    def load_failing_off_thread(self: AgentCache, *args: Any, **kwargs: Any) -> Any:
+        # Off-thread loads are the model-policy one, then two more; the third is the
+        # launch-args seed (the harness is already known by then).
+        if threading.current_thread() is not threading.main_thread():
+            worker_thread_loads.append(1)
+            if len(worker_thread_loads) == 3:
+                raise _SpecUnavailable("spec unavailable")
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentCache, "load", load_failing_off_thread)
+    resp = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    assert resp.status_code == 201, resp.text
+    assert worker_thread_loads
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
 async def test_create_session_codex_explicit_stricter_stance_keeps_it(
     client: httpx.AsyncClient,
 ) -> None:

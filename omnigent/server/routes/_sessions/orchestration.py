@@ -14043,19 +14043,20 @@ async def _create_session_from_existing_agent(
     # the agent's own trusted spec seeds them below — explicit opt-ins
     # only, never the headless worker default bypass.
     sub_spec: AgentSpec | None = None
+    launch_args_spec_consulted = False
     if body.sub_agent_name:
         sub_spec = _resolve_subagent_spec(
             agent=agent,
             sub_agent_name=body.sub_agent_name,
             agent_cache=agent_cache,
         )
+        launch_args_spec_consulted = sub_spec is not None and (
+            not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
+        )
         try:
             validated_launch_args = (
                 _derive_terminal_launch_args_from_spec(sub_spec, harness=selected_harness)
-                if sub_spec is not None
-                and (
-                    not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
-                )
+                if launch_args_spec_consulted
                 else None
             )
         except ValueError as exc:
@@ -14131,6 +14132,7 @@ async def _create_session_from_existing_agent(
         and own_spec is not None
         and (not spec_names_harness(own_spec) or _spec_harness(own_spec) == selected_harness)
     ):
+        launch_args_spec_consulted = True
         try:
             validated_launch_args = _derive_terminal_launch_args_from_spec(
                 own_spec, headless_defaults=False, harness=selected_harness
@@ -14141,16 +14143,13 @@ async def _create_session_from_existing_agent(
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
 
-    # No spec to consult (not loaded, or it names another harness): codex still
-    # defaults to the bypass stance a loaded spec would have given it.
+    # No spec spoke for this harness (not loaded, or it names another one, as for a
+    # named child overridden to codex): codex still gets the default bypass stance.
     if (
-        needs_launch_args_from_spec
+        selected_harness == _CODEX_NATIVE_HARNESS
         and validated_launch_args is None
-        and selected_harness == _CODEX_NATIVE_HARNESS
-        and (
-            own_spec is None
-            or (spec_names_harness(own_spec) and _spec_harness(own_spec) != selected_harness)
-        )
+        and not launch_args_spec_consulted
+        and (body.sub_agent_name or needs_launch_args_from_spec)
     ):
         validated_launch_args = list(_CODEX_DEFAULT_LAUNCH_ARGS)
 
