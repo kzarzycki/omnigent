@@ -8022,6 +8022,12 @@ async def test_session_list_filters_by_created_by_session_id() -> None:
         ({"labels": {"omnigent.acp.permission_mode": "auto"}}, "auto"),
         ({"terminal_launch_args": ["--permission-mode", "acceptEdits"]}, "acceptEdits"),
         ({"terminal_launch_args": ["--dangerously-skip-permissions"]}, "bypassPermissions"),
+        ({"terminal_launch_args": ["--permission-mode=auto"]}, "auto"),
+        (
+            {"terminal_launch_args": ["--permission-mode", "auto", "--permission-mode", "plan"]},
+            "plan",
+        ),
+        ({"terminal_launch_args": ["--", "--dangerously-skip-permissions"]}, None),
         ({}, None),
     ],
 )
@@ -8032,6 +8038,36 @@ def test_session_permission_mode_reads_label_then_launch_args(
     from omnigent.runner.tool_dispatch import _session_permission_mode
 
     assert _session_permission_mode(snapshot) == expected
+
+
+@pytest.mark.asyncio
+async def test_sys_session_get_info_reports_the_acp_permission_mode() -> None:
+    """``sys_session_get_info`` returns the session's ACP permission-mode label."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_acp":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_acp",
+                    "agent_name": "worker",
+                    "status": "idle",
+                    "labels": {"omnigent.acp.permission_mode": "auto"},
+                },
+            )
+        return httpx.Response(404, json={})
+
+    async with _session_query_client(handler) as client:
+        info = json.loads(
+            await execute_tool(
+                tool_name="sys_session_get_info",
+                arguments=json.dumps({"session_id": "conv_acp"}),
+                server_client=client,
+                conversation_id="conv_acp",
+            )
+        )
+    assert info["permission_mode"] == "auto"
 
 
 def test_agent_tools_are_runner_local() -> None:
@@ -8620,7 +8656,16 @@ async def test_sys_agent_list_merges_three_sources(tmp_path: Path) -> None:
         if request.url.path == "/v1/agents" and request.url.params.get("scope") == "user":
             return httpx.Response(
                 200,
-                json={"data": [{"id": "ag_u", "name": "claude-cloud", "harness": "acp:claude"}]},
+                json={
+                    "data": [
+                        {
+                            "id": "ag_u",
+                            "name": "claude-cloud",
+                            "description": "Installed worker instructions",
+                            "harness": "acp:claude",
+                        }
+                    ]
+                },
             )
         if request.url.path == "/v1/agents":
             return httpx.Response(
@@ -8672,6 +8717,7 @@ async def test_sys_agent_list_merges_three_sources(tmp_path: Path) -> None:
         {
             "agent_id": "ag_u",
             "name": "claude-cloud",
+            "description": "Installed worker instructions",
             "harness": "acp:claude",
         }
     ]

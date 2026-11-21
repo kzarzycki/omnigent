@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
-import itertools
 import json
 import logging
 import math
@@ -5752,14 +5751,15 @@ def _session_permission_mode(snap: _JsonObject) -> str | None:
     """
     Read the permission mode a session was created or launched with.
 
-    An ACP session carries it as a server-owned label; a native terminal
-    session carries it in its launch args. ``None`` when the session runs
-    on its agent's own default.
+    An ACP session carries it as a server-owned label; a native Claude terminal
+    session carries it in its launch args, read with the launch parser. ``None``
+    when the session runs on its agent's own default.
 
     :param snap: The session snapshot from ``GET /v1/sessions/{id}``.
     :returns: e.g. ``"auto"`` or ``"bypassPermissions"``, else ``None``.
     """
     from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_LABEL_KEY
+    from omnigent.runner.native.orchestration import _claude_launch_permission_mode
 
     labelled = (_string_mapping(snap.get("labels")) or {}).get(ACP_PERMISSION_MODE_LABEL_KEY)
     if labelled:
@@ -5767,12 +5767,7 @@ def _session_permission_mode(snap: _JsonObject) -> str | None:
     args = snap.get("terminal_launch_args")
     if not isinstance(args, list):
         return None
-    if "--dangerously-skip-permissions" in args:
-        return "bypassPermissions"
-    for flag, value in itertools.pairwise(args):
-        if flag == "--permission-mode" and isinstance(value, str):
-            return value
-    return None
+    return _claude_launch_permission_mode([a for a in args if isinstance(a, str)])
 
 
 async def _session_get_info_via_rest(
@@ -6590,9 +6585,9 @@ async def _agent_list_via_rest(
     )
     listing["builtins"] = _in_spawn_family(listing["builtins"], family)
     # The caller's own installed agents (e.g. a cloud agent) are launchable by agent_id too.
-    # Compact rows (no description) and the first page only, so they never crowd the budget.
+    # First page only, descriptions shortened, so they never crowd the output budget.
     listing["user_agents"] = [
-        {key: row[key] for key in ("agent_id", "name", "harness")}
+        {**row, "description": _truncated_description(row["description"])}
         for row in _project_agent_rows(user_agents.rows)
     ]
     from omnigent.harness_availability import harness_launch_availability
@@ -6623,6 +6618,14 @@ async def _agent_list_via_rest(
 
 
 _USER_AGENTS_LIMIT = 20
+_USER_AGENT_DESCRIPTION_CHARS = 200
+
+
+def _truncated_description(description: object) -> object:
+    """Shorten a description to :data:`_USER_AGENT_DESCRIPTION_CHARS` characters."""
+    if isinstance(description, str) and len(description) > _USER_AGENT_DESCRIPTION_CHARS:
+        return description[:_USER_AGENT_DESCRIPTION_CHARS]
+    return description
 
 
 def _project_agent_rows(rows: list[_JsonObject]) -> list[_JsonObject]:
