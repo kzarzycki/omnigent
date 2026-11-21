@@ -56,6 +56,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     AuthProvider,
 )
+from omnigent.server.machine_access import conversation_bypasses_permissions
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
@@ -66,7 +67,6 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
-from omnigent.server.machine_access import conversation_bypasses_permissions
 from omnigent.server.routes._codex_elicitation import parse_codex_elicitation_request
 from omnigent.server.routes._content_type import (
     require_json_content_type,
@@ -394,7 +394,9 @@ def register_hooks_routes(
 
         # Bypass mode asks nobody: answer Claude's own safety prompt with a deny it can read.
         bypass_denial = (
-            _claude_bypass_safety_denial(payload, tool_name, permission_mode) if is_claude else None
+            _claude_bypass_safety_denial(payload, tool_name, permission_mode)
+            if is_claude
+            else None
         )
         if bypass_denial is not None:
             return Response(

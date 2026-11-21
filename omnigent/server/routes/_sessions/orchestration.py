@@ -3096,6 +3096,18 @@ async def _resolve_elicitation(
     if isinstance(elicitation_id, str) and elicitation_id.startswith(QUESTION_ID_PREFIX):
         await _answer_question(session_id, elicitation_id, data, conversation_store, post_answer)
         return
+    # A card mirrored into an ancestor names the child that parked it; a verdict sent
+    # to the ancestor would reach no waiter and leave the child's prompt pending.
+    if isinstance(elicitation_id, str) and elicitation_id:
+        mirror = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
+        mirror_params = mirror[1].get("params") if mirror is not None else None
+        target = mirror_params.get("target_session_id") if isinstance(mirror_params, dict) else None
+        if isinstance(target, str) and target and target != session_id:
+            await _resolve_elicitation(
+                target, data, runner_router, conversation_store, post_answer=post_answer
+            )
+            _publish_elicitation_resolved(session_id, elicitation_id, action=data.get("action"))
+            return
     if isinstance(elicitation_id, str) and await _resolve_native_delivery(
         session_id, elicitation_id, data, conversation_store
     ):

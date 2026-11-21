@@ -43,13 +43,14 @@ from omnigent.native.elicitation_reattach import (
     HELD_POLL_READ_TIMEOUT_S,
     PRE_RESOLVED_ELICITATION_TTL_S,
 )
-from omnigent.runtime import session_stream
+from omnigent.runtime import pending_elicitations, session_stream
 from omnigent.server._elicitation_registry import (
     _harness_pre_resolved_elicitations,
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.routes import sessions as sessions_route
+from omnigent.server.routes.sessions import routes_hooks
 from tests.server.helpers import create_session_for_agent as _create_session
 from tests.server.helpers import create_test_agent, start_session_stream_collector
 
@@ -1396,34 +1397,27 @@ async def test_permission_request_hook_remember_webfetch_no_host_tool_wide(
 
 
 async def test_permission_request_hook_bypass_mode_denies_without_card(
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Bypass mode answers Claude's own safety prompt with a readable deny, no card."""
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
     agent = await create_test_agent(client, "test-permission-bypass-deny")
     session_id = await _create_session(client, agent["id"])
     payload = await _claude_permission_payload()
     payload["permission_mode"] = "bypassPermissions"
     payload["decision_reason"] = "dangerousRemoval"
-    events: list[dict[str, Any]] = []
 
-    async def collect() -> None:
-        async for event in session_stream.subscribe(session_id):
-            events.append(event)
-
-    collector = asyncio.create_task(collect())
-    await asyncio.sleep(0.05)
     response = await client.post(
         f"/v1/sessions/{session_id}/hooks/permission-request", json=payload
     )
-    await asyncio.sleep(0.05)
-    collector.cancel()
 
     assert response.status_code == 200, response.text
     output = response.json()["hookSpecificOutput"]
     assert output["hookEventName"] == "PermissionRequest"
     assert output["decision"]["behavior"] == "deny"
     assert "dangerousRemoval" in output["decision"]["message"]
-    assert not [e for e in events if e.get("type") == "response.elicitation_request"]
+    publish.assert_not_awaited()
 
 
 async def test_permission_request_hook_forwards_cwd_and_permission_mode(
@@ -3195,6 +3189,7 @@ async def test_codex_command_approval_hook_bypass_declines_without_card(
     method: str,
     expected: dict[str, Any],
     session_fields: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Codex session launched in bypass answers a command approval with a decline, no card."""
     agent = await create_test_agent(
@@ -3216,23 +3211,58 @@ async def test_codex_command_approval_hook_bypass_declines_without_card(
             "cwd": "/tmp/workspace",
         },
     }
-    events: list[dict[str, Any]] = []
-
-    async def collect() -> None:
-        async for event in session_stream.subscribe(session_id):
-            events.append(event)
-
-    collector = asyncio.create_task(collect())
-    await asyncio.sleep(0.05)
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
     resp = await client.post(
         f"/v1/sessions/{session_id}/hooks/codex-elicitation-request", json=payload
     )
-    await asyncio.sleep(0.05)
-    collector.cancel()
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == expected
-    assert not [e for e in events if e.get("type") == "response.elicitation_request"]
+    publish.assert_not_awaited()
+
+
+async def test_codex_command_approval_resolved_through_ancestor_mirror_reaches_codex(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    A verdict sent to the ancestor holding a mirrored Codex card reaches the child's
+    waiting hook and clears the card on both sessions.
+    """
+    agent = await create_test_agent(
+        client,
+        "test-codex-mirror-resolve",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    child_id = await _create_session(client, agent["id"])
+    ancestor_id = await _create_session(client, agent["id"])
+    payload = {
+        "id": 15,
+        "method": "item/commandExecution/requestApproval",
+        "params": {"threadId": "thread_1", "itemId": "item_1", "command": "pytest"},
+    }
+    drain_task = asyncio.create_task(_drain_until_elicitation(child_id))
+    await asyncio.sleep(0.05)  # custom-lint: disable=sleep-then-assert -- lets the stream subscribe first
+    hook_task = asyncio.create_task(
+        client.post(f"/v1/sessions/{child_id}/hooks/codex-elicitation-request", json=payload)
+    )
+    event = await drain_task
+    elicitation_id = event["elicitation_id"]
+    session_stream.publish(
+        ancestor_id,
+        {**event, "params": {**event["params"], "target_session_id": child_id}},
+    )
+
+    resolved = await client.post(
+        f"/v1/sessions/{ancestor_id}/elicitations/{elicitation_id}/resolve",
+        json={"action": "accept"},
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    resp = await hook_task
+    assert resp.json() == {"decision": "accept"}
+    for session_id in (child_id, ancestor_id):
+        assert pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None
 
 
 async def test_codex_command_approval_hook_accepts_execpolicy_amendment(
