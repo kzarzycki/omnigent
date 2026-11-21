@@ -283,7 +283,9 @@ describe("scrollToMessage across the bubbles of one response", () => {
       delete (Range.prototype as Partial<Range>).getBoundingClientRect;
     });
 
-    scrollToMessage("resp_1", undefined, undefined, document, (el) => firstFindRange(el, "zorblat"));
+    scrollToMessage("resp_1", undefined, undefined, document, (el) =>
+      firstFindRange(el, "zorblat"),
+    );
 
     expect(scrollBy).toHaveBeenCalledWith({ top: 2610, behavior: "smooth" });
     expect(scrollSpy).not.toHaveBeenCalled();

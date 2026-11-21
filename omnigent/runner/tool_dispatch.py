@@ -4066,11 +4066,11 @@ async def _execute_session_create(
     }
     create_requested = False
     requested_at = 0.0
+    host_id: str | None = None
     try:
         endpoint = "/v1/sessions" if placement == "child" else "/v1/sessions/orchestrated"
         if placement == "host":
             endpoint += "/host"
-        host_id = None
         info_data: _JsonObject = {}
         # Independent first tasks are delivered after creation, so check the server's
         # limit first rather than leave a session without its task.
