@@ -1,0 +1,26 @@
+# Mergify only executes: approval policy stays in the engineering loop's
+# `approvals.py check merge`. A PR enters the queue by `@mergifyio queue`
+# from someone with write access; there are no automatic queueing rules.
+commands_restrictions:
+  queue:
+    conditions:
+      - sender-permission>=write
+
+queue_rules:
+  - name: default
+    queue_conditions:
+      - base=mine
+      - -head~=^sync/
+    merge_conditions:
+      - check-success=gate
+    merge_method: squash
+    batch_size: 1
+  # An upstream-sync PR keeps upstream's parent (docs/agents/gatekeeper.md).
+  - name: sync
+    queue_conditions:
+      - base=mine
+      - head~=^sync/
+    merge_conditions:
+      - check-success=gate
+    merge_method: merge
+    batch_size: 1

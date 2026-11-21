@@ -1,0 +1,61 @@
+name: Gate
+
+# Fork only. The merge gate Mergify's queue requires (.mergify.yml): the checks
+# `mise run check:all` and the full unit suite run, on the PR and on Mergify's
+# temporary merge-queue branches. Keep the steps in step with mise.toml.
+
+on:
+  pull_request:
+    branches: [mine]
+  push:
+    branches: ["mergify/merge-queue/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Set up Node and pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install dependencies
+        env:
+          OMNIGENT_SKIP_WEB_UI: "true"
+        run: |
+          uv sync --locked --extra all --group test --group lint
+          pnpm install --frozen-lockfile --filter web --filter omnigent-vscode
+
+      - name: Run the checks
+        run: |
+          source .venv/bin/activate
+          pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD
+          bash .claude/skills/fork-sync/test.sh
+          bash .claude/skills/cloud-dev/test.sh
+          python3 integrations/claude-cloud-acp/claude_cloud_acp.py --self-check
+
+      - name: Run the full unit suite
+        env:
+          OMNIGENT_SKIP_WEB_UI: "true"
+        run: uv run --no-sync pytest -n auto --dist=loadfile
