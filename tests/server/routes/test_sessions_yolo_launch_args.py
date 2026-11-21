@@ -420,7 +420,9 @@ def test_codex_native_permission_mode_maps_to_mode_launch_args(
 
 
 @pytest.mark.parametrize("mode", ["bypass", "Approve-for-me", " approve-for-me", "auto", 1])
-@pytest.mark.parametrize(("headless_defaults", "expected"), [(True, _CODEX_BYPASS), (False, _CODEX_BYPASS)])
+@pytest.mark.parametrize(
+    ("headless_defaults", "expected"), [(True, _CODEX_BYPASS), (False, _CODEX_BYPASS)]
+)
 def test_codex_native_unsupported_permission_mode_keeps_existing_behavior(
     mode: object, headless_defaults: bool, expected: list[str] | None
 ) -> None:
