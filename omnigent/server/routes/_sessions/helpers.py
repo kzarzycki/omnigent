@@ -478,6 +478,80 @@ def _claude_native_permission_directories(suggestions: Any) -> list[str] | None:
     return directories or None
 
 
+def _claude_session_runs_in_bypass(conv: Conversation) -> bool:
+    """
+    Whether a stored Claude session is set to never prompt.
+
+    Read from the session's own stored settings (the permission-mode label, which wins,
+    else the launch args), never from a hook request, so a request cannot claim or
+    hide bypass.
+
+    :param conv: The stored session row.
+    :returns: ``True`` when the session was launched or switched into bypass mode.
+    """
+    from omnigent.harnesses.claude_native.bridge import _args_request_bypass_permissions
+
+    mode = (conv.labels or {}).get(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
+    if isinstance(mode, str) and mode:
+        return mode == "bypassPermissions"
+    return _args_request_bypass_permissions(tuple(conv.terminal_launch_args or ()))
+
+
+def _codex_session_never_asks(conv: Conversation) -> bool:
+    """
+    Whether a stored Codex session runs with approvals off.
+
+    The bypass label counts only when it equals ``"1"``, as the launcher reads it; the
+    launch args count only when they set ``approval_policy=never``.
+
+    :param conv: The stored session row.
+    :returns: ``True`` when Codex will not ask for command approval.
+    """
+    from omnigent.harnesses.codex_native.app_server import codex_launch_args_never_ask
+    from omnigent.stores.conversation_store import CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
+
+    if (conv.labels or {}).get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1":
+        return True
+    return codex_launch_args_never_ask(conv.terminal_launch_args)
+
+
+def _claude_bypass_safety_denial(
+    payload: dict[str, Any], tool_name: str, conv: Conversation
+) -> dict[str, Any] | None:
+    """
+    Deny decision for a permission prompt Claude still raises in a bypass session.
+
+    A session set to bypass chose not to be asked, so Claude's own safety check (for
+    example the dangerous-removal breaker) must not become an approval card.
+    ``AskUserQuestion`` is a question, not a permission, and keeps its flow.
+
+    :param payload: Claude's PermissionRequest hook body.
+    :param tool_name: The gated tool, e.g. ``"Bash"``.
+    :param conv: The stored session row the hook belongs to.
+    :returns: A ``decision`` dict with ``behavior`` and ``message``, or ``None`` when
+        the request should follow the normal card flow.
+    """
+    if tool_name == "AskUserQuestion" or not _claude_session_runs_in_bypass(conv):
+        return None
+    flagged = next(
+        (
+            payload[key].strip()
+            for key in ("decision_reason", "reason", "safety_check")
+            if isinstance(payload.get(key), str) and payload[key].strip()
+        ),
+        None,
+    )
+    cause = f"Claude Code's safety check ({flagged})" if flagged else "Claude Code's safety check"
+    return {
+        "behavior": "deny",
+        "message": (
+            f"{cause} blocked this {tool_name} call, and this session runs in bypass mode, "
+            "so there is nobody to approve it. Rewrite the command without the flagged part "
+            "(for example a broad rm), or split it into smaller steps, then try again."
+        ),
+    }
+
+
 def _allow_auto_mode_eligible(tool_name: str, permission_mode: str | None) -> bool:
     """
     Whether a regular Claude permission prompt may offer a session-scoped auto-mode switch.
