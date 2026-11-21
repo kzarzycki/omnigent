@@ -4038,6 +4038,42 @@ async def test_create_session_undeclared_codex_spec_defaults_to_bypass(
     assert session["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
+async def test_create_session_codex_harness_override_without_stance_defaults_to_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A codex-native session whose spec names another harness still gets the default bypass."""
+    agent = await create_test_agent(
+        client,
+        name="opencode-spec-codex-override",
+        executor={"type": "omnigent", "config": {"harness": "opencode-native"}},
+    )
+    resp = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "harness_override": "codex-native"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+async def test_create_session_codex_explicit_stricter_stance_keeps_it(
+    client: httpx.AsyncClient,
+) -> None:
+    """An explicit permission mode (the picker's choice) is not replaced by the bypass."""
+    agent = await create_test_agent(
+        client,
+        name="codex-explicit-stance",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "terminal_launch_args": ["--ask-for-approval", "on-request"],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == ["--ask-for-approval", "on-request"]
+
+
 async def test_create_session_body_launch_args_override_spec_yolo(
     client: httpx.AsyncClient,
 ) -> None:

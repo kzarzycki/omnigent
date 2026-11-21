@@ -11186,6 +11186,10 @@ def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
     return isinstance(value, str) and value.lower() == "true"
 
 
+# Codex's stance when nothing asks for another: no approvals, full access.
+_CODEX_DEFAULT_LAUNCH_ARGS: tuple[str, ...] = ("--dangerously-bypass-approvals-and-sandbox",)
+
+
 def _derive_terminal_launch_args_from_spec(
     spec: AgentSpec, *, headless_defaults: bool = True, harness: str | None = None
 ) -> list[str] | None:
@@ -11313,7 +11317,7 @@ def _derive_terminal_launch_args_from_spec(
         # with ``permission_mode`` or ``yolo: false``.
         if _spec_config_flag_explicitly_disabled(spec, "yolo"):
             return None
-        return _validate_terminal_launch_args(["--dangerously-bypass-approvals-and-sandbox"])
+        return _validate_terminal_launch_args(list(_CODEX_DEFAULT_LAUNCH_ARGS))
     if harness == _CURSOR_NATIVE_HARNESS:
         # Prefer an explicit Smart Auto mode when the bundle asks for it
         # (mirrors Claude's ``permission_mode: auto``), else full --yolo

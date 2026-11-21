@@ -298,6 +298,8 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
+    _CODEX_DEFAULT_LAUNCH_ARGS,
+    _CODEX_NATIVE_HARNESS,
     SessionLiveness,
     _ancestor_session_ids,
     _antigravity_subagent_labels_from_body,
@@ -14138,6 +14140,19 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args in agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+
+    # No spec to consult (not loaded, or it names another harness): codex still
+    # defaults to the bypass stance a loaded spec would have given it.
+    if (
+        needs_launch_args_from_spec
+        and validated_launch_args is None
+        and selected_harness == _CODEX_NATIVE_HARNESS
+        and (
+            own_spec is None
+            or (spec_names_harness(own_spec) and _spec_harness(own_spec) != selected_harness)
+        )
+    ):
+        validated_launch_args = list(_CODEX_DEFAULT_LAUNCH_ARGS)
 
     if reasoning_effort is None:
         effort_spec: AgentSpec | None = sub_spec if sub_spec is not None else own_spec
