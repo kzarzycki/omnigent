@@ -1,7 +1,7 @@
 name: Gate
 
 # Fork only. The merge gate Mergify's queue requires (.mergify.yml): the checks
-# `mise run check:all` and the full unit suite run, on the PR and on Mergify's
+# `mise run check-fast` runs, on the PR and on Mergify's
 # temporary merge-queue branches.
 
 on:
@@ -49,10 +49,13 @@ jobs:
           # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      # check:all is the task `land` ran (mise.toml); it sets up Python and the web packages first.
+      # check-fast (mise.toml): check:all, then pytest on the tests the change touches. The full
+      # suite runs nightly (fork-nightly.yml) and in the land tool's local-ci.
       - name: Run the checks
         env:
           MISE_YES: "1"
+          # A PR diffs against its base; a merge-queue branch falls back to the merge base with mine.
+          GATE_BASE: ${{ github.event.pull_request.base.sha }}
           OMNIGENT_SKIP_WEB_UI: "true"
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}
@@ -62,9 +65,4 @@ jobs:
           GIT_COMMITTER_NAME: gate
           GIT_COMMITTER_EMAIL: gate@example.invalid
         run: |
-          mise run check:all
-
-      - name: Run the full unit suite
-        env:
-          OMNIGENT_SKIP_WEB_UI: "true"
-        run: uv run --no-sync pytest -n auto --dist=loadfile
+          mise run check-fast

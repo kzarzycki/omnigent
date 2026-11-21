@@ -1,6 +1,16 @@
 # Mergify only executes: approval policy stays in the engineering loop's
-# `approvals.py check merge`. A PR enters the queue by `@mergifyio queue`
-# from someone with write access; there are no automatic queueing rules.
+# `approvals.py check merge`. A PR queues itself once the gate job is green and the
+# land tool has posted the `land` commit status on this head (after `check merge`
+# passes; a push drops it, and fork PR tokens can't post it).
+pull_request_rules:
+  - name: queue a PR the land tool approved
+    conditions:
+      - base=mine
+      - check-success=gate
+      - status-success=land
+    actions:
+      queue:
+
 commands_restrictions:
   queue:
     conditions:
