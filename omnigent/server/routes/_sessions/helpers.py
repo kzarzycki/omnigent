@@ -95,7 +95,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
-from omnigent.native.permission_modes import PERMISSION_LAUNCH_ARGS
+from omnigent.native.permission_modes import PERMISSION_LAUNCH_ARGS, mode_for_launch_args
 from omnigent.native.session_todos import validate_session_todos
 from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
@@ -11186,6 +11186,10 @@ def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
     return isinstance(value, str) and value.lower() == "true"
 
 
+# Codex's stance when nothing asks for another: no approvals, full access.
+_CODEX_DEFAULT_LAUNCH_ARGS: tuple[str, ...] = ("--dangerously-bypass-approvals-and-sandbox",)
+
+
 def _derive_terminal_launch_args_from_spec(
     spec: AgentSpec, *, headless_defaults: bool = True, harness: str | None = None
 ) -> list[str] | None:
@@ -11253,8 +11257,10 @@ def _derive_terminal_launch_args_from_spec(
     this returns ``None`` so no terminal args are set. ``None`` is also
     returned when the relevant field is absent / falsey.
 
-    ``headless_defaults`` selects the stance for a spec that declares
-    nothing: named-worker / bundled-child creates keep the headless
+    codex-native bypasses by default for every create, headless or not
+    (``permission_mode`` or ``yolo: false`` opts into a stricter stance).
+    ``headless_defaults`` selects the stance of the other harnesses for a
+    spec that declares nothing: named-worker / bundled-child creates keep the headless
     default above (codex-native / cursor-native bypass by DEFAULT, because
     nobody can answer their prompts). Top-level and self-resolved-agent
     creates pass ``headless_defaults=False``: those sessions are
@@ -11307,11 +11313,11 @@ def _derive_terminal_launch_args_from_spec(
                 "falling back to the yolo / headless default.",
                 mode,
             )
+        # Interactive creates bypass too: a session asks for a stricter stance
+        # with ``permission_mode`` or ``yolo: false``.
         if _spec_config_flag_explicitly_disabled(spec, "yolo"):
             return None
-        if not headless_defaults and not _spec_config_flag_explicitly_enabled(spec, "yolo"):
-            return None
-        return _validate_terminal_launch_args(["--dangerously-bypass-approvals-and-sandbox"])
+        return _validate_terminal_launch_args(list(_CODEX_DEFAULT_LAUNCH_ARGS))
     if harness == _CURSOR_NATIVE_HARNESS:
         # Prefer an explicit Smart Auto mode when the bundle asks for it
         # (mirrors Claude's ``permission_mode: auto``), else full --yolo
@@ -11368,6 +11374,48 @@ def _derive_terminal_launch_args_from_spec(
             )
         return None
     return None
+
+
+def _agent_default_permission_mode(
+    spec: AgentSpec | None, harness: str | None, *, headless: bool = False
+) -> str | None:
+    """
+    Return the permission mode an agent's definition gives its sessions, in the harness's words.
+
+    A request for a session may only tighten this mode. It is the mode the spec declares as
+    ``executor.config.permission_mode``, else the one its ``yolo`` flag or the harness's
+    bypass default launches in.
+
+    :param spec: The agent's loaded spec, or ``None`` when it could not be loaded.
+    :param harness: The session's effective harness, e.g. ``"codex-native"``.
+    :param headless: Whether the session is a named worker, which launches with the headless
+        defaults.
+    :returns: The mode, or ``None`` when the definition declares none.
+    """
+    from omnigent.acp_permission_mode import ACP_PERMISSION_MODES
+    from omnigent.harness_aliases import canonicalize_harness
+    from omnigent.native.permission_modes import PERMISSION_MODE_STRICTNESS
+    from omnigent.server.session_defaults import spec_names_harness
+
+    canonical = canonicalize_harness(harness) or harness
+    declared = spec.executor.config.get("permission_mode") if spec is not None else None
+    if canonical == "acp":
+        return declared if isinstance(declared, str) and declared in ACP_PERMISSION_MODES else None
+    if spec is None or (spec_names_harness(spec) and _spec_harness(spec) != canonical):
+        # No spec speaks for this harness: codex keeps its own default stance.
+        args = list(_CODEX_DEFAULT_LAUNCH_ARGS) if canonical == _CODEX_NATIVE_HARNESS else None
+        return mode_for_launch_args(canonical, args) if args else None
+    if isinstance(declared, str) and declared in PERMISSION_MODE_STRICTNESS.get(
+        canonical or "", ()
+    ):
+        return declared
+    try:
+        args = _derive_terminal_launch_args_from_spec(
+            spec, headless_defaults=headless, harness=canonical
+        )
+    except ValueError:
+        return None
+    return mode_for_launch_args(canonical, args) if args else None
 
 
 def _native_subagent_wrapper_labels_from_spec(

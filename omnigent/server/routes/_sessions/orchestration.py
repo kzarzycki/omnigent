@@ -99,7 +99,12 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
-from omnigent.native.permission_modes import APPROVAL_SKIPPING_PERMISSION_MODES
+from omnigent.native.permission_modes import (
+    check_permission_mode_not_looser,
+    launch_args_for_mode,
+    mode_for_launch_args,
+    permission_mode_is_looser,
+)
 from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import (
     ElicitationRequest,
@@ -298,7 +303,10 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
+    _CODEX_DEFAULT_LAUNCH_ARGS,
+    _CODEX_NATIVE_HARNESS,
     SessionLiveness,
+    _agent_default_permission_mode,
     _ancestor_session_ids,
     _antigravity_subagent_labels_from_body,
     _antigravity_subagent_title,
@@ -478,6 +486,7 @@ from omnigent.spec.types import (
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
     PINNED_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
@@ -13942,38 +13951,38 @@ async def _create_session_from_existing_agent(
     # An ACP session carries its mode as a label its ACP builder reads; every other
     # harness turns it into launch args.
     acp_permission_mode: str | None = None
-    if body.permission_mode is not None and canonicalize_harness(selected_harness) == "acp":
+    is_acp_session = canonicalize_harness(selected_harness) == "acp"
+    # The agent's definition is the ceiling a request can only tighten.
+    agent_default_mode = _agent_default_permission_mode(
+        selection_spec, selected_harness, headless=bool(body.sub_agent_name)
+    )
+    if (
+        body.permission_mode is not None
+        and not is_acp_session
+        and body.terminal_launch_args is not None
+    ):
+        raise OmnigentError(
+            "permission_mode can't be combined with terminal_launch_args",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if body.permission_mode is not None:
         try:
-            acp_permission_mode = validate_acp_permission_mode(body.permission_mode)
-        except ValueError as exc:
-            raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
-        # An agent picks this value, and text it reads can steer it, so it can't skip
-        # approval, unless its creator already runs without approval.
-        creator_id = created_by_session_id or body.parent_session_id
-        if acp_permission_mode in APPROVAL_SKIPPING_PERMISSION_MODES and creator_id is not None:
-            creator = await asyncio.to_thread(conversation_store.get_conversation, creator_id)
-            creator_mode = creator.labels.get(ACP_PERMISSION_MODE_LABEL_KEY) if creator else None
-            if creator_mode != acp_permission_mode:
-                raise OmnigentError(
-                    f"permission_mode {acp_permission_mode!r} skips approval, which a session "
-                    "created by another session can use only when its creator runs in the "
-                    "same mode",
-                    code=ErrorCode.INVALID_INPUT,
+            if is_acp_session:
+                acp_permission_mode = validate_acp_permission_mode(body.permission_mode)
+            check_permission_mode_not_looser(
+                "acp" if is_acp_session else selected_harness,
+                body.permission_mode,
+                agent_default_mode,
+            )
+            if not is_acp_session:
+                permission_launch_args = launch_args_for_mode(
+                    selected_harness, body.permission_mode
                 )
-    elif body.permission_mode is not None:
-        from omnigent.native.permission_modes import created_session_launch_args
-
-        if body.sub_agent_name or body.terminal_launch_args is not None:
-            raise OmnigentError(
-                "permission_mode can't be combined with terminal_launch_args or sub_agent_name",
-                code=ErrorCode.INVALID_INPUT,
-            )
-        try:
-            permission_launch_args = created_session_launch_args(
-                selected_harness, body.permission_mode
-            )
         except ValueError as exc:
             raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+    elif is_acp_session:
+        # No mode asked: the session gets the agent's own default.
+        acp_permission_mode = agent_default_mode
 
     # A blocked default is refused, not run silently; checked before any worktree exists.
     await refuse_blocked_start_defaults(
@@ -14045,19 +14054,20 @@ async def _create_session_from_existing_agent(
     # the agent's own trusted spec seeds them below — explicit opt-ins
     # only, never the headless worker default bypass.
     sub_spec: AgentSpec | None = None
+    launch_args_spec_consulted = False
     if body.sub_agent_name:
         sub_spec = _resolve_subagent_spec(
             agent=agent,
             sub_agent_name=body.sub_agent_name,
             agent_cache=agent_cache,
         )
+        launch_args_spec_consulted = sub_spec is not None and (
+            not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
+        )
         try:
             validated_launch_args = (
                 _derive_terminal_launch_args_from_spec(sub_spec, harness=selected_harness)
-                if sub_spec is not None
-                and (
-                    not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
-                )
+                if launch_args_spec_consulted
                 else None
             )
         except ValueError as exc:
@@ -14065,6 +14075,9 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args in sub-agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        if body.permission_mode is not None and not is_acp_session:
+            # Already held to the child's own default above.
+            validated_launch_args = permission_launch_args
     elif body.permission_mode is not None and acp_permission_mode is None:
         validated_launch_args = permission_launch_args
     else:
@@ -14090,6 +14103,15 @@ async def _create_session_from_existing_agent(
             user_id=user_id,
             harness=selected_harness,
         )
+    # An automation's mode may tighten the worker's agent default but never widen it.
+    if automation_launch_options is not None and permission_mode_is_looser(
+        selected_harness,
+        "bypass"
+        if CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY in automation_launch_options[1]
+        else mode_for_launch_args(selected_harness, automation_launch_options[0]),
+        agent_default_mode,
+    ):
+        automation_launch_options = None
     automation_permission_labels: dict[str, str] = {}
     if automation_launch_options is not None:
         validated_launch_args, automation_permission_labels = automation_launch_options
@@ -14133,6 +14155,7 @@ async def _create_session_from_existing_agent(
         and own_spec is not None
         and (not spec_names_harness(own_spec) or _spec_harness(own_spec) == selected_harness)
     ):
+        launch_args_spec_consulted = True
         try:
             validated_launch_args = _derive_terminal_launch_args_from_spec(
                 own_spec, headless_defaults=False, harness=selected_harness
@@ -14142,6 +14165,16 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args in agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+
+    # No spec spoke for this harness (not loaded, or it names another one, as for a
+    # named child overridden to codex): codex still gets the default bypass stance.
+    if (
+        selected_harness == _CODEX_NATIVE_HARNESS
+        and validated_launch_args is None
+        and not launch_args_spec_consulted
+        and (body.sub_agent_name or needs_launch_args_from_spec)
+    ):
+        validated_launch_args = list(_CODEX_DEFAULT_LAUNCH_ARGS)
 
     if reasoning_effort is None:
         effort_spec: AgentSpec | None = sub_spec if sub_spec is not None else own_spec

@@ -1742,8 +1742,8 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         ``"auto"`` (approval cards) or ``"bypassPermissions"`` (no card for a
         request no TOOL_CALL policy decided; a policy deny still denies), which
         reaches its ``HARNESS_ACP_PERMISSION_MODE``; a session another session
-        creates can use ``bypassPermissions`` only when its creator runs in
-        it too. ``None`` keeps the agent's mode.
+        creates can use a mode only when it is no looser than the agent's
+        default. ``None`` gives the agent's default.
     :param model_override: Optional per-session LLM model override to
         persist at create time, e.g. ``"databricks-claude-sonnet-4-6"``.
         Set by ``sys_session_send``'s per-dispatch ``model`` arg so the
