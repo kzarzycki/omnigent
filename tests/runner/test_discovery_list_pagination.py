@@ -252,7 +252,9 @@ async def test_exhausted_source_is_not_refetched_while_other_source_continues(
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal agent_reads
         if request.url.path == "/v1/agents":
-            agent_reads += 1
+            # The user-scope read only happens on the first page.
+            if "scope" not in request.url.params:
+                agent_reads += 1
             return httpx.Response(200, json={"data": []})
         if request.url.path == "/v1/sessions":
             return _server_page(request, _session_rows(large=False))

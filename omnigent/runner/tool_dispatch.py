@@ -6565,7 +6565,14 @@ async def _agent_list_via_rest(
         asyncio.to_thread(_scan_local_agent_configs, configs_dir),
         _agent_list_host_readiness(server_client, conversation_id),
         _spawn_family(server_client, conversation_id),
-        _agent_list_fetch("/v1/agents", server_client, after=None, limit=50, scope="user"),
+        _agent_list_fetch(
+            "/v1/agents",
+            server_client,
+            after=None,
+            limit=_USER_AGENTS_LIMIT,
+            scope="user",
+            exhausted=continued,
+        ),
     )
     local_state, local_after = cursor_state["local_configs"]
     if local_state == _DISCOVERY_END:
@@ -6583,7 +6590,11 @@ async def _agent_list_via_rest(
     )
     listing["builtins"] = _in_spawn_family(listing["builtins"], family)
     # The caller's own installed agents (e.g. a cloud agent) are launchable by agent_id too.
-    listing["user_agents"] = _project_agent_rows(user_agents.rows)
+    # Compact rows (no description) and the first page only, so they never crowd the budget.
+    listing["user_agents"] = [
+        {key: row[key] for key in ("agent_id", "name", "harness")}
+        for row in _project_agent_rows(user_agents.rows)
+    ]
     from omnigent.harness_availability import harness_launch_availability
 
     for row in listing["builtins"]:
@@ -6609,6 +6620,9 @@ async def _agent_list_via_rest(
             ),
         },
     )
+
+
+_USER_AGENTS_LIMIT = 20
 
 
 def _project_agent_rows(rows: list[_JsonObject]) -> list[_JsonObject]:

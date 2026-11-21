@@ -8672,7 +8672,6 @@ async def test_sys_agent_list_merges_three_sources(tmp_path: Path) -> None:
         {
             "agent_id": "ag_u",
             "name": "claude-cloud",
-            "description": None,
             "harness": "acp:claude",
         }
     ]
