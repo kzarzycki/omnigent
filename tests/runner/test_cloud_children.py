@@ -353,3 +353,25 @@ def test_a_spec_without_an_executor_is_not_a_cloud_session() -> None:
     assert not is_cloud_session(None)
     assert is_cloud_session(None, "acp:claude-cloud")
     assert not is_cloud_session(CLOUD_SPEC, "claude-native")
+
+
+@pytest.mark.parametrize(
+    ("override", "spec", "expected"),
+    [
+        ("acp:claude-cloud", LOCAL_SPEC, "acp:claude-cloud"),
+        (None, CLOUD_SPEC, "acp:claude-cloud"),
+        ("claude-native", CLOUD_SPEC, "acp"),
+        (None, LOCAL_SPEC, "acp"),
+        (None, None, "acp"),
+    ],
+    ids=["override-on-local-spec", "cloud-spec", "local-override", "local-spec", "unknown-spec"],
+)
+def test_dispatch_keeps_a_cloud_sessions_full_harness(
+    override: str | None, spec: AgentSpec | None, expected: str
+) -> None:
+    from omnigent.runner.cloud_children import dispatch_harness, is_cloud_session
+
+    seen = dispatch_harness(override, spec, "acp")
+
+    assert seen == expected
+    assert is_cloud_session(LOCAL_SPEC, seen) is (expected == "acp:claude-cloud")

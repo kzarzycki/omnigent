@@ -726,12 +726,19 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
     parent = payload.get("parent_tool_use_id")
     sub = "[sub-agent] " if parent else ""
     if kind == "result" and not sub:
-        # A foreground helper still open when its turn ends was cut off.
-        cut_off = [i for i, background in _open_subagents.items() if not background]
-        for call_id in cut_off:
-            del _open_subagents[call_id]
+        # A helper still open when its turn ends is cut off, or runs on in the background,
+        # whose result reaches the parent outside this stream: either way its row ends here.
+        ended = dict(_open_subagents)
+        _open_subagents.clear()
         return [
-            _subagent_end(i, False, "The turn ended before it finished.") for i in cut_off
+            _subagent_end(
+                call_id,
+                background,
+                "Running in the background; its result goes to the parent."
+                if background
+                else "The turn ended before it finished.",
+            )
+            for call_id, background in ended.items()
         ], True
     if kind == "system" and payload.get("subtype") == "task_notification":
         call_id = payload.get("tool_use_id")
@@ -2257,8 +2264,12 @@ def self_check() -> None:
     assert upd[0]["_meta"][SUBAGENT_META]["ok"] is False and not _open_subagents
     block = {"type": "tool_use", "id": "f1", "name": "Agent", "input": spawn}
     to_updates({"type": "assistant", "message": {"content": [block]}})
+    to_updates(
+        {"type": "assistant", "message": {"content": [dict(block, id="g2", input=background)]}}
+    )
     upd, done = to_updates({"type": "result"})
-    assert done and upd[0]["_meta"][SUBAGENT_META]["ok"] is False, "a cut-off helper ends"
+    ends = {u["toolCallId"]: u["_meta"][SUBAGENT_META]["ok"] for u in upd}
+    assert done and ends == {"f1": False, "g2": True} and not _open_subagents, ends
     assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
     assert split_replay("fix the bug", "/") == (None, "fix the bug")
     replay = (

@@ -51,6 +51,22 @@ def is_cloud_session(agent_spec: AgentSpec | None, effective_harness: str | None
     return spec_harness_id(agent_spec) == CLOUD_SESSION_HARNESS
 
 
+def dispatch_harness(
+    override: str | None, agent_spec: AgentSpec | None, canonical: str | None
+) -> str | None:
+    """The harness tool dispatch sees: the canonical name, but a cloud session's full slug.
+
+    :param override: The session's forwarded harness override, if any.
+    :param agent_spec: The session's spec, or ``None`` when unknown.
+    :param canonical: The runner's canonical harness name, where ``acp:<slug>`` reads ``acp``.
+    :returns: The full cloud harness for a cloud session, else ``canonical``.
+    """
+    declared = override
+    if declared is None and agent_spec is not None and getattr(agent_spec, "executor", None):
+        declared = spec_harness_id(agent_spec)
+    return CLOUD_SESSION_HARNESS if declared == CLOUD_SESSION_HARNESS else canonical
+
+
 async def read_caller(server_client: httpx.AsyncClient, conversation_id: str) -> CloudCaller:
     """Read the calling session's agent id and workspace.
 
