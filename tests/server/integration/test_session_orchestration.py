@@ -584,11 +584,43 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             {},
             id="starting-run",
         ),
-        # A fork keeps the origin label but isn't the run.
-        pytest.param("approve-for-me", True, None, None, None, {}, id="fork"),
-        pytest.param("approve-for-me", True, "succeeded", None, None, {}, id="finished-run"),
-        pytest.param("approve-for-me", False, "running", None, None, {}, id="no-origin"),
-        pytest.param(None, True, "running", None, None, {}, id="no-mode"),
+        # A fork keeps the origin label but isn't the run, so the worker default applies.
+        pytest.param(
+            "approve-for-me",
+            True,
+            None,
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="fork",
+        ),
+        pytest.param(
+            "approve-for-me",
+            True,
+            "succeeded",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="finished-run",
+        ),
+        pytest.param(
+            "approve-for-me",
+            False,
+            "running",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="no-origin",
+        ),
+        pytest.param(
+            None,
+            True,
+            "running",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="no-mode",
+        ),
         # The automation's own mode wins over a permissive worker spec...
         pytest.param("default", True, "running", {"yolo": True}, None, {}, id="default-over-spec"),
         # ...which still applies when the automation sets no mode.

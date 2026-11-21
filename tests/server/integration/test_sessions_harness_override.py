@@ -903,9 +903,10 @@ async def test_unpinned_spec_without_any_default_is_refused(
     [
         (None, "claude-native", ["--permission-mode", "plan"]),
         # A Claude-only key must not reach codex: ``--permission-mode`` is not a
-        # codex flag, and codex would exit before its thread starts.
-        (None, "codex-native", None),
-        ("claude-native", "codex-native", None),
+        # codex flag, and codex would exit before its thread starts. Codex gets
+        # its own default bypass instead.
+        (None, "codex-native", ["--dangerously-bypass-approvals-and-sandbox"]),
+        ("claude-native", "codex-native", ["--dangerously-bypass-approvals-and-sandbox"]),
     ],
 )
 async def test_spec_claude_keys_follow_the_session_harness(

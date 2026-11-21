@@ -4025,26 +4025,166 @@ async def test_create_session_derives_explicit_yolo_from_agent_spec(
     assert snap.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
-async def test_create_session_undeclared_codex_spec_keeps_launch_args_null(
+async def test_create_session_undeclared_codex_spec_defaults_to_bypass(
     client: httpx.AsyncClient,
 ) -> None:
-    """
-    No spec opt-in → no derived args: the headless default must not leak.
-
-    codex-native named WORKERS default to full bypass because nobody can
-    answer a headless prompt, but a top-level session is interactive — a
-    human can answer the ApprovalCard. A codex-native spec that never
-    mentions ``yolo`` must keep ``terminal_launch_args`` NULL rather than
-    silently launching every custom codex agent with approvals and
-    sandbox bypassed.
-    """
+    """A codex-native spec that declares nothing launches in full bypass, top-level too."""
     agent = await create_test_agent(
         client,
         name="codex-plain-self-resolved",
         executor={"type": "omnigent", "config": {"harness": "codex-native"}},
     )
     session = await _create_session(client, agent["id"])
+    assert session["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+async def test_create_session_codex_harness_override_without_stance_defaults_to_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A codex-native session whose spec names another harness still gets the default bypass."""
+    agent = await create_test_agent(
+        client,
+        name="opencode-spec-codex-override",
+        executor={"type": "omnigent", "config": {"harness": "opencode-native"}},
+    )
+    resp = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "harness_override": "codex-native"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+async def test_create_named_child_overridden_to_codex_defaults_to_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A named child whose spec names another harness gets the codex default when overridden."""
+    agent = await create_test_agent(
+        client,
+        name="codex-override-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        sub_agents=[
+            {
+                "name": "worker",
+                "executor": {"type": "omnigent", "config": {"harness": "claude-sdk"}},
+            }
+        ],
+    )
+    parent = await _create_session(client, agent["id"])
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+            "harness_override": "codex-native",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+    snap = await client.get(f"/v1/sessions/{resp.json()['id']}")
+    assert snap.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+async def test_create_session_codex_with_unloadable_spec_defaults_to_bypass(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the launch-args spec load fails, a resolved codex-native create keeps the default."""
+    import threading
+
+    from omnigent.runtime.agent_cache import AgentCache
+
+    agent = await create_test_agent(
+        client,
+        name="codex-unloadable-spec",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    real_load = AgentCache.load
+    worker_thread_loads: list[int] = []
+
+    class _SpecUnavailable(OSError, RuntimeError):
+        """Caught by each off-thread create-time spec load, whichever errors it tolerates."""
+
+    def load_failing_off_thread(self: AgentCache, *args: Any, **kwargs: Any) -> Any:
+        # Off-thread loads are the model-policy one, then two more; the third is the
+        # launch-args seed (the harness is already known by then).
+        if threading.current_thread() is not threading.main_thread():
+            worker_thread_loads.append(1)
+            if len(worker_thread_loads) == 3:
+                raise _SpecUnavailable("spec unavailable")
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentCache, "load", load_failing_off_thread)
+    resp = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    assert resp.status_code == 201, resp.text
+    assert worker_thread_loads
+    assert resp.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
+
+
+_CODEX_OPT_OUTS = [{"yolo": False}, {"permission_mode": "default"}]
+
+
+@pytest.mark.parametrize("opt_out", _CODEX_OPT_OUTS)
+async def test_create_session_codex_spec_opt_out_keeps_launch_args_unset(
+    client: httpx.AsyncClient, opt_out: dict[str, Any]
+) -> None:
+    """A matching codex spec that opts out of the bypass is not defaulted into it."""
+    agent = await create_test_agent(
+        client,
+        name="codex-spec-opt-out",
+        executor={"type": "omnigent", "config": {"harness": "codex-native", **opt_out}},
+    )
+    session = await _create_session(client, agent["id"])
     assert session["terminal_launch_args"] is None
+
+
+@pytest.mark.parametrize("opt_out", _CODEX_OPT_OUTS)
+async def test_create_named_codex_child_spec_opt_out_keeps_launch_args_unset(
+    client: httpx.AsyncClient, opt_out: dict[str, Any]
+) -> None:
+    """A named codex child whose own spec opts out keeps its launch args unset."""
+    agent = await create_test_agent(
+        client,
+        name="codex-child-opt-out-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        sub_agents=[
+            {
+                "name": "worker",
+                "executor": {"type": "omnigent", "config": {"harness": "codex-native", **opt_out}},
+            }
+        ],
+    )
+    parent = await _create_session(client, agent["id"])
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] is None
+
+
+async def test_create_session_codex_explicit_stricter_stance_keeps_it(
+    client: httpx.AsyncClient,
+) -> None:
+    """An explicit permission mode (the picker's choice) is not replaced by the bypass."""
+    agent = await create_test_agent(
+        client,
+        name="codex-explicit-stance",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "terminal_launch_args": ["--ask-for-approval", "on-request"],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["terminal_launch_args"] == ["--ask-for-approval", "on-request"]
 
 
 async def test_create_session_body_launch_args_override_spec_yolo(
@@ -4090,10 +4230,10 @@ async def test_bundle_create_derives_explicit_yolo_launch_args(
     assert owning.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
-async def test_bundle_create_undeclared_codex_spec_keeps_launch_args_null(
+async def test_bundle_create_undeclared_codex_spec_defaults_to_bypass(
     client: httpx.AsyncClient,
 ) -> None:
-    """A bundle that never mentions ``yolo`` gets no default bypass on upload."""
+    """A bundle that never mentions ``yolo`` gets the default bypass on upload."""
     agent = await create_test_agent(
         client,
         name="codex-plain-bundle",
@@ -4101,7 +4241,7 @@ async def test_bundle_create_undeclared_codex_spec_keeps_launch_args_null(
     )
     owning = await client.get(f"/v1/sessions/{agent['_session_id']}")
     assert owning.status_code == 200
-    assert owning.json()["terminal_launch_args"] is None
+    assert owning.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
 async def test_create_session_rejects_oversized_terminal_launch_args(
