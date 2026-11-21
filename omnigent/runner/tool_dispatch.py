@@ -5633,6 +5633,11 @@ async def _execute_session_query_tool(
         project = args.get("project")
         if project is not None and not isinstance(project, str):
             return json.dumps({"error": "project must be a project name string"})
+        created_by_session_id = args.get("created_by_session_id")
+        if created_by_session_id is not None and (
+            not isinstance(created_by_session_id, str) or not created_by_session_id.strip()
+        ):
+            return json.dumps({"error": "created_by_session_id must be a nonempty session id"})
         agent_name = args.get("agent_name")
         include_archived = args.get("include_archived") is True
         visibility = args.get("visibility", _SESSION_LIST_DEFAULT_VISIBILITY)
@@ -5649,7 +5654,9 @@ async def _execute_session_query_tool(
             args,
             tool_name,
             ("sessions",),
-            _session_list_filters(agent_name, include_archived, visibility, project),
+            _session_list_filters(
+                agent_name, include_archived, visibility, project, created_by_session_id
+            ),
         )
         if isinstance(window, str):
             return window
@@ -5661,6 +5668,7 @@ async def _execute_session_query_tool(
             include_archived=include_archived,
             visibility=visibility,
             project=project,
+            created_by_session_id=created_by_session_id,
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
@@ -5737,6 +5745,29 @@ async def _project_name_or_none(
     except Exception:
         _logger.debug("Project %s name read failed", project_id, exc_info=True)
         return None
+
+
+def _session_permission_mode(snap: _JsonObject) -> str | None:
+    """
+    Read the permission mode a session was created or launched with.
+
+    An ACP session carries it as a server-owned label; a native Claude terminal
+    session carries it in its launch args, read with the launch parser. ``None``
+    when the session runs on its agent's own default.
+
+    :param snap: The session snapshot from ``GET /v1/sessions/{id}``.
+    :returns: e.g. ``"auto"`` or ``"bypassPermissions"``, else ``None``.
+    """
+    from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_LABEL_KEY
+    from omnigent.runner.native.orchestration import _claude_launch_permission_mode
+
+    labelled = (_string_mapping(snap.get("labels")) or {}).get(ACP_PERMISSION_MODE_LABEL_KEY)
+    if labelled:
+        return labelled
+    args = snap.get("terminal_launch_args")
+    if not isinstance(args, list):
+        return None
+    return _claude_launch_permission_mode([a for a in args if isinstance(a, str)])
 
 
 async def _session_get_info_via_rest(
@@ -5827,6 +5858,7 @@ async def _session_get_info_via_rest(
                 CREATED_BY_SESSION_LABEL_KEY
             ),
             "sub_agent_name": snap.get("sub_agent_name"),
+            "permission_mode": _session_permission_mode(snap),
             "reasoning_effort": snap.get("reasoning_effort"),
             # Effective model: a per-session override wins over the
             # agent spec's default; both may be None when unset.
@@ -6227,6 +6259,7 @@ async def _agent_list_fetch(
     after: str | None,
     limit: int,
     exhausted: bool = False,
+    scope: str | None = None,
 ) -> _DiscoveryPage:
     """
     Fetch one cursor page of a paginated list endpoint.
@@ -6241,6 +6274,7 @@ async def _agent_list_fetch(
     :param after: Server cursor from the previous page, if any.
     :param limit: Maximum number of source rows to fetch.
     :param exhausted: Skip a source whose cursor has reached its end.
+    :param scope: Optional ``scope`` query value, e.g. ``"user"`` for the caller's own agents.
     :returns: Rows and server continuation metadata.
     """
     if exhausted:
@@ -6249,6 +6283,8 @@ async def _agent_list_fetch(
         params: dict[str, str | int] = {"limit": limit, "order": "desc"}
         if path == "/v1/sessions":
             params["visibility"] = "all"
+        if scope is not None:
+            params["scope"] = scope
         if after is not None:
             params["after"] = after
         resp = await server_client.get(path, params=params, timeout=30.0)
@@ -6499,7 +6535,14 @@ async def _agent_list_via_rest(
     spec = _effective_runner_os_env_spec(agent_spec, conversation_id, runner_workspace)
     assert spec.cwd is not None
     configs_dir = Path(spec.cwd) / _AGENT_CONFIG_SUBDIR
-    builtins_page, sessions_page, local_configs, readiness, family = await asyncio.gather(
+    (
+        builtins_page,
+        sessions_page,
+        local_configs,
+        readiness,
+        family,
+        user_agents,
+    ) = await asyncio.gather(
         _agent_list_fetch(
             "/v1/agents",
             server_client,
@@ -6517,6 +6560,14 @@ async def _agent_list_via_rest(
         asyncio.to_thread(_scan_local_agent_configs, configs_dir),
         _agent_list_host_readiness(server_client, conversation_id),
         _spawn_family(server_client, conversation_id),
+        _agent_list_fetch(
+            "/v1/agents",
+            server_client,
+            after=None,
+            limit=_USER_AGENTS_LIMIT,
+            scope="user",
+            exhausted=continued,
+        ),
     )
     local_state, local_after = cursor_state["local_configs"]
     if local_state == _DISCOVERY_END:
@@ -6533,6 +6584,12 @@ async def _agent_list_via_rest(
         remaining_configs[:source_limit],
     )
     listing["builtins"] = _in_spawn_family(listing["builtins"], family)
+    # The caller's own installed agents (e.g. a cloud agent) are launchable by agent_id too.
+    # First page only, descriptions shortened, so they never crowd the output budget.
+    listing["user_agents"] = [
+        {**row, "description": _truncated_description(row["description"])}
+        for row in _project_agent_rows(user_agents.rows)
+    ]
     from omnigent.harness_availability import harness_launch_availability
 
     for row in listing["builtins"]:
@@ -6548,6 +6605,7 @@ async def _agent_list_via_rest(
         continued=continued,
         tool_name="sys_agent_list",
         filters={},
+        page_sections=("builtins", "session_agents", "local_configs"),
         source_pages={
             "builtins": builtins_page,
             "session_agents": sessions_page,
@@ -6557,6 +6615,35 @@ async def _agent_list_via_rest(
             ),
         },
     )
+
+
+_USER_AGENTS_LIMIT = 20
+_USER_AGENT_DESCRIPTION_CHARS = 200
+
+
+def _truncated_description(description: object) -> object:
+    """Shorten a description to :data:`_USER_AGENT_DESCRIPTION_CHARS` characters."""
+    if isinstance(description, str) and len(description) > _USER_AGENT_DESCRIPTION_CHARS:
+        return description[:_USER_AGENT_DESCRIPTION_CHARS]
+    return description
+
+
+def _project_agent_rows(rows: list[_JsonObject]) -> list[_JsonObject]:
+    """
+    Project ``GET /v1/agents`` rows to ``{agent_id, name, description, harness}``.
+
+    :param rows: ``data`` rows from an agents list endpoint.
+    :returns: The projected rows.
+    """
+    return [
+        {
+            "agent_id": a.get("id"),
+            "name": a.get("name"),
+            "description": a.get("description"),
+            "harness": a.get("harness"),
+        }
+        for a in rows
+    ]
 
 
 def _project_agent_list(
@@ -6578,15 +6665,7 @@ def _project_agent_list(
     :param local_configs: Entries from :func:`_scan_local_agent_configs`.
     :returns: ``{builtins, session_agents, local_configs}``.
     """
-    builtins: list[_JsonObject] = [
-        {
-            "agent_id": a.get("id"),
-            "name": a.get("name"),
-            "description": a.get("description"),
-            "harness": a.get("harness"),
-        }
-        for a in builtins_raw
-    ]
+    builtins = _project_agent_rows(builtins_raw)
     session_agents: list[_JsonObject] = [
         {
             "session_id": s.get("id"),
@@ -6608,6 +6687,7 @@ def _session_list_filters(
     include_archived: bool,
     visibility: str = _SESSION_LIST_DEFAULT_VISIBILITY,
     project: str | None = None,
+    created_by_session_id: str | None = None,
 ) -> _JsonObject:
     """
     The ``sys_session_list`` filters a continuation cursor is bound to.
@@ -6630,6 +6710,8 @@ def _session_list_filters(
         filters["visibility"] = visibility
     if project is not None:
         filters["project"] = project
+    if created_by_session_id is not None:
+        filters["created_by_session_id"] = created_by_session_id
     return filters
 
 
@@ -6641,6 +6723,7 @@ async def _session_list_via_rest(
     include_archived: bool = False,
     visibility: str = _SESSION_LIST_DEFAULT_VISIBILITY,
     project: str | None = None,
+    created_by_session_id: str | None = None,
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
@@ -6682,6 +6765,7 @@ async def _session_list_via_rest(
             include_archived=include_archived,
             visibility=visibility,
             project=project,
+            created_by_session_id=created_by_session_id,
             after=cursor_state["sessions"][1],
             limit=limit or _SESSION_LIST_DEFAULT_LIMIT,
         )
@@ -6692,7 +6776,9 @@ async def _session_list_via_rest(
         cursor_state=cursor_state,
         continued=continued,
         tool_name="sys_session_list",
-        filters=_session_list_filters(agent_name, include_archived, visibility, project),
+        filters=_session_list_filters(
+            agent_name, include_archived, visibility, project, created_by_session_id
+        ),
         source_pages={"sessions": sessions_page},
         page_sections=("sessions",),
         default_limit=_SESSION_LIST_DEFAULT_LIMIT,
@@ -7126,6 +7212,7 @@ async def _collect_global_sessions(
     include_archived: bool = False,
     visibility: str = _SESSION_LIST_DEFAULT_VISIBILITY,
     project: str | None = None,
+    created_by_session_id: str | None = None,
     after: str | None,
     limit: int,
 ) -> _DiscoveryPage:
@@ -7154,6 +7241,9 @@ async def _collect_global_sessions(
     :param visibility: The server's ownership filter. ``"mine"`` (the
         sidebar's default) keeps other users' sessions out of an agent's
         view; ``"shared"`` / ``"all"`` rows also carry ``owner``.
+    :param created_by_session_id: Keep only sessions whose creation label names
+        this session. Applied to each fetched page, so a page can hold fewer
+        rows than ``limit``; keep following ``next_cursor``.
     :param after: Server cursor from the previous page, if any.
     :param limit: Maximum number of source rows to fetch.
     :returns: Projected global session entries and continuation metadata.
@@ -7204,6 +7294,13 @@ async def _collect_global_sessions(
     rows = page.rows
     if scope_locally:
         rows = [r for r in rows if _session_row_in_scope(r, viewer_id, visibility)]
+    if created_by_session_id is not None:
+        rows = [
+            r
+            for r in rows
+            if (_string_mapping(r.get("labels")) or {}).get(CREATED_BY_SESSION_LABEL_KEY)
+            == created_by_session_id
+        ]
     return _DiscoveryPage(
         [
             {
@@ -7486,7 +7583,8 @@ async def _close_tree_scope_error(
 
     Mirrors the in-process :func:`_resolve_session_call` check: the
     target must share the caller's ``root_conversation_id`` and must be
-    a sub-agent (have a parent). The caller's own root is resolved via
+    a sub-agent (have a parent), unless the caller created the target
+    (its ``created_by_session_id`` label). The caller's own root is resolved via
     its session snapshot — a session can always read itself, so this is
     a 200 on the happy path; a non-200 is surfaced as an error rather
     than failing open. A ``None`` root on either side is treated as
@@ -7517,6 +7615,12 @@ async def _close_tree_scope_error(
                 f"{caller_conversation_id!r}"
             }
         )
+    # An independent session has no parent and its own root; its creator may close it.
+    target_creator = (_string_mapping(target_snap.get("labels")) or {}).get(
+        CREATED_BY_SESSION_LABEL_KEY
+    )
+    if target_creator == caller_conversation_id:
+        return None
     caller_root = caller_snap.json().get("root_conversation_id")
     target_root = target_snap.get("root_conversation_id")
     if caller_root is None or target_root != caller_root:

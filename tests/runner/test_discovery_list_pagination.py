@@ -252,7 +252,9 @@ async def test_exhausted_source_is_not_refetched_while_other_source_continues(
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal agent_reads
         if request.url.path == "/v1/agents":
-            agent_reads += 1
+            # The user-scope read only happens on the first page.
+            if "scope" not in request.url.params:
+                agent_reads += 1
             return httpx.Response(200, json={"data": []})
         if request.url.path == "/v1/sessions":
             return _server_page(request, _session_rows(large=False))
@@ -1215,3 +1217,31 @@ async def test_session_project_filter_is_forwarded_and_bound_to_cursor(project):
     assert first["sessions"][0] != second["sessions"][0]
     assert all(query["project"] == project for query in queries)
     assert mismatch == {"error": "sys_session_list: cursor uses different filter arguments"}
+
+
+@pytest.mark.asyncio
+async def test_creator_filter_is_bound_to_cursor() -> None:
+    """A cursor issued under one creator filter is refused under another."""
+    creator_label = "omnigent.created_by_session_id"
+
+    def respond(request):
+        if request.url.path == "/v1/sessions":
+            rows = [
+                {**row, "labels": {creator_label: "conv_a"}} for row in _session_rows(large=False)
+            ]
+            return _server_page(request, rows)
+        return httpx.Response(200, json={"data": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        first = await _call_session(client, {"created_by_session_id": "conv_a", "limit": 1})
+        cursor = first["page"]["next_cursor"]
+        other = await _call_session(
+            client, {"created_by_session_id": "conv_b", "limit": 1, "cursor": cursor}
+        )
+        unfiltered = await _call_session(client, {"limit": 1, "cursor": cursor})
+    assert len(first["sessions"]) == 1
+    expected = {"error": "sys_session_list: cursor uses different filter arguments"}
+    assert other == expected
+    assert unfiltered == expected
