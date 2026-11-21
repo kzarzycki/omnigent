@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import itertools
 import json
 import logging
 import math
@@ -5768,7 +5769,7 @@ def _session_permission_mode(snap: _JsonObject) -> str | None:
         return None
     if "--dangerously-skip-permissions" in args:
         return "bypassPermissions"
-    for flag, value in zip(args, args[1:], strict=False):
+    for flag, value in itertools.pairwise(args):
         if flag == "--permission-mode" and isinstance(value, str):
             return value
     return None
