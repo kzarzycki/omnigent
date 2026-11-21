@@ -48,6 +48,9 @@ jobs:
           pnpm install --frozen-lockfile --filter web --filter omnigent-vscode
 
       - name: Run the checks
+        env:
+          # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
+          GH_TOKEN: ${{ github.token }}
         run: |
           source .venv/bin/activate
           pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD
