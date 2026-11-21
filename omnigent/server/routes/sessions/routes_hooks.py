@@ -66,6 +66,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
+from omnigent.server.machine_access import conversation_bypasses_permissions
 from omnigent.server.routes._codex_elicitation import parse_codex_elicitation_request
 from omnigent.server.routes._content_type import (
     require_json_content_type,
@@ -106,6 +107,7 @@ from omnigent.server.routes._sessions.orchestration import (
 )
 from omnigent.server.schemas import (
     ElicitationRequestParams,
+    ElicitationResult,
 )
 from omnigent.spec.types import (
     Phase,
@@ -1338,6 +1340,17 @@ def register_hooks_routes(
             )
         codex_request = parse_codex_elicitation_request(payload)
         from omnigent.server.routes import sessions as _sf
+
+        if codex_request.is_command_approval:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            # A bypass session asked nobody: decline instead of raising a card.
+            if conv is not None and conversation_bypasses_permissions(conv):
+                return Response(
+                    content=json.dumps(
+                        codex_request.build_response(ElicitationResult(action="decline"))
+                    ),
+                    media_type="application/json",
+                )
 
         result = await _publish_and_wait_for_harness_elicitation(
             request,

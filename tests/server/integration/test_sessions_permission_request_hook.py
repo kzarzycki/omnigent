@@ -3176,6 +3176,65 @@ async def test_codex_command_approval_hook_accept_round_trip(
     assert resp.json() == {"decision": "accept"}
 
 
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("item/commandExecution/requestApproval", {"decision": "decline"}),
+        ("execCommandApproval", {"decision": "denied"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "session_fields",
+    [
+        {"labels": {"omnigent.codex_native.bypass_sandbox": "1"}},
+        {"terminal_launch_args": ["--dangerously-bypass-approvals-and-sandbox"]},
+    ],
+)
+async def test_codex_command_approval_hook_bypass_declines_without_card(
+    client: httpx.AsyncClient,
+    method: str,
+    expected: dict[str, Any],
+    session_fields: dict[str, Any],
+) -> None:
+    """A Codex session launched in bypass answers a command approval with a decline, no card."""
+    agent = await create_test_agent(
+        client,
+        "test-codex-command-bypass",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    payload = {
+        "id": 14,
+        "method": method,
+        "params": {
+            "threadId": "thread_123",
+            "conversationId": "thread_123",
+            "callId": "call_1",
+            "command": "pytest",
+            "cwd": "/tmp/workspace",
+        },
+    }
+    events: list[dict[str, Any]] = []
+
+    async def collect() -> None:
+        async for event in session_stream.subscribe(session_id):
+            events.append(event)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0.05)
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/hooks/codex-elicitation-request", json=payload
+    )
+    await asyncio.sleep(0.05)
+    collector.cancel()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == expected
+    assert not [e for e in events if e.get("type") == "response.elicitation_request"]
+
+
 async def test_codex_command_approval_hook_accepts_execpolicy_amendment(
     client: httpx.AsyncClient,
 ) -> None:
