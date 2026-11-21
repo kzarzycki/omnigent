@@ -2070,6 +2070,17 @@ def self_check() -> None:
         assert create_cloud_session("hi", str(not_repo), model) == "session_01ArgsArgsArgs"
         assert (not_repo / "args").read_text().strip() == no_attribution + flags
     globals()["EFFORT"] = ""
+    # The session's cloud environment reaches the launch settings; unset it adds nothing.
+    assert "remote" not in json.loads(launch_settings())
+    os.environ["CLAUDE_CLOUD_ENVIRONMENT_ID"] = "env_01SelfCheckSelfCheck"
+    try:
+        assert json.loads(launch_settings())["remote"] == {
+            "defaultEnvironmentId": "env_01SelfCheckSelfCheck"
+        }
+        assert create_cloud_session("hi", str(not_repo))
+        assert "defaultEnvironmentId" in (not_repo / "args").read_text()
+    finally:
+        del os.environ["CLAUDE_CLOUD_ENVIRONMENT_ID"]
     # A per-session pick wins over the bridge-wide default.
     assert create_cloud_session("hi", str(not_repo), None, "max")
     assert (not_repo / "args").read_text().strip() == f"{no_attribution} --effort max"
