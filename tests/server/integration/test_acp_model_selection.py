@@ -736,6 +736,16 @@ async def test_a_child_may_bypass_acp_approval_when_its_creator_does(
     """A child's ``bypassPermissions`` is allowed only under a creator in the same mode."""
     agent = await create_test_agent(client, executor=_executor(), include_llm=False)
     parent = await client.post(
+
+
+async def test_a_launcher_keeps_its_acp_permission_mode_choice(client: httpx.AsyncClient) -> None:
+    """A session launched outside a tool call may still ask for ``bypassPermissions``."""
+    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+    launcher = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "initial_items": []}
+    )
+    assert launcher.status_code == 201, launcher.text
+    launched = await client.post(
         "/v1/sessions",
         json={
             "agent_id": agent["id"],
@@ -754,3 +764,11 @@ async def test_a_child_may_bypass_acp_approval_when_its_creator_does(
         },
     )
     assert child.status_code == 201, child.text
+=======
+            "created_by_session_id": launcher.json()["id"],
+            "permission_mode": "bypassPermissions",
+        },
+    )
+    assert launched.status_code == 201, launched.text
+    assert launched.json()["labels"]["omnigent.acp.permission_mode"] == "bypassPermissions"
+    assert launched.json()["labels"]["omnigent.created_by_session_id"] == launcher.json()["id"]

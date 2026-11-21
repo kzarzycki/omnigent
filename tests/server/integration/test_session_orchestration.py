@@ -3094,7 +3094,16 @@ async def test_a_launcher_outside_a_tool_call_is_recorded_as_creator(auth_client
     assert launched.json()["labels"][CREATED_BY_SESSION_LABEL_KEY] == launcher["id"]
     assert launched.json()["parent_session_id"] is None
 
+    # Bob can use his own agent, so only the launcher's owner differs.
+    bob_agent = (await _create_session_as(auth_client, "", "bob"))["agent_id"]
     refused = await auth_client.post(
-        "/v1/sessions", json=body, headers={"X-Forwarded-Email": "bob"}
+        "/v1/sessions",
+        json={**body, "agent_id": bob_agent},
+        headers={"X-Forwarded-Email": "bob"},
     )
     assert refused.status_code in (400, 403, 404), refused.text
+    listing = await auth_client.get("/v1/sessions", headers={"X-Forwarded-Email": "bob"})
+    assert all(
+        row.get("labels", {}).get(CREATED_BY_SESSION_LABEL_KEY) != launcher["id"]
+        for row in listing.json()["data"]
+    )
