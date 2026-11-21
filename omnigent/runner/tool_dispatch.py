@@ -6407,6 +6407,27 @@ def _session_permission_mode(snap: _JsonObject) -> str | None:
     return _claude_launch_permission_mode([a for a in args if isinstance(a, str)])
 
 
+def _optional_int(value: object) -> int | None:
+    """Return *value* when it is a plain integer, else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _visible_status(status: object, pending_count: int) -> object:
+    """
+    The status a caller of the session tools sees.
+
+    A running session whose input is held by an approval prompt reads
+    ``awaiting_approval`` so a poller does not take it for working; every other
+    status, and a session with no prompt, is unchanged. The server's own status
+    value is not touched.
+
+    :param status: The session's stored status, e.g. ``"running"``.
+    :param pending_count: Open approval prompts and questions, e.g. ``1``.
+    :returns: ``"awaiting_approval"`` or *status* as given.
+    """
+    return "awaiting_approval" if status == "running" and pending_count > 0 else status
+
+
 async def _session_get_info_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -6472,7 +6493,10 @@ async def _session_get_info_via_rest(
     return json.dumps(
         {
             "session_id": snap.get("id"),
-            "status": snap.get("status"),
+            "status": _visible_status(
+                snap.get("status"),
+                max(len(pending), _optional_int(snap.get("pending_elicitations_count")) or 0),
+            ),
             # Persisted conversation activity is distinct from lifecycle
             # status: repeated polls with an unchanged value let an
             # orchestrator detect a running session that is not advancing.
@@ -8030,7 +8054,9 @@ async def _collect_global_sessions(
                 # above still receives the caller's raw argument unchanged.
                 "agent_name": public_agent_name(_optional_string(r.get("agent_name"))),
                 "title": r.get("title"),
-                "status": r.get("status"),
+                "status": _visible_status(
+                    r.get("status"), _optional_int(r.get("pending_elicitations_count")) or 0
+                ),
                 "runner_id": r.get("runner_id"),
                 "runner_online": _RUNNER_ONLINE_SIZING_PLACEHOLDER,
                 "parent_session_id": r.get("parent_session_id"),
