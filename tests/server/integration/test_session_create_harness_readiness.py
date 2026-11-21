@@ -308,6 +308,32 @@ async def test_child_naming_parent_host_keeps_parent_runner(
     assert store.get_conversation(response.json()["id"]).runner_id == "runner_test"
 
 
+async def test_child_without_host_inherits_parent_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    monkeypatch.setattr(
+        orchestration, "_validate_session_workspace", AsyncMock(return_value="/tmp/workspace")
+    )
+    agent = await create_test_agent(client)
+    parent = (await client.post("/v1/sessions", json={"agent_id": agent["id"]})).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(parent["id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", workspace="/tmp/workspace")
+    store.set_runner_id(parent["id"], "runner_test")
+    response = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "parent_session_id": parent["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert store.get_conversation(response.json()["id"]).runner_id == "runner_test"
+
+
 async def test_loaded_parent_does_not_require_another_session_read(
     client: httpx.AsyncClient,
     db_uri: str,
