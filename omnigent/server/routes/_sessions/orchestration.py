@@ -3101,7 +3101,9 @@ async def _resolve_elicitation(
     if isinstance(elicitation_id, str) and elicitation_id:
         mirror = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
         mirror_params = mirror[1].get("params") if mirror is not None else None
-        target = mirror_params.get("target_session_id") if isinstance(mirror_params, dict) else None
+        target = (
+            mirror_params.get("target_session_id") if isinstance(mirror_params, dict) else None
+        )
         if isinstance(target, str) and target and target != session_id:
             await _resolve_elicitation(
                 target, data, runner_router, conversation_store, post_answer=post_answer
