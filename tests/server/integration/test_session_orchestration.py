@@ -2602,3 +2602,34 @@ async def test_explicit_host_endpoint_refuses_without_capability_or_source(
     )
     assert response.status_code == 403, response.text
     assert {session.id for session in store.list_conversations().data} == before
+
+
+async def test_a_launcher_outside_a_tool_call_is_recorded_as_creator(auth_client):
+    """``created_by_session_id`` on create records the launcher; only its owner may name it."""
+    launcher = await _create_session_as(auth_client, "", "alice")
+    body = {
+        "agent_id": launcher["agent_id"],
+        "initial_items": [],
+        "created_by_session_id": launcher["id"],
+    }
+
+    launched = await auth_client.post(
+        "/v1/sessions", json=body, headers={"X-Forwarded-Email": "alice"}
+    )
+    assert launched.status_code == 201, launched.text
+    assert launched.json()["labels"][CREATED_BY_SESSION_LABEL_KEY] == launcher["id"]
+    assert launched.json()["parent_session_id"] is None
+
+    # Bob can use his own agent, so only the launcher's owner differs.
+    bob_agent = (await _create_session_as(auth_client, "", "bob"))["agent_id"]
+    refused = await auth_client.post(
+        "/v1/sessions",
+        json={**body, "agent_id": bob_agent},
+        headers={"X-Forwarded-Email": "bob"},
+    )
+    assert refused.status_code in (400, 403, 404), refused.text
+    listing = await auth_client.get("/v1/sessions", headers={"X-Forwarded-Email": "bob"})
+    assert all(
+        row.get("labels", {}).get(CREATED_BY_SESSION_LABEL_KEY) != launcher["id"]
+        for row in listing.json()["data"]
+    )

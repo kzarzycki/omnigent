@@ -13406,6 +13406,7 @@ async def _create_session_from_existing_agent(
     created_by_project_id: str | None = None,
     created_by_scheduled_task_id: str | None = None,
     created_by_labels: Mapping[str, str] | None = None,
+    launcher_session_id: str | None = None,
 ) -> tuple[SessionResponse, Conversation, SessionCreateInput]:
     """
     Create a session bound to an already-registered agent.
@@ -13436,6 +13437,8 @@ async def _create_session_from_existing_agent(
         to the runner.
     :param artifact_store: Optional binary content store for the same.
     :param created_by_session_id: Server-authorized source of an independent worker.
+    :param launcher_session_id: Session that launched this one outside a tool call;
+        recorded as its creator without the limits a tool-created session has.
     :param created_by_project_id: That source's project. A worker whose request names
         no project is filed there, so it sits beside the session that started it.
     :param created_by_scheduled_task_id: The automation whose run is that source, if
@@ -14159,8 +14162,9 @@ async def _create_session_from_existing_agent(
         requested_labels=initial_labels,
     )
     initial_labels[CLIENT_SURFACE_LABEL_KEY] = client_surface
-    if created_by_session_id is not None:
-        initial_labels[CREATED_BY_SESSION_LABEL_KEY] = created_by_session_id
+    creator_session_id = created_by_session_id or launcher_session_id
+    if creator_session_id is not None:
+        initial_labels[CREATED_BY_SESSION_LABEL_KEY] = creator_session_id
     initial_labels.update(registry_labels)
     initial_labels.update(automation_permission_labels)
     initial_labels.update(inherited_mcp_labels)

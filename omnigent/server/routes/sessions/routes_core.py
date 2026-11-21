@@ -294,6 +294,7 @@ from omnigent.server.session_orchestration import (
     require_archive_outside_source_lineage,
     require_named_source_private,
     require_orchestration_source,
+    require_owned_session,
 )
 from omnigent.server.session_recaps import STATUS_BY_KEY, STATUS_LINE_KEY
 from omnigent.stores import AgentStore, ConversationStore
@@ -1730,6 +1731,29 @@ def register_core_routes(
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
+        launcher_id = None
+        if source is None and body.created_by_session_id is not None:
+            # A launcher outside a tool call names itself; it must own that session. A
+            # server without session permissions has no owners, so it must just exist.
+            if permission_store is None or user_id is None:
+                launcher = await asyncio.to_thread(
+                    conversation_store.get_conversation,
+                    normalize_uuid(body.created_by_session_id) or body.created_by_session_id,
+                )
+                if launcher is None:
+                    raise OmnigentError(
+                        f"Session not found: {body.created_by_session_id!r}",
+                        code=ErrorCode.NOT_FOUND,
+                    )
+            else:
+                launcher = await asyncio.to_thread(
+                    require_owned_session,
+                    body.created_by_session_id,
+                    user_id,
+                    conversation_store,
+                    permission_store,
+                )
+            launcher_id = launcher.id
         resp, conv, resolved_body = await _create_session_from_existing_agent(
             conversation_store,
             agent_store,
@@ -1745,6 +1769,7 @@ def register_core_routes(
             background_title_coordinator=background_title_coordinator,
             project_store=project_store,
             created_by_session_id=source.id if source is not None else None,
+            launcher_session_id=launcher_id,
             created_by_project_id=source.project_id if source is not None else None,
             created_by_scheduled_task_id=(
                 source.labels.get(SCHEDULED_TASK_ORIGIN_LABEL_KEY) if source is not None else None
