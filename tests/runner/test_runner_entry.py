@@ -40,6 +40,7 @@ from omnigent.runner._entry import (
     _InitialAuthTokenFactory,
     _install_crash_logging,
     _install_signal_handlers,
+    _load_runner_idle_hold_max_s_from_config,
     _load_runner_idle_timeout_s_from_config,
     _make_auth_token_factory,
     _make_managed_mint_factory,
@@ -51,6 +52,7 @@ from omnigent.runner._entry import (
     _resolve_agent_spec_from_server,
     _run_inactivity_monitor,
     _run_parent_death_killer,
+    _runner_keeps_idle_session,
     _runner_last_activity,
     _runner_parent_pid_from_env,
     _runner_threadpool_max_workers,
@@ -2341,6 +2343,160 @@ async def test_inactivity_monitor_requests_shutdown_when_idle() -> None:
     )
 
     assert shutdowns == ["shutdown"]
+
+
+_SOFT_HOLDS = frozenset({"background_agents", "pane_output", "native_turn_in_flight"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hold", "fresh_progress", "keeps_runner", "reaped"),
+    [
+        pytest.param("background_agents", False, False, True, id="stale-background-agents"),
+        pytest.param("pane_output", False, False, True, id="stale-pane-output"),
+        pytest.param("native_turn_in_flight", False, False, True, id="stale-native-turn"),
+        pytest.param("pane_output", True, False, False, id="fresh-progress"),
+        pytest.param("turn", False, False, False, id="hard-turn"),
+        pytest.param("human_wait", False, False, False, id="hard-human-wait"),
+        pytest.param("pane_output", False, True, False, id="excluded-or-attached"),
+    ],
+)
+async def test_inactivity_monitor_bounds_a_soft_hold_without_work_progress(
+    hold: str, fresh_progress: bool, keeps_runner: bool, reaped: bool
+) -> None:
+    """Only a soft hold with no work progress for the ceiling lets an idle runner go.
+
+    :param hold: Hold name the runner reports while idle.
+    :param fresh_progress: Whether work progress keeps arriving.
+    :param keeps_runner: Whether an attached client or the exclude list keeps it.
+    :param reaped: Whether the monitor requests shutdown.
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    shutdowns: list[str] = []
+    task = asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: shutdowns.append("shutdown"),
+            poll_interval_s=0.005,
+            get_hold=lambda: hold,
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.05,
+            get_work_progress=(lambda: loop.time()) if fresh_progress else (lambda: None),
+            keeps_runner=lambda: keeps_runner,
+        )
+    )
+    if reaped:
+        await asyncio.wait_for(task, timeout=1.0)
+        assert shutdowns == ["shutdown"]
+        return
+    await asyncio.sleep(0.2)
+    assert shutdowns == []
+    assert not task.done()
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_inactivity_monitor_keeps_a_soft_hold_when_the_ceiling_is_zero() -> None:
+    """``idle_hold_max_s: 0`` keeps the unbounded hold.
+
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    shutdowns: list[str] = []
+    task = asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: shutdowns.append("shutdown"),
+            poll_interval_s=0.005,
+            get_hold=lambda: "pane_output",
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.0,
+            get_work_progress=lambda: None,
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert shutdowns == []
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_inactivity_monitor_logs_the_hold_once_and_the_reap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The monitor names the hold once while it holds, then again when it reaps.
+
+    :param caplog: Pytest log capture fixture.
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    caplog.set_level("INFO", logger="omnigent.runner._entry")
+    await asyncio.wait_for(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: None,
+            poll_interval_s=0.005,
+            get_hold=lambda: "pane_output",
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.05,
+            get_work_progress=lambda: None,
+        ),
+        timeout=1.0,
+    )
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("kept up by pane_output hold" in message for message in messages) == 1
+    assert sum("only the pane_output hold" in message for message in messages) == 1
+
+
+def test_idle_hold_max_defaults_to_four_hours_and_zero_disables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``runner.idle_hold_max_s`` defaults to 4 h, ``0`` disables, and a negative value fails.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    assert _load_runner_idle_hold_max_s_from_config() == 4 * 60 * 60
+    config = tmp_path / "config.yaml"
+    config.write_text("runner:\n  idle_hold_max_s: 0\n", encoding="utf-8")
+    assert _load_runner_idle_hold_max_s_from_config() == 0.0
+    config.write_text("runner:\n  idle_hold_max_s: 90\n", encoding="utf-8")
+    assert _load_runner_idle_hold_max_s_from_config() == 90.0
+    for bad in ("-1", "true", "soon"):
+        config.write_text(f"runner:\n  idle_hold_max_s: {bad}\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="runner.idle_hold_max_s"):
+            _load_runner_idle_hold_max_s_from_config()
+
+
+def test_exclude_list_keeps_a_listed_session_and_an_unreadable_list_keeps_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The host exclude list is re-read per call; a listed or unreadable one keeps the runner.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "config.yaml"
+    assert _runner_keeps_idle_session(["conv_a"]) is False
+    config.write_text(
+        "host:\n  replace_stale_runners_exclude: [conv_keep]\n", encoding="utf-8"
+    )
+    assert _runner_keeps_idle_session(["conv_a", "conv_keep"]) is True
+    assert _runner_keeps_idle_session(["conv_a"]) is False
+    config.write_text("host:\n  replace_stale_runners_exclude: conv_keep\n", encoding="utf-8")
+    assert _runner_keeps_idle_session(["conv_a"]) is True
+    config.write_text("host: [unterminated\n", encoding="utf-8")
+    assert _runner_keeps_idle_session(["conv_a"]) is True
 
 
 @pytest.mark.asyncio
