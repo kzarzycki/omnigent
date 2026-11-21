@@ -4025,26 +4025,17 @@ async def test_create_session_derives_explicit_yolo_from_agent_spec(
     assert snap.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
-async def test_create_session_undeclared_codex_spec_keeps_launch_args_null(
+async def test_create_session_undeclared_codex_spec_defaults_to_bypass(
     client: httpx.AsyncClient,
 ) -> None:
-    """
-    No spec opt-in → no derived args: the headless default must not leak.
-
-    codex-native named WORKERS default to full bypass because nobody can
-    answer a headless prompt, but a top-level session is interactive — a
-    human can answer the ApprovalCard. A codex-native spec that never
-    mentions ``yolo`` must keep ``terminal_launch_args`` NULL rather than
-    silently launching every custom codex agent with approvals and
-    sandbox bypassed.
-    """
+    """A codex-native spec that declares nothing launches in full bypass, top-level too."""
     agent = await create_test_agent(
         client,
         name="codex-plain-self-resolved",
         executor={"type": "omnigent", "config": {"harness": "codex-native"}},
     )
     session = await _create_session(client, agent["id"])
-    assert session["terminal_launch_args"] is None
+    assert session["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
 async def test_create_session_body_launch_args_override_spec_yolo(
@@ -4090,10 +4081,10 @@ async def test_bundle_create_derives_explicit_yolo_launch_args(
     assert owning.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
-async def test_bundle_create_undeclared_codex_spec_keeps_launch_args_null(
+async def test_bundle_create_undeclared_codex_spec_defaults_to_bypass(
     client: httpx.AsyncClient,
 ) -> None:
-    """A bundle that never mentions ``yolo`` gets no default bypass on upload."""
+    """A bundle that never mentions ``yolo`` gets the default bypass on upload."""
     agent = await create_test_agent(
         client,
         name="codex-plain-bundle",
@@ -4101,7 +4092,7 @@ async def test_bundle_create_undeclared_codex_spec_keeps_launch_args_null(
     )
     owning = await client.get(f"/v1/sessions/{agent['_session_id']}")
     assert owning.status_code == 200
-    assert owning.json()["terminal_launch_args"] is None
+    assert owning.json()["terminal_launch_args"] == _CODEX_BYPASS_ARGS
 
 
 async def test_create_session_rejects_oversized_terminal_launch_args(
