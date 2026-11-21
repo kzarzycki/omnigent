@@ -1438,6 +1438,30 @@ async def test_permission_request_hook_bypass_session_denies_without_card(
     publish.assert_not_awaited()
 
 
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+async def test_permission_request_hook_bypass_session_keeps_question_card(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """A question in a session stored in bypass is still shown, not denied."""
+    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+    agent = await create_test_agent(client, "test-permission-bypass-question")
+    created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
+    assert created.status_code == 201, created.text
+    payload = await _claude_permission_payload(tool_name="AskUserQuestion")
+    payload["permission_mode"] = "bypassPermissions"
+
+    response = await client.post(
+        f"/v1/sessions/{created.json()['id']}/hooks/permission-request", json=payload
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    publish.assert_awaited_once()
+
+
 @pytest.mark.parametrize("request_mode", ["bypassPermissions", "default", None])
 async def test_permission_request_hook_request_cannot_claim_bypass(
     client: httpx.AsyncClient,

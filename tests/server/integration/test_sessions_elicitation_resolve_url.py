@@ -1328,6 +1328,64 @@ async def test_resolve_url_cross_session_does_not_resolve(
     assert resp.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
 
+@pytest.mark.parametrize("route", ["resolve", "events"])
+async def test_mirrored_card_resolve_checks_ownership_for_the_authenticated_user(
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """Both verdict routes hand the signed-in user to the mirrored-target ownership check."""
+    from omnigent.server.routes._sessions import orchestration
+
+    agent = await create_test_agent(auth_client, user="alice@example.com")
+    parent_id = await _create_session(auth_client, agent["id"], user="alice@example.com")
+    child_id = _create_child_session(db_uri, parent_id=parent_id, agent_id=agent["id"])
+    elicitation_id = "elicit_mirrored_owner_check"
+    session_stream.publish(
+        parent_id,
+        {
+            "type": "response.elicitation_request",
+            "elicitation_id": elicitation_id,
+            "params": {
+                "mode": "form",
+                "message": "child asks",
+                "requestedSchema": None,
+                "target_session_id": child_id,
+            },
+        },
+    )
+    seen: list[tuple[str | None, object]] = []
+    real = orchestration._is_resolvable_descendant
+
+    async def spy(session_id, target, store, user_id, permission_store):
+        seen.append((user_id, permission_store))
+        return await real(session_id, target, store, user_id, permission_store)
+
+    monkeypatch.setattr(orchestration, "_is_resolvable_descendant", spy)
+    headers = {"X-Forwarded-Email": "alice@example.com"}
+    if route == "resolve":
+        response = await auth_client.post(
+            f"/v1/sessions/{parent_id}/elicitations/{elicitation_id}/resolve",
+            json={"action": "accept"},
+            headers=headers,
+        )
+    else:
+        response = await auth_client.post(
+            f"/v1/sessions/{parent_id}/events",
+            json={
+                "type": "approval",
+                "data": {"elicitation_id": elicitation_id, "action": "accept"},
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 202, response.text
+    assert len(seen) == 1
+    user_id, permission_store = seen[0]
+    assert user_id is not None and permission_store is not None
+
+
 async def test_resolve_url_cross_user_forbidden(
     auth_client: httpx.AsyncClient,
 ) -> None:
