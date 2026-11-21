@@ -531,7 +531,9 @@ async def test_child_naming_another_ready_host_launches_there_not_on_parent_runn
     hosts.upsert_on_connect(
         parent_host_id, "parent-host", "local", configured_harnesses={readiness_key: False}
     )
-    hosts.upsert_on_connect(_HOST_ID, "laptop", "local", configured_harnesses={readiness_key: True})
+    hosts.upsert_on_connect(
+        _HOST_ID, "laptop", "local", configured_harnesses={readiness_key: True}
+    )
     parent_agent = await create_test_agent(client)
     child_agent = await create_test_agent(
         client,
