@@ -271,7 +271,7 @@ beforeEach(() => {
   vi.mocked(proactiveInboxHook.useProactiveInbox).mockReturnValue(proactiveInboxStub());
   vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([]));
   vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(commentInboxStub());
-  vi.mocked(sessionsApi.getSession).mockResolvedValue({
+  vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
     pendingElicitations: [],
   } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
   vi.mocked(sessionsApi.approve).mockResolvedValue(
@@ -328,7 +328,7 @@ describe("InboxPage question cards", () => {
     vi.mocked(conversationsHook.useConversations).mockReturnValue(
       conversationsStub([conversation()]),
     );
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("question_md", "Pick a path", {
           policy_name: "sys_ask_user_question",
@@ -389,7 +389,7 @@ describe("InboxPage approval items", () => {
     // elicitation becomes a card; the first card is expanded by default.
     const row = conversation({ id: "sess_1", title: "My Session" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this dangerous op?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -412,7 +412,7 @@ describe("InboxPage approval items", () => {
     renderPage();
 
     expect(await screen.findByText("Nothing waiting on you")).toBeInTheDocument();
-    expect(sessionsApi.getSession).not.toHaveBeenCalled();
+    expect(sessionsApi.getSessionSlim).not.toHaveBeenCalled();
   });
 
   it("collapses an item when its toggle is clicked and hides the card", async () => {
@@ -420,7 +420,7 @@ describe("InboxPage approval items", () => {
     // (otherwise-default-expanded) first item so its ApprovalCard unmounts.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Claude wants to call **Bash**")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -440,7 +440,7 @@ describe("InboxPage approval items", () => {
   it("keeps a question card's answers when its row is collapsed and reopened", async () => {
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("eli_question", "Claude has questions", {
           ask_user_question: { questions: draftQuestions },
@@ -467,7 +467,7 @@ describe("InboxPage approval items", () => {
     const message = "Agent wants to call sys_os_shell('ls **/vendor/**'). Approve?";
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", message)],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -485,7 +485,7 @@ describe("InboxPage approval items", () => {
     // verdict through `approve()` to the resolve-target session.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     saveAskUserQuestionDraft("eli_1", draftSignature, unsentDraft);
@@ -507,7 +507,7 @@ describe("InboxPage approval items", () => {
     // until the server drops the prompt, so the session must not also read as unread.
     const row = unreadConversation({ pending_elicitations_count: 1 });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     vi.mocked(sessionsApi.approve).mockReturnValue(new Promise(() => {}));
@@ -524,7 +524,7 @@ describe("InboxPage approval items", () => {
   it("offers auto mode from a snapshot and sends the choice to the owning session", async () => {
     const row = conversation({ id: "parent" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("eli_auto", "Claude needs permission", {
           target_session_id: "child",
@@ -548,7 +548,7 @@ describe("InboxPage approval items", () => {
     const row = conversation({ id: "sess_directory" });
     const directories = ["/worktrees/branch", "/mount/real-branch"];
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("eli_directory", "Claude wants to call **Edit**", {
           permission_directories: directories,
@@ -599,7 +599,7 @@ describe("InboxPage approval items", () => {
       title: "Linked session",
       status: "idle",
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSessionSlim>>);
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("eli_q", "Question", {
           ask_user_question: {
@@ -630,7 +630,7 @@ describe("InboxPage approval items", () => {
     // returns to pending and the user can retry.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     vi.mocked(sessionsApi.approve).mockRejectedValue(new Error("nope"));
@@ -653,7 +653,7 @@ describe("InboxPage approval items", () => {
     // approve button reappears.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     const queryClient = new QueryClient({
@@ -678,7 +678,7 @@ describe("InboxPage approval items", () => {
     // Simulate a snapshot refresh that still lists the same elicitation
     // (hook retry re-parked it). Update the row's updated_at so the
     // query key changes, which triggers a refetch with fresh data.
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     const updatedRow = conversation({ id: "sess_1", updated_at: 1_700_000_001 });
@@ -709,7 +709,7 @@ describe("InboxPage approval items", () => {
     const snapshot = {
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>;
-    vi.mocked(sessionsApi.getSession).mockResolvedValue(snapshot);
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue(snapshot);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const tree = () => (
       <QueryClientProvider client={queryClient}>
@@ -727,7 +727,7 @@ describe("InboxPage approval items", () => {
     scroller.scrollTop = 120;
 
     let settle!: (value: typeof snapshot) => void;
-    vi.mocked(sessionsApi.getSession).mockReturnValue(
+    vi.mocked(sessionsApi.getSessionSlim).mockReturnValue(
       new Promise((resolve) => {
         settle = resolve;
       }),
@@ -736,7 +736,7 @@ describe("InboxPage approval items", () => {
       conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
     );
     rerender(tree());
-    await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(sessionsApi.getSessionSlim).toHaveBeenCalledTimes(2));
 
     // Loading: the placeholder keeps the card.
     expect(screen.getByTestId("approval-card")).toBe(card);
@@ -764,7 +764,7 @@ describe("InboxPage approval items", () => {
     // not be read as fresh server data that clears the optimistic verdict.
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -783,12 +783,12 @@ describe("InboxPage approval items", () => {
       expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded"),
     );
 
-    vi.mocked(sessionsApi.getSession).mockReturnValue(new Promise(() => {}));
+    vi.mocked(sessionsApi.getSessionSlim).mockReturnValue(new Promise(() => {}));
     vi.mocked(conversationsHook.useConversations).mockReturnValue(
       conversationsStub([conversation({ id: "sess_1", updated_at: 1_700_000_001 })]),
     );
     rerender(tree());
-    await waitFor(() => expect(sessionsApi.getSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(sessionsApi.getSessionSlim).toHaveBeenCalledTimes(2));
 
     expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded");
   });
@@ -799,7 +799,7 @@ describe("InboxPage approval items", () => {
     const rowA = conversation({ id: "sess_a", updated_at: 1_700_000_010 });
     const rowB = conversation({ id: "sess_b", updated_at: 1_700_000_000 });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([rowA, rowB]));
-    vi.mocked(sessionsApi.getSession).mockImplementation(
+    vi.mocked(sessionsApi.getSessionSlim).mockImplementation(
       async (id) =>
         ({
           pendingElicitations: [rawElicitation(`eli_${id}`, `Approve ${id}?`)],
@@ -823,7 +823,7 @@ describe("InboxPage approval items", () => {
     );
 
     // A's snapshot refreshes (still pending: re-parked) while B's stays in flight.
-    vi.mocked(sessionsApi.getSession).mockImplementation((id) =>
+    vi.mocked(sessionsApi.getSessionSlim).mockImplementation((id) =>
       id === "sess_b"
         ? new Promise(() => {})
         : (Promise.resolve({
@@ -850,7 +850,7 @@ describe("InboxPage approval items", () => {
     });
     const row = conversation({ id: "sess_1" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -879,7 +879,7 @@ describe("InboxPage approval items", () => {
     // must target that session, not the row it surfaced under.
     const row = conversation({ id: "parent" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [
         rawElicitation("eli_child", "Child approval?", { target_session_id: "child" }),
       ],
@@ -899,7 +899,7 @@ describe("InboxPage approval items", () => {
     // not read as coming from a sub-agent.
     const row = conversation({ id: "parent" });
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_own", "Own approval?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -1762,7 +1762,7 @@ describe("InboxPage recency groups", () => {
     vi.mocked(conversationsHook.useConversations).mockReturnValue(
       conversationsStub([approvalRow, unreadRow]),
     );
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -1789,7 +1789,7 @@ describe("InboxPage filter tabs", () => {
     vi.mocked(conversationsHook.useConversations).mockReturnValue(
       conversationsStub([approvalRow, unreadRow]),
     );
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -1849,7 +1849,7 @@ describe("InboxPage filter tabs", () => {
         }),
       ]),
     );
-    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+    vi.mocked(sessionsApi.getSessionSlim).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     renderPage();
@@ -1909,7 +1909,7 @@ it.each(
     const row = conversation();
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
     let delivery = { state: "ready", attempt: "first", action: "accept" };
-    vi.mocked(sessionsApi.getSession).mockImplementation(
+    vi.mocked(sessionsApi.getSessionSlim).mockImplementation(
       async () =>
         ({
           pendingElicitations: [
@@ -1976,7 +1976,7 @@ it("recovers a native request after an empty snapshot without reloading", async 
     }),
   ];
   let pendingElicitations = pending;
-  vi.mocked(sessionsApi.getSession).mockImplementation(
+  vi.mocked(sessionsApi.getSessionSlim).mockImplementation(
     async () =>
       ({ pendingElicitations }) as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>,
   );
@@ -1985,7 +1985,7 @@ it("recovers a native request after an empty snapshot without reloading", async 
   });
   const poll = () =>
     act(async () => {
-      await vi.advanceTimersByTimeAsync(1001);
+      await vi.advanceTimersByTimeAsync(2001);
     });
   try {
     await act(async () => {
