@@ -16332,7 +16332,11 @@ async def test_hook_evaluate_orders_tool_call_after_running_tool_result(
 
     client = _GatedClient({"result": "POLICY_ACTION_ALLOW"})
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
-    post_payload = {**_PRE_TOOL_USE_PAYLOAD, "hook_event_name": "PostToolUse", "tool_response": "ok"}
+    post_payload = {
+        **_PRE_TOOL_USE_PAYLOAD,
+        "hook_event_name": "PostToolUse",
+        "tool_response": "ok",
+    }
     try:
         post_task = asyncio.create_task(
             asyncio.to_thread(
@@ -16349,7 +16353,7 @@ async def test_hook_evaluate_orders_tool_call_after_running_tool_result(
                 _PRE_TOOL_USE_PAYLOAD,
             )
         )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.3)  # custom-lint: disable=sleep-then-assert -- PreToolUse held
         assert upstream_order == ["start:PHASE_TOOL_RESULT"], upstream_order
         release_result.set()
         await asyncio.wait_for(asyncio.gather(post_task, pre_task), 10)
