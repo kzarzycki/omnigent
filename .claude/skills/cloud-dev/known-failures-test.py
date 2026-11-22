@@ -13,6 +13,8 @@ HERE = Path(__file__).resolve().parent
 
 def pytest_run(project: Path, listing: str) -> subprocess.CompletedProcess:
     (project / "list.txt").write_text(listing)
+    # own ini file: a temp dir inside a repo would otherwise inherit the repo's pytest config
+    (project / "pytest.ini").write_text("[pytest]\n")
     (project / "test_sample.py").write_text(
         "import pytest\n\n"
         "def test_known_bad():\n    assert 0\n\n"
