@@ -240,7 +240,7 @@ every fork-only commit in it. As a backstop, `mise run pin-pr-target` makes the
 fork the default for bare `gh` commands; run it once per clone (worktrees share
 it), and `mise run check:all` runs it too.
 
-Land a PR with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
+Land a PR with the engineering loop's `uv run <gatekeeper skill>/scripts/approvals.py
 land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
 the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
 (head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
