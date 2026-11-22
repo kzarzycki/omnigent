@@ -68,6 +68,7 @@ import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/native
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
 import { Link, useLocation } from "@/lib/routing";
+import { WORKFLOW_QUESTION_PHASE } from "@/lib/sessionJournal";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { type FileEditDiff, getFileEditDiff } from "@/lib/toolEditDiff";
 import type { AgyPermission, CodexPersistMode, FileEditRequest, RememberScope } from "@/lib/types";
@@ -103,7 +104,10 @@ const QUESTION_TITLES = [
   ["devin_", "Devin needs your input"],
 ] as const;
 
-function questionPromptTitle(policyName: string, phase: string): string {
+// A workflow question comes from whichever harness runs the workflow; its
+// message names the task waiting on it.
+function questionPromptTitle(policyName: string, phase: string, message: string): string {
+  if (phase === WORKFLOW_QUESTION_PHASE && message) return message;
   const match = QUESTION_TITLES.find(
     ([prefix]) => policyName.startsWith(prefix) || phase.startsWith(prefix),
   );
@@ -258,6 +262,7 @@ interface ApprovalCardProps {
     cwd: string | null;
     reason: string | null;
     execPolicyAmendment: string[] | null;
+    requestFingerprint?: string | null;
   } | null;
   /**
    * Claude-native edit-tool prompts only: when true, the binary
@@ -388,8 +393,11 @@ export function ApprovalCard({
     // must be str / int / float / bool / list[str] / null).
     submit(elicitationId, "accept", answers);
   };
-  const submitExecPolicyAmendment = (amendment: string[]) => {
-    submit(elicitationId, "accept", { execpolicy_amendment: amendment });
+  const submitExecPolicyAmendment = () => {
+    submit(elicitationId, "accept", {
+      remember: true,
+      request_fingerprint: codexCommand?.requestFingerprint,
+    });
   };
   const submitAutoMode = () => {
     submit(elicitationId, "accept", { allow_auto_mode: true });
@@ -472,7 +480,7 @@ export function ApprovalCard({
   const askUserQuestionTitle =
     policyName === NON_BLOCKING_QUESTION_POLICY
       ? "The agent has questions"
-      : questionPromptTitle(policyName, phase);
+      : questionPromptTitle(policyName, phase, message);
 
   const fileEditDiff = useMemo(
     () => (fileEdit ? getFileEditDiff(fileEdit.toolName, fileEdit.toolInput) : null),
@@ -497,8 +505,7 @@ export function ApprovalCard({
       ? codexCommand.execPolicyAmendment
       : null;
   const acceptedWithExecPolicy =
-    Array.isArray(response?.content?.execpolicy_amendment) &&
-    response.content.execpolicy_amendment.every((entry) => typeof entry === "string");
+    isCodexCommandApproval && response?.action === "accept" && response.content?.remember === true;
   const acceptedAllEdits = response?.content?.allow_all_edits === true;
   const acceptedAutoMode =
     response?.action === "accept" && response.content?.allow_auto_mode === true;
@@ -690,16 +697,21 @@ export function ApprovalCard({
           Approve
         </Button>
       </KeyboardShortcutTooltip>
-      {execPolicyAmendment && (
+      {execPolicyAmendment && codexCommand?.requestFingerprint && (
         <Button
           size="sm"
           variant="outline"
-          className={MOBILE_CHOICE_CLASS}
-          onClick={() => submitExecPolicyAmendment(execPolicyAmendment)}
+          className={cn("h-auto max-w-full whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+          onClick={submitExecPolicyAmendment}
           componentId="approval.approve_command_remember"
         >
-          <CheckIcon className="mr-1 size-3.5" />
-          Approve and remember
+          <CheckIcon className="mr-1 size-3.5 shrink-0" />
+          <span className="min-w-0">
+            Approve and remember commands starting with{" "}
+            <code className="break-all rounded bg-muted px-1 font-mono">
+              {JSON.stringify(execPolicyAmendment)}
+            </code>
+          </span>
         </Button>
       )}
       <KeyboardShortcutTooltip label="Reject" keys={declineKeys}>
@@ -905,6 +917,14 @@ export function ApprovalCard({
                     <span className="text-muted-foreground">cwd: </span>
                     <code className="rounded bg-muted px-1 py-0.5 font-mono text-sm">
                       {codexCommand.cwd}
+                    </code>
+                  </span>
+                )}
+                {acceptedWithExecPolicy && execPolicyAmendment && (
+                  <span>
+                    Remembered command prefix:{" "}
+                    <code className="break-all rounded bg-muted px-1 font-mono text-sm">
+                      {JSON.stringify(execPolicyAmendment)}
                     </code>
                   </span>
                 )}
