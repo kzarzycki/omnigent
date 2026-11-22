@@ -363,7 +363,9 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 # Cloud workers commit and open PRs without Claude Code attribution lines.
-NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
+NO_ATTRIBUTION_SETTINGS = json.dumps(
+    {"attribution": {"commit": "", "pr": "", "sessionUrl": False}}
+)
 
 
 def create_cloud_session(
@@ -1973,6 +1975,7 @@ def self_check() -> None:
         assert "is not a git repository" in str(exc), exc
     assert not (not_repo / "ran").exists()
     # Every launch carries the attribution-off settings; the picked model and effort add flags.
+    assert json.loads(NO_ATTRIBUTION_SETTINGS)["attribution"]["sessionUrl"] is False
     no_attribution = f"--cloud hi --settings {NO_ATTRIBUTION_SETTINGS}"
     subprocess.run(["git", "init", "-q", str(not_repo)], check=True)
     stub.write_text(
