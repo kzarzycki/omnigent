@@ -28,6 +28,8 @@ _PLAIN_TOOL_APPROVALS = {
     "sys_session_list": {"approval_mode": "approve"},
     "sys_agent_list": {"approval_mode": "approve"},
     "sys_agent_get": {"approval_mode": "approve"},
+    "sys_scheduled_task_create": {"approval_mode": "approve"},
+    "sys_scheduled_task_update": {"approval_mode": "approve"},
 }
 
 
