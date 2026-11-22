@@ -309,7 +309,7 @@ describe("ApprovalCard — binary approve/reject", () => {
     expect(screen.getByRole("button", { name: /reject/i })).toBeDefined();
   });
 
-  it("submits Codex execpolicy amendments when the remember option is clicked", () => {
+  it("shows the exact Codex rule prefix and binds the remember choice to this request", () => {
     const submitSpy = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({ submitApproval: submitSpy } as Partial<
       ReturnType<typeof useChatStore.getState>
@@ -330,18 +330,49 @@ describe("ApprovalCard — binary approve/reject", () => {
           cwd: "/Users/example/project",
           reason: "Run the focused pytest suite.",
           execPolicyAmendment: [".venv/bin/python", "-m", "pytest"],
+          requestFingerprint: "displayed-request",
         }}
       />,
     );
 
-    const rememberButton = screen.getByRole("button", { name: /approve and remember/i });
-    expect(rememberButton.getAttribute("data-variant")).toBe("outline");
-
-    fireEvent.click(rememberButton);
-
-    expect(submitSpy).toHaveBeenCalledWith("elic_cmd_policy", "accept", {
-      execpolicy_amendment: [".venv/bin/python", "-m", "pytest"],
+    const remember = screen.getByRole("button", {
+      name: /approve and remember commands starting with/i,
     });
+    expect(within(remember).getByText('[".venv/bin/python","-m","pytest"]')).toBeVisible();
+    fireEvent.click(remember);
+    expect(submitSpy).toHaveBeenCalledWith("elic_cmd_policy", "accept", {
+      remember: true,
+      request_fingerprint: "displayed-request",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(submitSpy).toHaveBeenLastCalledWith("elic_cmd_policy", "accept", undefined);
+  });
+
+  it("shows the remembered command prefix after approval", () => {
+    render(
+      <ApprovalCard
+        elicitationId="elic_cmd_policy"
+        message="Codex wants to run pytest"
+        phase="codex_command_approval"
+        policyName="codex_native_command_approval"
+        contentPreview=""
+        requestedSchema={{}}
+        status="responded"
+        response={{ action: "accept", content: { remember: true } }}
+        codexCommand={{
+          command: ".venv/bin/python -m pytest -q",
+          cwd: null,
+          reason: null,
+          execPolicyAmendment: [".venv/bin/python", "-m", "pytest"],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Approved and remembered")).toBeVisible();
+    const prefix = screen.getByText('[".venv/bin/python","-m","pytest"]');
+    expect(prefix).toBeVisible();
+    // The compact JSON has no spaces, so without break-all a long prefix overflows the card.
+    expect(prefix).toHaveClass("break-all");
   });
 });
 
@@ -1215,6 +1246,34 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     expect(screen.queryByText("Claude has questions")).toBeNull();
   });
 
+  it("titles a workflow question with the task waiting on it, on any harness", () => {
+    render(
+      <ApprovalCard
+        elicitationId="elicit_journal_1"
+        message="Waiting for you on Review and approve the plan"
+        phase="workflow_request_input"
+        policyName=""
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "Approve this plan?",
+              header: "Plan approval",
+              options: [{ label: "Approve (recommended)" }, { label: "Request changes" }],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Waiting for you on Review and approve the plan")).toBeDefined();
+    expect(screen.queryByText("Claude has questions")).toBeNull();
+  });
+
   it("labels Antigravity structured input prompts as Antigravity prompts", () => {
     // Antigravity (agy) reuses the same AskUserQuestion renderer via the
     // ``ask_user_question`` extra, so the title must reflect the producer
@@ -1758,6 +1817,30 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     // were still outstanding.
     expect(screen.queryByText(/wants to call/)).toBeNull();
   });
+
+  it.each([
+    ["accept", { Release: "Yes" }, "answered"],
+    ["cancel", undefined, "dismissed"],
+  ] as const)(
+    "names the session, the verdict and the choice when another session %s",
+    (action, content, verdict) => {
+      render(
+        <ApprovalCard
+          elicitationId="elic_by_session"
+          message="Claude wants to call AskUserQuestion"
+          phase="pre_tool_use"
+          policyName="claude_native_permission"
+          contentPreview={sampleSinglePreview}
+          requestedSchema={{}}
+          status="responded"
+          response={{ action, resolvedBy: "conv_parent", ...(content ? { content } : {}) }}
+        />,
+      );
+
+      expect(screen.getByText(`Resolved by session conv_parent · ${verdict}`)).toBeDefined();
+      expect(screen.queryByText(/Yes/) !== null).toBe(content !== undefined);
+    },
+  );
 
   describe("unsent answers across a remount", () => {
     const draftQuestions: ClaudeQuestion[] = [

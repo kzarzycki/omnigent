@@ -41,12 +41,13 @@ from omnigent.debug_logging import (
     set_current_session_id,
 )
 from omnigent.entities import Conversation
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.harness_aliases import canonicalize_harness, harness_account_key
 from omnigent.host.frames import (
     CAP_CLONE_REPOSITORY,
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
+    CAP_LONG_SESSION_MESSAGES,
     CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_RESOURCES_INTERVAL_S,
@@ -68,6 +69,7 @@ from omnigent.host.frames import (
     optional_str_bool_map,
     workspace_missing_message,
 )
+from omnigent.host.text_file import is_credential_path
 from omnigent.onboarding.harness_install import (
     ui_credential_configurable_harnesses,
     ui_install_key,
@@ -95,6 +97,11 @@ from omnigent.server.machine_access import refuse_machine_request
 from omnigent.server.managed_hosts import parse_project_repository
 from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._host_filesystem import (
+    HostFsError,
+    HostFsUnavailableError,
+    read_workspace_from_host,
+)
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
     host_absent_error,
@@ -937,7 +944,9 @@ async def _resolve_agent_spec_cwd(
     agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
     if agent is None or agent.bundle_location is None:
         return None
-    loaded = await asyncio.to_thread(agent_cache.load, agent.id, agent.bundle_location)
+    loaded = await asyncio.to_thread(
+        agent_cache.load, agent.id, agent.bundle_location, expand_env=agent.operator_authored
+    )
     os_env = getattr(loaded.spec, "os_env", None)
     return getattr(os_env, "cwd", None) if os_env is not None else None
 
@@ -970,7 +979,9 @@ async def _resolve_agent_harness(
     agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
     if agent is None or agent.bundle_location is None:
         return None
-    loaded = await asyncio.to_thread(agent_cache.load, agent.id, agent.bundle_location)
+    loaded = await asyncio.to_thread(
+        agent_cache.load, agent.id, agent.bundle_location, expand_env=agent.operator_authored
+    )
     return canonicalize_harness(loaded.spec.executor.harness_kind)
 
 
@@ -1119,6 +1130,10 @@ def create_hosts_router(
                 "gateway_inference": host_registry.gateway_inference(host.host_id),
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
                 **_reported_build(host.host_id),
+                # False also when another replica holds the tunnel: unverified.
+                "long_session_messages_supported": bool(
+                    conn is not None and CAP_LONG_SESSION_MESSAGES in conn.hello.capabilities
+                ),
             }
             if (
                 harness_setup_enabled
@@ -1181,6 +1196,9 @@ def create_hosts_router(
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
             **_reported_build(host.host_id),
+            "long_session_messages_supported": bool(
+                conn is not None and CAP_LONG_SESSION_MESSAGES in conn.hello.capabilities
+            ),
             "runners": [],
         }
         if (
@@ -1967,6 +1985,61 @@ def create_hosts_router(
             "data": result.get("entries", []),
             "has_more": bool(result.get("has_more", False)),
         }
+
+    @router.get("/hosts/{host_id}/files/{path:path}")
+    async def read_host_file(
+        request: Request,
+        host_id: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """
+        Read one small UTF-8 text file on a host, with no live session.
+
+        Owner-scoped like the directory listing and reaches the host over
+        the same tunnel (``host.fs_request``, op ``read_text_file``). Takes
+        the listing's path rules: absolute or ``~``-prefixed.
+
+        :param request: FastAPI request (for auth).
+        :param host_id: Host identifier.
+        :param path: Absolute or tilde-prefixed file path.
+        :returns: ``{"object": "file", "path": <absolute path>, "size":
+            <bytes>, "content": <text>}``.
+        :raises HTTPException: 404 (host or file missing), 403 (not owner or
+            credential path), 400 (directory, non-UTF-8, bad path), 413
+            (over 64 KiB), 503 (host offline), 504 (timeout), 502 (host I/O).
+        """
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+
+        path = restore_host_filesystem_url_path(path)
+        _require_host_directory_path(path)
+        if is_credential_path(path):
+            raise HTTPException(status_code=403, detail="credential files cannot be read")
+
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            absent = _host_absent_error(host)
+            if isinstance(absent, WrongReplicaError):
+                raise absent
+            raise HTTPException(status_code=503, detail="host is offline")
+
+        try:
+            return await read_workspace_from_host(
+                host_registry=host_registry,
+                host_conn=conn,
+                op="read_text_file",
+                workspace=path,
+                session_id="",
+                params={},
+            )
+        except HostFsError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        except HostFsUnavailableError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.post("/hosts/{host_id}/directories")
     async def create_host_directory(

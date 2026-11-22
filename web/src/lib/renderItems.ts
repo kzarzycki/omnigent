@@ -37,6 +37,7 @@ import {
 } from "./routingDecision";
 import type { AssistantMessagePhase } from "./conversationItems";
 import { isInterruptUserContent, isSystemUserContent } from "./systemMessage";
+import { repeatsTaskMarker } from "./taskActivity";
 import type { AgyPermission, CodexPersistMode, FileEditRequest, RememberScope } from "./types";
 import type { ActiveResponse } from "@/store/types";
 
@@ -154,6 +155,7 @@ export type RenderItem =
       status: "pending" | "responded";
       response: {
         action: "accept" | "decline" | "cancel" | "auto_resolved";
+        resolvedBy?: string;
         content?: Record<string, unknown>;
         _meta?: Record<string, unknown>;
       } | null;
@@ -165,6 +167,7 @@ export type RenderItem =
         cwd: string | null;
         reason: string | null;
         execPolicyAmendment: string[] | null;
+        requestFingerprint?: string | null;
       } | null;
       allowAllEdits?: boolean;
       allowAutoMode?: boolean;
@@ -1748,17 +1751,18 @@ function buildAssistantItems(
       // reducer only ever emits one per group, but the schema permits
       // many — preserve that shape).
       for (const ex of b.executions) {
-        items.push(
-          toolItem(
-            ex,
-            b.ctx.itemId,
-            b.ctx.timestamp,
-            // Rid-scoped lookup: a reused callId can't adopt another turn's output.
-            crossBubbleResults.get(`${b.ctx.responseId}:${ex.callId}`),
-            lifecycle,
-            liveToolCallIds.has(ex.callId),
-          ),
+        const item = toolItem(
+          ex,
+          b.ctx.itemId,
+          b.ctx.timestamp,
+          // Rid-scoped lookup: a reused callId can't adopt another turn's output.
+          crossBubbleResults.get(`${b.ctx.responseId}:${ex.callId}`),
+          lifecycle,
+          liveToolCallIds.has(ex.callId),
         );
+        // A journal write the chat marks with a task or plan line gets no row of its own.
+        if (repeatsTaskMarker(ex.name, item.output, item.state === "input-available")) continue;
+        items.push(item);
       }
       i += 1;
       continue;
@@ -1988,7 +1992,7 @@ function toolItem(
   result: ToolResultBlock | undefined,
   lifecycle: ActiveResponse["state"],
   isLiveToolCall: boolean,
-): RenderItem {
+): Extract<RenderItem, { kind: "tool" }> {
   const output = result?.output ?? execution.output ?? null;
   const startedAt = startedAtTimestamp > 0 ? startedAtTimestamp : null;
   const duration =

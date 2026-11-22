@@ -240,7 +240,7 @@ every fork-only commit in it. As a backstop, `mise run pin-pr-target` makes the
 fork the default for bare `gh` commands; run it once per clone (worktrees share
 it), and `mise run check:all` runs it too.
 
-Land a PR with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
+Land a PR with the engineering loop's `uv run <gatekeeper skill>/scripts/approvals.py
 land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
 the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
 (head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
@@ -262,8 +262,11 @@ Omnigent development runs in Claude cloud sessions (the `claude-cloud` agent,
 environment `omnigent-dev`), so the load is off the owner's machines. In such a
 session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
 first. The VM can't reach GitHub's GraphQL API, so every
-`approvals.py` step, the land and the Codex verifier run on the bridge host,
-through a host helper session the skill describes.
+`approvals.py` step, the land and the Codex verifier run on the landing host (the
+one with `gh`, the agent-skills checkout, signing and the report paths), through a
+host helper session the skill describes. Any host that bridges cloud sessions is a
+bridge host; the helper and verifier are created on the landing host by naming it
+(`placement='host'`, `host_id`, `workspace`), whichever host bridges the lead.
 
 ## This fork: filing upstream issues and PRs
 

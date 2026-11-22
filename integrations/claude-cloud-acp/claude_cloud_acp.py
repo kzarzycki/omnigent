@@ -363,7 +363,9 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 # Cloud workers commit and open PRs without Claude Code attribution lines.
-NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": ""}})
+NO_ATTRIBUTION_SETTINGS = json.dumps(
+    {"attribution": {"commit": "", "pr": "", "sessionUrl": False}}
+)
 
 
 def create_cloud_session(
@@ -696,14 +698,57 @@ def _text_of(content: object) -> str:
     return ""
 
 
+# The cloud CLI's tool that starts a sub-agent ("Task" before it was renamed).
+SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
+# Omnigent's ACP sub-agent dialect (omnigent/inner/acp_bridge_subagents.py).
+SUBAGENT_META = "omnigent/subagent"
+# Sub-agent calls still running, mapped to whether they run in the background: a foreground
+# call's result ends its child session, a background one's task notification does.
+_open_subagents: dict[str, bool] = {}
+
+
+def _subagent_end(call_id: str, ok: bool, summary: str) -> dict:
+    """The update that ends a child session, for a call still open."""
+    return {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": call_id,
+        "status": "completed" if ok else "failed",
+    } | _subagent({"event": "end", "id": call_id, "ok": ok, "summary": summary})
+
+
+def _subagent(tag: dict) -> dict:
+    return {"_meta": {SUBAGENT_META: tag}}
+
+
 def to_updates(payload: dict) -> tuple[list[dict], bool]:
     """Map one cloud-session event payload to ACP updates; True ends the turn."""
     kind = payload.get("type")
-    # Sub-agent steps carry the id of the Agent tool call that started them.
-    # ponytail: mirrored inline with a label, not as nested cards; ACP has no nesting.
-    sub = "[sub-agent] " if payload.get("parent_tool_use_id") else ""
+    # Sub-agent steps carry the id of the Agent tool call that started them. Their
+    # tool calls go to the sub-agent's child session; their text stays inline, labelled.
+    parent = payload.get("parent_tool_use_id")
+    sub = "[sub-agent] " if parent else ""
     if kind == "result" and not sub:
-        return [], True
+        # A helper still open when its turn ends is cut off, or runs on in the background,
+        # whose result reaches the parent outside this stream: either way its row ends here.
+        ended = dict(_open_subagents)
+        _open_subagents.clear()
+        return [
+            _subagent_end(
+                call_id,
+                background,
+                "Running in the background; its result goes to the parent."
+                if background
+                else "The turn ended before it finished.",
+            )
+            for call_id, background in ended.items()
+        ], True
+    if kind == "system" and payload.get("subtype") == "task_notification":
+        call_id = payload.get("tool_use_id")
+        if call_id in _open_subagents:
+            del _open_subagents[call_id]
+            ok = payload.get("status") == "completed"
+            return [_subagent_end(call_id, ok, str(payload.get("summary") or ""))], False
+        return [], False
     if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
         return (
             [
@@ -748,31 +793,163 @@ def to_updates(payload: dict) -> tuple[list[dict], bool]:
                 }
             )
         elif kind == "assistant" and btype == "tool_use":
-            updates.append(
-                {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": block.get("id"),
-                    "title": sub + str(block.get("name")),
-                    "kind": "other",
-                    "status": "in_progress",
-                    "rawInput": block.get("input") or {},
-                }
+            call_id, name, tool_input = (
+                block.get("id"),
+                str(block.get("name")),
+                block.get("input") or {},
             )
-        elif kind == "user" and btype == "tool_result":
-            updates.append(
-                {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": block.get("tool_use_id"),
-                    "status": "failed" if block.get("is_error") else "completed",
-                    "content": [
-                        {
-                            "type": "content",
-                            "content": {"type": "text", "text": _text_of(block.get("content"))},
-                        }
-                    ],
+            upd = {
+                "sessionUpdate": "tool_call",
+                "toolCallId": call_id,
+                "title": sub + name,
+                "kind": "other",
+                "status": "in_progress",
+                "rawInput": tool_input,
+            }
+            if parent:
+                tag = {
+                    "event": "tool",
+                    "id": parent,
+                    "callId": call_id,
+                    "name": name,
+                    "args": tool_input,
                 }
-            )
+                upd |= _subagent(tag)
+            elif name in SUBAGENT_TOOLS and call_id:
+                _open_subagents[call_id] = bool(tool_input.get("run_in_background"))
+                title = tool_input.get("description") or tool_input.get("subagent_type") or name
+                # The server splits a child's title at its first colon, and "ui:" marks a
+                # user-added row.
+                title = str(title).replace(":", " -")
+                tag = {
+                    "event": "start",
+                    "id": call_id,
+                    "title": title,
+                    "task": tool_input.get("prompt") or "",
+                }
+                upd |= _subagent(tag)
+            updates.append(upd)
+        elif kind == "user" and btype == "tool_result" and not parent:  # a sub-agent's has no card
+            call_id, text = block.get("tool_use_id"), _text_of(block.get("content"))
+            upd = {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call_id,
+                "status": "failed" if block.get("is_error") else "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+            }
+            if call_id in _open_subagents and not _open_subagents[call_id]:
+                del _open_subagents[call_id]
+                tag = {
+                    "event": "end",
+                    "id": call_id,
+                    "ok": not block.get("is_error"),
+                    "summary": text,
+                }
+                upd |= _subagent(tag)
+            updates.append(upd)
     return updates, False
+
+
+# ── Usage ──────────────────────────────────────────────────
+
+
+_TOKEN_FIELDS = (
+    ("input_tokens", "inputTokens"),
+    ("output_tokens", "outputTokens"),
+    ("cache_read_input_tokens", "cachedReadTokens"),
+    ("cache_creation_input_tokens", "cachedWriteTokens"),
+)
+
+
+class UsageTracker:
+    """Turn the cloud stream's usage into one ACP ``usage`` object per turn.
+
+    A ``result`` event carries the cloud CLI's cumulative usage and cost, so a turn's
+    share is the growth since the previous ``result``. Window fill comes from the last
+    top-level assistant message. Nothing is reported when the stream carries no usage.
+    """
+
+    def __init__(self) -> None:
+        self.model: str | None = None
+        self.context_tokens: int | None = None
+        self.context_window: int | None = None
+        self.seen: dict[str, float] = {}
+        self.loaded = False  # ``seen`` holds the baseline a previous bridge saved
+        self.turn: dict | None = None
+
+    def note(self, payload: dict) -> None:
+        kind = payload.get("type")
+        if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
+            self.model = str(payload["model"])
+        elif kind == "assistant" and not payload.get("parent_tool_use_id"):
+            usage = (payload.get("message") or {}).get("usage") or {}
+            fill = sum(
+                usage.get(key) or 0
+                for key in (
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+                if isinstance(usage.get(key), int)
+            )
+            if fill > 0:
+                self.context_tokens = fill
+        elif kind == "result" and not payload.get("parent_tool_use_id"):
+            self._note_result(payload)
+
+    def _note_result(self, payload: dict) -> None:
+        usage = payload.get("usage")
+        by_model = payload.get("modelUsage")
+        if isinstance(by_model, dict) and by_model:
+            # The session's own model names the window; a helper model's bucket does not.
+            main = by_model.get(self.model) if self.model else None
+            if main is None and len(by_model) == 1:
+                self.model, main = next(iter(by_model.items()))
+            window = (main or {}).get("contextWindow")
+            if isinstance(window, int) and window > 0:
+                self.context_window = window
+        totals: dict[str, float] = {}
+        if isinstance(usage, dict):
+            for key, _ in _TOKEN_FIELDS:
+                if isinstance(usage.get(key), int):
+                    totals[key] = usage[key]
+        cost = payload.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            totals["cost"] = float(cost)
+        if not totals:
+            self.turn = None  # the stream carried no usage: unknown, not zero
+            return
+        out: dict = {}
+        for key, acp_key in _TOKEN_FIELDS:
+            if key in totals:
+                out[acp_key] = _growth(totals[key], self.seen.get(key))
+        if "cost" in totals:
+            out["costUsd"] = round(_growth(totals["cost"], self.seen.get("cost")), 6)
+        self.seen.update(totals)
+        if "inputTokens" in out or "outputTokens" in out:
+            out["totalTokens"] = out.get("inputTokens", 0) + out.get("outputTokens", 0)
+        if self.context_tokens is not None:
+            out["contextTokens"] = self.context_tokens
+        if self.model:
+            out["model"] = self.model
+        self.turn = out
+
+    def load(self, cloud_id: str) -> None:
+        """Take the baseline a previous bridge of this cloud session saved."""
+        self.loaded = True
+        with contextlib.suppress(ValueError, TypeError):
+            saved = json.loads(recall().get(f"usage:{cloud_id}") or "{}")
+            self.seen = {k: v for k, v in saved.items() if isinstance(v, (int, float))}
+
+    def take(self) -> dict | None:
+        """The usage of the turn just mirrored, once."""
+        turn, self.turn = self.turn, None
+        return turn
+
+
+def _growth(total: float, before: float | None) -> float:
+    """Growth of a cumulative counter; a counter that went down restarted."""
+    return total if before is None or total < before else total - before
 
 
 # ── ACP server ─────────────────────────────────────────────
@@ -795,6 +972,7 @@ class Session:
         # The effort the cloud session was created with ("" = default); None if adopted.
         self.started_effort: str | None = None
         self.mcp: dict[str, McpProxy] = {}
+        self.usage = UsageTracker()
         self.events: queue.Queue[dict] = queue.Queue()
         self.reader: threading.Thread | None = None
         # Events the turns since the last completed one took off the queue. Omnigent
@@ -1081,6 +1259,8 @@ def update(acp_id: str, upd: dict) -> None:
 
 def run_turn(acp_id: str, text: str) -> str:
     s = session_for(acp_id)
+    if s.cloud_id and not s.usage.loaded:
+        s.usage.load(s.cloud_id)
     s.cancelled.clear()
     s.interrupted = False
     s.running = True
@@ -1251,6 +1431,9 @@ def _mirror(acp_id: str, s: Session, after: int) -> str:
             quiet = 0  # a CLI that starts before the turn does takes the message instead
         elif quiet is not None:
             quiet = 0 if payload.get("type") in _NOT_TURN_LIFE else None
+        if s.cloud_id and not s.usage.loaded:  # adopted from the replay or the state file
+            s.usage.load(s.cloud_id)
+        s.usage.note(payload)
         updates, done = to_updates(payload)
         for upd in updates:
             update(acp_id, upd)
@@ -1369,7 +1552,19 @@ def handle_prompt(msg: dict) -> None:
     params = msg.get("params") or {}
     try:
         stop = run_turn(params["sessionId"], prompt_text(params.get("prompt") or []))
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"stopReason": stop}})
+        result: dict = {"stopReason": stop}
+        tracker = session_for(params["sessionId"]).usage
+        if (usage := tracker.take()) is not None:
+            result["usage"] = usage
+            cloud_id = session_for(params["sessionId"]).cloud_id
+            if cloud_id:
+                remember(f"usage:{cloud_id}", json.dumps(tracker.seen))
+            if tracker.context_window:
+                update(
+                    params["sessionId"],
+                    {"sessionUpdate": "usage_update", "size": tracker.context_window},
+                )
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
@@ -1633,11 +1828,11 @@ def check_lifetime() -> None:
     try:
         IDLE_EXIT_S = 60.0
         parent = os.getppid()
-        start = time.monotonic()
 
         def at(offset: float, pid: int = parent) -> str | None:
-            # Earlier checks leave threads that touch(); the activity time is given.
-            return lifetime_over(pid, start + offset, start)
+            # The activity time is given. The clock starts at 0: adding an offset to a
+            # small monotonic reading can round to just under it.
+            return lifetime_over(pid, offset, 0.0)
 
         assert at(59) is None
         assert at(60) == "idle for 60s"
@@ -1853,6 +2048,7 @@ def self_check() -> None:
         assert "is not a git repository" in str(exc), exc
     assert not (not_repo / "ran").exists()
     # Every launch carries the attribution-off settings; the picked model and effort add flags.
+    assert json.loads(NO_ATTRIBUTION_SETTINGS)["attribution"]["sessionUrl"] is False
     no_attribution = f"--cloud hi --settings {NO_ATTRIBUTION_SETTINGS}"
     subprocess.run(["git", "init", "-q", str(not_repo)], check=True)
     stub.write_text(
@@ -2019,6 +2215,64 @@ def self_check() -> None:
         upd[0]["content"]["text"] == "[sub-agent] looking"
         and upd[1]["title"] == "[sub-agent] Read"
     )
+    assert upd[1]["_meta"][SUBAGENT_META] == {
+        "event": "tool",
+        "id": "x",
+        "callId": "t2",
+        "name": "Read",
+        "args": {},
+    }
+    sub_result = {"type": "tool_result", "tool_use_id": "t2", "content": "file"}
+    assert to_updates(
+        {"type": "user", "parent_tool_use_id": "x", "message": {"content": [sub_result]}}
+    ) == ([], False)
+    spawn = {"description": "find callers", "prompt": "grep for foo", "subagent_type": "Explore"}
+    block = {"type": "tool_use", "id": "a1", "name": "Agent", "input": spawn}
+    upd, _ = to_updates({"type": "assistant", "message": {"content": [block]}})
+    assert upd[0]["_meta"][SUBAGENT_META] == {
+        "event": "start",
+        "id": "a1",
+        "title": "find callers",
+        "task": "grep for foo",
+    }
+    done = {"type": "tool_result", "tool_use_id": "a1", "content": [{"type": "text", "text": "3"}]}
+    upd, _ = to_updates({"type": "user", "message": {"content": [done]}})
+    assert upd[0]["_meta"][SUBAGENT_META] == {
+        "event": "end",
+        "id": "a1",
+        "ok": True,
+        "summary": "3",
+    }
+    # The legacy tool name, a colon in the title, and a background helper that fails later.
+    for name in ("Agent", "Task"):
+        _open_subagents.clear()
+        block = {
+            "type": "tool_use",
+            "id": "b1",
+            "name": name,
+            "input": spawn | {"description": "ui: a:b"},
+        }
+        upd, _ = to_updates({"type": "assistant", "message": {"content": [block]}})
+        assert upd[0]["_meta"][SUBAGENT_META]["title"] == "ui - a -b", name
+    _open_subagents.clear()
+    background = {"description": "build", "prompt": "go", "run_in_background": True}
+    block = {"type": "tool_use", "id": "g1", "name": "Agent", "input": background}
+    to_updates({"type": "assistant", "message": {"content": [block]}})
+    ack = {"type": "tool_result", "tool_use_id": "g1", "content": "started"}
+    upd, _ = to_updates({"type": "user", "message": {"content": [ack]}})
+    assert SUBAGENT_META not in upd[0].get("_meta", {}), "a launch acknowledgement is not an end"
+    upd, _ = to_updates(
+        {"type": "system", "subtype": "task_notification", "tool_use_id": "g1", "status": "failed"}
+    )
+    assert upd[0]["_meta"][SUBAGENT_META]["ok"] is False and not _open_subagents
+    block = {"type": "tool_use", "id": "f1", "name": "Agent", "input": spawn}
+    to_updates({"type": "assistant", "message": {"content": [block]}})
+    to_updates(
+        {"type": "assistant", "message": {"content": [dict(block, id="g2", input=background)]}}
+    )
+    upd, done = to_updates({"type": "result"})
+    ends = {u["toolCallId"]: u["_meta"][SUBAGENT_META]["ok"] for u in upd}
+    assert done and ends == {"f1": False, "g2": True} and not _open_subagents, ends
     assert to_updates({"type": "result", "parent_tool_use_id": "x"}) == ([], False)
     assert split_replay("fix the bug", "/") == (None, "fix the bug")
     replay = (

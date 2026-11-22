@@ -72,8 +72,13 @@ def launch_args_bypass_permissions(args: Iterable[str] | None) -> bool:
     :returns: ``True`` for a known bypass flag, or a bypass value after
         ``--permission-mode`` / ``--sandbox`` (also in ``--flag=value`` form).
     """
+    from omnigent.harnesses.codex_native.app_server import codex_launch_args_grant_full_access
+
+    args = list(args or ())
+    if codex_launch_args_grant_full_access(args):
+        return True
     previous_flag = ""
-    for arg in args or ():
+    for arg in args:
         flag, _, inline_value = arg.partition("=")
         if flag in _BYPASS_FLAGS:
             return True

@@ -36,6 +36,11 @@ class _CountingAgentCache:
         self.harness_by_agent: dict[str, str] = {}
 
     def load(self, agent_id: str, bundle_location: str, *, expand_env: bool = False):
+        return SimpleNamespace(
+            spec=self.load_spec(agent_id, bundle_location, expand_env=expand_env)
+        )
+
+    def load_spec(self, agent_id: str, bundle_location: str, *, expand_env: bool = False):
         self.loads += 1
         executor = SimpleNamespace(
             type="claude-sdk",
@@ -43,14 +48,13 @@ class _CountingAgentCache:
             model="model-a",
             reasoning_effort=None,
         )
-        spec = SimpleNamespace(
+        return SimpleNamespace(
             name="agent",
             executor=executor,
             sub_agents=[],
             tools=[],
             llm=SimpleNamespace(model="model-a"),
         )
-        return SimpleNamespace(spec=spec)
 
 
 def _seed(

@@ -61,6 +61,8 @@ class FakeGh:
                 # An older gh has no --json for auth status, but its plain status succeeds.
                 return (1, "", "unknown flag: --json") if "--json" in argv else (0, "", "")
             return 0, self.auth, ""
+        if argv[:2] == ["auth", "token"]:
+            return 0, f"token-{argv[argv.index('--user') + 1]}", ""
         if argv[:2] == ["pr", "view"]:
             if self.pr is None:
                 return 1, "", "GraphQL: Could not resolve to a PullRequest (HTTP 404)"

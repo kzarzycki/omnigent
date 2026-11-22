@@ -74,6 +74,9 @@ def structured_ask_user_question(tool_input: Any) -> dict[str, Any] | None:
         header = entry.get("header")
         if isinstance(header, str) and header:
             question["header"] = header
+        question_key = entry.get("id")
+        if isinstance(question_key, str) and question_key:
+            question["id"] = question_key
         questions.append(question)
     if not questions:
         return None

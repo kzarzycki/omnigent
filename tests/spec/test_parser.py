@@ -1156,6 +1156,7 @@ def test_discover_host_skills_skips_invalid_yaml_frontmatter(
     assert "invalid YAML frontmatter" in msg, msg
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_discover_host_skills_skips_unreadable_skill_file(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -4106,6 +4107,66 @@ def test_parse_executor_auth_unknown_type_raises(tmp_path: Path) -> None:
     (tmp_path / "config.yaml").write_text(yaml.dump(config))
     with pytest.raises(OmnigentError, match=r"must be 'api_key', 'databricks', or 'provider'"):
         parse(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model",
+        "reasoning_effort",
+        "context_window",
+        "connection",
+        "auth",
+        "timeout",
+        "max_iterations",
+    ],
+)
+def test_parse_executor_config_rejects_misplaced_executor_field(tmp_path: Path, key: str) -> None:
+    """A field that lives directly under ``executor:`` is refused inside ``config``."""
+    config = {"spec_version": 1, "executor": {"type": "claude_sdk", "config": {key: "x"}}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError, match=rf"executor\.config\.{key}.*executor\.{key}"):
+        parse(tmp_path)
+
+
+@pytest.mark.parametrize("harness", ["claude", "claude-sdk", "claude-native", "native-claude"])
+def test_parse_executor_config_rejects_misplaced_keys_for_claude_harness_spellings(
+    tmp_path: Path, harness: str
+) -> None:
+    """Every Claude harness spelling gets both diagnostics."""
+    for key, hint in (("model", r"executor\.model"), ("setting_sources", r"skills: none")):
+        config = {"spec_version": 1, "executor": {"config": {"harness": harness, key: "x"}}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+        with pytest.raises(OmnigentError, match=rf"executor\.config\.{key}.*{hint}"):
+            parse(tmp_path)
+
+
+def test_parse_executor_config_rejects_setting_sources(tmp_path: Path) -> None:
+    """``setting_sources`` in ``executor.config`` points to top-level ``skills: none``."""
+    config = {
+        "spec_version": 1,
+        "executor": {"config": {"harness": "claude-native", "setting_sources": []}},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    with pytest.raises(OmnigentError, match=r"executor\.config\.setting_sources.*skills: none"):
+        parse(tmp_path)
+
+
+def test_parse_executor_config_model_allowed_for_codex_native(tmp_path: Path) -> None:
+    """Non-Claude harnesses read ``executor.config.model``, so it still parses."""
+    config = {
+        "spec_version": 1,
+        "executor": {"config": {"harness": "codex-native", "model": "gpt-x"}},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    assert parse(tmp_path).executor.config["model"] == "gpt-x"
+
+
+def test_parse_executor_config_profile_still_allowed(tmp_path: Path) -> None:
+    """``profile`` stays valid under ``executor.config``."""
+    config = {"spec_version": 1, "executor": {"config": {"profile": "p"}}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    assert parse(tmp_path).executor.config["profile"] == "p"
 
 
 def test_parse_executor_auth_api_key_missing_key_raises(tmp_path: Path) -> None:

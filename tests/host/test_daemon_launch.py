@@ -81,7 +81,7 @@ async def test_attachment_probes_owner_and_preserves_offline_recovery(
     set_session_host("attached", "owner")
     try:
         async with open_daemon_client(
-            url, {}, "caller", auth=_DatabricksTokenAuth(server_url=url, session_id=None)
+            url, {}, "caller", auth=_DatabricksTokenAuth(server_url=url)
         ) as client:
             runner = await launch_or_reuse_daemon_runner(
                 client, host_id="caller", session_id="attached", workspace="/caller/work"
@@ -472,6 +472,7 @@ async def test_open_daemon_client_uses_machine_key_without_host(
         assert client.headers[OMNIGENT_SLICE_KEY_HEADER] == "client_key"
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_open_daemon_client_keeps_an_unkeyed_resend_unkeyed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

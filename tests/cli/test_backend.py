@@ -1524,6 +1524,7 @@ def test_host_reset_id_mints_fresh_id_when_no_daemon_runs(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
 
     result = CliRunner().invoke(cli_group, ["host", "reset-id", "--yes"])
@@ -1575,6 +1576,7 @@ def test_host_reset_id_refuses_while_a_daemon_is_running(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [_online_record()])
     monkeypatch.setattr(cli, "_pid_alive", lambda _pid: True)
 
@@ -1595,6 +1597,7 @@ def test_host_reset_id_declined_prompt_leaves_id_untouched(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
 
     result = CliRunner().invoke(cli_group, ["host", "reset-id"], input="n\n")
@@ -1619,6 +1622,7 @@ def test_host_reset_id_refuses_when_env_override_pins_identity(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
     monkeypatch.setenv("OMNIGENT_HOST_ID", "b" * 32)
     monkeypatch.setenv("OMNIGENT_HOST_NAME", "managed-host")
@@ -3880,7 +3884,7 @@ def test_databricks_preflight_rejected_credential_recovers_via_sdk_refresh(
     monkeypatch.setattr(httpx, "get", _get)
     monkeypatch.setattr(
         "omnigent.cli_auth.load_databricks_workspace_host",
-        lambda server: "https://example.databricks.com",
+        lambda server: "https://workspace.example.test",
     )
     monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda server: None)
     from omnigent.inner.databricks_executor import _databrickscfg_fingerprint
@@ -3890,6 +3894,7 @@ def test_databricks_preflight_rejected_credential_recovers_via_sdk_refresh(
         current_token=lambda: "fresh-token",
         profile_name=None,
         resolved_config_file=_databrickscfg_fingerprint(),
+        resolved_workspace_host="https://workspace.example.test",
     )
     monkeypatch.setattr(
         cli,
@@ -3911,7 +3916,7 @@ def test_databricks_preflight_rejected_credential_recovers_via_sdk_refresh(
 
     cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)
 
-    assert stored == [(_HOST_DATABRICKS_SERVER, "https://example.databricks.com")]
+    assert stored == [(_HOST_DATABRICKS_SERVER, "https://workspace.example.test")]
     shared = chat._shared_token_source(_HOST_DATABRICKS_SERVER)
     assert shared is not refused, (
         "clients built after the refused probe would reuse the refused credential"

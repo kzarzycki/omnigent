@@ -18,7 +18,9 @@ periodically) posts it with capped backoff, and also picks up an attempt a
 crashed server never finished. A row is posted only while its subscription
 stands: unsubscribing, or archiving or deleting either side, removes it and
 settles the pair's rows unposted, except that archiving the target keeps its
-subscriptions, so their rows post and a restored target is heard again.
+subscriptions, so their rows post and a restored target is heard again. A held
+completed row (see below) whose target is archived by delivery is settled
+unposted instead.
 Delivery is at-least-once: a notice is a wake, so a rare duplicate costs the
 reader one history read while a lost one stalls it.
 Settled rows are pruned after a retention window, except a prompt's, which is
@@ -26,7 +28,8 @@ kept while its target may still have it pending.
 
 A subscription with a quiet period holds a completed turn end's row until that
 period has passed, and a newer held end replaces it; the sweep posts it then,
-or holds it again while the target or a direct child is running. Failures,
+or holds it again while the target or a direct child is running; it settles
+unposted if the target is archived by then. Failures,
 cancels, prompts and an end whose last reply has a line starting with one of
 ``_SETTLED_MARKERS`` post at once.
 
@@ -698,6 +701,16 @@ async def retry_due_deliveries() -> int:
     return attempted
 
 
+async def _held_for_archived_target(
+    store: ConversationStore, delivery: SubscriptionDelivery
+) -> bool:
+    """Whether *delivery* is a held completed row whose target is archived."""
+    if delivery.outcome != _HELD_COMPLETED:
+        return False
+    target = await asyncio.to_thread(store.get_conversation, delivery.target_id)
+    return target is not None and target.archived
+
+
 async def _retry(
     store: ConversationStore, delivery: SubscriptionDelivery, *, lease_until: int | None = None
 ) -> None:
@@ -709,7 +722,7 @@ async def _retry(
             if subscription is None:
                 return
             owner = await _deliverable(store, delivery.subscriber_id, delivery.target_id)
-            if owner is _SKIP:
+            if owner is _SKIP or await _held_for_archived_target(store, delivery):
                 await asyncio.to_thread(
                     store.settle_subscription_delivery,
                     *key,

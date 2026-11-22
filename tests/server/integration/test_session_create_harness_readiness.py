@@ -213,11 +213,17 @@ async def test_top_level_create_rejects_unavailable_harness(
     assert response.json()["error"]["code"] == "harness_not_configured"
 
 
-async def test_agent_id_child_uses_parent_host_even_if_request_names_another(
+@pytest.mark.parametrize(
+    ("named_host_ready", "expected_status"),
+    [(False, 412), (True, 409)],
+)
+async def test_child_with_explicit_host_is_placed_and_checked_on_that_host(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    named_host_ready: bool,
+    expected_status: int,
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -228,15 +234,11 @@ async def test_agent_id_child_uses_parent_host_even_if_request_names_another(
     monkeypatch.setattr(
         orchestration, "_validate_session_workspace", AsyncMock(return_value="/tmp/workspace")
     )
-
     parent_agent = await create_test_agent(client)
     jcode = await create_test_agent(
         client,
         name="jcode-worker",
-        executor={
-            "type": "omnigent",
-            "config": {"harness": "jcode"},
-        },
+        executor={"type": "omnigent", "config": {"harness": "jcode"}},
     )
     parent = (await client.post("/v1/sessions", json={"agent_id": parent_agent["id"]})).json()
     store = SqlAlchemyConversationStore(db_uri)
@@ -247,13 +249,13 @@ async def test_agent_id_child_uses_parent_host_even_if_request_names_another(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "parent-host",
         "local",
-        configured_harnesses={"jcode": False},
+        configured_harnesses={"jcode": not named_host_ready},
     )
     hosts.upsert_on_connect(
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "other-host",
         "local",
-        configured_harnesses={"jcode": True},
+        configured_harnesses={"jcode": named_host_ready},
     )
     app.state.host_store = hosts
     response = await client.post(
@@ -265,8 +267,71 @@ async def test_agent_id_child_uses_parent_host_even_if_request_names_another(
             "workspace": "/tmp/workspace",
         },
     )
-    assert response.status_code == 412, response.text
-    assert response.json()["error"]["code"] == "harness_not_configured"
+    assert response.status_code == expected_status, response.text
+    if expected_status == 412:
+        assert response.json()["error"]["code"] == "harness_not_configured"
+        return
+    # Readiness passed on the named host; placement then tries it (not the parent's
+    # runner) and finds it offline in this harness-less test app.
+    assert response.json()["error"]["message"] == "host is offline"
+
+
+async def test_child_naming_parent_host_keeps_parent_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    monkeypatch.setattr(
+        orchestration, "_validate_session_workspace", AsyncMock(return_value="/tmp/workspace")
+    )
+    agent = await create_test_agent(client)
+    parent = (await client.post("/v1/sessions", json={"agent_id": agent["id"]})).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(parent["id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", workspace="/tmp/workspace")
+    store.set_runner_id(parent["id"], "runner_test")
+    response = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "host_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "workspace": "/tmp/workspace",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert store.get_conversation(response.json()["id"]).runner_id == "runner_test"
+
+
+async def test_child_without_host_inherits_parent_runner(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    monkeypatch.setattr(
+        orchestration, "_validate_session_workspace", AsyncMock(return_value="/tmp/workspace")
+    )
+    agent = await create_test_agent(client)
+    parent = (await client.post("/v1/sessions", json={"agent_id": agent["id"]})).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(parent["id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", workspace="/tmp/workspace")
+    store.set_runner_id(parent["id"], "runner_test")
+    response = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "parent_session_id": parent["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert store.get_conversation(response.json()["id"]).runner_id == "runner_test"
 
 
 async def test_loaded_parent_does_not_require_another_session_read(
@@ -357,3 +422,42 @@ async def test_nested_parent_readiness_has_bounded_reads(
     with pytest.raises(OmnigentError, match="not configured"):
         await validation
     assert read.call_count == min(depth, 16)
+
+
+async def test_acp_agent_missing_from_host_report_is_refused_by_name(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """A host with other ACP agents but no ``claude-cloud`` entry refuses the create."""
+    from omnigent.errors import OmnigentError
+    from omnigent.server.routes._session_harness_readiness import validate_create_harness_readiness
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+    from omnigent.stores.host_store import HostStore
+
+    host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    hosts = HostStore(db_uri)
+    hosts.upsert_on_connect(
+        host_id,
+        "test-host",
+        "local",
+        configured_harnesses={"acp": True, "acp:other": True},
+    )
+    arguments = {
+        "harness": "acp:claude-cloud",
+        "host_id": host_id,
+        "parent_session_id": None,
+        "inherited_runner_id": None,
+        "user_id": None,
+        "conversation_store": SqlAlchemyConversationStore(db_uri),
+        "host_store": hosts,
+    }
+
+    with pytest.raises(OmnigentError, match="claude-cloud"):
+        await validate_create_harness_readiness(**arguments)
+
+    hosts.upsert_on_connect(
+        host_id,
+        "test-host",
+        "local",
+        configured_harnesses={"acp": True, "acp:other": True, "acp:claude-cloud": True},
+    )
+    await validate_create_harness_readiness(**arguments)

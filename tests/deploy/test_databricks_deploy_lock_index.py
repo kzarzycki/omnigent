@@ -143,7 +143,7 @@ def test_lock_preserves_non_index_environment(
     ("index_url", "shown"),
     [
         (
-            "https://user:p@ssw0rd@packages.example/simple?token=qu3ry-tok3n#frag",
+            "https://idx-u53r:p@ssw0rd@packages.example/simple?token=qu3ry-tok3n#frag",
             "https://***@packages.example/simple",
         ),
         (
@@ -173,7 +173,7 @@ def test_lock_redacts_credentials_in_log_but_passes_them_to_uv(
 def test_lock_propagates_uv_failure_without_index_credentials(
     deploy_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    index_url = "https://user:p@ssw0rd@packages.example/simple?token=qu3ry-tok3n#frag"
+    index_url = "https://idx-u53r:p@ssw0rd@packages.example/simple?token=qu3ry-tok3n#frag"
     monkeypatch.setenv("UV_INDEX_URL", index_url)
 
     def fail_run(cmd: list[str], **kwargs: Any) -> None:
@@ -187,5 +187,5 @@ def test_lock_propagates_uv_failure_without_index_credentials(
     assert excinfo.value.returncode == 1
     assert excinfo.value.cmd[-1] == "https://***@packages.example/simple"
     diagnostics = repr(excinfo.value) + "".join(traceback.format_exception(excinfo.value))
-    for secret in ("user", "p@ssw0rd", "qu3ry-tok3n", "frag"):
+    for secret in ("idx-u53r", "p@ssw0rd", "qu3ry-tok3n", "frag"):
         assert secret not in diagnostics
