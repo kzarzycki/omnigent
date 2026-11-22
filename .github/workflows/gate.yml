@@ -1,21 +1,20 @@
 name: Gate
 
-# Fork only. The merge gate Mergify's queue requires (.mergify.yml): the checks
-# `mise run check-fast` runs, on the PR and on Mergify's
-# temporary merge-queue branches.
+# Fork only. The one proof per tree: the `mine` ruleset requires this `gate` check. It runs
+# `mise run check-fast` (the hooks, the skills' tests and the tests the change touches) on each PR head
+# and on Mergify's draft PRs (the tree it merges), so nothing else runs those tests; the full suite is
+# nightly (fork-nightly.yml).
 
 on:
   pull_request:
     branches: [mine]
-  push:
-    branches: ["mergify/merge-queue/**"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   gate:
@@ -40,6 +39,15 @@ jobs:
       - name: Set up Node and pnpm
         uses: ./.github/actions/setup-pnpm
 
+      - name: Install test system dependencies
+        # ripgrep: the Grep tool prefers it. bubblewrap: the linux_bwrap sandbox needs it.
+        # tmux: harness terminal tests spawn it. apparmor sysctl: Ubuntu 24.04 blocks the
+        # user namespaces bwrap needs (ephemeral runner).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap tmux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install mise
         env:
           MISE_VERSION: v2026.11.10
@@ -49,12 +57,11 @@ jobs:
           # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      # check-fast (mise.toml): check:all, then pytest on the tests the change touches. The full
-      # suite runs nightly (fork-nightly.yml) and in the land tool's local-ci.
+      # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
       - name: Run the checks
         env:
           MISE_YES: "1"
-          # A PR diffs against its base; a merge-queue branch falls back to the merge base with mine.
+          # A PR, and Mergify's draft PR, diffs against the base branch tip.
           GATE_BASE: ${{ github.event.pull_request.base.sha }}
           OMNIGENT_SKIP_WEB_UI: "true"
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.

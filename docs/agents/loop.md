@@ -20,6 +20,6 @@ The Codex verifier of a cloud worker's PR runs in that worker's VM, on its check
 
 Affected tests: mise run check-fast
 
-`check:all` plus pytest on the tests the change touches, picked from the git diff alone by `.claude/skills/cloud-dev/affected_tests.py` (the changed tests and the tests that name a changed module; the whole `tests` tree when a conftest, the test helpers or the dependency files change), so it runs the same on a fresh clone, in a cloud VM and in CI. It reads `GATE_BASE`, else the merge base with `origin/mine`. Narrowed gates (`local-ci`, worker heads, `land`) run it in place of the full check; `ci: false` stays, so the narrowed `local-ci` pass is the landing proof. Undo: delete the line, and every gate runs `check:all` again.
+`check:all` plus pytest on the tests the change touches, picked from the git diff alone by `.claude/skills/cloud-dev/affected_tests.py` (the changed tests and the tests that name a changed module; the whole `tests` tree when a conftest, the test helpers or the dependency files change), so it runs the same on a fresh clone, in a cloud VM and in CI. It reads `GATE_BASE`, else the merge base with `origin/mine`. The `gate` workflow runs it on each PR head and on Mergify's draft PR, and that Actions run is the landing proof, so `land` runs no gate on the host; a worker's head check and `local-ci` run it in place of the full check. Undo: delete the line, and every gate runs `check:all` again.
 
 The loop's policy (`approvals.py`'s settings block) is in `docs/agents/gatekeeper.md` under `## Policy`.
