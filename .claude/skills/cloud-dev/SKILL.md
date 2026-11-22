@@ -77,7 +77,7 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 The engineering loop's scripts on the landing host are in its agent-skills checkout, not an
 installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
-`engineering/skills/engineering-loop/scripts/approvals.py` under it.
+`gatekeeper/skills/gatekeeper/scripts/approvals.py` under it.
 
 | Step | Why it can't run in the VM |
 |---|---|
