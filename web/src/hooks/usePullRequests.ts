@@ -534,7 +534,9 @@ export function computePanelPullRequestPollInterval(
 ): number | false {
   const interval = computePullRequestPollInterval(info);
   if (!info?.tracking_available) return interval;
-  if (interval === false || !info.pr) return PULL_REQUEST_LIST_POLL_MS;
+  const { auth } = normalizePullRequestInfo(info);
+  const setUp = info.available && auth.authenticated && !!info.repo?.name_with_owner;
+  if (interval === false || (setUp && !info.pr)) return PULL_REQUEST_LIST_POLL_MS;
   return Math.max(interval, TRACKING_PANEL_POLL_MS);
 }
 

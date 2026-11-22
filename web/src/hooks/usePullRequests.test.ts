@@ -429,7 +429,13 @@ describe("computePullRequestPollInterval", () => {
     // Checks running or setup unresolved: 10 s, never faster.
     const running = { ...open, checks: { ...open.checks, pending: 1 } };
     expect(computePanelPullRequestPollInterval(tracked({ pr: running }))).toBe(10_000);
-    expect(computePanelPullRequestPollInterval(tracked({ authenticated: false }))).toBe(10_000);
+    // Setup unresolved: the runner sends no PR then, and the user may fix it any moment.
+    expect(computePanelPullRequestPollInterval(tracked({ authenticated: false, pr: null }))).toBe(
+      10_000,
+    );
+    expect(
+      computePanelPullRequestPollInterval(tracked({ available: false, repo: null, pr: null })),
+    ).toBe(10_000);
     // A host without tracking keeps the plain rule.
     expect(computePanelPullRequestPollInterval(ready())).toBe(false);
     expect(computePanelPullRequestPollInterval(undefined)).toBe(5_000);
