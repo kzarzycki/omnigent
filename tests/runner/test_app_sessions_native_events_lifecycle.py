@@ -127,6 +127,46 @@ class _RecordingCodexAppServerClient:
 
 
 @pytest.mark.asyncio
+async def test_events_policy_change_closes_native_allow_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A forwarded ``policy_change`` closes the bridge's no-policy ALLOW window.
+
+    The server sends it when a session policy is added, changed or removed, so
+    native hooks stop reusing an ALLOW that predates the change.
+    """
+    import time as _time
+
+    from omnigent.native import policy_allow_cache
+
+    conv_id = "6a0d7e1c2b3f4a5d9e8f7a6b5c4d3e2f"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(conv_id)
+    bridge_dir.mkdir(parents=True)
+    policy_allow_cache.record(
+        bridge_dir,
+        policy_allow_cache.generation(bridge_dir),
+        {"result": "POLICY_ACTION_ALLOW", "allow_cache_seconds": 60.0},
+        _time.time(),
+    )
+    cache_file = bridge_dir / "policy_allow_until"
+    assert int(cache_file.read_text().split()[0]) > _time.time()
+
+    app, _ = await _build_app_for_spec(_harness_spec("codex-native", model="gpt-5.4"))
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        resp = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "policy_change"})
+
+    assert resp.status_code == 204, resp.text
+    assert int(cache_file.read_text().split()[0]) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_payload,expected_params",
     [
