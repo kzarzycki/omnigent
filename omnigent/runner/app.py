@@ -4474,6 +4474,15 @@ def create_runner_app(
         h = spec.executor.config.get("harness") or spec.executor.type
         return canonicalize_harness(h) or h
 
+    def _session_dispatch_harness(conv_id: str) -> str | None:
+        from omnigent.runner.cloud_children import dispatch_harness
+
+        return dispatch_harness(
+            _session_harness_overrides.get(conv_id),
+            _unwrap_spec_entry(_session_spec_cache.get(conv_id)),
+            _session_harness_name(conv_id),
+        )
+
     def _native_turn_outcome_is_forwarder_confirmed(conv_id: str) -> bool:
         """Whether this session's forwarder distinguishes finished from aborted turns."""
         agent = native_coding_agent_for_harness(_session_harness_name(conv_id))
@@ -7783,7 +7792,7 @@ def create_runner_app(
                                                     ),
                                                     publish_event=_publish_event,
                                                     filesystem_registry=filesystem_registry,
-                                                    effective_harness=_session_harness_name(
+                                                    effective_harness=_session_dispatch_harness(
                                                         conv_id
                                                     ),
                                                     wake_on_async_result=_wake_on_async_result,
@@ -9611,7 +9620,7 @@ def create_runner_app(
         _resolve_session_spec_entry=_resolve_session_spec_entry,
         _session_agent_ids=_session_agent_ids,
         _session_async_tasks=_session_async_tasks,
-        _session_harness_name=_session_harness_name,
+        _session_harness_name=_session_dispatch_harness,
         _session_inboxes=_session_inboxes,
         _session_runtime_cwd=_session_runtime_cwd,
         _session_spec_cache=_session_spec_cache,
