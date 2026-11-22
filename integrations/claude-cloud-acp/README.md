@@ -72,6 +72,25 @@ it), taking its MCP server child with it, and a bridge whose runner is gone exit
 at once. The next message starts a new bridge, which re-attaches the same cloud
 session from the replayed transcript's `cloud session:` line.
 
+### Another bridge host
+
+Any host can bridge cloud sessions; this spreads the per-session memory over several
+machines. Repeat the setup above on each one:
+
+- **A login of its own.** Run `claude auth login` on that host. Never copy a
+  credentials file: two hosts sharing one refresh token can log each other out.
+- **The same `Claude Cloud` entry** under `acp.agents`, with `inject_system_prompt: false`
+  and `cancel_on_abandon: false`. Without the second, a turn Omnigent gives up on
+  interrupts the cloud session. Omnigent refuses to create a session for
+  `acp:claude-cloud` on a host that does not report this entry, naming the agent.
+- **A pinned, trusted launch dir.** Put `remote.defaultEnvironmentId` in the launch dir's
+  `.claude/settings.local.json`, and run `claude` there once to trust the folder.
+- **A current Omnigent build** on the host, so it reports each ACP agent under its own
+  `acp:<slug>` key; the server checks that key at create.
+
+A session stays on the host it started on, because the bridge keeps its session map and
+its at-most-once tool-call record in that host's own state directory.
+
 Offline check of the event mapping: `python3 claude_cloud_acp.py --self-check`.
 
 Live scenarios, each starting real cloud sessions: `python3 e2e.py
