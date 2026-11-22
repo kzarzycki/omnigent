@@ -18,8 +18,6 @@ What this catches
 What this does NOT catch
 ------------------------
 
-- ``@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/<n>: ...")``:
-  a known-red test skipped with a reason that links its tracking issue.
 - ``@pytest.mark.skipif(condition, reason=...)``. Conditional skip
   is legitimate when the condition tests an environmental
   precondition (missing binary, wrong platform, missing optional
@@ -65,22 +63,25 @@ _ISSUE_URL = re.compile(r"https://github\.com/kzarzycki/omnigent/issues/\d+")
 
 
 def _reason_links_issue(call: ast.Call) -> bool:
-    """Return True if ``call`` has a string ``reason=`` linking a fork issue."""
+    """Return True if the skip's ``reason`` is a string holding a fork issue URL."""
+    reasons = [kw.value for kw in call.keywords if kw.arg == "reason"] or call.args[:1]
     return any(
-        keyword.arg == "reason"
-        and isinstance(keyword.value, ast.Constant)
-        and isinstance(keyword.value.value, str)
-        and _ISSUE_URL.search(keyword.value.value) is not None
-        for keyword in call.keywords
+        isinstance(reason, ast.Constant)
+        and isinstance(reason.value, str)
+        and _ISSUE_URL.search(reason.value) is not None
+        for reason in reasons
     )
 
 
 def _decorator_calls_skip(decorator: ast.expr) -> bool:
-    """Return True if ``decorator`` is ``@pytest.mark.skip`` or ``@...skip(...)``."""
+    """Return True if ``decorator`` is an unlinked ``@pytest.mark.skip`` or ``@...skip(...)``.
+
+    ``skip(reason="https://github.com/kzarzycki/omnigent/issues/<n>")`` names the
+    issue that owns the failure and is allowed.
+    """
     if _is_skip_attribute(decorator):
         return True
     if isinstance(decorator, ast.Call) and _is_skip_attribute(decorator.func):
-        # A known-red test may be skipped when its reason links the tracking issue.
         return not _reason_links_issue(decorator)
     return False
 
@@ -192,8 +193,9 @@ def main(argv: list[str]) -> int:
             "\nSkipped tests are invisible coverage loss. If a test can't "
             "pass, rewrite it for the current architecture or delete it. "
             "For genuine environmental gates (missing binary, platform), "
-            "use ``@pytest.mark.skipif`` with a clear reason — this rule "
-            "only flags unconditional ``skip``.\n"
+            "use ``@pytest.mark.skipif`` with a clear reason. A known-red test "
+            "may use ``@pytest.mark.skip`` with a fork issue URL as its reason; "
+            "every other unconditional ``skip`` is flagged.\n"
         )
         return 1
     return 0

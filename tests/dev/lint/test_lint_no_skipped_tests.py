@@ -28,22 +28,6 @@ def test_scan_flags_decorator_skip(tmp_path: Path) -> None:
     assert "test_thing" in hits[0][1], f"Message should name the function, got {hits[0][1]!r}."
 
 
-def test_scan_accepts_skip_whose_reason_links_a_fork_issue(tmp_path: Path) -> None:
-    """A skip is allowed only when its reason links a tracking issue."""
-    linked = tmp_path / "test_linked.py"
-    linked.write_text(
-        "import pytest\n"
-        '@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: red")\n'
-        "def test_thing() -> None: ...\n"
-    )
-    unlinked = tmp_path / "test_unlinked.py"
-    unlinked.write_text(
-        'import pytest\n@pytest.mark.skip(reason="see issue 595")\ndef test_thing() -> None: ...\n'
-    )
-    assert scan(linked) == [], "A skip linking a fork issue URL must pass."
-    assert len(scan(unlinked)) == 1, "A skip without an issue URL must still be flagged."
-
-
 def test_scan_flags_module_level_pytestmark_skip(tmp_path: Path) -> None:
     """A module-level ``pytestmark = pytest.mark.skip(...)`` trips the hook."""
     f = tmp_path / "test_sample.py"
@@ -51,6 +35,23 @@ def test_scan_flags_module_level_pytestmark_skip(tmp_path: Path) -> None:
     hits = scan(f)
     assert len(hits) == 1, f"Expected one module-level skip flagged, got {hits!r}."
     assert hits[0][0] == 2  # the pytestmark assignment line
+
+
+def test_scan_allows_skip_whose_reason_links_a_fork_issue(tmp_path: Path) -> None:
+    """A skip naming its fork issue passes; any other reason, or none, is still flagged."""
+    linked = tmp_path / "test_linked.py"
+    linked.write_text(
+        "import pytest\n"
+        '@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")\n'
+        "def test_thing() -> None: ...\n"
+    )
+    assert scan(linked) == [], "A skip linking a fork issue is the allowed form."
+    for reason in ('"later"', '"https://github.com/other/repo/issues/1"', '"issues/584"'):
+        other = tmp_path / "test_other.py"
+        other.write_text(
+            f"import pytest\n@pytest.mark.skip(reason={reason})\ndef test_thing() -> None: ...\n"
+        )
+        assert len(scan(other)) == 1, f"reason {reason} must stay flagged."
 
 
 def test_scan_ignores_skipif(tmp_path: Path) -> None:
