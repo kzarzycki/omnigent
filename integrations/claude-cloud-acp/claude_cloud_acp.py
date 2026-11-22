@@ -363,7 +363,9 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 # Cloud workers commit and open PRs without Claude Code attribution lines.
-NO_ATTRIBUTION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
+NO_ATTRIBUTION_SETTINGS = json.dumps(
+    {"attribution": {"commit": "", "pr": "", "sessionUrl": False}}
+)
 
 
 def create_cloud_session(
