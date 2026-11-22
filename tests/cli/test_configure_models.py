@@ -2325,8 +2325,6 @@ def test_overview_kimi_row_reflects_detected_login(isolated_config, monkeypatch)
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_overview_descriptions_map_to_their_rows(isolated_config, monkeypatch) -> None:
     """Each compact row keeps the next-step hint attached to the same harness.
 

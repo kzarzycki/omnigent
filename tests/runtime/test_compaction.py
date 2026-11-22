@@ -561,8 +561,6 @@ async def test_layer1_clears_binary_content_and_preserves_file_id(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
-
-
 def test_clear_binary_content_handles_resolver_shapes() -> None:
     """Resolver-produced attachment payloads are cleared before token counting."""
     payload = "A" * 100_000
@@ -601,8 +599,6 @@ def test_clear_binary_content_handles_resolver_shapes() -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
-
-
 def test_resolver_parameterized_image_is_cleared_before_token_counting() -> None:
     """Resolver canonicalizes parameterized MIME and compaction clears its payload."""
     payload = b"A" * 400_000
@@ -1250,8 +1246,6 @@ def test_compaction_to_history_items_produces_valid_pair() -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
-
-
 def test_count_tokens_returns_positive_integer() -> None:
     """count_tokens returns a positive integer for non-empty messages."""
     messages = [{"role": "user", "content": "Hello world, this is a test message."}]
@@ -1262,8 +1256,6 @@ def test_count_tokens_returns_positive_integer() -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
-
-
 def test_count_tokens_unknown_model_falls_back() -> None:
     """Unknown model falls back to cl100k_base encoding without raising."""
     messages = [{"role": "user", "content": "test"}]

@@ -1157,8 +1157,6 @@ def test_discover_host_skills_skips_invalid_yaml_frontmatter(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
-
-
 def test_discover_host_skills_skips_unreadable_skill_file(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

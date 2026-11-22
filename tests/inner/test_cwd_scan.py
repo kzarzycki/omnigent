@@ -781,8 +781,6 @@ def test_missing_cwd_returns_empty_list(tmp_path: Path) -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
-
-
 def test_unreadable_subdirectory_is_skipped_silently(tmp_path: Path) -> None:
     """
     A subdirectory that can't be opened (e.g. permission denied)

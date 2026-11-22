@@ -5818,8 +5818,6 @@ def test_load_global_config_uses_env_override(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_load_global_config_returns_empty_when_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5839,8 +5837,6 @@ def test_load_global_config_returns_empty_when_missing(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_save_and_load_global_config_round_trips(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5863,8 +5859,6 @@ def test_save_and_load_global_config_round_trips(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_save_global_config_merges_with_existing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5888,8 +5882,6 @@ def test_save_global_config_merges_with_existing(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_save_global_config_unset_removes_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5955,8 +5947,6 @@ def test_is_run_shorthand(argv: list[str], expected: bool) -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_config_list_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6042,8 +6032,6 @@ def test_config_set_global_writes_file(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_config_set_global_writes_auto_open_conversation_bool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6069,8 +6057,6 @@ def test_config_set_global_writes_auto_open_conversation_bool(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_config_set_global_writes_session_title_instructions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6271,8 +6257,6 @@ def test_config_list_dedups_when_cwd_is_config_home(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_save_global_migrates_scalar_harness_to_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6291,8 +6275,6 @@ def test_save_global_migrates_scalar_harness_to_mapping(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_save_global_scalar_migration_notice_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6349,8 +6331,6 @@ def test_config_set_harness_deep_merges_preserving_overrides(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_config_set_harness_migrates_scalar_to_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6412,8 +6392,6 @@ def test_config_list_ignores_project_harness_launch_overrides(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_config_list_shows_scalar_harness_without_note(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6708,8 +6686,6 @@ def test_run_interactive_defaults_browser_open_on(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_run_headless_prompt_defaults_browser_open_off(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6868,8 +6844,6 @@ def test_codex_applies_auto_open_conversation_config(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
-
-
 def test_run_bare_omnigent_with_harness_only_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

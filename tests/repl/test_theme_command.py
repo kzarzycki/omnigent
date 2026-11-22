@@ -44,8 +44,6 @@ def test_startup_theme_falls_back_to_light_for_corrupt_config(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_startup_theme_returns_persisted_dark(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -60,8 +58,6 @@ def test_startup_theme_returns_persisted_dark(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_startup_theme_shows_picker_on_first_launch(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

@@ -532,7 +532,11 @@ def test_databricks_install_failure_does_not_publish_binary(
 @pytest.mark.parametrize(
     ("args", "download_fails"),
     [
-        pytest.param("", False, marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")),
+        pytest.param(
+            "",
+            False,
+            marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584"),
+        ),
         ("", True),
         ("--no-databricks --extra antigravity", False),
     ],

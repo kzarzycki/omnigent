@@ -187,8 +187,6 @@ def test_build_theme_confirmation_light() -> None:
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_startup_picker_non_tty_defaults_to_light(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -212,8 +210,6 @@ def test_startup_picker_non_tty_defaults_to_light(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_startup_picker_non_tty_respects_dark_detection(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,8 +230,6 @@ def test_startup_picker_non_tty_respects_dark_detection(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
-
-
 def test_startup_picker_falls_back_without_unix_terminal_modules(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

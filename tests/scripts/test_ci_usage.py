@@ -199,8 +199,6 @@ def _workflow(name):
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/587")
-
-
 def test_every_workflow_has_an_explicit_model_usage_classification():
     categories = [
         set(INVENTORY["model_workflows"]),

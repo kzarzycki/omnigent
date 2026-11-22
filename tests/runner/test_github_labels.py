@@ -261,8 +261,6 @@ def test_edit_label_failures_are_user_facing(
 
 
 @pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/586")
-
-
 def test_every_gh_call_of_a_label_edit_shares_one_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,7 +285,13 @@ def test_every_gh_call_of_a_label_edit_shares_one_deadline(
 
 @pytest.mark.parametrize(
     "slow",
-    [pytest.param("account lookup", marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/586")), "removal"],
+    [
+        pytest.param(
+            "account lookup",
+            marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/586"),
+        ),
+        "removal",
+    ],
 )
 def test_a_label_edit_past_its_deadline_reports_an_unknown_outcome(
     monkeypatch: pytest.MonkeyPatch, slow: str

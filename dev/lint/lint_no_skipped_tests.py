@@ -194,8 +194,8 @@ def main(argv: list[str]) -> int:
             "pass, rewrite it for the current architecture or delete it. "
             "For genuine environmental gates (missing binary, platform), "
             "use ``@pytest.mark.skipif`` with a clear reason. A known-red test "
-            "may use ``@pytest.mark.skip(reason=\"https://github.com/kzarzycki/omnigent/issues/<n>\")`` "
-            "naming its issue; every other unconditional ``skip`` is flagged.\n"
+            "may use ``@pytest.mark.skip`` with a fork issue URL as its reason; "
+            "every other unconditional ``skip`` is flagged.\n"
         )
         return 1
     return 0

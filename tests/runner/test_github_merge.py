@@ -262,7 +262,13 @@ def test_enterprise_merges_require_a_signed_in_host(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.parametrize(
     "slow",
-    [pytest.param("account lookup", marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/586")), "merge"],
+    [
+        pytest.param(
+            "account lookup",
+            marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/586"),
+        ),
+        "merge",
+    ],
 )
 def test_a_merge_past_its_deadline_reports_an_unknown_outcome(
     monkeypatch: pytest.MonkeyPatch, slow: str
