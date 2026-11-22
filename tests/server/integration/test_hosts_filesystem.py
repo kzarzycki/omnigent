@@ -26,6 +26,8 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
+    HostFsRequestFrame,
+    HostFsResultFrame,
     HostHelloFrame,
     HostListDirFrame,
     HostListDirResultFrame,
@@ -151,6 +153,8 @@ async def fs_setup(
     conn = registry.get(_HOST_ID)
     assert conn is not None
     replies: dict[str, dict[str, Any]] = {}
+    requested_ops: list[tuple[str, str]] = []
+    app.state.requested_fs_ops = requested_ops
 
     async def _drain() -> None:
         """Drain outbound WS frames from the communicator and reply.
@@ -204,6 +208,18 @@ async def fs_setup(
                                 routable_models=reply.get("routable_models", []),
                                 error=reply.get("error"),
                             )
+                        ),
+                    }
+                )
+                continue
+            if isinstance(frame, HostFsRequestFrame):
+                reply = replies[f"fs:{frame.workspace}"]
+                requested_ops.append((frame.op, frame.workspace))
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostFsResultFrame(request_id=frame.request_id, **reply)
                         ),
                     }
                 )
@@ -888,6 +904,162 @@ async def test_list_filesystem_owner_check_blocks_other_users(
             "/v1/hosts/f54bb9272002938a3a934bfcb6bb228a/filesystem",
             headers={"X-Test-User": "bob@example.com"},
         )
+    assert resp.status_code == 403
+
+
+# ── GET /v1/hosts/{id}/files/{path} ─────────────────────
+
+_FsSetup = tuple[
+    FastAPI,
+    HostRegistry,
+    ApplicationCommunicator,
+    dict[str, dict[str, Any]],
+    asyncio.Task[None],
+]
+
+
+async def _get_host_file(app: FastAPI, path: str, host_id: str = _HOST_ID) -> Any:
+    """GET the host file route for ``path`` (as written in the URL)."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.get(f"/v1/hosts/{host_id}/files/{path}")
+
+
+async def test_read_host_file_returns_text_without_a_session(fs_setup: _FsSetup) -> None:
+    """A text file on a host with no session comes back in the fixed shape."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    path = "/work/proj/.claude/settings.local.json"
+    content = '{"remote": {"defaultEnvironmentId": "env_example"}}'
+    replies[f"fs:{path}"] = {
+        "status": "ok",
+        "payload": {"object": "file", "path": path, "size": len(content), "content": content},
+    }
+
+    resp = await _get_host_file(app, "work/proj/.claude/settings.local.json")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "object": "file",
+        "path": path,
+        "size": len(content),
+        "content": content,
+    }
+    assert app.state.requested_fs_ops == [("read_text_file", path)]
+
+
+async def test_read_host_file_forwards_tilde_path(fs_setup: _FsSetup) -> None:
+    """A ``~`` path reaches the host unchanged so the host expands it."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    replies["fs:~/note.txt"] = {
+        "status": "ok",
+        "payload": {"object": "file", "path": "/home/u/note.txt", "size": 2, "content": "hi"},
+    }
+
+    resp = await _get_host_file(app, "~/note.txt")
+
+    assert resp.status_code == 200
+    assert resp.json()["path"] == "/home/u/note.txt"
+
+
+@pytest.mark.parametrize(
+    "status,code,detail",
+    [
+        (404, "not_found", "file does not exist"),
+        (400, "is_a_directory", "path is a directory; use /filesystem to list it"),
+        (400, "not_utf8", "file is not valid UTF-8"),
+        (413, "too_large", "file is larger than 65536 bytes"),
+        (403, "forbidden_path", "credential files cannot be read"),
+    ],
+)
+async def test_read_host_file_maps_host_errors(
+    fs_setup: _FsSetup, status: int, code: str, detail: str
+) -> None:
+    """Missing, directory, non-UTF-8, oversized and refused paths keep the host's status."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    replies["fs:/work/x"] = {
+        "status": "error",
+        "error_status": status,
+        "error_code": code,
+        "error": detail,
+    }
+
+    resp = await _get_host_file(app, "work/x")
+
+    assert resp.status_code == status
+    assert detail in resp.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["work/.credentials.json", "work/auth.json", "work/.env", "work/.env.local", "~/.ssh/id_rsa"],
+)
+async def test_read_host_file_refuses_credential_paths_before_asking_the_host(
+    fs_setup: _FsSetup, path: str
+) -> None:
+    """A deny-listed path is a 403 and never reaches the host."""
+    app, _reg, _comm, _replies, _drain = fs_setup
+
+    resp = await _get_host_file(app, path)
+
+    assert resp.status_code == 403
+    assert app.state.requested_fs_ops == []
+
+
+async def test_read_host_file_offline_host_returns_503(
+    fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """A host record with no live tunnel answers 503."""
+    app, _reg, host_store, _cs = fs_app
+    host_store.upsert_on_connect(host_id=_HOST_ID, name="offline-host", user_id="local")
+    host_store.set_offline(_HOST_ID)
+
+    resp = await _get_host_file(app, "work/x")
+
+    assert resp.status_code == 503
+
+
+async def test_read_host_file_unknown_host_returns_404(
+    fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """An unknown host id is a 404."""
+    app, _reg, _hs, _cs = fs_app
+
+    resp = await _get_host_file(app, "work/x", host_id="7139b7e896ef9478abca6480107d1677")
+
+    assert resp.status_code == 404
+
+
+async def test_read_host_file_non_owner_returns_403(
+    fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """Only the host owner can read: another user gets 403 and the host is never asked."""
+    from omnigent.server.auth import AuthProvider
+
+    _app, _reg, host_store, conv_store = fs_app
+
+    class _Stub(AuthProvider):
+        """Reads the caller id from the X-Test-User header."""
+
+        def get_user_id(self, request: Any) -> str | None:
+            """Return the header value or ``None``."""
+            return request.headers.get("X-Test-User")
+
+    auth = _Stub()
+    auth_app = FastAPI()
+    auth_app.include_router(
+        create_hosts_router(HostRegistry(), host_store, conv_store, auth_provider=auth),
+        prefix="/v1",
+    )
+    host_store.upsert_on_connect(
+        host_id=_HOST_ID, name="alice-laptop", user_id="alice@example.com"
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=auth_app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            f"/v1/hosts/{_HOST_ID}/files/work/x", headers={"X-Test-User": "bob@example.com"}
+        )
+
     assert resp.status_code == 403
 
 
