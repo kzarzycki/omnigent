@@ -49,16 +49,18 @@ def _server(requests: list[httpx.Request], *, scripted: bool = True, builtin_cou
                 return httpx.Response(404)
             return httpx.Response(200, json={"id": agent_id, "harness": HARNESSES[agent_id]})
         if path == "/v1/agents":
+            after = request.url.params.get("after")
+            ids = [f"ag_local{i or ''}" for i in range(builtin_count)]
+            if after in ids:
+                ids = ids[ids.index(after) + 1 :]
+            page = ids[: int(request.url.params.get("limit", 100))]
+            more = len(ids) > len(page)
             rows = [
-                {
-                    "id": f"ag_local{i or ''}",
-                    "name": "claude-native-ui",
-                    "harness": "claude-native",
-                }
-                for i in range(builtin_count)
+                {"id": i, "name": "claude-native-ui", "harness": "claude-native"} for i in page
             ]
             return httpx.Response(
-                200, json={"data": [] if "after" in request.url.params else rows}
+                200,
+                json={"data": rows, "has_more": more, "last_id": page[-1] if more else None},
             )
         if path.endswith("/child_sessions"):
             return httpx.Response(200, json={"data": []})
