@@ -27,4 +27,20 @@ describe("splitSessionMessageOrigin", () => {
     expect(splitSessionMessageOrigin("[Message from session abc def]\nhi")).toBeNull();
     expect(splitSessionMessageOrigin("[Message from ]\nhi")).toBeNull();
   });
+
+  it("trims a padded label and rejects a blank one", () => {
+    expect(splitSessionMessageOrigin("[Message from  Supervisor ]\nx")?.label).toBe("Supervisor");
+    expect(splitSessionMessageOrigin("[Message from   ]\nx")).toBeNull();
+  });
+
+  it("bounds a named label to 1-64 characters without brackets or newlines", () => {
+    const body = "\nx";
+    expect(splitSessionMessageOrigin(`[Message from ${"a"}]${body}`)?.label).toBe("a");
+    expect(
+      splitSessionMessageOrigin(`[Message from ${"a".repeat(64)}]${body}`)?.label,
+    ).toHaveLength(64);
+    for (const label of ["a".repeat(65), "a[b", "a]b", "a\nb", "a\rb"]) {
+      expect(splitSessionMessageOrigin(`[Message from ${label}]${body}`)).toBeNull();
+    }
+  });
 });

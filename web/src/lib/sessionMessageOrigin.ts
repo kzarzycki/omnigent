@@ -28,6 +28,7 @@ export function splitSessionMessageOrigin(text: string): SessionMessageOrigin | 
   const match = SESSION_MESSAGE_PREFIX_RE.exec(text);
   if (match) return { sourceId: match[1], label: null, body: text.slice(match[0].length) };
   const named = NAMED_MESSAGE_PREFIX_RE.exec(text);
-  if (!named) return null;
-  return { sourceId: null, label: named[1].trim(), body: text.slice(named[0].length) };
+  const label = named?.[1].trim();
+  if (!named || !label) return null;
+  return { sourceId: null, label, body: text.slice(named[0].length) };
 }
