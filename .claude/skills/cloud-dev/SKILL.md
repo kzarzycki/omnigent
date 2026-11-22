@@ -79,34 +79,45 @@ installed skill (`~/.claude/skills` has none, and any other copy on the host may
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
 `engineering/skills/engineering-loop/scripts/approvals.py` under it.
 
+Checked in a VM against pack `engineering-v0.35.1` (`gatekeeper.py check merge <pr>`, `record verdict --help`,
+`record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
+the VM. Run them from a clone of the pack (`git clone --depth 1 --branch engineering-v0.35.1
+https://github.com/kzarzycki/agent-skills /tmp/as`; `gatekeeper.py` under `gatekeeper/skills/gatekeeper/scripts/`).
+
+**Runs in the VM:** `check build`, `check merge`, `record verdict`, `record checks` (the `local-ci` gate and its
+record) and `land`. `land` merges over REST (`PUT pulls/N/merge`, squash, pinned to the gated head), which needs no
+signing key. A PR's review threads are read through the proxy's `ccr/review_threads` route.
+Run `record checks` and `land` from a clean worktree of the PR head, after the setup steps below.
+
+**Still needs the host:**
+
 | Step | Why it can't run in the VM |
 |---|---|
-| Every `approvals.py` call: `check build`, `verdict`, `local-ci`, `land` | It reads PRs, issues, edit history and review threads through GraphQL |
-| Resolving review threads | GraphQL only |
+| Setting the board's `Risk` field | GraphQL only. `check build` and `check merge` say so and go on; the `risk:high` label alone shows the risk |
+| Resolving review threads | GraphQL only (reading them works) |
+| Telling whether a PR is in a merge queue | Not readable over REST, so `land` refuses such a PR in the VM |
 | The Codex verifier | It is the other model family, and there is no Codex cloud bridge |
 | Reading the verifier's report, writing your own report | Those files are on the host, where the chief of staff reads them |
 | The bridge and the Omnigent MCP relay | They drive the cloud session from the host that holds the personal claude.ai login; Omnigent's tools reach the VM through them |
 | Starting the lead (`start-lead.py`) and its workspace checkout | The chief of staff's side: the workspace names the environment and the branch the VM clones |
 | Anything needing the tailnet, a local browser or Xcode | The VM has none of these. No Omnigent step needs them today |
 
-- **Host helper.** Start one `claude-native-ui` child with `mcp__omnigent__sys_session_create`
+- **Host helper.** For the steps in the table, start one `claude-native-ui` child with `mcp__omnigent__sys_session_create`
   (model `claude-sonnet-5-5`, title `<story>-host`). Create it on the landing host by naming
   it (`placement='host'`, `host_id`, `workspace`), whichever host bridges your session;
   a child with no host runs on the bridge host, which may lack `gh` and the report paths.
   It runs in your host workspace, the checkout your session started from. Send it exact commands and ask for
-  their output and exit codes in its reply. It runs the scripts at the host paths above.
-  `local-ci` and `land` check the checkout's HEAD against the PR head, so it runs both in
-  a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
+  their output and exit codes in its reply. It also writes your final report to the host path your brief names.
+  A gatekeeper step run on the host (`record checks`, `land`) checks the checkout's HEAD against the PR head, so it
+  runs in a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
   `mise trust -q`, `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group lint` and
   `pnpm install --frozen-lockfile --filter web --filter ./editors/vscode` (the session-list
   lint is TypeScript, and the VS Code extension's type check runs once a branch touches the
-  pnpm lockfile).
-  Without them `local-ci` stops without checking anything. It also writes your final
-  report to the host path your brief names.
+  pnpm lockfile). Without them `record checks` stops without checking anything.
 - **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
   new sandbox without the Omnigent tools (#116), and a full host `tests/server` run takes
   about 24 minutes. Run long suites in the VM; send the helper steps that finish in a few
-  minutes, and `land --wait` only once `local-ci` has recorded its pass.
+  minutes, and `land --wait` only once `record checks` has recorded its pass.
 - **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
   `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
   child's finish notice instead.
