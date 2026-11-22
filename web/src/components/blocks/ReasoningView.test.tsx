@@ -138,9 +138,11 @@ describe("ReasoningView — keep thinking expanded", () => {
   it("shows a settled section's text without a click when the preference is on", () => {
     writeKeepThinkingExpanded(true);
     render(<ReasoningView text="Considered the options." isStreaming={false} duration={2.5} />);
-    expect(screen.getByText("Considered the options.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button"));
-    expect(screen.queryByText("Considered the options.")).toBeNull();
+    // The header previews the first line, so check the trigger's state rather than the text.
+    const trigger = screen.getByRole("button");
+    expect(trigger.getAttribute("data-state")).toBe("open");
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("data-state")).toBe("closed");
   });
 
   it("keeps a settled empty section a flat header when the preference is on", () => {
