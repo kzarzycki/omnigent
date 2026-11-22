@@ -41,7 +41,7 @@ from omnigent.debug_logging import (
     set_current_session_id,
 )
 from omnigent.entities import Conversation
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
 from omnigent.harness_aliases import canonicalize_harness, harness_account_key
 from omnigent.host.frames import (
     CAP_CLONE_REPOSITORY,
@@ -69,6 +69,7 @@ from omnigent.host.frames import (
     optional_str_bool_map,
     workspace_missing_message,
 )
+from omnigent.host.text_file import is_credential_path
 from omnigent.onboarding.harness_install import (
     ui_credential_configurable_harnesses,
     ui_install_key,
@@ -96,6 +97,11 @@ from omnigent.server.machine_access import refuse_machine_request
 from omnigent.server.managed_hosts import parse_project_repository
 from omnigent.server.model_block_list import current_model_block_list
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._host_filesystem import (
+    HostFsError,
+    HostFsUnavailableError,
+    read_workspace_from_host,
+)
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
     host_absent_error,
@@ -1979,6 +1985,61 @@ def create_hosts_router(
             "data": result.get("entries", []),
             "has_more": bool(result.get("has_more", False)),
         }
+
+    @router.get("/hosts/{host_id}/files/{path:path}")
+    async def read_host_file(
+        request: Request,
+        host_id: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """
+        Read one small UTF-8 text file on a host, with no live session.
+
+        Owner-scoped like the directory listing and reaches the host over
+        the same tunnel (``host.fs_request``, op ``read_text_file``). Takes
+        the listing's path rules: absolute or ``~``-prefixed.
+
+        :param request: FastAPI request (for auth).
+        :param host_id: Host identifier.
+        :param path: Absolute or tilde-prefixed file path.
+        :returns: ``{"object": "file", "path": <absolute path>, "size":
+            <bytes>, "content": <text>}``.
+        :raises HTTPException: 404 (host or file missing), 403 (not owner or
+            credential path), 400 (directory, non-UTF-8, bad path), 413
+            (over 64 KiB), 503 (host offline), 504 (timeout), 502 (host I/O).
+        """
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+
+        path = restore_host_filesystem_url_path(path)
+        _require_host_directory_path(path)
+        if is_credential_path(path):
+            raise HTTPException(status_code=403, detail="credential files cannot be read")
+
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            absent = _host_absent_error(host)
+            if isinstance(absent, WrongReplicaError):
+                raise absent
+            raise HTTPException(status_code=503, detail="host is offline")
+
+        try:
+            return await read_workspace_from_host(
+                host_registry=host_registry,
+                host_conn=conn,
+                op="read_text_file",
+                workspace=path,
+                session_id="",
+                params={},
+            )
+        except HostFsError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        except HostFsUnavailableError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.post("/hosts/{host_id}/directories")
     async def create_host_directory(
