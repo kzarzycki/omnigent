@@ -1993,6 +1993,16 @@ it("recovers a native request after an empty snapshot without reloading", async 
     });
     await poll();
     expect(screen.getByRole("button", { name: "Retry sending approval" })).toBeVisible();
+    // The snapshot is re-read every 2 s, not every second.
+    const reads = vi.mocked(sessionsApi.getSessionSlim).mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(sessionsApi.getSessionSlim).toHaveBeenCalledTimes(reads);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(sessionsApi.getSessionSlim).toHaveBeenCalledTimes(reads + 1);
     pendingElicitations = [];
     await poll();
     expect(
