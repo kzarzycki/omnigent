@@ -26,5 +26,7 @@ describe("splitSessionMessageOrigin", () => {
     expect(splitSessionMessageOrigin("[Message from session abc]\nhi")?.sourceId).toBe("abc");
     expect(splitSessionMessageOrigin("[Message from session abc def]\nhi")).toBeNull();
     expect(splitSessionMessageOrigin("[Message from ]\nhi")).toBeNull();
+    expect(splitSessionMessageOrigin("[Message from   ]\nhi")).toBeNull();
+    expect(splitSessionMessageOrigin("[Message from  Supervisor ]\nhi")?.label).toBe("Supervisor");
   });
 });
