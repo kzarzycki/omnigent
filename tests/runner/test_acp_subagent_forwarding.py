@@ -75,7 +75,7 @@ async def test_mint_subagent_child_uses_the_acp_start_type() -> None:
     parent_url = "/v1/sessions/parent1/events"
     child_url = "/v1/sessions/child_abc/events"
     client = _RecordingServerClient(
-        [_ok(parent_url, {"child_session_id": "child_abc"}), _ok(child_url)]
+        [_ok(parent_url, {"child_session_id": "child_abc"}), _ok(child_url), _ok(child_url)]
     )
     fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
@@ -112,7 +112,7 @@ async def test_mint_subagent_child_seeds_the_task_into_the_child_chat() -> None:
     parent_url = "/v1/sessions/parent1/events"
     child_url = "/v1/sessions/child_abc/events"
     client = _RecordingServerClient(
-        [_ok(parent_url, {"child_session_id": "child_abc"}), _ok(child_url)]
+        [_ok(parent_url, {"child_session_id": "child_abc"}), _ok(child_url), _ok(child_url)]
     )
     fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
@@ -125,7 +125,7 @@ async def test_mint_subagent_child_seeds_the_task_into_the_child_chat() -> None:
         child_id_future=fut,
     )
 
-    assert len(client.calls) == 2, "expected the mint plus the task message"
+    assert len(client.calls) == 3, "expected the mint, the task message and the running edge"
     item = client.calls[1]
     assert item.url == child_url, "the task must be addressed to the CHILD, not the parent"
     assert item.body["type"] == "external_conversation_item"
@@ -141,7 +141,9 @@ async def test_mint_subagent_child_seeds_the_task_into_the_child_chat() -> None:
 async def test_mint_subagent_child_skips_the_seed_without_a_task() -> None:
     """No task text → no transcript POST (the row is still minted)."""
     parent_url = "/v1/sessions/p/events"
-    client = _RecordingServerClient([_ok(parent_url, {"child_session_id": "c"})])
+    client = _RecordingServerClient(
+        [_ok(parent_url, {"child_session_id": "c"}), _ok("/v1/sessions/c/events")]
+    )
     fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     await acp_subagent_sessions._mint_acp_subagent_child(
@@ -154,7 +156,12 @@ async def test_mint_subagent_child_skips_the_seed_without_a_task() -> None:
     )
 
     assert fut.result() == "c"
-    assert len(client.calls) == 1
+    # The mint, then the running edge: the row shows Working, not Idle, until the end edge.
+    assert [call.url for call in client.calls] == [parent_url, "/v1/sessions/c/events"]
+    assert client.calls[1].body == {
+        "type": "external_session_status",
+        "data": {"status": "running"},
+    }
     # A blank title still sends a usable label (the child_key).
     assert client.calls[0].body["data"]["title"] == "k1"
 

@@ -2765,6 +2765,7 @@ async def _execute_subagent_tool(
     agent_spec: AgentSpec | None = None,
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     session_inbox: asyncio.Queue[_JsonObject] | None = None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Dispatch a sub-agent tool call (``sys_session_send``).
@@ -3088,6 +3089,15 @@ async def _execute_subagent_tool(
                 )
             harness_override_canonical = canonical
             child_harness = canonical
+        from omnigent.runner import cloud_children
+        from omnigent.server.machine_access import CLOUD_SESSION_HARNESS
+
+        if (
+            cloud_children.is_cloud_session(agent_spec, effective_harness)
+            and child_harness != CLOUD_SESSION_HARNESS
+        ):
+            # A new child shares this cloud session's runner, which is the bridge host.
+            return "Error: " + cloud_children.local_child_refusal(str(sub_agent_name))
         # Fail loud at dispatch when the child's harness needs a CLI binary
         # that isn't on PATH. Otherwise a missing CLI surfaces only as a lazy
         # first-turn failure (e.g. the pi harness raises ImportError, which the
@@ -3884,6 +3894,7 @@ async def _execute_session_create(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None = None,
     runner_workspace: Path | None = None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Create a child or an independent session (``sys_session_create``).
@@ -3924,16 +3935,35 @@ async def _execute_session_create(
         os_env cwd that ``config_path`` is read from.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param effective_harness: The session's harness override, which decides
+        whether the caller is a claude-cloud session.
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     if server_client is None:
         return json.dumps({"error": "sys_session_create requires server access"})
     if conversation_id is None:
         return json.dumps({"error": "sys_session_create requires a session id"})
+    from omnigent.runner import cloud_children
+
     agent_id = args.get("agent_id")
     config_path = args.get("config_path")
     has_agent_id = isinstance(agent_id, str) and bool(agent_id)
     has_config_path = isinstance(config_path, str) and bool(config_path)
+    cloud_caller: cloud_children.CloudCaller | None = None
+    if cloud_children.is_cloud_session(agent_spec, effective_harness):
+        if has_config_path:
+            return json.dumps(
+                {
+                    "error": "config_path reads the bridge host's disk, not this claude-cloud "
+                    "session's. Name a registered agent with agent_id: a claude-cloud agent "
+                    f"runs as a child; for any other, {cloud_children.NAME_A_HOST}; "
+                    "no session was created"
+                }
+            )
+        cloud_caller = await cloud_children.read_caller(server_client, conversation_id)
+        if not has_agent_id and cloud_caller.agent_id is not None:
+            # A cloud session's default child is another session of its own cloud agent.
+            agent_id, has_agent_id = cloud_caller.agent_id, True
     if has_agent_id == has_config_path:
         # Fail loud on both-or-neither: the two modes create different
         # agents, so silently preferring one would mislaunch.
@@ -3977,6 +4007,16 @@ async def _execute_session_create(
     project_error = _project_argument_error(args, placement)
     if project_error is not None:
         return project_error
+    if cloud_caller is not None:
+        refusal = await cloud_children.bridge_host_refusal(
+            server_client,
+            placement=placement,
+            agent_id=str(agent_id),
+            own_agent=cloud_caller.agent_id,
+            pinned=bool(args.get("environment_id")),
+        )
+        if refusal is not None:
+            return json.dumps({"error": refusal})
     message = args.get("message")
     profile_fields = ("sandbox_provider", "sandbox_profile_id", "sandbox_profile_revision")
     selection = {key: args[key] for key in profile_fields if args.get(key) is not None}
@@ -4032,6 +4072,10 @@ async def _execute_session_create(
     )
     if workflow_id is not None:
         body["workflow_id"] = workflow_id
+    if cloud_caller is not None and placement == "child" and cloud_caller.workspace:
+        # The bridge starts the child from its workspace, whose pin selects the cloud
+        # environment; without one the runner would use its own launch directory.
+        body["workspace"] = cloud_caller.workspace
     headers: dict[str, str] = {}
     # A project named by environment_id places a same_host create on its pinned host.
     pinned = {"environment_id": args["environment_id"]} if args.get("environment_id") else {}
@@ -4107,7 +4151,8 @@ async def _execute_session_create(
             return json.dumps(
                 {
                     "error": "Scripted session options are unavailable on this server; "
-                    "no session was created"
+                    "no session was created. The server enables them with the "
+                    "scripted_sessions release flag (OMNIGENT_FEATURES=scripted_sessions)"
                 }
             )
         if placement == "host":
@@ -6664,6 +6709,7 @@ async def _execute_agent_tool(
     agent_spec: AgentSpec | None,
     conversation_id: str | None,
     runner_workspace: Path | None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Runner-local handler for ``sys_agent_get`` / ``sys_agent_download``.
@@ -6693,6 +6739,8 @@ async def _execute_agent_tool(
         resolution, e.g. ``"conv_abc123"``.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param effective_harness: The session's harness override, so a cloud caller is
+        recognized through it.
     :returns: Tool output JSON string.
     """
     if server_client is None:
@@ -6715,6 +6763,7 @@ async def _execute_agent_tool(
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
+            effective_harness=effective_harness,
         )
     session_id = args.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -7132,6 +7181,7 @@ async def _agent_list_via_rest(
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
+    effective_harness: str | None = None,
 ) -> str:
     """
     List agents across built-ins, session-bound, and local, with host readiness.
@@ -7246,7 +7296,7 @@ async def _agent_list_via_rest(
             ),
         }
 
-    return await _fitted_discovery_result(
+    result = await _fitted_discovery_result(
         _fetch,
         limit=limit,
         cursor_state=cursor_state,
@@ -7255,6 +7305,33 @@ async def _agent_list_via_rest(
         filters={},
         page_sections=("builtins", "session_agents", "local_configs"),
     )
+    from omnigent.runner import cloud_children
+
+    if (
+        continued
+        or not conversation_id
+        or agent_spec is None
+        or not cloud_children.is_cloud_session(agent_spec, effective_harness)
+    ):
+        return result
+    # A cloud session's own agent is the one its cloud children start from, though a
+    # user or session-bound agent is not among the server's agents. Its own field, so
+    # paging never trims it or puts a cursor on it.
+    own_agent = (await cloud_children.read_caller(server_client, conversation_id)).agent_id
+    parsed = json.loads(result)
+    if own_agent and isinstance(parsed, dict) and "error" not in parsed:
+        from omnigent.server.machine_access import spec_harness_id
+
+        parsed["caller_agent"] = [
+            {
+                "agent_id": own_agent,
+                "name": agent_spec.name,
+                "description": agent_spec.description,
+                "harness": spec_harness_id(agent_spec),
+            }
+        ]
+        return json.dumps(parsed)
+    return result
 
 
 _USER_AGENTS_LIMIT = 20
@@ -8659,6 +8736,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 publish_event=publish_event,
                 session_inbox=session_inbox,
+                effective_harness=effective_harness,
             )
         elif tool_name in _LIST_MODELS_TOOLS:
             output = await _execute_list_models_tool(agent_spec=agent_spec)
@@ -8691,6 +8769,7 @@ async def execute_tool(
                 publish_event=publish_event,
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
+                effective_harness=effective_harness,
             )
         elif tool_name in _UI_TOOLS:
             output = await _open_file_via_rest(args, conversation_id, server_client)
@@ -8816,6 +8895,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 conversation_id=conversation_id,
                 runner_workspace=runner_workspace,
+                effective_harness=effective_harness,
             )
         elif tool_name in _POLICY_TOOLS:
             output = await _execute_policy_tool(
