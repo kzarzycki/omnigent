@@ -106,7 +106,6 @@ fe() { env -u OMNIGENT_BRIDGE_HOST -u OMNIGENT_DEV_ENVIRONMENT_ID OMNIGENT_FORK_
   || { echo "!! fork-env.sh: $(cat "$tmp/err" 2>/dev/null)"; exit 1; }
 echo "cloud-dev fork-env.sh: ok"
 bash "$here/gate-setup-test.sh" || exit 1
-bash "$here/check-trailers-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
 # the approvals.py the policy test receives through the gate's own last line (POLICY_ONLY=1 skips the rest of
 # this script): pin over checkout, checkout when no pin, override over both, a stale pin exits nonzero

@@ -1524,6 +1524,7 @@ def test_host_reset_id_mints_fresh_id_when_no_daemon_runs(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
 
     result = CliRunner().invoke(cli_group, ["host", "reset-id", "--yes"])
@@ -1575,6 +1576,7 @@ def test_host_reset_id_refuses_while_a_daemon_is_running(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [_online_record()])
     monkeypatch.setattr(cli, "_pid_alive", lambda _pid: True)
 
@@ -1595,6 +1597,7 @@ def test_host_reset_id_declined_prompt_leaves_id_untouched(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
 
     result = CliRunner().invoke(cli_group, ["host", "reset-id"], input="n\n")
@@ -1619,6 +1622,7 @@ def test_host_reset_id_refuses_when_env_override_pins_identity(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"host": {"host_id": "a" * 32, "name": "my-laptop"}}))
     monkeypatch.setattr("omnigent.host.identity.CONFIG_PATH", config_path)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "_list_daemon_records", lambda **_kw: [])
     monkeypatch.setenv("OMNIGENT_HOST_ID", "b" * 32)
     monkeypatch.setenv("OMNIGENT_HOST_NAME", "managed-host")
