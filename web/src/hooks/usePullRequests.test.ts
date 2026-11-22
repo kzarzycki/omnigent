@@ -6,6 +6,7 @@ import {
   applyPullRequestLabelChange,
   applyPullRequestReviewerChange,
   computeLinkedPullRequestPollInterval,
+  computePanelPullRequestPollInterval,
   computePullRequestPollInterval,
   fetchPullRequestInfo,
   normalizePullRequestInfo,
@@ -412,6 +413,28 @@ describe("computePullRequestPollInterval", () => {
     expect(
       computePullRequestPollInterval(ready({ pr: { ...merged, comments_partial: true } })),
     ).toBe(5_000);
+  });
+
+  it("polls a tracking panel fast while something changes and slowly once settled", () => {
+    const tracked = (over: Partial<PullRequestInfo> = {}) =>
+      ready({ tracking_available: true, ...over });
+    const open = ready().pr!;
+    // Settled, merged or closed: a new link can still appear, so rest at 30 s, not 10 s.
+    expect(computePanelPullRequestPollInterval(tracked())).toBe(30_000);
+    for (const state of ["MERGED", "CLOSED"]) {
+      expect(computePanelPullRequestPollInterval(tracked({ pr: { ...open, state } }))).toBe(
+        30_000,
+      );
+    }
+    // Waiting for a PR: the turn-end refresh shows the agent's own PR sooner.
+    expect(computePanelPullRequestPollInterval(tracked({ pr: null }))).toBe(30_000);
+    // Checks running or setup unresolved: 10 s, never faster.
+    const running = { ...open, checks: { ...open.checks, pending: 1 } };
+    expect(computePanelPullRequestPollInterval(tracked({ pr: running }))).toBe(10_000);
+    expect(computePanelPullRequestPollInterval(tracked({ authenticated: false }))).toBe(10_000);
+    // A host without tracking keeps the plain rule.
+    expect(computePanelPullRequestPollInterval(ready())).toBe(false);
+    expect(computePanelPullRequestPollInterval(undefined)).toBe(5_000);
   });
 
   it("rests once there is nothing left to watch", () => {
