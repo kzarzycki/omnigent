@@ -67,6 +67,24 @@ on macOS, or `~/.claude/.credentials.json`.
    The bridge never answers the trust prompt and fails with that instruction
    instead.
 
+### Another bridge host
+
+Any host can bridge cloud sessions; this spreads the per-session memory over several
+machines. Repeat the setup above on each one:
+
+- **A login of its own.** Run `claude auth login` on that host. Never copy a
+  credentials file: two hosts sharing one refresh token can log each other out.
+- **The same `Claude Cloud` entry** under `acp.agents`, with `inject_system_prompt: false`
+  and `cancel_on_abandon: false`. Without the second, a turn Omnigent gives up on
+  interrupts the cloud session. Omnigent refuses to create a session for
+  `acp:claude-cloud` on a host that does not report this entry, naming the agent.
+- **A pinned, trusted launch dir.** Put `remote.defaultEnvironmentId` in the launch dir's
+  `.claude/settings.local.json`, and run `claude` there once to trust the folder.
+- **Current host updates**, so the host reports each ACP agent under its own key.
+
+A session stays on the host it started on (see [Limits](#limits)); the bridge's state is
+per host.
+
 An idle bridge exits after `CLAUDE_CLOUD_IDLE_EXIT_S` seconds (default 60, `0` keeps
 it), taking its MCP server child with it, and a bridge whose runner is gone exits
 at once. The next message starts a new bridge, which re-attaches the same cloud

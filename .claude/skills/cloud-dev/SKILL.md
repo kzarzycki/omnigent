@@ -8,7 +8,10 @@ description: How to develop this fork from a Claude cloud session (the `claude-c
 Omnigent development runs in Claude cloud sessions through the `claude-cloud` Omnigent
 agent, so the load is on Anthropic's machines rather than the owner's. The session's VM
 (cloud machine) does the spec, the code, the tests and the PR. A few steps can't run
-there and go through a host helper on the bridge host, where the bridge runs. The owner's
+there and go through a host helper on the landing host. Two roles: a **bridge host** is any
+host that bridges cloud sessions (a lead may be bridged on any of them); the **landing host**
+is the one with `gh`, the agent-skills checkout, signing and the report paths. They can be
+the same machine. The owner's
 machine-specific values (host names, the environment's ID) stay out of this repo:
 `fork-env.sh <NAME>` next to this file prints one, from the environment or the local
 overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when neither has it.
@@ -71,7 +74,7 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 
 ## On the host
 
-The engineering loop's scripts on the bridge host are in its agent-skills checkout, not an
+The engineering loop's scripts on the landing host are in its agent-skills checkout, not an
 installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
 `engineering/skills/engineering-loop/scripts/approvals.py` under it.
@@ -87,8 +90,10 @@ and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that chec
 | Anything needing the tailnet, a local browser or Xcode | The VM has none of these. No Omnigent step needs them today |
 
 - **Host helper.** Start one `claude-native-ui` child with `mcp__omnigent__sys_session_create`
-  (model `claude-sonnet-5-5`, title `<story>-host`). It runs on the bridge host in your host
-  workspace, the checkout your session started from. Send it exact commands and ask for
+  (model `claude-sonnet-5-5`, title `<story>-host`). Create it on the landing host by naming
+  it (`placement='host'`, `host_id`, `workspace`), whichever host bridges your session;
+  a child with no host runs on the bridge host, which may lack `gh` and the report paths.
+  It runs in your host workspace, the checkout your session started from. Send it exact commands and ask for
   their output and exit codes in its reply. It runs the scripts at the host paths above.
   `local-ci` and `land` check the checkout's HEAD against the PR head, so it runs both in
   a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
@@ -105,7 +110,7 @@ and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that chec
 - **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
   `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
   child's finish notice instead.
-- **Verifier.** Have the helper make a detached worktree of the PR head on the host
+- **Verifier.** Have the helper make a detached worktree of the PR head on the landing host
   (`git fetch origin <branch> && git worktree add --detach <path> <sha>`). Start the
   verifier as a `codex-native-ui` child with `sys_session_create`. A child always starts
   in your host workspace, so its brief names that worktree and a report path inside it.
