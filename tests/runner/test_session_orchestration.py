@@ -1710,3 +1710,46 @@ async def test_pr_link_uncertain_delivery_is_not_retried(failure):
         )
     assert len(posts) == 1
     assert ("refused" if failure == "forbidden" else "could not be confirmed") in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_and_message_tools_accept_a_long_worker_brief():
+    """A 19,000-character brief passes the runner's length checks of both tools."""
+    brief = "a" * 19_000
+    requests: list[httpx.Request] = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(404, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        created = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {"agent_id": "worker", "placement": "same_host", "message": brief}
+                ),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+        messaged = json.loads(
+            await execute_tool(
+                tool_name="sys_session_message",
+                arguments=json.dumps({"session_id": "1234567890123456", "message": brief}),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+    assert requests, "sys_session_create refused the brief before any request"
+    assert "characters" not in created.get("error", "")
+    assert "characters" not in messaged.get("error", "")
+
+
+def test_session_message_schema_advertises_the_long_limit():
+    from omnigent.tools.builtins.session_message import SysSessionMessageTool
+
+    schema = SysSessionMessageTool().get_schema()["function"]["parameters"]["properties"]
+    assert schema["message"]["maxLength"] == 32_000
