@@ -77,7 +77,7 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
 The engineering loop's scripts on the landing host are in its agent-skills checkout, not an
 installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
-`engineering/skills/engineering-loop/scripts/approvals.py` under it.
+`gatekeeper/skills/gatekeeper/scripts/approvals.py` under it.
 
 Checked in a VM against pack `engineering-v0.35.1` (`approvals.py check merge <pr>`, `record verdict --help`,
 `record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
