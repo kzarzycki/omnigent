@@ -246,9 +246,9 @@ the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
 (head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
 other PR as a squash (`land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
 Nothing is signed or checked against a signer list.
-The fork runs no GitHub Actions (`loop.ci: false`), so first record `mise run
-check:all` passing on the head with `approvals.py local-ci <pr>` (run `mise trust`
-once in a new checkout).
+The `gate` check in GitHub Actions is the proof and `land` queues the PR with Mergify,
+so no local gate is recorded first (`mise run check:all` stays the pre-push check;
+run `mise trust` once in a new checkout).
 
 A landing host needs `gh` logged in to an account that can push to
 `kzarzycki/omnigent`. Their names are machine-specific, so they stay out of this

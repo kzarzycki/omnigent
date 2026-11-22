@@ -106,7 +106,7 @@ and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that chec
 - **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
   new sandbox without the Omnigent tools (#116), and a full host `tests/server` run takes
   about 24 minutes. Run long suites in the VM; send the helper steps that finish in a few
-  minutes, and `land --wait` only once `local-ci` has recorded its pass.
+  minutes, and `land --wait` only once the PR's `gate` check is green.
 - **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
   `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
   child's finish notice instead.
