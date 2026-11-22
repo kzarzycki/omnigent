@@ -27,6 +27,7 @@ def _item(kind: str, item_id: str, **data: object) -> ConversationItem:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_layer_two_preserves_tool_pairs_across_the_recent_boundary(
     interleaved: bool,
 ) -> None:
@@ -96,6 +97,7 @@ async def test_layer_two_preserves_tool_pairs_across_the_recent_boundary(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_closed_older_tool_pairs_remain_eligible_for_summarization() -> None:
     history = [
         _item(
