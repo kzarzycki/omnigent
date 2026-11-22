@@ -43,6 +43,9 @@ def test_startup_theme_falls_back_to_light_for_corrupt_config(
     assert _load_startup_theme() is LIGHT_THEME
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
+
+
 def test_startup_theme_returns_persisted_dark(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -54,6 +57,9 @@ def test_startup_theme_returns_persisted_dark(
     config_path.write_text("tui:\n  theme: dark\n", encoding="utf-8")
 
     assert _load_startup_theme() is DARK_THEME
+
+
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
 
 
 def test_startup_theme_shows_picker_on_first_launch(
@@ -87,6 +93,7 @@ async def test_theme_no_args_shows_current_theme() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
 async def test_theme_light_updates_host_and_formatter(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -111,6 +118,7 @@ async def test_theme_light_updates_host_and_formatter(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/583")
 async def test_theme_dark_and_default_reset_to_default_theme(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

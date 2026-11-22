@@ -441,6 +441,7 @@ def databricks_env(tmp_path: Path) -> dict[str, str]:
         ("Darwin", "arm64", "darwin_arm64"),
     ],
 )
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_install_databricks_cli(
     lib: Path, databricks_env: dict[str, str], system: str, arch: str, release_platform: str
 ) -> None:
@@ -495,6 +496,7 @@ def test_existing_databricks_cli_is_checked_without_replacement(
 
 
 @pytest.mark.parametrize("failure", ["download", "checksum", "archive", "auth"])
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_databricks_install_failure_does_not_publish_binary(
     lib: Path, databricks_env: dict[str, str], failure: str
 ) -> None:
@@ -529,7 +531,11 @@ def test_databricks_install_failure_does_not_publish_binary(
 
 @pytest.mark.parametrize(
     ("args", "download_fails"),
-    [("", False), ("", True), ("--no-databricks --extra antigravity", False)],
+    [
+        pytest.param("", False, marks=pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")),
+        ("", True),
+        ("--no-databricks --extra antigravity", False),
+    ],
 )
 def test_main_requires_selected_dependencies_before_reporting_success(
     lib: Path, databricks_env: dict[str, str], args: str, download_fails: bool

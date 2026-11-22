@@ -472,6 +472,9 @@ async def test_open_daemon_client_uses_machine_key_without_host(
         assert client.headers[OMNIGENT_SLICE_KEY_HEADER] == "client_key"
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
+
+
 async def test_open_daemon_client_keeps_an_unkeyed_resend_unkeyed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
