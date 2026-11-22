@@ -63,7 +63,7 @@ from fastapi import FastAPI
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.inner.acp_executor import AcpAgentConfig, AcpExecutor
-from omnigent.inner.acp_extension import NO_ACP_EXTENSION, AcpExtension
+from omnigent.inner.acp_extension import AcpExtension, generic_acp_extension
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import Executor
 from omnigent.inner.os_env_serialization import decode_sandbox_spec
@@ -151,11 +151,11 @@ def _resolve_os_env() -> OSEnvSpec:
     )
 
 
-def _build_acp_executor(extension: AcpExtension = NO_ACP_EXTENSION) -> Executor:
+def _build_acp_executor(extension: AcpExtension | None = None) -> Executor:
     """Construct an :class:`AcpExecutor` from env-var config (lazily, on first turn).
 
     :param extension: Vendor behavior to inject, from the calling wrap. Defaults
-        to protocol-only for the generic ``acp`` harness.
+        to :func:`generic_acp_extension` for the generic ``acp`` harness.
     """
     command = os.environ.get(_ENV_COMMAND, "").strip()
     if not command:
@@ -187,10 +187,15 @@ def _build_acp_executor(extension: AcpExtension = NO_ACP_EXTENSION) -> Executor:
         inject_system_prompt=inject_system_prompt,
         cancel_on_abandon=_env_enabled(_ENV_CANCEL_ON_ABANDON, default=True),
     )
-    return AcpExecutor(config=config, cwd=cwd, os_env=_resolve_os_env(), extension=extension)
+    return AcpExecutor(
+        config=config,
+        cwd=cwd,
+        os_env=_resolve_os_env(),
+        extension=extension if extension is not None else generic_acp_extension(),
+    )
 
 
-def create_app(extension: AcpExtension = NO_ACP_EXTENSION) -> FastAPI:
+def create_app(extension: AcpExtension | None = None) -> FastAPI:
     """Build the generic ACP harness's FastAPI app (required entry point).
 
     The wrapped :class:`AcpExecutor` is constructed lazily on the first turn, so

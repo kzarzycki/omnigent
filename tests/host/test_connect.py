@@ -63,6 +63,7 @@ from omnigent.host.frames import (
     HostDetectCredentialsFrame,
     HostDetectCredentialsResultFrame,
     HostFsRequestFrame,
+    HostFsResultFrame,
     HostHarnessLoginCancelFrame,
     HostHarnessLoginCancelResultFrame,
     HostHarnessLoginFrame,
@@ -7001,6 +7002,131 @@ async def test_dispatch_clone_repository_keeps_orphan_reaper_paused(
     )
 
 
+# ── host.fs_request read_text_file op ───────────────────
+
+
+def _read_text_file(host: HostProcess, path: str) -> HostFsResultFrame:
+    """Run a ``read_text_file`` fs request for ``path`` through the host handler."""
+    return host._handle_fs_request(
+        HostFsRequestFrame(
+            request_id="rt1", op="read_text_file", workspace=path, session_id="", params={}
+        )
+    )
+
+
+def test_read_text_file_returns_content_and_resolved_path(tmp_path: Path) -> None:
+    """A small UTF-8 file answers with its absolute path, byte size and text."""
+    target = tmp_path / ".claude" / "settings.local.json"
+    target.parent.mkdir()
+    target.write_text('{"remote": {"defaultEnvironmentId": "env_example"}}', encoding="utf-8")
+
+    result = _read_text_file(_make_host_process(), str(target))
+
+    assert result.status == "ok"
+    assert result.payload == {
+        "object": "file",
+        "path": str(target),
+        "size": target.stat().st_size,
+        "content": target.read_text(encoding="utf-8"),
+    }
+
+
+def test_read_text_file_missing_is_404(tmp_path: Path) -> None:
+    """A missing path is a 404."""
+    result = _read_text_file(_make_host_process(), str(tmp_path / "nope.txt"))
+
+    assert (result.status, result.error_status) == ("error", 404)
+
+
+def test_read_text_file_directory_is_400(tmp_path: Path) -> None:
+    """A directory is a 400 that points at the listing route."""
+    result = _read_text_file(_make_host_process(), str(tmp_path))
+
+    assert (result.status, result.error_status) == ("error", 400)
+    assert "/filesystem" in (result.error or "")
+
+
+def test_read_text_file_over_limit_is_413(tmp_path: Path) -> None:
+    """A file over 64 KiB is a 413; exactly 64 KiB is still served."""
+    at_limit = tmp_path / "at_limit.txt"
+    at_limit.write_bytes(b"a" * 65536)
+    over = tmp_path / "over.txt"
+    over.write_bytes(b"a" * 65537)
+    host = _make_host_process()
+
+    assert _read_text_file(host, str(at_limit)).status == "ok"
+    result = _read_text_file(host, str(over))
+    assert (result.status, result.error_status) == ("error", 413)
+
+
+def test_read_text_file_non_utf8_is_400(tmp_path: Path) -> None:
+    """Bytes that are not valid UTF-8 are a 400."""
+    target = tmp_path / "binary.bin"
+    target.write_bytes(b"\xff\xfe\x00bad")
+
+    result = _read_text_file(_make_host_process(), str(target))
+
+    assert (result.status, result.error_status) == ("error", 400)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".credentials.json",
+        "auth.json",
+        ".env",
+        ".env.production",
+        ".ssh/id_ed25519",
+        ".ENV",
+        "Auth.JSON",
+        ".SSH/id_rsa",
+    ],
+)
+def test_read_text_file_refuses_credential_paths(tmp_path: Path, relative: str) -> None:
+    """Credential basenames and anything under a .ssh directory are a 403."""
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("secret", encoding="utf-8")
+
+    result = _read_text_file(_make_host_process(), str(target))
+
+    assert (result.status, result.error_status) == ("error", 403)
+
+
+def test_read_text_file_refuses_symlink_to_credential_file(tmp_path: Path) -> None:
+    """A symlink under an innocent name cannot reach a credential file."""
+    secret = tmp_path / ".credentials.json"
+    secret.write_text("secret", encoding="utf-8")
+    link = tmp_path / "notes.txt"
+    link.symlink_to(secret)
+
+    result = _read_text_file(_make_host_process(), str(link))
+
+    assert (result.status, result.error_status) == ("error", 403)
+
+
+def test_read_text_file_refuses_non_regular_file(tmp_path: Path) -> None:
+    """A FIFO is a 400 and never blocks on open."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+
+    result = _read_text_file(_make_host_process(), str(fifo))
+
+    assert (result.status, result.error_status) == ("error", 400)
+
+
+def test_read_text_file_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``~`` path resolves against the host's home and reports the absolute path."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "note.txt").write_text("hi", encoding="utf-8")
+
+    result = _read_text_file(_make_host_process(), "~/note.txt")
+
+    assert result.status == "ok"
+    assert result.payload is not None
+    assert result.payload["path"] == str(tmp_path / "note.txt")
+
+
 # ── host.create_dir handler ─────────────────────────────
 
 
@@ -12519,7 +12645,7 @@ def test_host_serves_a_pr_the_server_vouches_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reads and writes serve a PR this host never recorded once the server vouches for it."""
-    from omnigent.host.frames import HostFsResultFrame, HostFsWriteFrame
+    from omnigent.host.frames import HostFsWriteFrame
     from omnigent.runner import github_resource
 
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
@@ -13084,7 +13210,7 @@ def test_github_attachment_upload_is_served_on_host(
     """The host decodes the tunnelled file and uploads it when the runner is offline."""
     import base64
 
-    from omnigent.host.frames import HostFsResultFrame, HostFsWriteFrame
+    from omnigent.host.frames import HostFsWriteFrame
     from omnigent.runner import github_resource
     from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
 
