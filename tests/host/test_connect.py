@@ -7071,7 +7071,16 @@ def test_read_text_file_non_utf8_is_400(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "relative",
-    [".credentials.json", "auth.json", ".env", ".env.production", ".ssh/id_ed25519"],
+    [
+        ".credentials.json",
+        "auth.json",
+        ".env",
+        ".env.production",
+        ".ssh/id_ed25519",
+        ".ENV",
+        "Auth.JSON",
+        ".SSH/id_rsa",
+    ],
 )
 def test_read_text_file_refuses_credential_paths(tmp_path: Path, relative: str) -> None:
     """Credential basenames and anything under a .ssh directory are a 403."""
@@ -7094,6 +7103,16 @@ def test_read_text_file_refuses_symlink_to_credential_file(tmp_path: Path) -> No
     result = _read_text_file(_make_host_process(), str(link))
 
     assert (result.status, result.error_status) == ("error", 403)
+
+
+def test_read_text_file_refuses_non_regular_file(tmp_path: Path) -> None:
+    """A FIFO is a 400 and never blocks on open."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+
+    result = _read_text_file(_make_host_process(), str(fifo))
+
+    assert (result.status, result.error_status) == ("error", 400)
 
 
 def test_read_text_file_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 from typing import Any
 
 MAX_TEXT_FILE_BYTES = 64 * 1024
@@ -37,7 +38,8 @@ def is_credential_path(path: str) -> bool:
     :param path: Absolute or ``~``-prefixed path, ``/`` or ``\\`` separated.
     :returns: ``True`` for a credential basename or any path under a ``.ssh`` directory.
     """
-    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    # Casefolded so a case-insensitive filesystem can't reach `.ENV` or `.SSH`.
+    parts = [part.casefold() for part in path.replace("\\", "/").split("/") if part]
     if not parts:
         return False
     if _SSH_DIRECTORY in parts[:-1]:
@@ -59,14 +61,20 @@ def read_text_file(path: str) -> dict[str, Any]:
     resolved = os.path.realpath(absolute)
     if is_credential_path(absolute) or is_credential_path(resolved):
         raise HostTextFileError(403, "forbidden_path", "credential files cannot be read")
-    if not os.path.exists(absolute):
-        raise HostTextFileError(404, "not_found", "file does not exist")
-    if os.path.isdir(absolute):
+    try:
+        mode = os.stat(resolved).st_mode
+    except FileNotFoundError as exc:
+        raise HostTextFileError(404, "not_found", "file does not exist") from exc
+    if stat.S_ISDIR(mode):
         raise HostTextFileError(
             400, "is_a_directory", "path is a directory; use /filesystem to list it"
         )
+    if not stat.S_ISREG(mode):
+        # A FIFO or device would block the host's worker thread on open.
+        raise HostTextFileError(400, "not_a_regular_file", "path is not a regular file")
     try:
-        with open(absolute, "rb") as handle:
+        # Open the resolved path the deny-list checked, not the path as given.
+        with open(resolved, "rb") as handle:
             # One extra byte detects an oversized file without reading all of it.
             raw = handle.read(MAX_TEXT_FILE_BYTES + 1)
     except FileNotFoundError as exc:
