@@ -85,7 +85,7 @@ the VM. Run them from the pack clone (Loop role files above; add `--branch engin
 `gatekeeper/skills/gatekeeper/scripts/approvals.py`.
 
 **Runs in the VM:** `check build`, `check merge`, `record verdict`, `record checks` (the `local-ci` gate and its
-record) and `land`. `land` merges over REST (`PUT pulls/N/merge`, squash, pinned to the gated head), which needs no
+record) and `land`. `land` merges over REST (`PUT pulls/N/merge`, squash, or a merge commit for a `sync/*` head, pinned to the gated head), which needs no
 signing key. A PR's review threads are read through the proxy's `ccr/review_threads` route.
 Run `record checks` and `land` from a clean worktree of the PR head, after the setup steps below.
 
