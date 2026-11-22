@@ -59,6 +59,10 @@ def reported_harness_availability(
     if not harness or harness == "auto" or not readiness:
         return None, None
     canonical = canonicalize_harness(harness) or harness
+    # Hosts report each ACP agent under its own key; the shared ``acp`` key only
+    # means some agent is configured. Older hosts report no per-agent keys.
+    if harness.startswith("acp:") and any(key.startswith("acp:") for key in readiness):
+        canonical = harness
     value = readiness.get(canonical)
     if value is True:
         return True, None
