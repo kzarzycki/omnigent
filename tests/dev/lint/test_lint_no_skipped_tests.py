@@ -28,6 +28,22 @@ def test_scan_flags_decorator_skip(tmp_path: Path) -> None:
     assert "test_thing" in hits[0][1], f"Message should name the function, got {hits[0][1]!r}."
 
 
+def test_scan_accepts_skip_whose_reason_links_a_fork_issue(tmp_path: Path) -> None:
+    """A skip is allowed only when its reason links a tracking issue."""
+    linked = tmp_path / "test_linked.py"
+    linked.write_text(
+        "import pytest\n"
+        '@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: red")\n'
+        "def test_thing() -> None: ...\n"
+    )
+    unlinked = tmp_path / "test_unlinked.py"
+    unlinked.write_text(
+        'import pytest\n@pytest.mark.skip(reason="see issue 595")\ndef test_thing() -> None: ...\n'
+    )
+    assert scan(linked) == [], "A skip linking a fork issue URL must pass."
+    assert len(scan(unlinked)) == 1, "A skip without an issue URL must still be flagged."
+
+
 def test_scan_flags_module_level_pytestmark_skip(tmp_path: Path) -> None:
     """A module-level ``pytestmark = pytest.mark.skip(...)`` trips the hook."""
     f = tmp_path / "test_sample.py"

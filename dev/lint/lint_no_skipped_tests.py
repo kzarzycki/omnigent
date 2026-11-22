@@ -18,6 +18,8 @@ What this catches
 What this does NOT catch
 ------------------------
 
+- ``@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/<n>: ...")``:
+  a known-red test skipped with a reason that links its tracking issue.
 - ``@pytest.mark.skipif(condition, reason=...)``. Conditional skip
   is legitimate when the condition tests an environmental
   precondition (missing binary, wrong platform, missing optional
@@ -32,6 +34,7 @@ Exit code 1 if any hits are found.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -58,12 +61,27 @@ def _is_skip_attribute(node: ast.expr) -> bool:
     return False
 
 
+_ISSUE_URL = re.compile(r"https://github\.com/kzarzycki/omnigent/issues/\d+")
+
+
+def _reason_links_issue(call: ast.Call) -> bool:
+    """Return True if ``call`` has a string ``reason=`` linking a fork issue."""
+    return any(
+        keyword.arg == "reason"
+        and isinstance(keyword.value, ast.Constant)
+        and isinstance(keyword.value.value, str)
+        and _ISSUE_URL.search(keyword.value.value) is not None
+        for keyword in call.keywords
+    )
+
+
 def _decorator_calls_skip(decorator: ast.expr) -> bool:
     """Return True if ``decorator`` is ``@pytest.mark.skip`` or ``@...skip(...)``."""
     if _is_skip_attribute(decorator):
         return True
     if isinstance(decorator, ast.Call) and _is_skip_attribute(decorator.func):
-        return True
+        # A known-red test may be skipped when its reason links the tracking issue.
+        return not _reason_links_issue(decorator)
     return False
 
 
