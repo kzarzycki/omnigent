@@ -5211,12 +5211,17 @@ def inject_user_message(
 
 @dataclass(frozen=True)
 class _SubmittedPrompt:
-    """A submitted message: its bridge, transcript boundary and time at its Enter, and text."""
+    """
+    A submitted message: its bridge, transcript boundary and time at its Enter, and text.
+
+    :param echoes_before: Echoes of the message's marker above the input box before the paste.
+    """
 
     bridge_dir: Path
     boundary: SubmitBoundary | None
     text: str
     submitted_at: float
+    echoes_before: int = 0
 
 
 # The last submit per bridge whose draft Claude never accepted in time; its Enter may still land.
@@ -5240,6 +5245,27 @@ def _submit_recorded(submitted: _SubmittedPrompt) -> bool:
     )
     return boundary is not None and has_recorded_prompt(
         boundary, submitted.text, normalize_prompt=_recorded_prompt_text
+    )
+
+
+def _echoes_above_composer(pane: str, needle: str) -> int:
+    """Count *needle* in the pane above its input box, where a submitted prompt is echoed."""
+    lines = pane.splitlines()
+    rules = _composer_frame_rule_indices(lines)
+    above = lines[: rules[-2] if len(rules) >= 2 else rules[-1]] if rules else lines
+    return "\n".join(above).count(needle)
+
+
+def _submit_echoed(pane: str, needle: str, earlier: _SubmittedPrompt) -> bool:
+    """
+    Return whether *pane* shows *earlier* was submitted: a readable empty box and a new echo.
+
+    A capture with no box, or a box emptied with no echo, is no evidence either way.
+    """
+    return (
+        bool(needle)
+        and _composer_reads_clear(_composer_box(pane))
+        and _echoes_above_composer(pane, needle) > earlier.echoes_before
     )
 
 
@@ -5394,11 +5420,11 @@ def _paste_and_submit(
         # Append a CR only when a trailing backslash would consume the submit Enter.
         payload += b"\r"
     tail_needle = _submit_tail_needle(text) if needle else ""
-    if earlier is not None and needle:
-        # A draft that left the box was submitted; Claude records it once its hooks finish.
-        shown = _capture_pane(socket_path, tmux_target)
-        if shown.strip() and not _draft_in_input_box(shown, needle, tail_needle=tail_needle):
-            return _landed_late(earlier)
+    if earlier is not None and _submit_echoed(
+        _capture_pane(socket_path, tmux_target), needle, earlier
+    ):
+        # Echoed above an empty box: submitted, though Claude records it only after its hooks.
+        return _landed_late(earlier)
     delivery_diagnostics.set_stage("pasting")
     # Clear stale text first, or the paste lands inside the person's draft and
     # Enter submits both together.
@@ -5414,12 +5440,12 @@ def _paste_and_submit(
             "Claude Code still has not accepted the submitted message "
             "(the draft is still in the input box). The message was not delivered."
         ) from not_cleared
+    transcript_before_paste = _capture_pane(socket_path, tmux_target)
     if earlier is not None:
         # The original may have landed while the box was cleared; typing now would double it.
-        if _submit_recorded(earlier):
+        if _submit_recorded(earlier) or _submit_echoed(transcript_before_paste, needle, earlier):
             return _landed_late(earlier)
         _UNACCEPTED_SUBMITS.pop(bridge_dir, None)
-    transcript_before_paste = _capture_pane(socket_path, tmux_target)
     draft_seen, pane, polls, empty_captures, paste_wait_started = _paste_and_await_draft(
         bridge_dir,
         socket_path,
@@ -5485,7 +5511,11 @@ def _paste_and_submit(
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
     submitted = _SubmittedPrompt(
-        bridge_dir=bridge_dir, boundary=submit_boundary, text=text, submitted_at=submitted_at
+        bridge_dir=bridge_dir,
+        boundary=submit_boundary,
+        text=text,
+        submitted_at=submitted_at,
+        echoes_before=_echoes_above_composer(transcript_before_paste, needle) if needle else 0,
     )
     if not draft_seen:
         delivery_diagnostics.record_details(verification="unverified")

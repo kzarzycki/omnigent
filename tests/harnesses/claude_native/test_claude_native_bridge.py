@@ -5984,7 +5984,7 @@ class _UnacceptedSubmit:
         self.bridge_dir = tmp_path
         self.transcript = tmp_path / "native.jsonl"
         self.transcript.write_text('{"type":"system","content":"prefix"}\n')
-        self.pane = "\u2500\u2500\n\u276f synthetic prompt\n\u2500\u2500\n"
+        self.pane = _composer_pane()
         self.pastes = 0
         self.accepted = False
         self.clear: Callable[[], None] = lambda: None
@@ -6009,6 +6009,7 @@ class _UnacceptedSubmit:
 
     def _paste(self, *_args: object, **_kwargs: object) -> tuple[bool, str, int, int, float]:
         self.pastes += 1
+        self.pane = _composer_pane("synthetic prompt")
         return True, self.pane, 1, 0, 0.0
 
     def record_original(self) -> None:
@@ -6068,49 +6069,102 @@ def test_resend_of_an_unaccepted_submit_checks_whether_it_landed_late(
     assert tmp_path not in claude_native_bridge._UNACCEPTED_SUBMITS
 
 
-@pytest.mark.parametrize("landing", ["during-the-clear", "draft-left-before-its-record"])
+_EMPTY_BOX = _composer_pane()
+_ECHOED_ABOVE_EMPTY_BOX = "\u276f synthetic prompt\n\n" + _EMPTY_BOX
+
+
+@pytest.mark.parametrize(
+    "landing", ["recorded-during-the-clear", "echoed-during-the-clear", "echoed-before-the-resend"]
+)
 def test_original_that_lands_during_the_resend_is_not_typed_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, landing: str
 ) -> None:
-    """A late original, seen after the clear or as a vanished draft, is not typed again."""
+    """A late original is waited on whether its record, or only its echo, shows by then."""
     fake = _UnacceptedSubmit(tmp_path, monkeypatch)
     with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted):
         fake.submit()
     original = claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path]
     fake.pastes = 0
-    if landing == "during-the-clear":
+    if landing == "recorded-during-the-clear":
         fake.clear = fake.record_original
+    elif landing == "echoed-during-the-clear":
+        # The replayed Enter submits it during the clear; its record lags behind the hooks.
+        fake.clear = lambda: setattr(fake, "pane", _ECHOED_ABOVE_EMPTY_BOX)
     else:
-        fake.pane = "\u2500\u2500\n\u276f \n\u2500\u2500\n"
+        fake.pane = _ECHOED_ABOVE_EMPTY_BOX
+        fake.clear = lambda: pytest.fail("a submitted original needs no clear")
 
     assert fake.submit() is original
     assert fake.pastes == 0
 
 
-def test_resend_into_a_pane_still_stuck_on_the_draft_stays_not_accepted(
+@pytest.mark.parametrize(
+    "pane",
+    ["\u276f synthetic prompt\n  redrawing\n", _EMPTY_BOX],
+    ids=["no-box-in-capture", "box-emptied-without-a-submit"],
+)
+def test_resend_types_again_when_the_capture_gives_no_sign_the_original_was_submitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pane: str
+) -> None:
+    """An unreadable capture, or a box emptied with no echo, is unknown: the message is typed."""
+    fake = _UnacceptedSubmit(tmp_path, monkeypatch)
+    with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted):
+        fake.submit()
+    original = claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path]
+    fake.pane = pane
+    fake.pastes = 0
+    fake.accepted = True
+
+    assert fake.submit() is not original
+    assert fake.pastes == 1
+
+
+def test_an_echo_already_on_screen_before_the_submit_is_no_sign_it_landed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A clear that cannot finish refuses with the same code and keeps the submit."""
+    """The same text sent earlier leaves an echo; only a new one counts as a submit."""
+    fake = _UnacceptedSubmit(tmp_path, monkeypatch)
+    fake.pane = _ECHOED_ABOVE_EMPTY_BOX
+    with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted):
+        fake.submit()
+    original = claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path]
+    fake.pane = _ECHOED_ABOVE_EMPTY_BOX
+    fake.pastes = 0
+    fake.accepted = True
+
+    assert fake.submit() is not original
+    assert fake.pastes == 1
+
+
+@pytest.mark.parametrize("recorded_during_the_clear", [False, True])
+def test_resend_into_a_pane_still_stuck_on_the_draft_stays_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded_during_the_clear: bool
+) -> None:
+    """A refused clear keeps the code and submit, unless the original was recorded meanwhile."""
     fake = _UnacceptedSubmit(tmp_path, monkeypatch)
     with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted):
         fake.submit()
     original = claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path]
 
     def stuck() -> None:
+        if recorded_during_the_clear:
+            fake.record_original()
         raise claude_native_bridge.ClaudeComposerNotCleared("stuck")
 
     fake.clear = stuck
     fake.pastes = 0
-    with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted) as refused:
-        fake.submit()
-
-    assert refused.value.code == "claude_submit_not_accepted"
-    assert claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path] is original
+    if recorded_during_the_clear:
+        assert fake.submit() is original
+    else:
+        with pytest.raises(claude_native_bridge.ClaudeSubmitNotAccepted) as refused:
+            fake.submit()
+        assert refused.value.code == "claude_submit_not_accepted"
+        assert claude_native_bridge._UNACCEPTED_SUBMITS[tmp_path] is original
+        # The original lands once the pane recovers: the next resend waits on it.
+        fake.record_original()
+        fake.clear = lambda: None
+        assert fake.submit() is original
     assert fake.pastes == 0
-    # The original lands once the pane recovers: the next resend waits on it.
-    fake.record_original()
-    fake.clear = lambda: None
-    assert fake.submit() is original
 
 
 @pytest.mark.parametrize(

@@ -16,4 +16,6 @@ uv run --no-sync pytest -q \
   "$bridge::test_a_refused_submit_is_remembered_for_the_resend_of_the_same_text" \
   "$bridge::test_resend_of_an_unaccepted_submit_checks_whether_it_landed_late" \
   "$bridge::test_original_that_lands_during_the_resend_is_not_typed_again" \
-  "$bridge::test_resend_into_a_pane_still_stuck_on_the_draft_stays_not_accepted"
+  "$bridge::test_resend_into_a_pane_still_stuck_on_the_draft_stays_not_accepted" \
+  "$bridge::test_resend_types_again_when_the_capture_gives_no_sign_the_original_was_submitted" \
+  "$bridge::test_an_echo_already_on_screen_before_the_submit_is_no_sign_it_landed"
