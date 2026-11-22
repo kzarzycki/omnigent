@@ -1828,11 +1828,11 @@ def check_lifetime() -> None:
     try:
         IDLE_EXIT_S = 60.0
         parent = os.getppid()
-        start = time.monotonic()
 
         def at(offset: float, pid: int = parent) -> str | None:
-            # Earlier checks leave threads that touch(); the activity time is given.
-            return lifetime_over(pid, start + offset, start)
+            # The activity time is given. The clock starts at 0: adding an offset to a
+            # small monotonic reading can round to just under it.
+            return lifetime_over(pid, offset, 0.0)
 
         assert at(59) is None
         assert at(60) == "idle for 60s"
