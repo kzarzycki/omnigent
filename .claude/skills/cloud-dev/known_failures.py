@@ -1,7 +1,7 @@
 """pytest plugin: run the tests in known_failures.txt as non-strict xfail.
 
 Load with `-p known_failures` and PYTHONPATH naming this directory (run-affected-tests.sh does).
-A line is `<test id><TAB>#<issue><TAB><reason>`; one without an issue and a reason is a usage error.
+A line is `<test id><TAB>#<issue><TAB><reason>`; one lacking an issue or a reason is refused.
 """
 
 import re
@@ -20,7 +20,9 @@ def load(path: Path = LIST) -> dict[str, str]:
             continue
         parts = line.split("\t")
         if len(parts) != 3 or not re.fullmatch(r"#\d+", parts[1]) or not parts[2].strip():
-            raise pytest.UsageError(f"{path.name}:{number}: want <test id><TAB>#<issue><TAB><reason>")
+            raise pytest.UsageError(
+                f"{path.name}:{number}: want <test id><TAB>#<issue><TAB><reason>"
+            )
         known[parts[0]] = f"known failure {parts[1]}: {parts[2]}"
     return known
 
