@@ -39,8 +39,8 @@ with the zygote: one forkserver's death must not take every session down.
 
 POSIX (the gate is ``IS_POSIX``): the fork path runs on macOS too, though the
 copy-on-write savings are Linux-specific. On by default; set
-``OMNIGENT_RUNNER_ZYGOTE=0`` to opt out. The daemon falls back to direct
-``Popen`` if the zygote is unavailable, so this is never a hard dependency.
+``OMNIGENT_RUNNER_ZYGOTE=0`` to opt out, or ``required`` to fail launches the
+zygote cannot serve. By default the daemon falls back to a direct ``Popen``.
 """
 
 from __future__ import annotations

@@ -19,9 +19,9 @@ This module owns:
 
 This code runs on any POSIX host (the gate is ``IS_POSIX``); the copy-on-write
 *savings* are Linux-specific, but the fork/protocol path executes on macOS too.
-On by default; set ``OMNIGENT_RUNNER_ZYGOTE=0`` to opt out. The daemon falls
-back to direct ``Popen`` on any failure, so the zygote is never a hard
-dependency.
+On by default; ``OMNIGENT_RUNNER_ZYGOTE`` picks the mode (see
+:func:`zygote_mode_from_env`). In the default mode the daemon falls back to a
+direct ``Popen`` when no zygote can be had; ``required`` fails the launch instead.
 """
 
 from __future__ import annotations
@@ -37,13 +37,14 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
+from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO
 
 import psutil
 
 from omnigent.inner import _proc
-from omnigent.process_logging import child_logging_popen_kwargs
+from omnigent.process_logging import child_logging_popen_kwargs, env_truthy
 from omnigent.runner._zygote import ZYGOTE_CONTROL_FD_ENV_VAR
 
 logger = logging.getLogger(__name__)
@@ -57,10 +58,45 @@ _CONTROL_TIMEOUT_S = 30.0
 _ZYGOTE_LOST_EXIT_CODE = 254
 
 
+class ZygoteMode(StrEnum):
+    """How the host daemon uses the runner zygote."""
+
+    OFF = "off"
+    """Every runner is a direct ``Popen``."""
+    PREFERRED = "preferred"
+    """Fork via the zygote, falling back to a direct ``Popen`` without one."""
+    REQUIRED = "required"
+    """Fork via the zygote only; a launch with no zygote fails."""
+
+
+def zygote_mode_from_env(value: str | None) -> ZygoteMode:
+    """Map an ``OMNIGENT_RUNNER_ZYGOTE`` value to a :class:`ZygoteMode`.
+
+    Unset or any truthy value is ``preferred``; a falsy one (``0``, ``false``,
+    ``no``, ``off``, empty) is ``off``; ``required`` is ``required``.
+
+    :param value: The raw environment value, or ``None`` when unset.
+    :returns: The selected mode.
+    """
+    if value is None:
+        return ZygoteMode.PREFERRED
+    if value.strip().lower() == ZygoteMode.REQUIRED:
+        return ZygoteMode.REQUIRED
+    return ZygoteMode.PREFERRED if env_truthy(value) else ZygoteMode.OFF
+
+
 class ZygoteUnavailable(RuntimeError):
     """The zygote could not be started or stopped responding.
 
-    The daemon catches this and falls back to a direct ``Popen`` launch.
+    The daemon catches this and replaces the zygote; in ``preferred`` mode this
+    launch falls back to a direct ``Popen``.
+    """
+
+
+class ZygoteRequiredError(OSError):
+    """``required`` mode found no usable zygote, so the runner was not launched.
+
+    An ``OSError`` so the launch path reports it as a failed runner spawn.
     """
 
 
@@ -215,20 +251,25 @@ class ZygoteManager:
         return self._proc is not None and self._proc.poll() is None
 
     def start(self) -> None:
-        """Spawn the zygote if it is not already running.
+        """Spawn the zygote if it is not already running, replacing a wedged one.
 
         The zygote is a fresh ``Popen`` interpreter (never a fork of this
         multithreaded async daemon). One end of an ``AF_UNIX`` socketpair is
-        passed to it via ``pass_fds``; the daemon keeps the other end.
+        passed to it via ``pass_fds``; the daemon keeps the other end. A live
+        zygote whose control channel failed is stopped first: its runners and
+        harnesses watch the daemon and their runner, not the zygote.
 
         :raises ZygoteUnavailable: If the process could not be spawned or does
             not answer an initial ping.
         """
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
-                if self._control_failed:
-                    raise ZygoteUnavailable("runner zygote control channel is unusable")
-                return
+                if not self._control_failed:
+                    return
+                logger.warning(
+                    "Replacing wedged runner zygote (pid=%s)", self._proc.pid
+                )
+                self.stop()
             if self._sock is not None:
                 self._sock.close()
                 self._sock = None

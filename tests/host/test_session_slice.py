@@ -243,7 +243,7 @@ def test_direct_runner_launch_goes_through_the_slice(
         "http://localhost:8000",
         session_slice=SessionSliceLaunch(name="omnigent-sessions.slice", command_prefix=_PREFIX),
     )
-    host._zygote_disabled = True
+    host._zygote = None
     _RecordedPopen.calls = []
     monkeypatch.setattr(connect.subprocess, "Popen", _RecordedPopen)
     env: dict[str, str] = {"RUNNER_ID": "runner_slice"}

@@ -182,7 +182,14 @@ from omnigent.host.runner_registry import (
     runner_registry_path,
     session_leaders,
 )
-from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
+from omnigent.host.runner_zygote import (
+    ZygoteManager,
+    ZygoteMode,
+    ZygoteRequiredError,
+    ZygoteRunnerProc,
+    ZygoteUnavailable,
+    zygote_mode_from_env,
+)
 from omnigent.host.session_env import consume_session_env_handoff
 from omnigent.host.session_slice import (
     SESSION_SLICE_ENV_VAR,
@@ -225,7 +232,6 @@ from omnigent.process_logging import (
     child_logging_popen_kwargs,
     configure_process_logging,
     display_log_path,
-    env_truthy,
     nonblocking_terminal_stdio,
     open_process_log_file,
     process_log_dir,
@@ -580,6 +586,9 @@ def _connection_refused(exc: BaseException) -> bool:
 
 
 _RECONNECT_BASE_S = 0.5
+# Backoff between attempts at a runner zygote that keeps failing (preferred mode).
+_ZYGOTE_RETRY_BASE_S = 30.0
+_ZYGOTE_RETRY_MAX_S = 600.0
 _RECONNECT_CAP_S = 3.0
 _RECONNECT_JITTER = 0.5
 # How often the lifecycle monitor re-checks that this daemon still owns its
@@ -1522,20 +1531,14 @@ class HostProcess:
         # Keep cancellation-shielded worker tasks alive until they release the
         # orphan-reaper guard after their subprocesses have actually finished.
         self._host_subprocess_tasks: set[asyncio.Task[object]] = set()
-        # Copy-on-write runner forkserver, on by default; set
-        # OMNIGENT_RUNNER_ZYGOTE=0 (or false/no/off) to opt out onto the direct
-        # Popen path. POSIX-only (needs os.fork + AF_UNIX fd-passing); the host
-        # daemon runs on the user's own machine, most often macOS, so gating on
-        # IS_POSIX rather than IS_LINUX lets those users share the ~120MB import
-        # floor too. Instantiated cheaply here (no process yet — start() spawns
-        # it, idempotent under its own lock). On any failure ``_zygote_disabled``
-        # latches so future launches take the direct Popen path, while
-        # ``_zygote`` is retained so a still-running zygote is reaped on daemon
-        # shutdown. The zygote is an optimization, never required.
-        _zygote_optout = os.environ.get(ZYGOTE_ENABLED_ENV_VAR)
-        self._zygote_enabled = IS_POSIX and not (
-            _zygote_optout is not None and not env_truthy(_zygote_optout)
-        )
+        # Copy-on-write runner forkserver; OMNIGENT_RUNNER_ZYGOTE picks the
+        # mode (preferred by default, 0/false/no/off for off, or required).
+        # POSIX-only (needs os.fork + AF_UNIX fd-passing); gating on IS_POSIX
+        # rather than IS_LINUX lets macOS hosts share the ~120MB import floor
+        # too. Instantiated cheaply here (start() spawns it, idempotent under
+        # its own lock). A zygote that fails is replaced on a later launch.
+        self._zygote_mode = zygote_mode_from_env(os.environ.get(ZYGOTE_ENABLED_ENV_VAR))
+        self._zygote_enabled = IS_POSIX and self._zygote_mode is not ZygoteMode.OFF
         self._session_slice = session_slice
         self._session_launch_prefix = session_slice.command_prefix if session_slice else ()
         self._zygote: ZygoteManager | None = (
@@ -1543,7 +1546,13 @@ class HostProcess:
             if self._zygote_enabled
             else None
         )
-        self._zygote_disabled = False
+        # Consecutive zygote start/fork failures and when the next attempt may
+        # run, so a zygote that keeps failing doesn't add a doomed spawn to
+        # every launch in preferred mode.
+        self._zygote_failure_lock = threading.Lock()
+        self._zygote_failures = 0
+        self._zygote_retry_at = 0.0
+        self._zygote_last_error: str | None = None
         # Warms the zygote at daemon start so the first launch doesn't pay
         # its one-time import; see run().
         self._zygote_prestart_task: asyncio.Task[ZygoteManager | None] | None = None
@@ -2478,34 +2487,103 @@ class HostProcess:
         )
 
     def _ensure_zygote_started(self) -> ZygoteManager | None:
-        """Start (or reuse) the runner zygote, latching the fallback on failure.
+        """Start (or reuse) the runner zygote, replacing a wedged one.
 
         Blocking — the first call pays the zygote's one-time import of the
         runner graph — so call it from a worker thread.
         ``ZygoteManager.start`` is idempotent under its own lock, so the
         boot-time prewarm (see :meth:`run`) and a concurrent launch can both
-        call this safely.
+        call this safely. In preferred mode a failing zygote is skipped until
+        its backoff expires; required mode tries on every launch.
 
-        :returns: The started zygote, or ``None`` when the zygote is disabled
-            (opt-out, non-POSIX, or a prior failure) or failed to start now.
+        :returns: The started zygote, or ``None`` when it is off, unsupported,
+            backing off, or failed to start now.
         """
         zygote = self._zygote
-        if zygote is None or self._zygote_disabled:
+        if zygote is None:
+            return None
+        if (
+            self._zygote_mode is not ZygoteMode.REQUIRED
+            and time.monotonic() < self._zygote_retry_at
+        ):
             return None
         try:
             zygote.start()
         except ZygoteUnavailable as exc:
-            # Spawning the zygote itself is broken; retrying on every
-            # launch would only add a doomed spawn to each, so disable
-            # it for the daemon's life and fall back to direct Popen.
+            delay = self._record_zygote_failure(exc)
             _logger.warning(
-                "Runner zygote failed to start (%s); disabling it and "
-                "falling back to direct spawn",
-                exc,
+                "Runner zygote failed to start (%s); retrying in %.0fs", exc, delay
             )
-            self._zygote_disabled = True
             return None
         return zygote
+
+    def _record_zygote_failure(self, exc: ZygoteUnavailable) -> float:
+        """Count a zygote failure and schedule the next attempt.
+
+        The first failure retries on the next launch; consecutive ones back off
+        exponentially up to :data:`_ZYGOTE_RETRY_MAX_S`.
+
+        :param exc: The failure, kept for the required-mode launch error.
+        :returns: Seconds until the next attempt.
+        """
+        with self._zygote_failure_lock:
+            self._zygote_failures += 1
+            self._zygote_last_error = str(exc)
+            failures = self._zygote_failures
+            delay = (
+                0.0
+                if failures == 1
+                else min(_ZYGOTE_RETRY_BASE_S * 2 ** (failures - 2), _ZYGOTE_RETRY_MAX_S)
+            )
+            self._zygote_retry_at = time.monotonic() + delay
+            return delay
+
+    def _record_zygote_success(self) -> None:
+        """Clear the failure backoff after a runner forked via the zygote."""
+        with self._zygote_failure_lock:
+            self._zygote_failures = 0
+            self._zygote_retry_at = 0.0
+            self._zygote_last_error = None
+
+    def _fork_via_zygote(
+        self, env: dict[str, str], log_path: Path, workspace: Path
+    ) -> ZygoteRunnerProc | None:
+        """Fork the runner via the zygote, replacing a zygote that fails.
+
+        A failed zygote is stopped at once, whether it died or is wedged: a
+        wedged one could still act on the request, and its runners watch this
+        daemon, not it. Required mode retries once on a fresh zygote.
+
+        :param env: Runner environment; ``RUNNER_PARENT_PID`` is this daemon.
+        :param log_path: Session log the runner writes to.
+        :param workspace: Existing session workspace for the runner's cwd.
+        :returns: The forked runner, or ``None`` when no zygote could fork it.
+        """
+        attempts = 2 if self._zygote_mode is ZygoteMode.REQUIRED else 1
+        for _ in range(attempts):
+            zygote = self._ensure_zygote_started()
+            if zygote is None:
+                return None
+            try:
+                proc = zygote.fork_runner(env, str(log_path), str(workspace))
+            except ZygoteUnavailable as exc:
+                delay = self._record_zygote_failure(exc)
+                _logger.warning(
+                    "Runner zygote unavailable (%s); replacing it, next attempt in %.0fs",
+                    exc,
+                    delay,
+                )
+                with contextlib.suppress(Exception):
+                    zygote.stop()
+                continue
+            self._record_zygote_success()
+            _logger.info(
+                "Forked runner via zygote (zygote pid=%s, runner pid=%s)",
+                zygote.pid,
+                proc.pid,
+            )
+            return proc
+        return None
 
     def _stale_adopted_runner_count(self) -> int:
         """Adopted runners still tracked that run another commit than this host."""
@@ -2582,16 +2660,16 @@ class HostProcess:
         Runs on a worker thread (blocking log open + first-launch zygote import).
         When the zygote is enabled it forks the runner there — sharing the import
         graph copy-on-write. The runner's orphan watchdog keeps watching this
-        daemon (``RUNNER_PARENT_PID``), not the zygote. A zygote start failure, or a
-        channel failure while the zygote is still alive, disables it for the
-        daemon's life; a zygote that died is reaped so the next launch respawns
-        a fresh one. Either way this launch falls back to a direct Popen.
+        daemon (``RUNNER_PARENT_PID``), not the zygote. A zygote that fails is
+        stopped and replaced on a later launch (see :meth:`_fork_via_zygote`);
+        this launch falls back to a direct Popen, or in required mode fails.
 
         :param env: Runner environment from :func:`_build_runner_env` (its
             ``RUNNER_PARENT_PID`` is the daemon pid on both paths).
         :param session_slug: Sanitized session id fragment for the log filename.
         :param workspace: Existing session workspace to use as the runner's cwd.
         :returns: ``(process_handle, log_path)`` — the handle quacks like Popen.
+        :raises ZygoteRequiredError: In required mode, when no zygote forked it.
         :raises OSError: If the log file or a direct Popen spawn fails.
         """
         log_path, log_fh = open_process_log_file("runner", prefix=f"runner-{session_slug}")
@@ -2600,45 +2678,19 @@ class HostProcess:
             # The runner and host watchdog share this per-launch marker.
             env[RUNNER_CONNECT_MARKER_ENV_VAR] = str(_connect_marker_path(log_path))
 
-            zygote = self._ensure_zygote_started()
-            if zygote is not None:
-                try:
-                    # RUNNER_PARENT_PID stays this daemon's pid: a forked
-                    # runner watches the host, not the zygote that forked it,
-                    # so a dead zygote leaves every runner serving.
-                    proc = zygote.fork_runner(env, str(log_path), str(workspace))
-                    _logger.info(
-                        "Forked runner via zygote (zygote pid=%s, runner pid=%s)",
-                        zygote.pid,
-                        proc.pid,
-                    )
-                    return proc, log_path
-                except ZygoteUnavailable as exc:
-                    if zygote.is_running():
-                        # Alive but its control channel failed: it is
-                        # wedged, so disable it for future launches. The
-                        # still-running zygote is reaped on daemon shutdown
-                        # (see run()'s finally).
-                        _logger.warning(
-                            "Runner zygote unavailable (%s); disabling it "
-                            "and falling back to direct spawn",
-                            exc,
-                        )
-                        self._zygote_disabled = True
-                    else:
-                        # The zygote process died; its runners keep serving
-                        # (they watch this daemon, not the zygote). Reap it
-                        # and let the next launch's start() respawn a fresh
-                        # one instead of losing copy-on-write forking for
-                        # the rest of the daemon's life.
-                        _logger.warning(
-                            "Runner zygote died (%s); falling back to "
-                            "direct spawn and respawning the zygote on "
-                            "the next launch",
-                            exc,
-                        )
-                        with contextlib.suppress(Exception):
-                            zygote.stop()
+            zygote_proc = self._fork_via_zygote(env, log_path, workspace)
+            if zygote_proc is not None:
+                return zygote_proc, log_path
+            if self._zygote_mode is ZygoteMode.REQUIRED:
+                cause = (
+                    "the runner zygote is POSIX-only"
+                    if self._zygote is None
+                    else self._zygote_last_error or "it did not start"
+                )
+                raise ZygoteRequiredError(
+                    f"runner zygote is required ({ZYGOTE_ENABLED_ENV_VAR}=required) "
+                    f"but unavailable: {cause}"
+                )
 
             with child_logging_popen_kwargs(env) as logging_kwargs:
                 proc = subprocess.Popen(
@@ -5441,8 +5493,8 @@ class HostProcess:
         # Warm the runner zygote now: start() blocks on its one-time import
         # of the runner graph (~1-2s), which otherwise lands inside the first
         # session launch of the daemon's life. Best-effort — a failure
-        # latches the same direct-Popen fallback the launch path uses.
-        if self._zygote is not None and not self._zygote_disabled:
+        # schedules the same retry the launch path uses.
+        if self._zygote is not None:
             self._zygote_prestart_task = asyncio.create_task(
                 asyncio.to_thread(self._ensure_zygote_started),
                 name="host-zygote-prestart",

@@ -124,7 +124,13 @@ from omnigent.host.runner_registry import (
     read_registry,
     runner_registry_path,
 )
-from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
+from omnigent.host.runner_zygote import (
+    ZygoteManager,
+    ZygoteMode,
+    ZygoteRequiredError,
+    ZygoteRunnerProc,
+    ZygoteUnavailable,
+)
 from omnigent.host.session_env import session_env_handoff
 from omnigent.native.owner_claim import current_boot_id
 from omnigent.onboarding import harness_install
@@ -4293,7 +4299,6 @@ async def test_run_prewarms_zygote_during_capability_discovery(
     """Runner prewarming and connection setup overlap the pending startup probe."""
     host = _make_host_process()
     host._zygote = _FakeZygote(fail_at="none", running=True)  # type: ignore[assignment]
-    host._zygote_disabled = False
     discovery_started = asyncio.Event()
     connection_started = asyncio.Event()
     prewarm_started = asyncio.Event()
@@ -4333,7 +4338,7 @@ async def test_run_keeps_one_model_catalog_prewarm_across_reconnects(
 ) -> None:
     """Catalog prewarm belongs to the host lifetime, not a tunnel generation."""
     host = _make_host_process()
-    host._zygote_disabled = True
+    host._zygote = None
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr(host, "_start_capability_discovery", lambda: None)
     monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
@@ -4378,7 +4383,7 @@ async def test_run_does_not_retry_failed_model_catalog_prewarm_while_offline(
 ) -> None:
     """Connection failures do not repeatedly restart native catalog probes."""
     host = _make_host_process()
-    host._zygote_disabled = True
+    host._zygote = None
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr(host, "_start_capability_discovery", lambda: None)
     monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
@@ -4475,7 +4480,7 @@ async def test_model_catalog_prewarm_failure_does_not_block_host(
 ) -> None:
     """Best-effort catalog failures do not prevent connection startup."""
     host = _make_host_process()
-    host._zygote_disabled = True
+    host._zygote = None
     monkeypatch.setattr(host, "_start_capability_discovery", lambda: None)
     monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
     prewarm_finished = asyncio.Event()
@@ -4504,7 +4509,7 @@ async def test_run_cleans_up_model_catalog_prewarm_after_teardown_failure(
 ) -> None:
     """Earlier teardown failures cannot skip host-owned prewarm cancellation."""
     host = _make_host_process()
-    host._zygote_disabled = True
+    host._zygote = None
     monkeypatch.setattr(host, "_start_capability_discovery", lambda: None)
     monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
     prewarm_started = asyncio.Event()
@@ -4540,7 +4545,7 @@ async def test_run_cleans_up_model_catalog_prewarm_after_startup_failure(
 ) -> None:
     """Startup failures after prewarm begins still run host-owned cleanup."""
     host = _make_host_process()
-    host._zygote_disabled = True
+    host._zygote = None
     monkeypatch.setattr(host, "_reap_orphans_once", lambda _child_pids=None: 0)
     prewarm_started = asyncio.Event()
     prewarm_cancelled = asyncio.Event()
@@ -4574,7 +4579,7 @@ async def test_run_cancels_inflight_capability_discovery_on_shutdown(
 ) -> None:
     """Daemon shutdown awaits and clears its background capability task."""
     host = _host()
-    host._zygote_disabled = True
+    host._zygote = None
     discovery_started = asyncio.Event()
     discovery_cancelled = asyncio.Event()
 
@@ -5459,7 +5464,7 @@ host = HostProcess(
     lifecycle_lock=Lock(),
     keep_runners_on_restart=os.environ["KEEP_RUNNERS_ON_RESTART"] == "1",
 )
-host._zygote_disabled = True
+host._zygote = None
 host._ensure_model_options_prewarm = lambda: None
 host._start_capability_discovery = lambda: None
 host._runners["runner-1"] = _RunnerHandle(
@@ -10446,21 +10451,37 @@ async def test_capabilities_are_initialized_once_across_reconnects(
 class _FakeZygote:
     """Scripted ZygoteManager stand-in for the spawn-fallback tests.
 
-    :param fail_at: ``"start"`` or ``"fork"`` — which call raises
+    :param fail_at: ``"start"``, ``"fork"`` or ``"none"`` — which call raises
         :class:`ZygoteUnavailable`.
     :param running: What ``is_running()`` reports after the failure.
+    :param failures: How many calls fail before the zygote works; ``None``
+        fails every call.
     """
 
-    def __init__(self, *, fail_at: str, running: bool) -> None:
+    def __init__(self, *, fail_at: str, running: bool, failures: int | None = None) -> None:
         """Store the failure script.
 
         :param fail_at: Which call raises.
         :param running: Post-failure ``is_running()`` answer.
+        :param failures: Failing calls before success, or ``None`` for all.
         """
         self._fail_at = fail_at
         self._running = running
+        self._failures_left = failures
         self.start_calls = 0
+        self.fork_calls = 0
         self.stop_calls = 0
+
+    def _should_fail(self, call: str) -> bool:
+        """Whether this *call* fails, consuming one scripted failure."""
+        if self._fail_at != call:
+            return False
+        if self._failures_left is None:
+            return True
+        if self._failures_left == 0:
+            return False
+        self._failures_left -= 1
+        return True
 
     @property
     def pid(self) -> int:
@@ -10474,13 +10495,16 @@ class _FakeZygote:
     def start(self) -> None:
         """Raise when scripted to fail at start."""
         self.start_calls += 1
-        if self._fail_at == "start":
+        if self._should_fail("start"):
             raise ZygoteUnavailable("scripted start failure")
 
     def fork_runner(self, env: dict[str, str], log_path: str, workspace: str) -> object:
-        """Always raise — the fork channel is scripted broken."""
+        """Raise while the fork channel is scripted broken, else fork."""
         del env, log_path, workspace
-        raise ZygoteUnavailable("scripted fork failure")
+        self.fork_calls += 1
+        if self._should_fail("fork"):
+            raise ZygoteUnavailable("runner zygote control error: timed out")
+        return _FakeSpawnedProc()
 
     def stop(self) -> None:
         """Record the reap."""
@@ -10497,24 +10521,26 @@ class _FakeSpawnedProc:
         return None
 
 
-def _spawn_with_fake_zygote(
+def _host_with_fake_zygote(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    zygote: _FakeZygote,
+    zygote: _FakeZygote | None,
     popen_kwargs: list[dict[str, object]] | None = None,
+    mode: ZygoteMode = ZygoteMode.PREFERRED,
 ) -> tuple[HostProcess, list[list[str]]]:
-    """Drive ``_spawn_runner_proc`` with *zygote* and a stubbed direct Popen.
+    """Build a host using *zygote* in *mode*, with a stubbed direct Popen.
 
     :param monkeypatch: The pytest monkeypatch fixture.
     :param tmp_path: Holds the fake runner log file.
-    :param zygote: The scripted zygote installed on the host.
+    :param zygote: The scripted zygote installed on the host, or ``None``.
     :param popen_kwargs: Optional sink for the keyword arguments of every
         direct ``Popen`` call.
+    :param mode: The host's zygote mode.
     :returns: The host and the argv of every direct ``Popen`` call.
     """
     host = _make_host_process()
     host._zygote = zygote  # type: ignore[assignment]
-    host._zygote_disabled = False
+    host._zygote_mode = mode
     popen_argvs: list[list[str]] = []
     log_path = tmp_path / "runner.log"
 
@@ -10535,6 +10561,20 @@ def _spawn_with_fake_zygote(
 
     monkeypatch.setattr("omnigent.host.connect.open_process_log_file", _fake_open_log)
     monkeypatch.setattr("omnigent.host.connect.subprocess.Popen", _fake_popen)
+    return host, popen_argvs
+
+
+def _spawn_with_fake_zygote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    zygote: _FakeZygote,
+    popen_kwargs: list[dict[str, object]] | None = None,
+) -> tuple[HostProcess, list[list[str]]]:
+    """Drive one ``_spawn_runner_proc`` with *zygote* in preferred mode.
+
+    :returns: The host and the argv of every direct ``Popen`` call.
+    """
+    host, popen_argvs = _host_with_fake_zygote(monkeypatch, tmp_path, zygote, popen_kwargs)
     host._spawn_runner_proc({}, "slug", tmp_path)
     return host, popen_argvs
 
@@ -10559,58 +10599,130 @@ def test_direct_runner_spawn_starts_its_own_session(
     assert popen_kwargs[0]["stdin"] is subprocess.DEVNULL
 
 
-def test_dead_zygote_is_reaped_and_respawnable(
+@pytest.mark.parametrize("running", [False, True], ids=["dead", "wedged"])
+def test_failed_zygote_is_replaced_and_the_next_launch_forks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    running: bool,
 ) -> None:
-    """A zygote that died mid-life must not disable forking forever.
+    """A zygote whose fork fails, dead or wedged, is stopped and replaced.
 
-    Its forked runners self-terminate via their orphan watchdogs the
-    moment it dies, so nothing depends on the dead instance — reap it
-    and leave the zygote enabled so the next launch's ``start()``
-    respawns a fresh one, instead of losing copy-on-write forking for
-    the rest of the daemon's life.
+    This launch falls back to a direct Popen; the next one forks again, so a
+    control timeout no longer disables copy-on-write forking for the
+    daemon's life.
     """
-    zygote = _FakeZygote(fail_at="fork", running=False)
+    zygote = _FakeZygote(fail_at="fork", running=running, failures=1)
+    host, popen_argvs = _host_with_fake_zygote(monkeypatch, tmp_path, zygote)
 
-    host, popen_argvs = _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote)
-
-    assert host._zygote_disabled is False
+    host._spawn_runner_proc({}, "slug", tmp_path)
     assert zygote.stop_calls == 1
-    # This launch still succeeded, via the direct-spawn fallback.
+    assert len(popen_argvs) == 1
+
+    proc, _log = host._spawn_runner_proc({}, "slug", tmp_path)
+    assert zygote.start_calls == 2
+    assert zygote.fork_calls == 2
+    assert isinstance(proc, _FakeSpawnedProc)
     assert len(popen_argvs) == 1
 
 
-def test_alive_zygote_with_broken_channel_is_disabled_not_stopped(
+def test_zygote_start_failure_is_retried_with_backoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An alive zygote with a broken channel is disabled but never stopped.
-
-    Stopping it would orphan the healthy runners already forked from it
-    (their parent-death watchdogs would self-terminate live sessions).
-    """
-    zygote = _FakeZygote(fail_at="fork", running=True)
-
-    host, popen_argvs = _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote)
-
-    assert host._zygote_disabled is True
-    assert zygote.stop_calls == 0
-    assert len(popen_argvs) == 1
-
-
-def test_zygote_start_failure_disables_it(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A zygote that cannot start is disabled — retrying every launch is waste."""
+    """A zygote that fails to start is retried on the next launch, then backs off."""
     zygote = _FakeZygote(fail_at="start", running=False)
+    host, popen_argvs = _host_with_fake_zygote(monkeypatch, tmp_path, zygote)
 
-    host, popen_argvs = _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote)
+    host._spawn_runner_proc({}, "slug", tmp_path)
+    host._spawn_runner_proc({}, "slug", tmp_path)
+    assert zygote.start_calls == 2
+    host._spawn_runner_proc({}, "slug", tmp_path)
+    assert zygote.start_calls == 2
+    assert len(popen_argvs) == 3
 
-    assert host._zygote_disabled is True
-    assert zygote.stop_calls == 0
-    assert len(popen_argvs) == 1
+    host._zygote_retry_at = 0.0
+    zygote._fail_at = "none"
+    proc, _log = host._spawn_runner_proc({}, "slug", tmp_path)
+    assert isinstance(proc, _FakeSpawnedProc)
+    assert zygote.start_calls == 3
+    assert host._zygote_failures == 0
+    assert len(popen_argvs) == 3
+
+
+def test_required_mode_replaces_a_wedged_zygote_within_the_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Required mode retries a timed-out fork once on a fresh zygote, never Popen."""
+    zygote = _FakeZygote(fail_at="fork", running=True, failures=1)
+    host, popen_argvs = _host_with_fake_zygote(
+        monkeypatch, tmp_path, zygote, mode=ZygoteMode.REQUIRED
+    )
+
+    proc, _log = host._spawn_runner_proc({}, "slug", tmp_path)
+
+    assert isinstance(proc, _FakeSpawnedProc)
+    assert zygote.stop_calls == 1
+    assert zygote.fork_calls == 2
+    assert popen_argvs == []
+
+
+@pytest.mark.parametrize(
+    "zygote",
+    [
+        _FakeZygote(fail_at="start", running=False),
+        _FakeZygote(fail_at="fork", running=True),
+        None,
+    ],
+    ids=["start-fails", "fork-fails", "unsupported"],
+)
+def test_required_mode_fails_the_launch_without_a_zygote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    zygote: _FakeZygote | None,
+) -> None:
+    """Required mode never spawns a runner directly; the launch fails instead."""
+    host, popen_argvs = _host_with_fake_zygote(
+        monkeypatch, tmp_path, zygote, mode=ZygoteMode.REQUIRED
+    )
+
+    with pytest.raises(ZygoteRequiredError, match="OMNIGENT_RUNNER_ZYGOTE=required"):
+        host._spawn_runner_proc({"RUNNER_ID": "runner_required"}, "slug", tmp_path)
+
+    assert popen_argvs == []
+    # In required mode a failing zygote is tried on every launch, without backoff.
+    if zygote is not None:
+        calls = zygote.start_calls
+        with pytest.raises(ZygoteRequiredError):
+            host._spawn_runner_proc({"RUNNER_ID": "runner_required"}, "slug", tmp_path)
+        assert zygote.start_calls > calls
+
+
+async def test_required_mode_launch_failure_reaches_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With no zygote in required mode, the launch result names the cause."""
+    host, popen_argvs = _host_with_fake_zygote(
+        monkeypatch, tmp_path, None, mode=ZygoteMode.REQUIRED
+    )
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    frame = HostLaunchRunnerFrame(
+        request_id="req_required",
+        binding_token="test_token_required",
+        workspace=str(workspace),
+    )
+
+    result = await host._handle_launch(frame)
+
+    assert isinstance(result, HostLaunchRunnerResultFrame)
+    assert result.status == "failed"
+    assert "failed to spawn runner: runner zygote is required" in (result.error or "")
+    assert popen_argvs == []
+    _cleanup_host(host)
 
 
 async def test_run_prestarts_zygote_before_first_launch(
@@ -10625,7 +10737,6 @@ async def test_run_prestarts_zygote_before_first_launch(
     host = _make_host_process()
     zygote = _FakeZygote(fail_at="none", running=True)
     host._zygote = zygote  # type: ignore[assignment]
-    host._zygote_disabled = False
 
     async def _fake_connect(self_: HostProcess) -> None:
         # Hold the "connection" open until the prestart thread has run, then

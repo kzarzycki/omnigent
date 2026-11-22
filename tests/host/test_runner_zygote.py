@@ -34,8 +34,10 @@ from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import (
     _ZYGOTE_LOST_EXIT_CODE,
     ZygoteManager,
+    ZygoteMode,
     ZygoteRunnerProc,
     ZygoteUnavailable,
+    zygote_mode_from_env,
 )
 from omnigent.inner import _proc
 from omnigent.runner import _zygote
@@ -893,9 +895,10 @@ def test_failed_control_channel_never_assigns_a_late_reply(
 def test_failed_control_channel_preserves_live_children(
     manager: ZygoteManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Losing control replies cannot stop the shared parent or fail live runners."""
+    """Losing control replies fails no live runner; start() replaces the parent."""
     child = manager.fork_runner(_sleep_env(30), str(tmp_path / "runner.log"), str(tmp_path))
     original_socket = manager._sock
+    wedged_pid = manager.pid
     try:
         with monkeypatch.context() as fault:
 
@@ -910,12 +913,12 @@ def test_failed_control_channel_preserves_live_children(
         assert manager.is_running()
         assert _proc.process_alive(child.pid)
         assert child.poll() is None
-        with pytest.raises(ZygoteUnavailable):
-            manager.start()
+        manager.start()
+        assert manager.pid != wedged_pid
+        assert wedged_pid is not None and not _proc.process_alive(wedged_pid)
+        assert _proc.process_alive(child.pid)
         child.kill()
         assert _wait_exit(child) == _ZYGOTE_LOST_EXIT_CODE
-        manager.stop()
-        manager.start()
         fresh = manager.fork_runner(_fork_env(7), str(tmp_path / "fresh.log"), str(tmp_path))
         assert _wait_exit(fresh) == 7
     finally:
@@ -1859,3 +1862,20 @@ def test_child_telemetry_flush_swallows_interrupts(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(dl, "close_debug_log_sink", _interrupted_close)
     _zygote._flush_child_telemetry()
+
+
+@pytest.mark.parametrize(
+    ("value", "mode"),
+    [
+        (None, ZygoteMode.PREFERRED),
+        ("1", ZygoteMode.PREFERRED),
+        ("preferred", ZygoteMode.PREFERRED),
+        ("0", ZygoteMode.OFF),
+        ("off", ZygoteMode.OFF),
+        ("", ZygoteMode.OFF),
+        (" Required ", ZygoteMode.REQUIRED),
+    ],
+)
+def test_zygote_mode_from_env(value: str | None, mode: ZygoteMode) -> None:
+    """The existing opt-out keeps its meaning; ``required`` adds a mode."""
+    assert zygote_mode_from_env(value) is mode
