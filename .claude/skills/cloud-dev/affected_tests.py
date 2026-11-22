@@ -6,6 +6,8 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
   its file name.
+- With AFFECTED_TESTS_NARROW set (a PR head, whose merge batch runs the full set), only the changed
+  `test_*.py` run.
 - Markdown selects nothing. No base to diff, or a change to the test setup (pyproject.toml,
   uv.lock, a conftest, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
@@ -66,11 +68,13 @@ def names(path: Path, text: str) -> bool:
     )
 
 
-def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
+def targets(
+    files: list[str] | None, root: Path = Path("."), narrow: bool = False
+) -> list[str]:
     files = [f for f in files if f] if files is not None else None
-    if files is None or any(
+    if files is None or (not narrow and any(
         f.startswith(EVERYTHING) or Path(f).name == "conftest.py" for f in files
-    ):
+    )):
         return ["tests"]
     tests = {
         p: p.read_text(errors="ignore")
@@ -83,7 +87,7 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
         if path.name.startswith("test_") and path.suffix == ".py":
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
-        elif path.suffix != ".md":
+        elif path.suffix != ".md" and not narrow:
             picked.update(
                 str(t.relative_to(root)) for t, text in tests.items() if names(path, text)
             )
@@ -93,4 +97,4 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
 if __name__ == "__main__":
     base = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("GATE_BASE")
     base = base or (git("merge-base", "origin/mine", "HEAD") or "").strip() or None
-    print("\n".join(targets(changed(base))))
+    print("\n".join(targets(changed(base), narrow=bool(os.environ.get("AFFECTED_TESTS_NARROW")))))

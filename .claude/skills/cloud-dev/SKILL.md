@@ -54,6 +54,8 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish. The `pnpm install` gives the JS hooks
   (`vscode-tsc`, `web-tsc`, ...) their `node_modules`; without it they exit 1 silently on a
   branch that touches the pnpm lockfile.
+- **CI proof.** A PR head's `gate` run is cheap (hooks, skills' tests, the test files the PR changes); the full
+  affected-tests set runs once per Mergify batch on its draft PR, so don't rerun it on a head to land.
 - **Tests.** A tool call stops at 10 minutes. On the VM's 4 CPUs:
   - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
     seconds after setup's warm-up; cold, from 30 s to over 6 minutes, depending on the

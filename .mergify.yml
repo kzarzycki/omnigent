@@ -10,7 +10,10 @@
 queue_rules:
   - name: default
     merge_method: squash
-    batch_size: 1
+    # One draft PR proves up to 5 PRs' merged tree; a red batch is split to find the bad PR
+    # (Mergify's default batch failure resolution), so the rest still land.
+    batch_size: 5
+    batch_max_wait_time: 5 minutes
     max_checks_retries: 1
     checks_timeout: 1 hour
     queue_conditions:

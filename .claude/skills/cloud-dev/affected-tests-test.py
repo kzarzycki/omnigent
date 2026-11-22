@@ -85,6 +85,10 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "update-ref", "-d", "refs/remotes/origin/mine")
     assert select(repo, change, ()) == ["tests"]
     assert affected_tests.targets(None) == ["tests"]  # no base to diff
+    # narrow (a PR head): only the changed test files, even for a module or conftest change
+    assert select(repo, {"omnigent/widgets/frob.py": "x = 5\n"}, (), GATE_BASE="base", AFFECTED_TESTS_NARROW="1") == []
+    assert select(repo, {"tests/server/conftest.py": "# c\n"}, (), GATE_BASE="base", AFFECTED_TESTS_NARROW="1") == []
+    assert select(repo, {widget: "# e\n", "omnigent/widgets/frob.py": "x = 6\n"}, (), GATE_BASE="base", AFFECTED_TESTS_NARROW="1") == [widget]
     # a deleted test file selects nothing, not a path pytest can't find
     run("git", "checkout", "-q", "-B", "work", "base")
     (repo / widget).unlink()
