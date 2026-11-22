@@ -266,9 +266,7 @@ class ZygoteManager:
             if self._proc is not None and self._proc.poll() is None:
                 if not self._control_failed:
                     return
-                logger.warning(
-                    "Replacing wedged runner zygote (pid=%s)", self._proc.pid
-                )
+                logger.warning("Replacing wedged runner zygote (pid=%s)", self._proc.pid)
                 self.stop()
             if self._sock is not None:
                 self._sock.close()

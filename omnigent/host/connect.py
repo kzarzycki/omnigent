@@ -2511,9 +2511,7 @@ class HostProcess:
             zygote.start()
         except ZygoteUnavailable as exc:
             delay = self._record_zygote_failure(exc)
-            _logger.warning(
-                "Runner zygote failed to start (%s); retrying in %.0fs", exc, delay
-            )
+            _logger.warning("Runner zygote failed to start (%s); retrying in %.0fs", exc, delay)
             return None
         return zygote
 
