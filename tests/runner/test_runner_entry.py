@@ -94,6 +94,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
 )
 from omnigent.spec.tar_utils import ExtractionError
 from omnigent.util import event_loop_watchdog as watchdog
+from tests._helpers.polling import poll_until_async
 from tests._helpers.session import bundle_files
 from tests.budgets import budget
 from tests.runner.helpers import make_test_terminal_instance
@@ -2529,6 +2530,7 @@ async def test_inactivity_monitor_rechecks_work_after_the_off_loop_keep_probe(
         "activity": loop.time() - 1.0,
         "progress": None,
         "probes": 0,
+        "reads_after_probe": 0,
     }
     shutdowns: list[str] = []
 
@@ -2543,12 +2545,18 @@ async def test_inactivity_monitor_rechecks_work_after_the_off_loop_keep_probe(
             state["activity"] = loop.time()
         else:
             state["progress"] = loop.time()
+        state["probe_done"] = True
         return False
+
+    def _last_activity() -> float:
+        if state.get("probe_done"):
+            state["reads_after_probe"] += 1
+        return state["activity"]
 
     task = asyncio.create_task(
         _run_inactivity_monitor(
             idle_timeout_s=0.01,
-            get_last_activity=lambda: state["activity"],
+            get_last_activity=_last_activity,
             has_active_work=lambda: True,
             request_shutdown=lambda: shutdowns.append(state["hold"]),
             poll_interval_s=0.005,
@@ -2559,9 +2567,9 @@ async def test_inactivity_monitor_rechecks_work_after_the_off_loop_keep_probe(
             keeps_runner=_probe,
         )
     )
-    await asyncio.sleep(0.2)
+    # Two activity reads after the probe: its recheck ran and the loop went on.
+    await poll_until_async(lambda: state["reads_after_probe"] >= 2 or shutdowns, timeout_s=5)
     task.cancel()
-    assert state["probes"] >= 1
     assert shutdowns == []
 
 
