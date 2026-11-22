@@ -6,6 +6,6 @@ uv run --no-sync pytest -q -p no:cacheprovider --reruns 0 \
   tests/server/integration/test_acp_default_permission_mode.py \
   tests/server/integration/test_acp_model_selection.py -k "permission or bypass or default"
 uv run --no-sync pytest -q -p no:cacheprovider --reruns 0 \
-  tests/server/integration/test_session_orchestration.py -k "permission_mode or agent_default"
+  tests/server/integration/test_session_orchestration.py -k "permission_mode or agent_default or launch_args_are_held"
 exec uv run --no-sync pytest -q -p no:cacheprovider --reruns 0 \
   tests/server/integration/test_sessions_endpoints.py -k "codex_native_undeclared or undeclared_codex_spec or resumed_codex_session or declared_native_default or declared_native_mode or keeps_an_explicit_default or named_cursor_child or codex_spec_opt_out or codex_explicit_stricter"

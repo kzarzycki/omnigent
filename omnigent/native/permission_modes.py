@@ -126,6 +126,17 @@ def permission_mode_is_looser(harness: str | None, mode: str | None, default: st
     return mode in order and default in order and order.index(mode) > order.index(default)
 
 
+def permission_mode_exceeds_default(
+    harness: str | None, mode: str | None, default: str | None
+) -> bool:
+    """Whether *mode* is looser than *default*, or skips approval when no default is declared."""
+    if mode is None:
+        return False
+    if default is None:
+        return mode in APPROVAL_SKIPPING_PERMISSION_MODES
+    return permission_mode_is_looser(harness, mode, default)
+
+
 def check_permission_mode_not_looser(harness: str | None, mode: str, default: str | None) -> None:
     """
     Refuse *mode* when it is looser than the agent's *default*.

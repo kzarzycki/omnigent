@@ -1698,6 +1698,49 @@ async def test_created_session_permission_mode_can_only_tighten_the_agent_defaul
         )
 
 
+@pytest.mark.parametrize(
+    ("spec_config", "raw_args", "accepted"),
+    [
+        # Raw launch args are held to the agent's default like a requested mode.
+        ({"permission_mode": "read-only"}, ["--dangerously-bypass-approvals-and-sandbox"], False),
+        (
+            {"permission_mode": "read-only"},
+            PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"],
+            True,
+        ),
+        ({}, ["--dangerously-bypass-approvals-and-sandbox"], True),
+        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], True),
+    ],
+)
+async def test_orchestrated_session_launch_args_are_held_to_the_agent_default(
+    auth_client, peers, db_uri, monkeypatch, spec_config, raw_args, accepted
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, **spec_config)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    response = await auth_client.post(
+        "/v1/sessions/orchestrated",
+        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+        json={
+            "agent_id": worker_agent_id,
+            "host_type": "managed",
+            "terminal_launch_args": raw_args,
+        },
+    )
+
+    if accepted:
+        assert response.status_code == 201, response.text
+    else:
+        assert response.status_code == 400, response.text
+        assert "looser than this agent's default" in response.text
+
+
 @pytest.mark.parametrize("placement", ["child", "managed"])
 async def test_created_session_without_a_mode_gets_the_agent_default(
     auth_client, peers, db_uri, monkeypatch, placement

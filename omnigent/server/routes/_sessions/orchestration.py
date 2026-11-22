@@ -103,7 +103,7 @@ from omnigent.native.permission_modes import (
     check_permission_mode_not_looser,
     launch_args_for_mode,
     mode_for_launch_args,
-    permission_mode_is_looser,
+    permission_mode_exceeds_default,
 )
 from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import (
@@ -14201,27 +14201,17 @@ async def _create_session_from_existing_agent(
 
     # Native-terminal pass-through args.
     #
-    # Named sub-agent creates (``body.sub_agent_name`` set) DERIVE these
-    # from the trusted, server-loaded sub-spec only — any caller-supplied
-    # ``body.terminal_launch_args`` is ignored. This is the YOLO seam:
-    # claude-native maps ``permission_mode`` to ``--permission-mode``,
-    # codex-native defaults to full bypass
-    # (``--dangerously-bypass-approvals-and-sandbox``), and cursor-native
-    # defaults to ``--yolo`` so a headless worker can edit/run unattended
-    # without stalling on native approval prompts (opt out with
-    # ``yolo: false``). A caller cannot inject launch wiring by smuggling
-    # args through the spawn body.
+    # Named sub-agent creates (``body.sub_agent_name`` set) derive them from the
+    # trusted, server-loaded sub-spec only; a caller-supplied
+    # ``body.terminal_launch_args`` is ignored. The spec's declared mode, else the
+    # harness default (codex-native and, for a named worker, cursor-native bypass
+    # unless ``yolo: false``), is the agent's default.
     #
-    # Sessions that resolve their own agent (top-level sessions and the
-    # manual Add Agent child flow where ``sub_agent_name`` is null) keep
-    # the validated body args (e.g. ``["--permission-mode",
-    # "bypassPermissions"]`` from the web permission-mode selector). The
-    # flat-list shape plus this bounds check is the security boundary;
-    # mirrors the multipart create + PATCH paths. A ``permission_mode``
-    # (from ``sys_session_create``) maps to its harness's args instead, and
-    # never to a mode that skips approval. When the body carries neither,
-    # the agent's own trusted spec seeds them below — explicit opt-ins
-    # only, never the headless worker default bypass.
+    # Sessions that resolve their own agent (top-level and the manual Add Agent
+    # flow where ``sub_agent_name`` is null) keep the validated body args from the
+    # web permission-mode selector. A ``permission_mode`` maps to its harness's
+    # args instead and may not be looser than the agent's default. With neither,
+    # the agent's own spec seeds them below.
     sub_spec: AgentSpec | None = None
     launch_args_spec_consulted = False
     if body.sub_agent_name:
@@ -14257,6 +14247,22 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        # Raw args from a session another session created are held to the agent's
+        # default like a requested mode; a person's own picker keeps its args.
+        if (
+            created_by_session_id is not None
+            and validated_launch_args
+            and permission_mode_exceeds_default(
+                selected_harness,
+                mode_for_launch_args(selected_harness, validated_launch_args),
+                agent_default_mode,
+            )
+        ):
+            raise OmnigentError(
+                "terminal_launch_args set a permission mode looser than this agent's "
+                "default; a session created by another session can only tighten it",
+                code=ErrorCode.INVALID_INPUT,
+            )
 
     # Workers an automation's run starts are unattended like the run itself, so they
     # use the automation's permission mode instead of their agent's default. A mode
@@ -14273,7 +14279,7 @@ async def _create_session_from_existing_agent(
             harness=selected_harness,
         )
     # An automation's mode may tighten the worker's agent default but never widen it.
-    if automation_launch_options is not None and permission_mode_is_looser(
+    if automation_launch_options is not None and permission_mode_exceeds_default(
         selected_harness,
         "bypass"
         if CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY in automation_launch_options[1]
@@ -14826,8 +14832,8 @@ def _create_session_from_bundle(
         metadata = metadata.model_copy(update={"terminal_launch_args": terminal_launch_args})
     elif metadata.terminal_launch_args is None:
         # Top-level bundle create (the ``omnigent run <dir>`` shape): honor the
-        # spec's explicit bypass opt-ins (e.g. codex-native ``yolo: true``);
-        # an interactive session never inherits the headless default bypass.
+        # spec's declared mode and bypass opt-ins (e.g. codex-native ``yolo: true``);
+        # codex-native bypasses by default here too, other harnesses only on an opt-in.
         try:
             terminal_launch_args = _derive_terminal_launch_args_from_spec(
                 spec, headless_defaults=False

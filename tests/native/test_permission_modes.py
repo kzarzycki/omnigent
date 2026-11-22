@@ -11,6 +11,7 @@ from omnigent.native.permission_modes import (
     check_permission_mode_not_looser,
     launch_args_for_mode,
     mode_for_launch_args,
+    permission_mode_exceeds_default,
 )
 
 
@@ -97,3 +98,21 @@ def test_a_mode_with_no_table_args_launches_with_its_bypass_flag() -> None:
         "--dangerously-bypass-approvals-and-sandbox"
     ]
     assert launch_args_for_mode("codex-native", "default") is None
+
+
+@pytest.mark.parametrize(
+    ("harness", "mode", "default", "exceeds"),
+    [
+        ("claude-native", None, "plan", False),
+        ("claude-native", "bypassPermissions", None, True),
+        ("claude-native", "acceptEdits", None, False),
+        ("cursor-native", "yolo", None, True),
+        ("claude-native", "bypassPermissions", "acceptEdits", True),
+        ("claude-native", "plan", "acceptEdits", False),
+        ("codex-native", "bypass", "bypass", False),
+    ],
+)
+def test_a_mode_exceeds_the_default_when_looser_or_skipping_without_one(
+    harness: str, mode: str | None, default: str | None, exceeds: bool
+) -> None:
+    assert permission_mode_exceeds_default(harness, mode, default) is exceeds
