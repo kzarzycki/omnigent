@@ -63,7 +63,7 @@ def _boot_with_config(
     return create_app
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_sandbox_section_reaches_create_app(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -81,7 +81,7 @@ def test_sandbox_section_reaches_create_app(
     assert (config.provider, config.server_url) == (_SANDBOX["provider"], _SANDBOX["server_url"])
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_no_sandbox_section_keeps_managed_hosts_off(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -95,7 +95,7 @@ def test_no_sandbox_section_keeps_managed_hosts_off(
     assert create_app.call_args.kwargs["memory_store"] is not None
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_invalid_sandbox_section_fails_startup(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -113,7 +113,7 @@ def test_invalid_sandbox_section_fails_startup(
     sys.modules.pop(_APP_MODULE, None)
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_databricks_account_connection_reaches_create_app(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -134,7 +134,7 @@ def test_databricks_account_connection_reaches_create_app(
     assert kwargs["databricks_store"] is store
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_databricks_account_connection_needs_a_cipher(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -151,7 +151,7 @@ def test_databricks_account_connection_needs_a_cipher(
     assert create_app.call_args.kwargs["databricks_store"] is None
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 @pytest.mark.parametrize("routing_provider", ["external", "none", "default"])
 def test_runtime_and_module_configuration_reaches_databricks_boot(
     request: pytest.FixtureRequest,
@@ -230,7 +230,7 @@ def test_runtime_and_module_configuration_reaches_databricks_boot(
         assert caps.routing_client is None
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: deploy namespace shadowed under xdist")
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 @pytest.mark.parametrize("catalog_kind", ["public", "invalid", "missing_cipher"])
 def test_registry_catalog_is_applied_during_databricks_boot(
     request: pytest.FixtureRequest,
