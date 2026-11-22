@@ -68,13 +68,12 @@ def names(path: Path, text: str) -> bool:
     )
 
 
-def targets(
-    files: list[str] | None, root: Path = Path("."), narrow: bool = False
-) -> list[str]:
+def targets(files: list[str] | None, root: Path = Path("."), narrow: bool = False) -> list[str]:
     files = [f for f in files if f] if files is not None else None
-    if files is None or (not narrow and any(
-        f.startswith(EVERYTHING) or Path(f).name == "conftest.py" for f in files
-    )):
+    if files is None or (
+        not narrow
+        and any(f.startswith(EVERYTHING) or Path(f).name == "conftest.py" for f in files)
+    ):
         return ["tests"]
     tests = {
         p: p.read_text(errors="ignore")
