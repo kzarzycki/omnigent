@@ -42,6 +42,7 @@ import { filterSessionScope, sessionVisibility } from "@/lib/sessionVisibility";
 import { useIdentityReady, useViewerId } from "./useViewerId";
 import { sumPendingApprovals } from "@/lib/inbox";
 import { useAutomationInbox } from "./useAutomationInbox";
+import { useProactiveInbox } from "./useProactiveInbox";
 import { useCommentInbox } from "./useCommentInbox";
 import {
   usePinnedConversations,
@@ -237,6 +238,7 @@ function useSidebarSources(config: SidebarConfig, identityReady: boolean) {
   );
   const comments = useCommentInbox(inboxRows);
   const automationInbox = useAutomationInbox(identityReady);
+  const proactiveInbox = useProactiveInbox(identityReady);
   // Pending approvals and questions only; read-only items stay on the Unread tab.
   const inboxCount = sumPendingApprovals(inboxRows);
   const watchedIds = useMemo(() => loadedRows.map((row) => row.id), [loadedRows]);
@@ -333,6 +335,7 @@ function useSidebarSources(config: SidebarConfig, identityReady: boolean) {
     inboxCount,
     comments,
     automationInbox,
+    proactiveInbox,
     watchedIds,
     registerFolder,
     applyLocalResolutions,

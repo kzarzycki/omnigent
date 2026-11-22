@@ -10,6 +10,8 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ElicitationCard } from "@/components/blocks/ApprovalCard";
+import { TaskMarkersProvider } from "@/components/blocks/TaskActivityMessage";
+import { readTaskActivity, taskMarkerId } from "@/lib/taskActivity";
 import { cn } from "@/lib/utils";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { CHAT_FIND_REQUEST_EVENT, fileViewerOwnsFind, hasCommandModifier } from "@/lib/hotkeys";
@@ -28,6 +30,7 @@ import { TurnRail, type Turn } from "@/pages/TurnRail";
 import { FloatingBannerStack, StreamBudgetBanner } from "@/components/StreamBudgetBanner";
 import { DbcertBanner } from "@/components/DbcertBanner";
 import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
+import { useSessionTasks } from "@/hooks/useSessionTasks";
 import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
 import { HostUpdateBanner, useOutdatedHost } from "@/components/HostUpdateBanner";
 import { useSearchParams } from "@/lib/routing";
@@ -42,7 +45,7 @@ import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { ChatFindBar, type FindStart, useChatFindHighlight } from "@/components/chat/ChatFindBar";
 import { ChatFindRevealContext, useChatFindReveal } from "@/components/chat/chatFindReveal";
 import { useUserMessageNav } from "@/hooks/useUserMessageNav";
-import { ChatPlanAccordion } from "@/shell/ChatPlanAccordion";
+import { ChatTasksPreview, hasTaskPreview } from "@/shell/ChatTasksPreview";
 import {
   RunnerStartingIndicator,
   McpStartupIndicator,
@@ -107,6 +110,17 @@ function isHiddenSubagentWakeBubble(bubble: Bubble): boolean {
   if (!bubble.content.every(isTextBlock)) return false;
   const parsed = parseSystemMessage(extractUserText(bubble.content));
   return parsed?.kind === "subagent_wake" && parsed.body === "";
+}
+
+/** Whether *bubble* holds the task marker *markerId*, as a notice of its own or beside its work. */
+function bubbleHasMarker(bubble: Bubble, markerId: string): boolean {
+  const matches = (data: Record<string, unknown>) => {
+    const activity = readTaskActivity(data);
+    return activity !== null && taskMarkerId(activity) === markerId;
+  };
+  if (bubble.kind === "subagent_activity") return matches(bubble.data);
+  if (bubble.kind !== "assistant") return false;
+  return bubble.items.some((item) => item.kind === "subagent_activity" && matches(item.data));
 }
 
 function isSessionMessageBubble(bubble: Bubble): boolean {
@@ -202,8 +216,19 @@ function TranscriptImpl({
   const sandboxFailed = useChatStore((s) => s.sandboxStatus?.stage === "failed");
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
   const mcpStartupActive = useChatStore((s) => s.mcpStartup !== null);
-  const hasTasks = useChatStore((s) => s.todos.length > 0);
   const conversationId = useChatStore((s) => s.conversationId);
+  const tasks = useSessionTasks(conversationId ?? undefined, true);
+  const hasTasks = hasTaskPreview(tasks);
+  // Task markers link to the tasks in the Tasks tab now; keyed by their IDs so
+  // the markers re-render only when that list changes.
+  const taskIdsKey = tasks.progress.map((item) => item.step.id).join("\n");
+  const taskMarkers = useMemo(
+    () =>
+      conversationId
+        ? { conversationId, taskIds: new Set(taskIdsKey ? taskIdsKey.split("\n") : []) }
+        : null,
+    [conversationId, taskIdsKey],
+  );
 
   // Build bubbles once per blocks/activeResponse change. Per-surface reuse
   // cache so a streaming append rebuilds only the active bubble, reusing the
@@ -366,10 +391,11 @@ function TranscriptImpl({
     () => display.bubbles.filter(isUserTurnBubble).map((b) => b.itemId),
     [display.bubbles, isUserTurnBubble],
   );
-  const nav = useUserMessageNav(userMessageIds, ensureItemVisible);
+  const nav = useUserMessageNav(userMessageIds, ensureItemVisible, scroller?.el);
   const jumpReady =
     display.conversationId === conversationId && !!scroller?.el && !!scrollToItemRef.current;
   useMessageDeepLink(conversationId ?? null, {
+    root: scroller?.el,
     ensureMessageVisible: ensureItemVisible,
     ready: jumpReady,
     rangeNonce: spacerMeasureNonce,
@@ -442,11 +468,17 @@ function TranscriptImpl({
   const outdatedHost = hostUpdate.outdated;
   const hasPinnedBanner = display.hasTasks || showArcaBanner || outdatedHost !== null;
   return (
-    <>
-      {/* Task tracker pinned above the thread. Sibling of the viewport (not an
+    <TaskMarkersProvider value={taskMarkers}>
+      {/* Task preview pinned above the thread. Sibling of the viewport (not an
       overlay) so it shrinks the scroll area rather than covering messages.
       Self-hides with no tasks. */}
-      <ChatPlanAccordion className="mt-14 md:mt-12" />
+      {conversationId && (
+        <ChatTasksPreview
+          conversationId={conversationId}
+          tasks={tasks}
+          className="mt-14 md:mt-12"
+        />
+      )}
       {showArcaBanner && <ArcaShutdownBanner warning={arcaWarning} hasTasks={display.hasTasks} />}
       {outdatedHost && (
         <HostUpdateBanner
@@ -528,6 +560,7 @@ function TranscriptImpl({
                     from="assistant"
                     className="max-w-full"
                     data-testid="bottom-elicitation"
+                    data-message-id={item.elicitationId}
                   >
                     <MessageContent className="w-full">
                       <ElicitationCard
@@ -610,7 +643,7 @@ function TranscriptImpl({
           />
         )}
       </div>
-    </>
+    </TaskMarkersProvider>
   );
 }
 
@@ -1236,11 +1269,14 @@ export function VirtualBubbleList({
   }, [conversationId, scrollEl, messageId, anchorStart]);
 
   const scrollToItem = useCallback((itemId: string): boolean => {
-    const index = bubblesRef.current.findIndex(
+    let index = bubblesRef.current.findIndex(
       (b) =>
         (b.kind === "user" && b.itemId === itemId) ||
         (b.kind === "assistant" && b.responseId === itemId),
     );
+    // A task marker, alone or in the work beside it. One of the agent's own
+    // tasks can mark the same start twice, so the newest wins.
+    if (index < 0) index = bubblesRef.current.findLastIndex((b) => bubbleHasMarker(b, itemId));
     if (index < 0) return false;
     const c = ctxRef.current;
     c.stopScroll();
