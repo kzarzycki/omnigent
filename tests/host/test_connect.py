@@ -3581,6 +3581,8 @@ async def test_fast_capability_discovery_is_included_in_hello(
         host._capabilities_initialized = True
 
     monkeypatch.setattr(host, "_initialize_capabilities", _discover)
+    # The resources loop's frame would race the cancel on a busy machine.
+    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     tunnel = _BlockingTunnel()
     serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
     try:
