@@ -422,9 +422,7 @@ describe("computePullRequestPollInterval", () => {
     // Settled, merged or closed: a new link can still appear, so rest at 30 s, not 10 s.
     expect(computePanelPullRequestPollInterval(tracked())).toBe(30_000);
     for (const state of ["MERGED", "CLOSED"]) {
-      expect(computePanelPullRequestPollInterval(tracked({ pr: { ...open, state } }))).toBe(
-        30_000,
-      );
+      expect(computePanelPullRequestPollInterval(tracked({ pr: { ...open, state } }))).toBe(30_000);
     }
     // Waiting for a PR: the turn-end refresh shows the agent's own PR sooner.
     expect(computePanelPullRequestPollInterval(tracked({ pr: null }))).toBe(30_000);
