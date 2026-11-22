@@ -159,7 +159,7 @@ async def _notify_runners_of_policy_change(
             _logger.debug("policy change: runner not told for %s", target, exc_info=True)
 
 
-def _schedule_policy_change_notification(
+def schedule_policy_change_notification(
     conversation_store: ConversationStore, session_id: str
 ) -> None:
     """Notify the session's runners in the background, off the request path.
@@ -273,7 +273,7 @@ def create_session_policies_router(
                 code=ErrorCode.CONFLICT,
             ) from exc
         invalidate_session_policy_specs_cache(session_id)
-        _schedule_policy_change_notification(conversation_store, session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/create: user=%s created policy_id=%s session_id=%s handler=%s",
             user_id or "(single-user)",
@@ -437,7 +437,7 @@ def create_session_policies_router(
         if policy is None:
             raise OmnigentError("Policy not found", code=ErrorCode.NOT_FOUND)
         invalidate_session_policy_specs_cache(session_id)
-        _schedule_policy_change_notification(conversation_store, session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/update: user=%s updated policy_id=%s session_id=%s",
             user_id or "(single-user)",
@@ -474,7 +474,7 @@ def create_session_policies_router(
             )
         store.delete(policy_id, session_id)
         invalidate_session_policy_specs_cache(session_id)
-        _schedule_policy_change_notification(conversation_store, session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/delete: user=%s deleted policy_id=%s session_id=%s",
             user_id or "(single-user)",
