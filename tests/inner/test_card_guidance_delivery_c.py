@@ -29,6 +29,12 @@ _AUTHOR_TEXT = "Agent prompt"
 _SERVED_TOOLS = [{"name": "sys_ask_user_question"}]
 
 
+@pytest.fixture(autouse=True)
+def _workspace_hook_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the Cursor executor as a platform without filesystem isolation."""
+    monkeypatch.setattr("omnigent.inner.cursor_executor._policy_gate_supported", lambda: False)
+
+
 def _composed(monkeypatch: pytest.MonkeyPatch, *, offered: bool) -> str:
     """Compose a prompt for a plain agent, with the card tool offered or not."""
     monkeypatch.setattr(prompt, "offers_ask_user_question", lambda *_a, **_k: offered)

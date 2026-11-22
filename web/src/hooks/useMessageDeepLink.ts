@@ -5,7 +5,12 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "@/lib/routing";
 import { SESSION_HISTORY_SEEK_PAGE_SIZE } from "@/lib/sessionsApi";
-import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM, findMessageElement } from "@/lib/messageDeepLink";
+import {
+  FIND_QUERY_PARAM,
+  MESSAGE_QUERY_PARAM,
+  MESSAGE_REQUEST_PARAM,
+  findMessageElement,
+} from "@/lib/messageDeepLink";
 import { scrollToMessage } from "@/hooks/useUserMessageNav";
 import { useChatStore } from "@/store/chatStore";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
@@ -15,6 +20,7 @@ import { firstFindRange } from "@/components/chat/chatFindReveal";
 export function useMessageDeepLinkChatView(conversationId: string | null): void {
   const [searchParams] = useSearchParams();
   const messageId = searchParams.get(MESSAGE_QUERY_PARAM) ?? searchParams.get(FIND_QUERY_PARAM);
+  const request = searchParams.get(MESSAGE_REQUEST_PARAM) ?? "";
   const terminalFirst = useTerminalFirst();
   const showTerminal = terminalFirst?.isTerminalFirst && terminalFirst.view === "terminal";
   const setView = terminalFirst?.setView;
@@ -26,14 +32,15 @@ export function useMessageDeepLinkChatView(conversationId: string | null): void 
       return;
     }
     if (loadingConversation) return;
-    const key = `${conversationId}:${messageId}`;
+    const key = `${conversationId}:${messageId}:${request}`;
     if (appliedKeyRef.current === key) return;
     appliedKeyRef.current = key;
     if (showTerminal) setView?.("chat");
-  }, [conversationId, messageId, loadingConversation, showTerminal, setView]);
+  }, [conversationId, messageId, request, loadingConversation, showTerminal, setView]);
 }
 
 interface MessageDeepLinkOptions {
+  root?: ParentNode;
   /** Mount a loaded message that is outside the virtualized window. */
   ensureMessageVisible?: (messageId: string) => boolean;
   ready?: boolean;
@@ -61,12 +68,13 @@ export function useMessageDeepLink(
 ): void {
   const [searchParams] = useSearchParams();
   const messageId = searchParams.get(MESSAGE_QUERY_PARAM);
+  const request = searchParams.get(MESSAGE_REQUEST_PARAM) ?? "";
   const target = useMemo(
     () =>
       conversationId && messageId
-        ? { key: `${conversationId}:${messageId}`, candidates: [messageId] }
+        ? { key: `${conversationId}:${messageId}:${request}`, candidates: [messageId] }
         : null,
-    [conversationId, messageId],
+    [conversationId, messageId, request],
   );
   useMessageJump(target, options);
 }
@@ -78,7 +86,13 @@ export function useMessageDeepLink(
  */
 export function useMessageJump(
   target: MessageJumpTarget | null,
-  { ensureMessageVisible, resolveAnchor, ready = true, rangeNonce = 0 }: MessageJumpOptions = {},
+  {
+    ensureMessageVisible,
+    resolveAnchor,
+    ready = true,
+    rangeNonce = 0,
+    root = document,
+  }: MessageJumpOptions = {},
 ): void {
   const terminalFirst = useTerminalFirst();
   const showTerminal = terminalFirst?.isTerminalFirst && terminalFirst.view === "terminal";
@@ -89,7 +103,7 @@ export function useMessageJump(
   const flashUserMessage = useChatStore((s) => s.flashUserMessage);
   const appliedKeyRef = useRef<string | null>(null);
 
-  useEffect(() => {
+  useEffect((): void | (() => void) => {
     if (!target) {
       appliedKeyRef.current = null;
       return;
@@ -102,7 +116,8 @@ export function useMessageJump(
       ? (candidates.map(resolveAnchor).find((id) => id !== null) ?? null)
       : (candidates[0] ?? null);
     if (anchor !== null) {
-      if (findMessageElement(anchor)) {
+      const scrollIfMounted = () => {
+        if (!findMessageElement(anchor, root)) return false;
         appliedKeyRef.current = key;
         // Through the virtualizer first, as the rail does: a bare smooth scroll
         // is cancelled when a row mounting above it corrects scrollTop.
@@ -110,12 +125,22 @@ export function useMessageJump(
           anchor,
           flashUserMessage,
           ensureMessageVisible,
+          root,
           query ? (el) => firstFindRange(el, query) : undefined,
         );
-        return;
-      }
+        return true;
+      };
+      if (scrollIfMounted()) return;
       // Geometry publishes a new range after this scroll mounts the target.
-      if (ensureMessageVisible?.(anchor)) return;
+      if (ensureMessageVisible?.(anchor)) {
+        if (scrollIfMounted()) return;
+        // A prepend can mount the target without changing the virtual range indices.
+        const observer = new MutationObserver(() => {
+          if (scrollIfMounted()) observer.disconnect();
+        });
+        observer.observe(root, { childList: true, subtree: true });
+        return () => observer.disconnect();
+      }
     }
     if (hasMoreHistory) {
       void useChatStore.getState().loadMoreHistory(undefined, SESSION_HISTORY_SEEK_PAGE_SIZE);
@@ -134,5 +159,6 @@ export function useMessageJump(
     ensureMessageVisible,
     resolveAnchor,
     rangeNonce,
+    root,
   ]);
 }
