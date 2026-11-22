@@ -8,6 +8,6 @@ if [ -z "$targets" ]; then echo "affected tests: none touched"; exit 0; fi
 echo "affected tests: $targets"
 # Tests that fail on mine run as non-strict xfail (known_failures.txt), so a head run needs no base run.
 export PYTHONPATH="$PWD/.claude/skills/cloud-dev${PYTHONPATH:+:$PYTHONPATH}"
-export PYTEST_ADDOPTS="-p known_failures ${PYTEST_ADDOPTS:-}"
+export PYTEST_ADDOPTS="-p known_failures -rX ${PYTEST_ADDOPTS:-}"
 # shellcheck disable=SC2086 # one target per line, no spaces in paths
 OMNIGENT_SKIP_WEB_UI=true uv run --no-sync pytest -n auto --dist=loadfile $targets
