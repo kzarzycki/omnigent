@@ -79,10 +79,10 @@ installed skill (`~/.claude/skills` has none, and any other copy on the host may
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
 `engineering/skills/engineering-loop/scripts/approvals.py` under it.
 
-Checked in a VM against pack `engineering-v0.35.1` (`gatekeeper.py check merge <pr>`, `record verdict --help`,
+Checked in a VM against pack `engineering-v0.35.1` (`approvals.py check merge <pr>`, `record verdict --help`,
 `record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
-the VM. Run them from a clone of the pack (`git clone --depth 1 --branch engineering-v0.35.1
-https://github.com/kzarzycki/agent-skills /tmp/as`; `gatekeeper.py` under `gatekeeper/skills/gatekeeper/scripts/`).
+the VM. Run them from the pack clone (Loop role files above; add `--branch engineering-v0.35.1` to pin it), as
+`gatekeeper/skills/gatekeeper/scripts/approvals.py`.
 
 **Runs in the VM:** `check build`, `check merge`, `record verdict`, `record checks` (the `local-ci` gate and its
 record) and `land`. `land` merges over REST (`PUT pulls/N/merge`, squash, pinned to the gated head), which needs no
@@ -95,7 +95,6 @@ Run `record checks` and `land` from a clean worktree of the PR head, after the s
 |---|---|
 | Setting the board's `Risk` field | GraphQL only. `check build` and `check merge` say so and go on; the `risk:high` label alone shows the risk |
 | Resolving review threads | GraphQL only (reading them works) |
-| Telling whether a PR is in a merge queue | Not readable over REST, so `land` refuses such a PR in the VM |
 | The Codex verifier | It is the other model family, and there is no Codex cloud bridge |
 | Reading the verifier's report, writing your own report | Those files are on the host, where the chief of staff reads them |
 | The bridge and the Omnigent MCP relay | They drive the cloud session from the host that holds the personal claude.ai login; Omnigent's tools reach the VM through them |
@@ -125,6 +124,6 @@ Run `record checks` and `land` from a clean worktree of the PR head, after the s
   (`git fetch origin <branch> && git worktree add --detach <path> <sha>`). Start the
   verifier as a `codex-native-ui` child with `sys_session_create`. A child always starts
   in your host workspace, so its brief names that worktree and a report path inside it.
-  The helper reads the report back to you and posts it with `approvals.py verdict`.
+  The helper reads the report back to you and posts it with `approvals.py verdict`: the report file is on the host, which is why this step runs there, not in the VM.
 - **Closing children.** `sys_session_close` closes a child a cloud session created with
   `sys_session_create`: it tombstones the child's free-form title and archives it.
