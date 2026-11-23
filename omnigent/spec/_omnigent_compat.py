@@ -192,7 +192,7 @@ def validate_omnigent_executor(
             result.add(
                 "executor.config.context_files", "only supported with harness 'pi' or 'pi-native'"
             )
-    if "settings" in spec.executor.config:
+    if "settings" in spec.executor.config and harness == "claude-native":
         if not isinstance(spec.executor.config["settings"], dict):
             result.add("executor.config.settings", "must be a mapping of Claude Code settings")
     if "system_prompt_mode" in spec.executor.config:
