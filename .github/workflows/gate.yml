@@ -126,6 +126,23 @@ jobs:
         run: |
           mise run check-fast
 
+      # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
+      # its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
+      # next run reruns it. Before the upload, which carries that record.
+      - name: Record flakes on their Flaky issues
+        if: always() && steps.earlier.outputs.run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EARLIER_RECORD: ${{ steps.earlier.outputs.record }}
+          EARLIER_RUN: ${{ steps.earlier.outputs.run }}
+          EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
+          PR: ${{ steps.earlier.outputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          THIS_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/gate-record" "$EARLIER_RECORD"
+
       - name: Upload this run's record
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -134,35 +151,3 @@ jobs:
           path: ${{ runner.temp }}/gate-record/
           retention-days: 7
           if-no-files-found: ignore
-
-      # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
-      # its open `Flaky: <node id>` issue, or a new issue, so a rerun never hides it.
-      - name: Record flakes on their Flaky issues
-        if: always() && steps.earlier.outputs.run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          FLAKES: ${{ runner.temp }}/gate-record/flakes
-          EARLIER_RUN: ${{ steps.earlier.outputs.run }}
-          EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
-          PR: ${{ steps.earlier.outputs.pr }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          THIS_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
-        run: |
-          [ -s "$FLAKES" ] || exit 0
-          gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" \
-            --jq '.[] | select(.pull_request | not) | [.number, .title] | @tsv' > "$RUNNER_TEMP/open-issues"
-          echo "### Flaky: failed in $EARLIER_RUN, passed on this rerun" >> "$GITHUB_STEP_SUMMARY"
-          while IFS= read -r test; do
-            title="Flaky: $test"
-            body="Failed in $EARLIER_RUN (head $EARLIER_SHA) and passed on the rerun in $THIS_RUN (head $HEAD_SHA), for #$PR. Nothing that names it changed between the two runs."
-            number=$(TITLE="$title" awk -F'\t' '$2 == ENVIRON["TITLE"] || index($2, ENVIRON["TITLE"] " ") == 1 { print $1; exit }' "$RUNNER_TEMP/open-issues")
-            if [ -n "$number" ]; then
-              url=$(gh api "repos/$GH_REPO/issues/$number/comments" -f body="$body" --jq .html_url < /dev/null)
-            else
-              url=$(gh api "repos/$GH_REPO/issues" -f title="$title" -f body="$body" -f 'labels[]=bug' --jq .html_url < /dev/null)
-              printf '%s\t%s\n' "${url##*/}" "$title" >> "$RUNNER_TEMP/open-issues"
-            fi
-            echo "Flaky: $test: $url"
-            echo "- \`$test\`: $url" >> "$GITHUB_STEP_SUMMARY"
-          done < "$FLAKES"
