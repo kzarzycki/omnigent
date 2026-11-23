@@ -1850,6 +1850,11 @@ def _load_agent_spec_bundle(
     spec_cache_root: Path, resp: httpx.Response, agent_id: str
 ) -> ResolvedSpec:
     """Extract and load a fresh bundle while the runner's worker lock is held."""
+    from omnigent.acp_cloud_environment import (
+        CLOUD_ENVIRONMENT_HEADER,
+        validate_cloud_environment_id,
+        with_cloud_environment_id,
+    )
     from omnigent.acp_permission_mode import (
         ACP_PERMISSION_MODE_HEADER,
         ACP_PERMISSION_MODES,
@@ -1910,6 +1915,14 @@ def _load_agent_spec_bundle(
         session_mode = resp.headers.get(ACP_PERMISSION_MODE_HEADER)
         if session_mode in ACP_PERMISSION_MODES:
             spec = with_acp_permission_mode(spec, session_mode)
+        cloud_environment = resp.headers.get(CLOUD_ENVIRONMENT_HEADER)
+        if cloud_environment:
+            try:
+                spec = with_cloud_environment_id(
+                    spec, validate_cloud_environment_id(cloud_environment)
+                )
+            except ValueError:
+                _logger.warning("ignoring a malformed cloud environment id")
         _apply_host_interactive_shells(spec)
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
