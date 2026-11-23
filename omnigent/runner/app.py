@@ -257,12 +257,16 @@ _CLAUDE_PENDING_PROMPT_POLL_S = 0.5
 _SIGN_IN_HOLD_MAX_S = 8 * 60.0
 # Refusals one sign-in wait absorbs; a pane that keeps asking after it looked ready fails.
 _SIGN_IN_HOLD_MAX_REPEATS = 3
+# Code of a Claude message whose submit the pane never accepted in time, and the waits
+# before each resend; the refusal after the last wait stands.
+_CLAUDE_RESUBMIT_CODE = "claude_submit_not_accepted"
+_CLAUDE_RESUBMIT_WAITS_S = (5.0, 15.0, 45.0, 120.0)
 
 
 @dataclasses.dataclass
 class _SignInHold:
     """
-    One session's wait for a launcher sign-in that refused its queued message.
+    One session's wait for a launcher sign-in, or a timed resend, of a refused queued message.
 
     :param deadline: ``time.monotonic()`` at which the wait gives up.
     :param holds: Refusals absorbed so far.
@@ -271,6 +275,10 @@ class _SignInHold:
         announcing the resend; until it resumes the queue, the deadline can't.
     :param resent: Whether the wait ran out and its message is being resent, so
         a watcher that sees the agent ready meanwhile asks for no resend.
+    :param resubmits: Refusals of a message Claude never accepted, each absorbed by
+        one timed wait.
+    :param resume_at: ``time.monotonic()`` at which a timed wait resends; ``None``
+        while the wait is for a sign-in.
     """
 
     deadline: float
@@ -278,6 +286,8 @@ class _SignInHold:
     waiting: bool = False
     releasing: bool = False
     resent: bool = False
+    resubmits: int = 0
+    resume_at: float | None = None
 
 
 def _sign_in_hold_deadline(body: Mapping[str, Any]) -> float:
@@ -401,6 +411,10 @@ _WAITING_STATUS_MIN_SERVER_VERSION = "0.3.0"
 # runner alive too. A ``running`` turn parked on a dialog is a human wait
 # instead, bounded by ``_resolve_human_wait_hold_s``.
 _IN_FLIGHT_SESSION_STATUSES = ("running", "waiting")
+
+# Inferred holds that can outlive the work they stood for; the idle monitor bounds
+# them by work progress. Every other hold name is a hard hold.
+SOFT_ACTIVE_WORK_HOLDS = frozenset({"background_agents", "pane_output", "native_turn_in_flight"})
 _HUMAN_WAIT_HOLD_ENV = "OMNIGENT_RUNNER_HUMAN_WAIT_HOLD_S"
 # One day, matching the default ASK wait in ``pending_approvals``: a human gate
 # should outlive a user stepping away without pinning the runner forever.
@@ -1801,38 +1815,53 @@ def create_runner_app(
     _session_inboxes = _session_inboxes_ref
     _session_async_tasks: dict[str, dict[str, tuple[asyncio.Task[str], asyncio.Event]]] = {}
 
-    def _native_pane_shows_live_work(
+    def _native_pane_recent_input(terminals: Any, session_id: str, terminal_name: str) -> bool:
+        """Whether a person drove this native pane recently (a hard hold).
+
+        :param terminals: Terminal registry holding the pane instance.
+        :param session_id: Session/conversation id, e.g. ``"conv_abc"``.
+        :param terminal_name: Native harness terminal name, e.g. ``"claude"``.
+        :returns: ``True`` when the web attach bridge saw input in the busy window.
+        """
+        from omnigent.terminals.pane_reaper import PANE_OUTPUT_BUSY_WINDOW_S
+
+        instance = terminals.get(session_id, terminal_name, "main")
+        return instance is not None and bool(
+            instance.client_interaction_within(PANE_OUTPUT_BUSY_WINDOW_S)
+        )
+
+    def _native_pane_soft_hold(
         terminals: Any, session_id: str, terminal_name: str, *, include_pane_activity: bool = True
-    ) -> bool:
-        """Whether a native pane shows live agent work the status edge can miss.
+    ) -> str | None:
+        """Name the inferred live-work signal a native pane shows, if any.
 
         A pane still redrawing output can read ``idle``, so the status edge alone
-        misses it. Reads the same in-memory signals the reaper uses, not its
-        tmux calls. A permission hook parked on a verdict is a human wait, which
+        misses it; a settled turn's background agent also outlives the edge. Both
+        are inferred and can outlive the work, so the idle monitor bounds them.
+        A permission hook parked on a verdict is a human wait, which
         ``_human_wait_holds`` bounds instead.
 
         :param terminals: Terminal registry holding the pane instance.
         :param session_id: Session/conversation id, e.g. ``"conv_abc"``.
         :param terminal_name: Native harness terminal name, e.g. ``"claude"``.
-        :param include_pane_activity: Whether recent pane input or output counts.
-            Viewing a pane (attach, resize, a redraw) produces both, so callers
-            asking about agent work rather than pane liveness pass ``False``.
-        :returns: ``True`` when a background agent outlives the settled turn,
-            or, with *include_pane_activity*, the pane shows recent input or
-            output.
+        :param include_pane_activity: Whether recent pane output counts. Viewing a
+            pane (attach, resize, a redraw) produces it, so callers asking about
+            agent work rather than pane liveness pass ``False``.
+        :returns: ``"background_agents"``, ``"pane_output"`` or ``None``.
         """
         from omnigent.terminals.pane_reaper import PANE_OUTPUT_BUSY_WINDOW_S
 
         if resource_registry.session_has_background_agents(session_id):
-            return True
+            return "background_agents"
         if not include_pane_activity:
-            return False
+            return None
         instance = terminals.get(session_id, terminal_name, "main")
-        if instance is None:
-            return False
-        if instance.client_interaction_within(PANE_OUTPUT_BUSY_WINDOW_S):
-            return True
-        return instance.screen_changed_within(PANE_OUTPUT_BUSY_WINDOW_S) is True
+        if (
+            instance is not None
+            and instance.screen_changed_within(PANE_OUTPUT_BUSY_WINDOW_S) is True
+        ):
+            return "pane_output"
+        return None
 
     # Sessions whose Claude pane reports a background shell still running after
     # its turn ended. Real work: it keeps the runner and its sandbox up, but only
@@ -1994,22 +2023,34 @@ def create_runner_app(
                 )
         return held
 
-    def _has_active_work(*, include_pane_activity: bool = True) -> bool:
+    def _active_work_hold(*, include_pane_activity: bool = True) -> str | None:
+        """Name what keeps the runner busy, hard holds before soft ones.
+
+        Hard holds are delivery-critical or human-driven: a turn, undelivered
+        input reports, async tools, timers, pending approvals, a background shell,
+        recent pane input, a harness turn, a human wait. Soft holds are inferred
+        and can outlive the work (see :data:`SOFT_ACTIVE_WORK_HOLDS`); one never
+        hides a hard hold.
+
+        :param include_pane_activity: Whether recent pane input or output counts.
+        :returns: The hold's name, e.g. ``"turn"``, or ``None`` when idle.
+        """
         if _active_turns:
-            return True
+            return "turn"
         if _undelivered_input_reports:
-            return True
+            return "undelivered_input_reports"
         if _has_live_async_tasks(_session_async_tasks):
-            return True
+            return "async_tools"
         for timers in _session_timers.values():
             for timer_task in timers.values():
                 if not timer_task.done():
-                    return True
+                    return "timers"
         if pending_approvals.has_any_pending():
-            return True
+            return "pending_approvals"
         session_ids = set(_session_start_cache) | set(_session_agent_ids)
         # Permission hooks parked on a verdict, per native pane's session.
         approval_waits: dict[str, list[str]] = {}
+        soft_hold: str | None = None
         # Terminal ensure can start native work before any harness or web turn.
         # Read current resources so deleting a terminal also retires this pin.
         terminals = resource_registry.terminal_registry
@@ -2025,24 +2066,34 @@ def create_runner_app(
                     continue
                 session_ids.add(session_id)
                 if session_id in _sessions_with_background_shell:
-                    return True
-                if _native_pane_shows_live_work(
-                    terminals, session_id, name, include_pane_activity=include_pane_activity
+                    return "background_shell"
+                if include_pane_activity and _native_pane_recent_input(
+                    terminals, session_id, name
                 ):
-                    return True
+                    return "pane_input"
+                soft_hold = soft_hold or _native_pane_soft_hold(
+                    terminals, session_id, name, include_pane_activity=include_pane_activity
+                )
                 if markers := fresh_approval_wait_markers(session_id):
                     approval_waits[session_id] = markers
         if process_manager is not None and any(
             process_manager.has_active_turn(session_id) for session_id in session_ids
         ):
-            return True
+            return "harness_turn"
+        if _human_wait_holds(session_ids, approval_waits):
+            return "human_wait"
+        if soft_hold is not None:
+            return soft_hold
         # A turn parked on a permission hook waits on a human, not on agent work.
         if any(
             session_id not in approval_waits and _native_turn_in_flight(session_id)
             for session_id in session_ids
         ):
-            return True
-        return _human_wait_holds(session_ids, approval_waits)
+            return "native_turn_in_flight"
+        return None
+
+    def _has_active_work(*, include_pane_activity: bool = True) -> bool:
+        return _active_work_hold(include_pane_activity=include_pane_activity) is not None
 
     def _native_turn_in_flight(session_id: str) -> bool:
         """Whether a native terminal still reports this session's turn as in flight.
@@ -2058,10 +2109,39 @@ def create_runner_app(
         return is_native_harness(_session_harness_name(session_id))
 
     app.state.has_active_work = _has_active_work
+    app.state.active_work_hold = _active_work_hold
+    app.state.undelivered_input_reports = _undelivered_input_reports
+    app.state.session_async_tasks = _session_async_tasks
     # Agent work only, for keeping a managed sandbox awake: a native pane's recent
     # input or output also comes from someone just viewing it. A prompt typed into
     # the pane still counts once the harness reports its turn in flight.
     app.state.has_sandbox_work = lambda: _has_active_work(include_pane_activity=False)
+
+    def _served_session_ids() -> set[str]:
+        """Sessions this runner tracks, including those with a live native pane."""
+        session_ids = set(_session_start_cache) | set(_session_agent_ids)
+        terminals = resource_registry.terminal_registry
+        if terminals is not None:
+            session_ids.update(session_id for session_id, _, _ in terminals.native_panes())
+        return session_ids
+
+    def _native_pane_has_attached_client() -> bool:
+        """Whether a tmux client (terminal or web attach bridge) is on a native pane.
+
+        Blocking (runs ``tmux``); call it off the event loop.
+        """
+        from omnigent.native.native_cost_popup import tmux_client_attached
+
+        terminals = resource_registry.terminal_registry
+        if terminals is None:
+            return False
+        return any(
+            tmux_client_attached(str(socket_path), "main")
+            for _, _, socket_path in terminals.native_panes()
+        )
+
+    app.state.served_session_ids = _served_session_ids
+    app.state.native_pane_has_attached_client = _native_pane_has_attached_client
 
     def _drain_session_streams() -> None:
         for queue in list(_session_event_queues.values()):
@@ -5440,7 +5520,7 @@ def create_runner_app(
         """
         if (
             error is None
-            or error.get("code") != "databricks_sign_in_pending"
+            or error.get("code") not in ("databricks_sign_in_pending", _CLAUDE_RESUBMIT_CODE)
             or not error.get("undelivered")
             or _session_harness_name(conv_id) != "claude-native"
             or conv_id not in _turn_message_bodies
@@ -5452,11 +5532,13 @@ def create_runner_app(
         if hold is None:
             # A message the server queued too long ago fails while it can still be recorded.
             return time.monotonic() < _sign_in_hold_deadline(_turn_message_bodies[conv_id])
-        if hold.holds >= _SIGN_IN_HOLD_MAX_REPEATS or time.monotonic() >= hold.deadline:
-            # The wait ran out, or the pane kept asking after it looked signed in: this
-            # refusal stands, and so do those of the messages queued during the wait.
-            return False
-        return True
+        if error.get("code") == _CLAUDE_RESUBMIT_CODE:
+            exhausted = hold.resubmits >= len(_CLAUDE_RESUBMIT_WAITS_S)
+        else:
+            exhausted = hold.holds >= _SIGN_IN_HOLD_MAX_REPEATS
+        # The wait ran out, or the pane kept refusing: this refusal stands. A sign-in's
+        # queue fails with it; a resubmit refusal ends the hold, so the queue waits afresh.
+        return not exhausted and time.monotonic() < hold.deadline
 
     def _is_sub_agent_session(conv_id: str) -> bool:
         """Return whether *conv_id* runs a sub-agent dispatch rather than a main session."""
@@ -5486,6 +5568,20 @@ def create_runner_app(
         hold = _sign_in_holds.get(conv_id)
         if hold is None:
             hold = _sign_in_holds[conv_id] = _SignInHold(deadline=_sign_in_hold_deadline(body))
+        if error.get("code") == _CLAUDE_RESUBMIT_CODE:
+            wait_s = _CLAUDE_RESUBMIT_WAITS_S[hold.resubmits]
+            hold.resubmits += 1
+            hold.waiting = True
+            hold.resume_at = time.monotonic() + wait_s
+            _logger.info(
+                "Holding a message for %s to resend in %.0fs: Claude Code did not accept it "
+                "(refusal %d)",
+                conv_id,
+                wait_s,
+                hold.resubmits,
+                extra={"session_id": conv_id, "event_name": "native_input_held_for_resubmit"},
+            )
+            return
         hold.holds += 1
         hold.waiting = True
         _logger.info(
@@ -5505,7 +5601,12 @@ def create_runner_app(
     def _message_held_for_sign_in(conv_id: str) -> bool:
         """Return whether a queued message waits on the session's sign-in, without resuming it."""
         hold = _sign_in_holds.get(conv_id)
-        return hold is not None and hold.waiting
+        return hold is not None and hold.waiting and hold.resume_at is None
+
+    def _message_held_for_resubmit(conv_id: str) -> bool:
+        """Return whether a queued message waits to be resent after Claude refused it."""
+        hold = _sign_in_holds.get(conv_id)
+        return hold is not None and hold.waiting and hold.resume_at is not None
 
     def _claim_sign_in_release(conv_id: str) -> bool:
         """
@@ -5533,6 +5634,12 @@ def create_runner_app(
         """Return whether queued input still waits on a sign-in; an expired wait resumes."""
         hold = _sign_in_holds.get(session_id)
         if hold is None or not hold.waiting:
+            return False
+        if hold.resume_at is not None:
+            if time.monotonic() < hold.resume_at:
+                return True
+            hold.waiting = False
+            hold.resume_at = None
             return False
         if hold.releasing or time.monotonic() < hold.deadline:
             return True
@@ -7497,7 +7604,8 @@ def create_runner_app(
                                     if (
                                         harness_name == "claude-native"
                                         and isinstance(error, dict)
-                                        and error.get("code") == "databricks_sign_in_pending"
+                                        and error.get("code")
+                                        in ("databricks_sign_in_pending", _CLAUDE_RESUBMIT_CODE)
                                         and error.get("undelivered") is True
                                         and (
                                             "input_stable_id" in turn_input_identity
@@ -8464,6 +8572,8 @@ def create_runner_app(
                                 "detail": (
                                     "Message buffered until the Databricks sign-in completes."
                                     if _message_held_for_sign_in(conversation_id)
+                                    else "Message buffered until Claude Code accepts input."
+                                    if _message_held_for_resubmit(conversation_id)
                                     else "Message buffered until the pending prompt is resolved."
                                 ),
                             },

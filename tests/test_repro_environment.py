@@ -1,5 +1,6 @@
 """Configuration and transport regressions for workflow-owned reproduction."""
 
+import contextlib
 import json
 import socket
 import threading
@@ -126,8 +127,22 @@ def test_relay_requires_private_socket_directory(tmp_path):
     assert not path.exists()
 
 
-# A full collection in a busy test worker can take seconds; this waits for it, not times it.
+# An upper bound for the relay-thread collection, not a time budget it must meet.
 _COLLECTION_WAIT_S = 60
+
+
+@contextlib.contextmanager
+def _only_new_objects_collectable():
+    """Collect earlier tests' garbage here, then freeze it, so a later collection on the
+    relay's thread sees only the relay's objects and runs no other test's finalizers."""
+    import gc
+
+    gc.collect()
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
 
 
 def test_relay_preserves_half_closed_connection_during_collection():
@@ -138,7 +153,7 @@ def test_relay_preserves_half_closed_connection_during_collection():
     received = []
     request_received = threading.Event()
     respond_now = threading.Event()
-    with socket.socket() as service:
+    with _only_new_objects_collectable(), socket.socket() as service:
         service.bind(("127.0.0.1", 0))
         service.listen()
         service.settimeout(5)

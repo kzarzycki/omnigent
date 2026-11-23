@@ -355,6 +355,7 @@ class ExecutorSpec:
         re-reading raw YAML.
     :param context_files: Pi context-file discovery override. None uses Pi's default.
     :param system_prompt_mode: Pi prompt delivery: append (default) or replace its base prompt.
+    :param settings: Claude Code settings for claude-native launches of this agent.
     """
 
     model: str | None = None
@@ -363,6 +364,7 @@ class ExecutorSpec:
     auth: object | None = None  # ApiKeyAuth | DatabricksAuth | None
     context_files: bool | None = None
     system_prompt_mode: str | None = None
+    settings: object | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -115,6 +115,7 @@ _STRUCTURED_EXECUTOR_CONFIG_KEYS: frozenset[str] = frozenset(
         "context_files",
         "disable_native_tools",
         "disallowed_tools",
+        "settings",
         "system_prompt_mode",
         "web_search",
     }

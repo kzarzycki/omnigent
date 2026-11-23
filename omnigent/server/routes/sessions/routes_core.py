@@ -1749,6 +1749,19 @@ def register_core_routes(
             else:
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
+        orchestration_marks = getattr(request.app.state, "orchestration_hosts", None)
+        if orchestration_marks is not None and body.host_id is not None:
+            from omnigent.server.orchestration_hosts import require_host_allows_agent
+
+            # Refused before the session exists, so a rejected create leaves nothing behind.
+            await require_host_allows_agent(
+                orchestration_marks,
+                await asyncio.to_thread(request.app.state.host_store.get_host, body.host_id),
+                await asyncio.to_thread(agent_store.get, body.agent_id)
+                if body.agent_id is not None
+                else None,
+                agent_cache,
+            )
         launching_task = None
         if source is not None:
             from omnigent.server.scheduled.run_sharing import launching_automation
@@ -2074,6 +2087,19 @@ def register_core_routes(
         await _check_initial_input(request, parsed_metadata.initial_input)
         if parsed_metadata.requested_host_id is not None:
             await _check_requested_host_id(request, parsed_metadata.requested_host_id, user_id)
+        orchestration_marks = getattr(request.app.state, "orchestration_hosts", None)
+        if orchestration_marks is not None and parsed_metadata.host_id is not None:
+            from omnigent.server.orchestration_hosts import require_host_allows_agent
+
+            # An uploaded agent is never an allow-listed one: it needs no check beyond the host.
+            await require_host_allows_agent(
+                orchestration_marks,
+                await asyncio.to_thread(
+                    request.app.state.host_store.get_host, parsed_metadata.host_id
+                ),
+                None,
+                None,
+            )
         creation_metadata(
             parent_session_id=parsed_metadata.parent_session_id,
             host_type=parsed_metadata.host_type,

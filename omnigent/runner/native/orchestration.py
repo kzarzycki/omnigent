@@ -8025,6 +8025,23 @@ def _claude_native_disallowed_tools_from_spec(
     return (*ask_off, *_spec_tool_names(spec, "disallowed_tools"))
 
 
+def _claude_native_settings_from_spec(
+    agent_spec: AgentSpec | ResolvedSpec | None,
+) -> dict[str, Any]:
+    """
+    Claude Code settings an agent carries under ``executor.config.settings``.
+
+    They let an agent switch a plugin on (``enabledPlugins``) or set ``env`` for
+    its own sessions only, without touching the user's settings.
+
+    :param agent_spec: Agent spec, a resolved wrapper, or ``None``.
+    :returns: The settings object, or ``{}`` when the agent has none.
+    """
+    spec = _unwrap_resolved_spec(agent_spec)
+    value = spec.executor.config.get("settings") if isinstance(spec, AgentSpec) else None
+    return value if isinstance(value, dict) else {}
+
+
 def _is_false(value: object) -> bool:
     return value is False or (isinstance(value, str) and value.strip().lower() == "false")
 
@@ -10332,9 +10349,16 @@ async def _auto_create_claude_terminal(
     configured_args, configured_settings = _extract_configured_settings_args(
         resolve_harness_args("claude-native", (), cfg=_harness_cfg), base_dir=Path(workspace)
     )
+    from omnigent.harnesses.claude_native.bridge import (  # noqa: FlagLocalImports
+        _merge_settings_objects,
+    )
+
     claude_args = augment_claude_args(
         base_claude_args,
-        config_settings=configured_settings,
+        # The agent's settings outrank the host's; a session's own --settings outranks both.
+        config_settings=_merge_settings_objects(
+            configured_settings, _claude_native_settings_from_spec(agent_spec)
+        ),
         active_harnesses=runner_mcp_disabled_servers_active_harnesses(),
         bridge_dir=bridge_dir,
         workspace=Path(workspace),
