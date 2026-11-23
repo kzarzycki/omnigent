@@ -20,6 +20,7 @@ from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 ROUTE = "/v1/settings/session-title-instructions"
+THINKING_ROUTE = "/v1/settings/thinking-summaries"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 
@@ -93,6 +94,7 @@ async def test_info_advertises_capability(client: httpx.AsyncClient) -> None:
     info = await client.get("/v1/info")
 
     assert info.json()["session_title_instructions"] is True
+    assert info.json()["thinking_summaries"] is True
 
 
 async def test_settings_are_private_to_each_user(multi_user_client: httpx.AsyncClient) -> None:
@@ -110,3 +112,41 @@ async def test_settings_are_private_to_each_user(multi_user_client: httpx.AsyncC
 async def test_requires_authenticated_user(multi_user_client: httpx.AsyncClient) -> None:
     assert (await multi_user_client.get(ROUTE)).status_code == 401
     assert (await multi_user_client.put(ROUTE, json={"instructions": "x"})).status_code == 401
+
+
+async def test_thinking_summaries_round_trip(client: httpx.AsyncClient) -> None:
+    assert (await client.get(THINKING_ROUTE)).json() == {"enabled": False}
+
+    saved = await client.put(THINKING_ROUTE, json={"enabled": True})
+    assert saved.status_code == 200
+    assert saved.json() == {"enabled": True}
+    assert (await client.get(THINKING_ROUTE)).json() == {"enabled": True}
+
+    assert (await client.put(THINKING_ROUTE, json={"enabled": False})).json() == {"enabled": False}
+    assert (await client.get(THINKING_ROUTE)).json() == {"enabled": False}
+
+
+@pytest.mark.parametrize("body", [{}, {"enabled": "yes"}, {"enabled": True, "extra": 1}])
+async def test_thinking_summaries_rejects_malformed_body(
+    client: httpx.AsyncClient, body: dict[str, object]
+) -> None:
+    assert (await client.put(THINKING_ROUTE, json=body)).status_code == 422
+
+
+async def test_thinking_summaries_are_private_to_each_user(
+    multi_user_client: httpx.AsyncClient,
+) -> None:
+    await multi_user_client.put(THINKING_ROUTE, json={"enabled": True}, headers=_as_user(ALICE))
+
+    alice = await multi_user_client.get(THINKING_ROUTE, headers=_as_user(ALICE))
+    bob = await multi_user_client.get(THINKING_ROUTE, headers=_as_user(BOB))
+
+    assert alice.json() == {"enabled": True}
+    assert bob.json() == {"enabled": False}
+
+
+async def test_thinking_summaries_require_authenticated_user(
+    multi_user_client: httpx.AsyncClient,
+) -> None:
+    assert (await multi_user_client.get(THINKING_ROUTE)).status_code == 401
+    assert (await multi_user_client.put(THINKING_ROUTE, json={"enabled": True})).status_code == 401

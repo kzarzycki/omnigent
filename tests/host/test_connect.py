@@ -13808,6 +13808,46 @@ async def test_host_reports_mcp_storage_failure_without_overwriting(tmp_path, mo
     assert path.read_text() == stored
 
 
+@pytest.mark.parametrize(("thinking_summaries", "expected"), [(None, False), (True, True)])
+async def test_thinking_summaries_launch_frame_to_runner_environment(thinking_summaries, expected):
+    from omnigent.runner.identity import (
+        RUNNER_THINKING_SUMMARIES_ENV_VAR,
+        runner_thinking_summaries,
+    )
+
+    frame = decode_host_frame(
+        encode_host_frame(
+            HostLaunchRunnerFrame(
+                "launch", "binding", "/repo", thinking_summaries=thinking_summaries
+            )
+        )
+    )
+    env = _build_runner_env(
+        # The host's own environment never turns it on.
+        {RUNNER_THINKING_SUMMARIES_ENV_VAR: "1"},
+        server_url="http://localhost",
+        runner_id="runner",
+        binding_token="binding",
+        workspace="/repo",
+        parent_pid=1,
+        thinking_summaries=frame.thinking_summaries,
+        session_env={RUNNER_THINKING_SUMMARIES_ENV_VAR: "1"},
+    )
+    assert runner_thinking_summaries(env) is expected
+    assert (RUNNER_THINKING_SUMMARIES_ENV_VAR in env) is expected
+
+
+@pytest.mark.parametrize("raw", ["0", "true", ""])
+async def test_runner_thinking_summaries_reads_only_the_host_stamp(raw):
+    from omnigent.runner.identity import (
+        RUNNER_THINKING_SUMMARIES_ENV_VAR,
+        runner_thinking_summaries,
+    )
+
+    assert runner_thinking_summaries({}) is False
+    assert runner_thinking_summaries({RUNNER_THINKING_SUMMARIES_ENV_VAR: raw}) is False
+
+
 @pytest.mark.parametrize("activation", [None, [], ["claude"], ["codex"], ["claude", "codex"]])
 async def test_mcp_activation_launch_frame_to_runner_environment(activation):
     from omnigent.runner.identity import (

@@ -6460,6 +6460,14 @@ class SessionTitleInstructionsResponse(BaseModel):
     max_chars: int
 
 
+class ThinkingSummariesSetting(BaseModel):
+    """Whether sessions the caller starts ask Claude and Codex for thinking summaries."""
+
+    enabled: bool = Field(..., strict=True)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 # ── Projects ──────────────────────────────────────────────────────
 
 

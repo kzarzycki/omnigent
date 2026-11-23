@@ -566,6 +566,14 @@ describe("custom agents settings capability", () => {
   );
 
   it.each([undefined, false, "true", true])(
+    "parses thinking_summaries strictly: %s",
+    async (stored) => {
+      const parsed = await probe({ thinking_summaries: stored });
+      expect(parsed.thinking_summaries).toBe(stored === true);
+    },
+  );
+
+  it.each([undefined, false, "true", true])(
     "requires explicit support for PR comment anchors: %s",
     async (supported) => {
       expect((await probe({ comment_anchor_metadata: supported })).comment_anchor_metadata).toBe(
