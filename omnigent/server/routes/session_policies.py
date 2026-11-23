@@ -10,6 +10,7 @@ view. Spec policies have ``id=None`` and cannot be patched or deleted.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -115,6 +116,62 @@ def _spec_to_response(spec: PolicySpec, source: str) -> dict[str, Any]:
     }
 
 
+#: Runner event that tells a session's native hooks a policy list changed.
+POLICY_CHANGE_EVENT = "policy_change"
+
+# Keeps scheduled notifications alive until they finish.
+# custom-lint: disable-next=workspace-scoped-cache -- holds task objects, not keyed data
+_policy_change_notifications: set[asyncio.Task[None]] = set()
+
+
+async def _notify_runners_of_policy_change(
+    conversation_store: ConversationStore, session_id: str
+) -> None:
+    """Tell the runners of a session and its sub-agents that its policies changed.
+
+    Native hooks may be reusing a no-policy ALLOW
+    (``omnigent.native.policy_allow_cache``); the runner closes that window so
+    the change applies to the next hook. Sub-agents inherit the session's
+    policies, so their runners are told too. Best effort: a runner that is not
+    reached keeps its window, which expires on its own.
+
+    :param conversation_store: Store used to list the session's sub-agents.
+    :param session_id: The session whose policies changed, e.g. ``"conv_abc123"``.
+    """
+    from omnigent.server.routes._sessions.common import get_server_runner_router
+    from omnigent.server.routes._sessions.helpers import (
+        _descendant_sessions,
+        _forward_session_change_to_runner,
+    )
+
+    try:
+        descendants = await asyncio.to_thread(_descendant_sessions, conversation_store, session_id)
+    except Exception:  # A failed listing still notifies the session itself.
+        _logger.debug("policy change: could not list sub-agents of %s", session_id, exc_info=True)
+        descendants = []
+    runner_router = get_server_runner_router()
+    for target in [session_id, *(child.id for child in descendants)]:
+        try:
+            await _forward_session_change_to_runner(
+                target, runner_router, {"type": POLICY_CHANGE_EVENT}
+            )
+        except Exception:  # Best effort; the window expires on its own.
+            _logger.debug("policy change: runner not told for %s", target, exc_info=True)
+
+
+def schedule_policy_change_notification(
+    conversation_store: ConversationStore, session_id: str
+) -> None:
+    """Notify the session's runners in the background, off the request path.
+
+    :param conversation_store: Store used to list the session's sub-agents.
+    :param session_id: The session whose policies changed, e.g. ``"conv_abc123"``.
+    """
+    task = asyncio.ensure_future(_notify_runners_of_policy_change(conversation_store, session_id))
+    _policy_change_notifications.add(task)
+    task.add_done_callback(_policy_change_notifications.discard)
+
+
 def create_session_policies_router(
     store: PolicyStore,
     conversation_store: ConversationStore,
@@ -216,6 +273,7 @@ def create_session_policies_router(
                 code=ErrorCode.CONFLICT,
             ) from exc
         invalidate_session_policy_specs_cache(session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/create: user=%s created policy_id=%s session_id=%s handler=%s",
             user_id or "(single-user)",
@@ -379,6 +437,7 @@ def create_session_policies_router(
         if policy is None:
             raise OmnigentError("Policy not found", code=ErrorCode.NOT_FOUND)
         invalidate_session_policy_specs_cache(session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/update: user=%s updated policy_id=%s session_id=%s",
             user_id or "(single-user)",
@@ -415,6 +474,7 @@ def create_session_policies_router(
             )
         store.delete(policy_id, session_id)
         invalidate_session_policy_specs_cache(session_id)
+        schedule_policy_change_notification(conversation_store, session_id)
         _logger.info(
             "session_policies/delete: user=%s deleted policy_id=%s session_id=%s",
             user_id or "(single-user)",
