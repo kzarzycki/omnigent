@@ -1506,6 +1506,109 @@ async def test_an_imported_agents_tool_restrictions_reach_the_claude_launch(
     assert args[args.index("--tools") + 1] == "Read,Grep"
 
 
+@pytest.mark.parametrize("resolved", [False, True], ids=["agent-spec", "resolved-spec"])
+async def test_an_agents_own_claude_settings_reach_its_launch_only(
+    resolved: bool, bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``executor.config.settings`` lands in the invocation settings beside Omnigent's hooks."""
+    from unittest.mock import Mock
+
+    from omnigent.runner.native.orchestration import ResolvedSpec
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+    settings = {"env": {"CODE_MODE_GUIDE": "system"}, "enabledPlugins": {"code-mode@m": True}}
+
+    for session_id, config in (
+        ("conv_agent_settings", {"settings": settings}),
+        ("conv_plain", {}),
+    ):
+        spec = AgentSpec(spec_version=1, executor=ExecutorSpec(config=config))
+        with pytest.raises(RuntimeError, match="stop after launch"):
+            await _auto_create_claude_terminal_for_test(
+                monkeypatch,
+                session_id=session_id,
+                workspace=bridge_dir,
+                registry=registry,
+                agent_spec=ResolvedSpec(spec=spec, workdir=None) if resolved else spec,
+            )
+
+    with_settings, plain = (
+        json.loads(Path(args[args.index("--settings") + 1]).read_text()) for args in launched
+    )
+    assert with_settings["enabledPlugins"] == {"code-mode@m": True}
+    assert with_settings["env"]["CODE_MODE_GUIDE"] == "system"
+    assert with_settings["hooks"], "Omnigent's own hooks must survive the merge"
+    assert "enabledPlugins" not in plain
+    assert "CODE_MODE_GUIDE" not in plain.get("env", {})
+
+
+async def test_an_agents_claude_settings_override_the_hosts_on_the_same_key(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host ``--settings`` < agent ``executor.config.settings``; untouched host keys stay."""
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    launched: list[list[str]] = []
+    registry = Mock(spec=SessionResourceRegistry)
+
+    def capture(**kwargs: object) -> None:
+        launched.append(list(kwargs["spec"].args))  # type: ignore[attr-defined]
+        raise RuntimeError("stop after launch")
+
+    registry.launch_required_terminal.side_effect = capture
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *_a, **_k: None,
+    )
+
+    async def no_catalog(_claude_config: object) -> None:
+        return None
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_model_catalog", no_catalog)
+    monkeypatch.setattr(
+        "omnigent.harness_startup_config.resolve_harness_args",
+        lambda _harness, cli_args, cfg=None: [
+            "--settings",
+            '{"env": {"SHARED": "host", "HOST_ONLY": "1"}}',
+            *cli_args,
+        ],
+    )
+    agent = AgentSpec(
+        spec_version=1,
+        executor=ExecutorSpec(config={"settings": {"env": {"SHARED": "agent"}}}),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after launch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_agent_over_host",
+            workspace=bridge_dir,
+            registry=registry,
+            agent_spec=agent,
+        )
+
+    args = launched[0]
+    env = json.loads(Path(args[args.index("--settings") + 1]).read_text())["env"]
+    assert env["SHARED"] == "agent"
+    assert env["HOST_ONLY"] == "1"
+
+
 @pytest.mark.parametrize("wrapper_prefix", [[], ["--"]], ids=["bare", "wrapper-separator"])
 async def test_configured_claude_settings_merge_into_the_invocation_settings(
     wrapper_prefix: list[str],

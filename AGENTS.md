@@ -247,7 +247,7 @@ Mergify merges it: an upstream-sync PR (head `sync/*`) as a merge commit, so
 `mine` keeps upstream's history, and every other PR as a squash
 (`land.queue` and `land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
 Nothing is signed or checked against a signer list.
-The `gate` check in GitHub Actions is the proof and `land` queues the PR with Mergify,
+The `gate` check, which GitHub Actions runs on Mergify's draft of the merge, is the proof,
 so no local gate is recorded first (`mise run check:all` stays the pre-push check;
 run `mise trust` once in a new checkout).
 
