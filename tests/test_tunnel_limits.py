@@ -125,6 +125,7 @@ def test_deprecated_runner_path_reexports_the_same_objects() -> None:
         assert getattr(shim, name) is getattr(canonical, name), name
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_docker_entrypoint_hands_the_tunnel_budget_and_graceful_shutdown_to_uvicorn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
