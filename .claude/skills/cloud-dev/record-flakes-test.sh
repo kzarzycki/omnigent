@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# record-flakes.sh with a fake gh: a flake is commented on its open `Flaky:` issue or gets a new one; one
-# whose call fails is recorded as failed instead.
+# record-flakes.sh with a fake gh: a flake is commented on its open `Flaky:` issue or gets a new one, both
+# naming the files that differ between the two trees; one whose call fails is recorded as failed instead.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -39,13 +39,15 @@ flakes() {
 setup aaa ccc
 flakes; rc=$?
 [ "$rc" = 0 ] || fail "filing exited $rc: $(cat "$tmp/out")"
-grep -q '^api repos/o/r/issues/42/comments -f body=' "$tmp/calls" || fail "no comment on the open issue: $(cat "$tmp/calls")"
+grep -q '^api repos/o/r/issues/42/comments -f body=.*Files that differ between the two runs.* trees: pkg/core\.py\.' "$tmp/calls" ||
+  fail "no comment on the open issue naming the differing file: $(cat "$tmp/calls")"
 grep -q '^api repos/o/r/issues/7/comments ' "$tmp/calls" || fail "a described title wasn't matched"
 grep -q '^api repos/o/r/issues -f title=Flaky: tests/b.py::u v -f body=.* -f labels\[\]=bug' "$tmp/calls" ||
   fail "no new issue for the unmatched flake"
 [ "$(grep -c '^- `' "$tmp/summary")" = 3 ] || fail "the summary doesn't list the three flakes: $(cat "$tmp/summary")"
 [ "$(cat "$tmp/record/lastfailed.json")" = '{}' ] || fail "a filed flake was recorded as failed"
 setup aaa aaa
+flakes; grep -q 'trees: none\.' "$tmp/calls" || fail "an unchanged tree isn't named as none"
 # a failed call: that flake is recorded as failed, the others are filed, and the run is red
 setup aaa aaa
 flakes GH_FAILS=create; rc=$?

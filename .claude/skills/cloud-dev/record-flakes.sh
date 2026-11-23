@@ -8,7 +8,19 @@ set -uo pipefail
 record=$1 earlier=$2
 [ -s "$record/flakes" ] || exit 0
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
+here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+# The files that differ between the two trees, so a reader can tell a fix elsewhere from a real flake.
+differ=$(python3 - "$here" "$earlier/tree" "$record/tree" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from affected_tests import listing
+then, now = (listing(Path(p).read_text()) for p in sys.argv[2:])
+paths = sorted(p for p in then.keys() | now.keys() if then.get(p) != now.get(p))
+print(", ".join(paths[:20]) + (f" and {len(paths) - 20} more" if len(paths) > 20 else "") or "none")
+PY
+) || differ="unknown (a tree listing can't be read)"
 # Without the open issues a new one could duplicate one, so every flake waits for the next run instead.
 listed=yes
 gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" \
@@ -17,7 +29,7 @@ echo "### Flaky: failed in $EARLIER_RUN, passed on this rerun" >> "$summary"
 : > "$work/unfiled"
 while IFS= read -r test; do
   title="Flaky: $test"
-  body="Failed in $EARLIER_RUN (head $EARLIER_SHA) and passed on the rerun in $THIS_RUN (head $HEAD_SHA), for #$PR. Nothing that names it changed between the two runs."
+  body="Failed in $EARLIER_RUN (head $EARLIER_SHA) and passed on the rerun in $THIS_RUN (head $HEAD_SHA), for #$PR. Files that differ between the two runs' trees: $differ."
   number=$(TITLE="$title" awk -F'\t' '$2 == ENVIRON["TITLE"] || index($2, ENVIRON["TITLE"] " ") == 1 { print $1; exit }' "$work/open-issues")
   url=
   if [ -z "$listed" ]; then
