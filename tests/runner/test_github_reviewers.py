@@ -198,6 +198,7 @@ def test_reference_info_shapes_reviewers_with_conversation_read() -> None:
         ),
         patch.object(github_resource._config, "github_account_preference", return_value=None),
         patch.object(github_resource, "_pr_token", return_value=None) as pr_token,
+        patch.object(github_resource, "_active_gh_token", return_value=None),
         patch.object(github_resource, "_gh", side_effect=run_gh),
     ):
         payload = github_resource._reference_info("/workspace", reference)
