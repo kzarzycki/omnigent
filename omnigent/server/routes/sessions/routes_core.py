@@ -1327,6 +1327,7 @@ def register_core_routes(
                 stage="runner_launch",
             ),
         )
+        thinking_summaries = await asyncio.to_thread(host_registry.thinking_summaries, target.conv)
         request_id = secrets.token_hex(8)
         future: asyncio.Future[HostLaunchResult] = asyncio.get_running_loop().create_future()
         conn.pending_launches[request_id] = future
@@ -1347,6 +1348,7 @@ def register_core_routes(
                 # host-side check.
                 harness=harness,
                 mcp_disabled_servers_active_harnesses=host_registry.mcp_disabled_servers_active_harnesses(),
+                thinking_summaries=thinking_summaries,
                 inference_config=(
                     target.conv.inference_snapshot["runtime_config"]
                     if target.conv.inference_snapshot

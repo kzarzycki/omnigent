@@ -15,6 +15,7 @@ parameterization produces additional collected cases.
 | [test_health.py](test_health.py) | Health | 4 |
 | [test_instructions.py](test_instructions.py) | Instructions | 20 |
 | [test_mcp_startup.py](test_mcp_startup.py) | Mcp startup | 14 |
+| [test_reasoning.py](test_reasoning.py) | Reasoning items saved with thinking summaries | 5 |
 | [test_replay_order.py](test_replay_order.py) | Replay order | 14 |
 | [test_settings.py](test_settings.py) | Settings | 20 |
 | [test_side_chat.py](test_side_chat.py) | Side chat | 1 |

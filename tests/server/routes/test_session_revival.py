@@ -365,6 +365,9 @@ class _Host(dict[str, Any]):
     def mcp_disabled_servers_active_harnesses(self) -> None:
         return None
 
+    def thinking_summaries(self, conv: Any) -> None:
+        return None
+
     async def admit_launch(self, conn: Any, session_id: str) -> None:
         if self.on_admit is not None:
             self.on_admit()

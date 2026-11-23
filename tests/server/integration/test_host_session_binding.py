@@ -1779,6 +1779,9 @@ async def test_move_launch_queued_behind_a_refused_relaunch_still_starts(
         def mcp_disabled_servers_active_harnesses(self) -> tuple[str, ...]:
             return ()
 
+        def thinking_summaries(self, conv: object) -> None:
+            return None
+
         def send_text(self, conn: object, text: str) -> None:
             # The runner is bound by now; the host's answer isn't under test.
             raise ConnectionError("host gone")
@@ -4729,3 +4732,137 @@ async def test_session_response_keeps_existing_failure_cause_while_exit_report_i
     assert _persisted_task_error(conv_store, session_id) == original_error
     assert after["status"] == "failed"
     assert after["last_task_error"] == original_error
+
+
+def _owned_session(db_uri: str, conv_store: SqlAlchemyConversationStore, owner: str) -> str:
+    """Create a session owned by ``owner`` and shared with an editor who has the setting on."""
+    from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    conv = conv_store.create_conversation(agent_id=None)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.grant(owner, conv.id, LEVEL_OWNER)
+    permissions.grant(_THINKING_EDITOR, conv.id, LEVEL_EDIT)
+    return conv.id
+
+
+_THINKING_OWNER_ON = "owner-on@example.com"
+_THINKING_OWNER_UNSET = "owner-unset@example.com"
+_THINKING_EDITOR = "editor@example.com"
+
+
+@pytest.mark.parametrize(
+    ("owner", "expected"), [(_THINKING_OWNER_ON, True), (_THINKING_OWNER_UNSET, None)]
+)
+async def test_runner_launch_carries_the_session_owners_thinking_summaries(
+    binding_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    db_uri: str,
+    owner: str,
+    expected: bool | None,
+) -> None:
+    """The owner's setting decides; an editor's setting does not, and off sends no field."""
+    from omnigent.stores.user_settings_store import (
+        UserSettingsStore,
+        session_owner_thinking_summaries,
+    )
+
+    app, registry, _hs, conv_store = binding_app
+    settings = UserSettingsStore(db_uri)
+    settings.save_thinking_summaries(True, user_id=_THINKING_OWNER_ON)
+    settings.save_thinking_summaries(True, user_id=_THINKING_EDITOR)
+    registry.thinking_summaries_resolver = session_owner_thinking_summaries(
+        settings, conv_store, single_user=False
+    )
+    comm = await _connect_host(app, registry)
+    session_id = _owned_session(db_uri, conv_store, owner)
+    launches: list[tuple[HostLaunchRunnerFrame, dict[str, Any]]] = []
+
+    async def _respond_launched() -> None:
+        for _ in range(20):
+            output = await comm.receive_output(timeout=10.0)
+            if output["type"] != "websocket.send":
+                continue
+            frame = decode_host_frame(output["text"])
+            if isinstance(frame, HostLaunchRunnerFrame):
+                launches.append((frame, json.loads(output["text"])))
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostLaunchRunnerResultFrame(
+                                request_id=frame.request_id,
+                                status="launched",
+                                runner_id="runner_token_test",
+                            )
+                        ),
+                    }
+                )
+                return
+
+    responder = asyncio.create_task(_respond_launched())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/v1/hosts/{_HOST_ID}/runners",
+            json={"session_id": session_id, "workspace": "/tmp"},
+        )
+    await responder
+
+    assert resp.status_code == 200
+    [(frame, wire)] = launches
+    assert frame.thinking_summaries is expected
+    assert ("thinking_summaries" in wire) is (expected is not None)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_relaunch_carries_the_session_owners_thinking_summaries(
+    binding_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    enabled: bool,
+) -> None:
+    """A server-driven relaunch reads the owner's setting the same way a first launch does."""
+    from typing import cast
+
+    from omnigent.server.routes._sessions.helpers import _launch_runner_on_host_locked
+
+    _app, _registry, _hs, conv_store = binding_app
+    conv = conv_store.create_conversation(agent_id=None, host_id=_HOST_ID, workspace="/tmp")
+    resolved: list[str] = []
+    sent: list[str] = []
+
+    class _Registry:
+        machine_launch_guard = None
+
+        async def admit_launch(self, conn: object, conversation_id: str, **_: object) -> None:
+            return None
+
+        def mcp_disabled_servers_active_harnesses(self) -> None:
+            return None
+
+        def thinking_summaries(self, session: Conversation) -> bool | None:
+            resolved.append(session.id)
+            return True if enabled else None
+
+        def send_text(self, conn: object, text: str) -> None:
+            sent.append(text)
+            raise ConnectionError("host gone")
+
+        def get(self, host_id: str) -> None:
+            return None
+
+    await _launch_runner_on_host_locked(
+        conv,
+        conv_store,
+        cast(Any, _Registry()),
+        cast(
+            Any,
+            SimpleNamespace(
+                host_id=_HOST_ID,
+                pending_launches={},
+                hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="h"),
+            ),
+        ),
+    )
+
+    assert resolved == [conv.id]
+    frame = decode_host_frame(sent[0])
+    assert isinstance(frame, HostLaunchRunnerFrame)
+    assert frame.thinking_summaries is (True if enabled else None)
