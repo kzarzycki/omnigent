@@ -11629,6 +11629,13 @@ def _reject_server_reserved_label_seed(
             "The ACP permission mode is set with permission_mode at session creation",
             code=ErrorCode.INVALID_INPUT,
         )
+    from omnigent.acp_cloud_environment import CLOUD_ENVIRONMENT_LABEL_KEY
+
+    if CLOUD_ENVIRONMENT_LABEL_KEY in labels:
+        raise OmnigentError(
+            "The cloud environment is set with cloud_environment_id at session creation",
+            code=ErrorCode.INVALID_INPUT,
+        )
     from omnigent.mcp_selection import MCP_SELECTION_PREFIX
 
     if any(key.startswith(MCP_SELECTION_PREFIX) for key in labels):
