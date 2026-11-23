@@ -286,6 +286,25 @@ async def test_multipart_create_with_host_id_binds_and_launches(
     assert any(frame.path == _WORKSPACE for frame in cap.stats)
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_create_launch_carries_the_users_thinking_summaries(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    enabled: bool,
+) -> None:
+    """A create's runner launch asks for thinking summaries only when the owner turned them on."""
+    from omnigent.stores.user_settings_store import UserSettingsStore
+
+    UserSettingsStore(db_uri).save_thinking_summaries(enabled, user_id=None)
+    cap = register_host()
+
+    resp = await _multipart_create(client, {"host_id": _HOST_ID, "workspace": _WORKSPACE})
+
+    assert resp.status_code == 201, resp.text
+    assert [frame.thinking_summaries for frame in cap.launch] == [True if enabled else None]
+
+
 async def test_multipart_create_files_the_session_by_its_workspace(
     register_host: RegisterHost,
     client: httpx.AsyncClient,

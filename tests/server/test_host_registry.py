@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -690,3 +691,27 @@ def test_mcp_launch_activation_defaults_closed_and_reads_gate_per_launch():
     assert registry.mcp_disabled_servers_active_harnesses() is None
     # Exhausting the callable also fails closed.
     assert registry.mcp_disabled_servers_active_harnesses() is None
+
+
+def test_thinking_summaries_launch_field_follows_the_resolver():
+    conv = SimpleNamespace(id="conv_1")
+    registry = HostRegistry()
+    # Without a settings store the field is omitted, as on an older server.
+    assert registry.thinking_summaries(conv) is None
+
+    registry.thinking_summaries_resolver = lambda _conv: True
+    assert registry.thinking_summaries(conv) is True
+    registry.thinking_summaries_resolver = lambda _conv: False
+    assert registry.thinking_summaries(conv) is None
+
+
+def test_thinking_summaries_read_failure_launches_with_the_setting_off(caplog):
+    def broken(_conv):
+        raise RuntimeError("database is locked")
+
+    registry = HostRegistry()
+    registry.thinking_summaries_resolver = broken
+
+    with caplog.at_level("WARNING"):
+        assert registry.thinking_summaries(SimpleNamespace(id="conv_1")) is None
+    assert "thinking summaries setting for session conv_1" in caplog.text

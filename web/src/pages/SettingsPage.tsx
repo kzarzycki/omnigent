@@ -85,6 +85,7 @@ import { SettingsGroup } from "@/components/SettingsGroup";
 import { SettingsLabel } from "@/components/SettingsLabel";
 import { ProactiveAgentSettingControl } from "@/components/ProactiveAgentSettingControl";
 import { SessionTitleInstructionsControl } from "@/components/SessionTitleInstructionsControl";
+import { ThinkingSummariesControl } from "@/components/ThinkingSummariesControl";
 import { McpRegistryConnections } from "@/components/McpRegistry";
 import { ThemeColorPicker } from "@/components/theme/ThemeColorPicker";
 import { CardRadioGroup } from "@/components/theme/CardRadioGroup";
@@ -2129,6 +2130,7 @@ function ProactiveAgentGroup() {
 function GeneralSection() {
   const info = useServerInfo();
   const titleInstructions = info !== "loading" && info.session_title_instructions === true;
+  const thinkingSummaries = info !== "loading" && info.thinking_summaries === true;
   return (
     <Section title="General" description="Configure general Omnigent behavior.">
       <div className="flex flex-col gap-6">
@@ -2151,6 +2153,11 @@ function GeneralSection() {
         </SettingsGroup>
         <SettingsGroup title="Chat" testId="settings-group-general-chat">
           <KeepThinkingExpandedControl />
+          {thinkingSummaries && (
+            <div className="mt-4 border-t border-border pt-4">
+              <ThinkingSummariesControl />
+            </div>
+          )}
         </SettingsGroup>
         <SettingsGroup title="Terminal" testId="settings-group-terminal">
           <TerminalClipboardControl />
