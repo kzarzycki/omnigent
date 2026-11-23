@@ -88,6 +88,9 @@ affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" C
 [ "$rc" = 1 ] && [ ! -s "$tmp/record/flakes" ] || fail "a file whose test failed was called a flake: $(cat "$tmp/record/flakes")"
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py PYTEST_EXIT=1; rc=$?
 [ "$rc" = 1 ] && [ ! -s "$tmp/record/flakes" ] || fail "a test whose file failed to collect was called a flake"
+# Building on a record without writing one still reads this run's own failures.
+affected AFFECTED_TESTS_SINCE="$tmp/since" FAILED=tests/example_test.py::test_a PYTEST_EXIT=1; rc=$?
+[ "$rc" = 1 ] && ! grep -q 'flaky, passed on the rerun' "$tmp/out" || fail "a rerun without a record called a failing test a flake"
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 [ "$rc" = 124 ] && [ ! -s "$tmp/record/flakes" ] || fail "a timed-out rerun exited $rc or named a flake"
 affected AFFECTED_TESTS_SINCE="$tmp/since" SELECTOR_FAILS=1; rc=$?
