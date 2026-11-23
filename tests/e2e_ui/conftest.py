@@ -2299,7 +2299,7 @@ def paused_mid_turn_session(
 
 @pytest.fixture(autouse=True)
 def _isolated_global_config() -> None:
-    """Keep the suite-owned config home: its servers inherited it and read mock provider config there."""
+    """Keep the suite-owned config home: its servers inherited it and read mock config there."""
 
 
 @pytest.fixture(autouse=True)
