@@ -28,6 +28,10 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from omnigent.acp_cloud_environment import (
+    CLOUD_ENVIRONMENT_LABEL_KEY,
+    validate_cloud_environment_id,
+)
 from omnigent.acp_permission_mode import (
     ACP_PERMISSION_MODE_LABEL_KEY,
     validate_acp_permission_mode,
@@ -13553,6 +13557,28 @@ async def _inherited_mcp_labels(
     return inherited
 
 
+def _checked_cloud_environment_id(
+    body: SessionCreateInput, selected_harness: str | None
+) -> str | None:
+    """Return the request's Claude cloud environment id after checking it.
+
+    :raises OmnigentError: 400 when the id is malformed or the agent is not a cloud agent.
+    """
+    if body.cloud_environment_id is None:
+        return None
+    from omnigent.harness_aliases import canonicalize_harness
+
+    if selected_harness is None or canonicalize_harness(selected_harness) != "acp":
+        raise OmnigentError(
+            "cloud_environment_id applies only to ACP agents such as acp:claude-cloud",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    try:
+        return validate_cloud_environment_id(body.cloud_environment_id)
+    except ValueError as exc:
+        raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+
+
 async def _create_session_from_existing_agent(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -14121,6 +14147,8 @@ async def _create_session_from_existing_agent(
     # Checked before a worktree exists, so a refused mode leaves nothing behind.
     from omnigent.harness_aliases import canonicalize_harness
 
+    cloud_environment_id = _checked_cloud_environment_id(body, selected_harness)
+
     permission_launch_args: list[str] | None = None
     # An ACP session carries its mode as a label its ACP builder reads; every other
     # harness turns it into launch args.
@@ -14378,6 +14406,8 @@ async def _create_session_from_existing_agent(
     initial_labels = dict(body.labels) if body.labels else {}
     if acp_permission_mode is not None:
         initial_labels[ACP_PERMISSION_MODE_LABEL_KEY] = acp_permission_mode
+    if cloud_environment_id is not None:
+        initial_labels[CLOUD_ENVIRONMENT_LABEL_KEY] = cloud_environment_id
     client_surface = resolve_session_surface(
         request.headers,
         parent_labels=_parent_for_routing.labels if _parent_for_routing is not None else None,

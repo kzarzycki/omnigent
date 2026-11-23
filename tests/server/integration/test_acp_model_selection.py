@@ -754,3 +754,48 @@ async def test_a_launcher_keeps_its_acp_permission_mode_choice(client: httpx.Asy
     assert launched.status_code == 201, launched.text
     assert launched.json()["labels"]["omnigent.acp.permission_mode"] == "bypassPermissions"
     assert launched.json()["labels"]["omnigent.created_by_session_id"] == launcher.json()["id"]
+
+
+async def test_session_cloud_environment_id_reaches_that_sessions_runner_env_only(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """``cloud_environment_id`` on create reaches only that session's runner env.
+
+    A malformed id and a raw label are refused with a message naming the argument.
+    """
+    from omnigent.runner._entry import _AgentSpecCache, _resolve_agent_spec_from_server
+
+    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+
+    async def launch_env(**create_fields: Any) -> dict[str, str]:
+        created = await client.post(
+            "/v1/sessions",
+            json={"agent_id": agent["id"], "initial_items": [], **create_fields},
+        )
+        assert created.status_code == 201, created.text
+        resolved = await _resolve_agent_spec_from_server(
+            client, _AgentSpecCache(tmp_path), agent["id"], session_id=created.json()["id"]
+        )
+        assert resolved is not None
+        env = _build_spawn_env_from_spec(resolved.spec, "acp:synthetic")
+        assert env is not None
+        return env
+
+    env = await launch_env(cloud_environment_id="env_01ExampleExample")
+    assert env["CLAUDE_CLOUD_ENVIRONMENT_ID"] == "env_01ExampleExample"
+    assert "CLAUDE_CLOUD_ENVIRONMENT_ID" in env["HARNESS_ACP_ENV_PASSTHROUGH"].split(",")
+    assert "CLAUDE_CLOUD_ENVIRONMENT_ID" not in await launch_env()
+
+    for rejected in (
+        {"cloud_environment_id": "not-an-environment"},
+        {"labels": {"omnigent.acp.cloud_environment_id": "env_01ExampleExample"}},
+    ):
+        response = await client.post(
+            "/v1/sessions", json={"agent_id": agent["id"], "initial_items": [], **rejected}
+        )
+        assert response.status_code == 400, response.text
+    bad = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "initial_items": [], "cloud_environment_id": "oops"},
+    )
+    assert "cloud_environment_id" in bad.json()["error"]["message"]
