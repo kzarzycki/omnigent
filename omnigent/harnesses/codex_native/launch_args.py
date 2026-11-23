@@ -54,6 +54,7 @@ _LOGGABLE_CONFIG_KEYS = frozenset(
         "model",
         "model_provider",
         "model_reasoning_effort",
+        "model_reasoning_summary",
         "profile",
         "sandbox_mode",
     }
