@@ -39,6 +39,7 @@ from omnigent.runner.resource_registry import (
 )
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
+from tests._helpers.providers import isolate_provider_resolution
 from tests.budgets import budget
 from tests.runner.conftest import (
     _build_app_for_spec,
@@ -1906,6 +1907,7 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
 @pytest.mark.parametrize("empty", [False, True])
 async def test_claude_native_model_options_use_session_launch_catalog(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     empty: bool,
 ) -> None:
     """The session listing is the launch catalog from one cached Claude config.
@@ -1917,6 +1919,7 @@ async def test_claude_native_model_options_use_session_launch_catalog(
     from omnigent.harnesses.claude_native.main import ClaudeModelProbe, ClaudeNativeUcodeConfig
     from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
 
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG
     )
@@ -2123,6 +2126,7 @@ async def test_claude_native_model_options_refresh_the_bridge_vocabulary(
 @pytest.mark.asyncio
 async def test_claude_native_model_options_serves_probe_rows_after_pending(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A slow probe answers 503-pending, then the probed rows, then the cache.
 
@@ -2135,6 +2139,7 @@ async def test_claude_native_model_options_serves_probe_rows_after_pending(
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
     from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
 
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG
     )
