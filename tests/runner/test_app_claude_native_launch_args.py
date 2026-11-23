@@ -146,6 +146,55 @@ def test_build_claude_native_base_args(
 
 
 @pytest.mark.parametrize(
+    ("thinking_summaries", "terminal_launch_args", "expected"),
+    [
+        # Off adds nothing, so the argv is exactly the pre-setting one.
+        (False, ["--verbose"], ("--effort", "high", "--verbose")),
+        # On asks Claude to write its thinking text, once, before the pass-through.
+        (
+            True,
+            ["--verbose"],
+            ("--effort", "high", "--thinking-display", "summarized", "--verbose"),
+        ),
+        # The user's own --thinking-display (either form) wins.
+        (
+            True,
+            ["--thinking-display", "omitted"],
+            ("--effort", "high", "--thinking-display", "omitted"),
+        ),
+        (True, ["--thinking-display=omitted"], ("--effort", "high", "--thinking-display=omitted")),
+        # A --thinking-display that is prompt text is not the user's flag.
+        (
+            True,
+            ["--", "--thinking-display omitted"],
+            (
+                "--effort",
+                "high",
+                "--thinking-display",
+                "summarized",
+                "--",
+                "--thinking-display omitted",
+            ),
+        ),
+    ],
+    ids=["off", "on", "explicit-space-wins", "explicit-joined-wins", "ignores-prompt-text"],
+)
+def test_build_claude_native_base_args_thinking_summaries(
+    thinking_summaries: bool,
+    terminal_launch_args: list[str],
+    expected: tuple[str, ...],
+) -> None:
+    args = _build_claude_native_base_args(
+        reasoning_effort="high",
+        model_override=None,
+        terminal_launch_args=terminal_launch_args,
+        thinking_summaries=thinking_summaries,
+    )
+
+    assert args == expected
+
+
+@pytest.mark.parametrize(
     (
         "reasoning_effort",
         "model_override",

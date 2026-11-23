@@ -692,10 +692,33 @@ class HostRegistry:
         # Re-checks a machine-owned session before any runner launch; see
         # ``omnigent.server.routes._machine_start.MachineLaunchGuard``.
         self.machine_launch_guard: Callable[[Conversation], Awaitable[None]] | None = None
+        # Answers whether a session's owner asks for thinking summaries; set by
+        # the app when it has a settings store. ``None`` leaves launches as they were.
+        self.thinking_summaries_resolver: Callable[[Conversation], bool] | None = None
 
     def mcp_disabled_servers_active_harnesses(self) -> list[str] | None:
         """Resolve launch activation; omit the wire field when no harness is active."""
         return active_harnesses(self._mcp_disabled_servers, self._feature_flags) or None
+
+    def thinking_summaries(self, conv: Conversation) -> bool | None:
+        """Resolve a launch's ``thinking_summaries`` field; ``None`` omits it, as when off.
+
+        Reads the settings store, so async callers run it off the event loop.
+        """
+        resolver = self.thinking_summaries_resolver
+        if resolver is None:
+            return None
+        try:
+            enabled = resolver(conv)
+        except Exception:
+            # A settings read must not block the launch; it goes ahead as with the setting off.
+            _logger.warning(
+                "Could not read the thinking summaries setting for session %s",
+                conv.id,
+                exc_info=True,
+            )
+            return None
+        return True if enabled else None
 
     def register(
         self,

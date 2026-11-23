@@ -223,6 +223,7 @@ from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 from omnigent.stores.scheduled_task_store.dispatch import ScheduledTaskDispatchStore
 from omnigent.stores.user_settings_store import (
     open_user_settings_store,
+    session_owner_thinking_summaries,
     session_owner_title_instructions,
 )
 from omnigent.tools.builtins.session_message import SESSION_MESSAGE_MAX_CHARS
@@ -426,6 +427,9 @@ class ServerInfoResponse(BaseModel):
     # GET/PUT /v1/settings/session-title-instructions; absent on older servers,
     # which clients treat as unsupported.
     session_title_instructions: bool = False
+    # GET/PUT /v1/settings/thinking-summaries; absent on older servers, which
+    # clients treat as unsupported.
+    thinking_summaries: bool = False
     admin_view: bool = False
     # Session comments accept and preserve immutable PR coordinates.
     comment_anchor_metadata: bool = True
@@ -2330,6 +2334,10 @@ def create_app(
         agent_cache=agent_cache,
     )
     user_settings_store = open_user_settings_store(conversation_store)
+    if user_settings_store is not None:
+        host_registry.thinking_summaries_resolver = session_owner_thinking_summaries(
+            user_settings_store, conversation_store, single_user=auth_provider is None
+        )
     background_title_coordinator = BackgroundSessionTitleCoordinator(
         conversation_store,
         RunnerBackgroundTitleGenerator(runner_router),
@@ -4266,6 +4274,7 @@ def create_app(
                 "workflows": frontend_features[Feature.WORKFLOWS.value]
                 and workflows.open_store(conversation_store) is not None,
                 "session_title_instructions": user_settings_store is not None,
+                "thinking_summaries": user_settings_store is not None,
                 "admin_view": admin_view_supported,
                 "filesystem_attachments": {
                     "extensions": sorted(filesystem_attachment_policy.extensions),

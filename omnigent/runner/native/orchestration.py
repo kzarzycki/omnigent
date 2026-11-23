@@ -94,7 +94,10 @@ from omnigent.native.native_coding_agents import (
 from omnigent.native.native_dispatch import resolve_hook
 from omnigent.pi_prompt import pi_prompt_args
 from omnigent.process_logging import process_log_reference
-from omnigent.runner.identity import runner_mcp_disabled_servers_active_harnesses
+from omnigent.runner.identity import (
+    runner_mcp_disabled_servers_active_harnesses,
+    runner_thinking_summaries,
+)
 from omnigent.runner.memory_guidance import memory_startup_guidance
 from omnigent.runner.resource_registry import (
     ANTIGRAVITY_NATIVE_TERMINAL_ROLE,
@@ -6035,6 +6038,7 @@ async def _auto_create_codex_terminal(
     app_server = await asyncio.to_thread(
         build_codex_native_server,
         active_harnesses=runner_mcp_disabled_servers_active_harnesses(),
+        thinking_summaries=runner_thinking_summaries(),
         session_id=session_id,
         primary_session_id=runner_primary_session_id(),
         socket_path=socket_path,
@@ -6972,6 +6976,7 @@ async def _codex_discover_thread_and_forward(
             thread_id=thread_id,
             client=event_client,
             auth=_RunnerDatabricksAuth(auth_factory),
+            persist_reasoning=runner_thinking_summaries(),
         )
     except asyncio.CancelledError:
         cancelled = True
@@ -7063,6 +7068,7 @@ async def _codex_forward_known_thread(
             thread_id=thread_id,
             client=client,
             auth=_RunnerDatabricksAuth(auth_factory),
+            persist_reasoning=runner_thinking_summaries(),
         )
     except asyncio.CancelledError:
         cancelled = True
@@ -8570,6 +8576,7 @@ def _build_claude_native_base_args(
     terminal_launch_args: list[str] | None,
     resume_external_session_id: str | None = None,
     skip_initial_prompt: bool = False,
+    thinking_summaries: bool = False,
 ) -> tuple[str, ...]:
     """
     Assemble the base ``claude`` CLI args for a native-terminal launch.
@@ -8612,6 +8619,9 @@ def _build_claude_native_base_args(
         could be synthesized) adds nothing.
     :param skip_initial_prompt: Omit a legacy leading prompt that the
         session already ran (see :func:`_claude_legacy_prompt_consumed`).
+    :param thinking_summaries: Add ``--thinking-display summarized`` so Claude
+        writes readable thinking text, unless the pass-through args carry their
+        own ``--thinking-display``.
     :returns: The assembled base args, e.g.
         ``("--resume", "<sid>", "--effort", "high")``.
     """
@@ -8623,6 +8633,10 @@ def _build_claude_native_base_args(
     passed_effort = has_flag_before_separator(terminal_launch_args or (), "--effort")
     if reasoning_effort is not None and reasoning_effort in CLAUDE_EFFORTS and not passed_effort:
         args.extend(("--effort", reasoning_effort))
+    if thinking_summaries and not has_flag_before_separator(
+        terminal_launch_args or (), "--thinking-display"
+    ):
+        args.extend(("--thinking-display", "summarized"))
     if terminal_launch_args:
         skip_leading_prompt = (
             skip_initial_prompt and _claude_legacy_launch_prompt(terminal_launch_args) is not None
@@ -10233,6 +10247,7 @@ async def _auto_create_claude_terminal(
         model_override=launch_model,
         terminal_launch_args=session_launch_args,
         resume_external_session_id=resume_external_session_id,
+        thinking_summaries=runner_thinking_summaries(),
         skip_initial_prompt=await _claude_legacy_prompt_consumed(
             server_client=server_client,
             session_id=session_id,

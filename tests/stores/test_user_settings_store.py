@@ -12,8 +12,10 @@ from omnigent.db.utils import get_or_create_engine
 from omnigent.server.server_config import SESSION_TITLE_INSTRUCTIONS_MAX_CHARS
 from omnigent.stores.user_settings_store import (
     SESSION_TITLE_INSTRUCTIONS_PREFERENCE_KEY,
+    THINKING_SUMMARIES_PREFERENCE_KEY,
     UserSettingsStore,
     open_user_settings_store,
+    session_owner_thinking_summaries,
     session_owner_title_instructions,
 )
 
@@ -26,7 +28,12 @@ def store(db_uri: str) -> UserSettingsStore:
     return UserSettingsStore(db_uri)
 
 
-def _write_raw_value(db_uri: str, user_id: str, value: bytes) -> None:
+def _write_raw_value(
+    db_uri: str,
+    user_id: str,
+    value: bytes,
+    key: str = SESSION_TITLE_INSTRUCTIONS_PREFERENCE_KEY,
+) -> None:
     with get_or_create_engine(db_uri).begin() as connection:
         # Untyped columns skip the value codec while letting each dialect quote ``key``.
         raw_preferences = table(
@@ -40,7 +47,7 @@ def _write_raw_value(db_uri: str, user_id: str, value: bytes) -> None:
             insert(raw_preferences).values(
                 workspace_id=0,
                 user_id=user_id,
-                key=SESSION_TITLE_INSTRUCTIONS_PREFERENCE_KEY,
+                key=key,
                 value=value,
             )
         )
@@ -161,3 +168,92 @@ def test_single_user_resolver_reads_local_user(store: UserSettingsStore) -> None
     )
 
     assert resolve("conv_any") == "Local rule."
+
+
+def test_thinking_summaries_default_off_and_round_trip(store: UserSettingsStore) -> None:
+    assert store.get_thinking_summaries(user_id=ALICE) is False
+
+    assert store.save_thinking_summaries(True, user_id=ALICE) is True
+    assert store.get_thinking_summaries(user_id=ALICE) is True
+
+    assert store.save_thinking_summaries(False, user_id=ALICE) is False
+    assert store.get_thinking_summaries(user_id=ALICE) is False
+
+
+def test_thinking_summaries_are_isolated_per_user(store: UserSettingsStore) -> None:
+    store.save_thinking_summaries(True, user_id=ALICE)
+
+    assert store.get_thinking_summaries(user_id=BOB) is False
+    assert store.get_thinking_summaries(user_id=None) is False
+    store.save_thinking_summaries(True, user_id=None)
+    store.save_thinking_summaries(False, user_id=ALICE)
+    assert store.get_thinking_summaries(user_id=None) is True
+    assert store.get_thinking_summaries(user_id=ALICE) is False
+
+
+def test_thinking_summaries_do_not_touch_title_instructions(store: UserSettingsStore) -> None:
+    store.save_session_title_instructions("Alice rule.", user_id=ALICE)
+    store.save_thinking_summaries(True, user_id=ALICE)
+    store.save_thinking_summaries(False, user_id=ALICE)
+
+    assert store.get_session_title_instructions(user_id=ALICE) == "Alice rule."
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(b"false", id="false"),
+        pytest.param(b"1", id="other-text"),
+        pytest.param(b"\x00\x07unknown codec", id="unknown-codec"),
+    ],
+)
+def test_unexpected_thinking_summaries_value_reads_off(
+    store: UserSettingsStore, db_uri: str, stored: bytes
+) -> None:
+    _write_raw_value(db_uri, ALICE, stored, key=THINKING_SUMMARIES_PREFERENCE_KEY)
+
+    assert store.get_thinking_summaries(user_id=ALICE) is False
+
+
+def _conversation(conv_id: str, root_id: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(id=conv_id, root_conversation_id=root_id or conv_id)
+
+
+def test_thinking_owner_resolver_reads_session_owner(store: UserSettingsStore) -> None:
+    store.save_thinking_summaries(True, user_id=ALICE)
+    owners = {"conv_alice": ALICE, "conv_bob": BOB}
+    calls: list[tuple[str, bool]] = []
+
+    def get_session_owner(session_id: str, *, owner_only: bool = False) -> str | None:
+        calls.append((session_id, owner_only))
+        return owners.get(session_id)
+
+    resolve = session_owner_thinking_summaries(
+        store, SimpleNamespace(get_session_owner=get_session_owner), single_user=False
+    )
+
+    assert resolve(_conversation("conv_alice")) is True
+    assert resolve(_conversation("conv_bob")) is False
+    assert resolve(_conversation("conv_unowned")) is False
+    # A sub-session without its own grant follows its root session's owner.
+    assert resolve(_conversation("conv_child", root_id="conv_alice")) is True
+    assert calls == [
+        ("conv_alice", True),
+        ("conv_bob", True),
+        ("conv_unowned", True),
+        ("conv_child", True),
+        ("conv_alice", True),
+    ]
+
+
+def test_single_user_thinking_resolver_reads_local_user(store: UserSettingsStore) -> None:
+    store.save_thinking_summaries(True, user_id=None)
+
+    def unexpected_owner_lookup(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("single-user mode has one owner")
+
+    resolve = session_owner_thinking_summaries(
+        store, SimpleNamespace(get_session_owner=unexpected_owner_lookup), single_user=True
+    )
+
+    assert resolve(_conversation("conv_any")) is True
