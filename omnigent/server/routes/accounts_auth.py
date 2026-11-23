@@ -368,8 +368,8 @@ def create_accounts_auth_router(
         # under XSS or form-hijack (the browser has no way to set it True).
         if body.issue_refresh is True and device_grant_store is not None:
             from omnigent.server.routes.device_auth import (
-                grant_max_lifetime_seconds,
                 issue_login_grant,
+                login_grant_lifetime_seconds,
             )
 
             try:
@@ -378,7 +378,7 @@ def create_accounts_auth_router(
                     user_id=username,
                     cookie_secret=config.cookie_secret,
                 )
-                body_payload["refresh_expires_in"] = grant_max_lifetime_seconds()
+                body_payload["refresh_expires_in"] = login_grant_lifetime_seconds()
             except Exception:  # grant failure must never break login
                 _logger.exception(
                     "auth/login: refresh grant issuance failed for %s",
