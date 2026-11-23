@@ -615,6 +615,36 @@ _LOOPBACK_REFUSED_FATAL_ATTEMPTS = 100
 # hint to a "this may not self-heal" prompt. Operator-facing only — the host
 # keeps retrying and never exits.
 _AUTH_REJECT_ESCALATE_ATTEMPTS = 30
+# Consecutive 401/403 rejections of an established host before it logs one
+# error naming the cause and fix and publishes AUTH_REJECTED_STATE_FILE.
+_AUTH_REJECT_ALERT_ATTEMPTS = 5
+AUTH_REJECTED_STATE_FILE = "host_auth_rejected.json"
+
+
+def _auth_rejected_state_path() -> Path:
+    """Where a host publishes that its credential is being refused."""
+    from omnigent.process_logging import data_dir
+
+    return data_dir() / AUTH_REJECTED_STATE_FILE
+
+
+def _publish_auth_rejection(streak: int, fix: str) -> None:
+    """Record the rejection for a supervisor or host-stats (no credential)."""
+    try:
+        path = _auth_rejected_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"since": time.time(), "streak": streak, "fix": fix}), encoding="utf-8"
+        )
+    except OSError:
+        _logger.debug("could not write host auth-rejection state", exc_info=True)
+
+
+def _clear_auth_rejection() -> None:
+    """Drop the rejection state once the server accepts the host again."""
+    with contextlib.suppress(OSError):
+        _auth_rejected_state_path().unlink()
+
 
 # Consecutive accepted-then-silent connections (upgrade completed, then the
 # socket died without one inbound frame) before the reconnect loop treats the
@@ -1921,6 +1951,17 @@ class HostProcess:
                 # is very likely permanently rejected: escalate the operator
                 # signal and name re-auth, but keep retrying so a real outage
                 # self-heals.
+                if self._auth_retry_streak == _AUTH_REJECT_ALERT_ATTEMPTS and self._ever_connected:
+                    fix = f"{cli_invocation()} login {self._login_hint_url()}"
+                    alert = (
+                        f"{cause} The server rejected this host's stored login "
+                        f"{self._auth_retry_streak} times in a row, so it is revoked or "
+                        f"past its renewal limit. Run `{fix}` on this host. Still retrying."
+                    )
+                    _logger.error("%s", alert)
+                    _print_host_status(f"✖ {alert}", stderr=True)
+                    _publish_auth_rejection(self._auth_retry_streak, fix)
+                    return None
                 if (
                     self._auth_retry_streak >= _AUTH_REJECT_ESCALATE_ATTEMPTS
                     and self._auth_retry_streak % _AUTH_REJECT_ESCALATE_ATTEMPTS == 0
@@ -5838,6 +5879,7 @@ class HostProcess:
         self._ever_connected = True
         self._login_redirect_streak = 0
         self._auth_retry_streak = 0
+        _clear_auth_rejection()
         self._refused_streak = 0
         self._transient_404_streak = 0
         self._conn_upgrade_accepted = True

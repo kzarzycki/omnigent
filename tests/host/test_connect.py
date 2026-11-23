@@ -11804,8 +11804,13 @@ def test_post_connect_auth_rejection_escalates_without_going_fatal(
     network hint to a re-auth prompt that names ``omnigent login`` — so a
     permanently-rejected credential surfaces instead of looping silently.
     """
-    from omnigent.host.connect import _AUTH_REJECT_ESCALATE_ATTEMPTS
+    from omnigent.host.connect import (
+        _AUTH_REJECT_ALERT_ATTEMPTS,
+        _AUTH_REJECT_ESCALATE_ATTEMPTS,
+        _auth_rejected_state_path,
+    )
 
+    _auth_rejected_state_path().unlink(missing_ok=True)
     host = _make_host_process()
     host._ever_connected = True
 
@@ -11815,11 +11820,24 @@ def test_post_connect_auth_rejection_escalates_without_going_fatal(
     assert "network dropped" in first
     assert "omnigent login" not in first
 
-    # Streak climbs toward — but not to — the escalation threshold: stays quiet
+    # Below the alert threshold the host stays quiet and publishes nothing,
     # so a brief VPN outage never raises a false re-auth alarm.
-    for _ in range(2, _AUTH_REJECT_ESCALATE_ATTEMPTS):
+    for _ in range(2, _AUTH_REJECT_ALERT_ATTEMPTS):
         assert host._classify_http_status(403) is None
     assert "omnigent login" not in capsys.readouterr().err
+    assert not _auth_rejected_state_path().exists()
+
+    # A few rejections in a row: one clear error naming the fix, and a state
+    # file a supervisor can read. Still retryable.
+    assert host._classify_http_status(403) is None
+    alert = capsys.readouterr().err
+    assert "omnigent login http://localhost:8000" in alert
+    state = json.loads(_auth_rejected_state_path().read_text())
+    assert state["streak"] == _AUTH_REJECT_ALERT_ATTEMPTS
+    assert "omnigent login" in state["fix"]
+    for _ in range(_AUTH_REJECT_ALERT_ATTEMPTS + 1, _AUTH_REJECT_ESCALATE_ATTEMPTS):
+        assert host._classify_http_status(403) is None
+    capsys.readouterr()
 
     # Crossing the threshold escalates — names the real remedy — and is STILL
     # retryable (no fatal error, so a recoverable daemon is never killed).
