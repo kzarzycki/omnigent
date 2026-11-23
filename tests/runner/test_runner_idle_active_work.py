@@ -410,6 +410,7 @@ async def test_native_in_flight_status_blocks_idle_shutdown_until_idle(
         await _post_status(client, conv_id, status)
         assert conv_id not in app.state.active_turns
         assert app.state.has_active_work() is True
+        assert app.state.active_work_hold() == "native_turn_in_flight"
 
         async def _release() -> None:
             await _post_status(client, conv_id, "idle")
@@ -1335,6 +1336,17 @@ async def test_native_pane_with_live_work_holds_watchdog_despite_idle_edge(
             background(conv_id, True)
         assert app.state.native_pane_status[conv_id] == "idle"
         assert app.state.has_active_work() is (evidence != "no_evidence")
+        assert (
+            app.state.active_work_hold()
+            == {
+                "permission_prompt": "human_wait",
+                "background_agent": "background_agents",
+                "background_shell": "background_shell",
+                "pane_output": "pane_output",
+                "pane_input": "pane_input",
+                "no_evidence": None,
+            }[evidence]
+        )
         # Sandbox keepalive counts agent work only: recent pane input or output
         # also comes from someone viewing the pane, so only the prompt, a
         # background agent and a background shell count.
@@ -1345,6 +1357,130 @@ async def test_native_pane_with_live_work_holds_watchdog_despite_idle_edge(
             background(conv_id, False)
             assert app.state.has_active_work() is False
             assert app.state.has_sandbox_work() is False
+
+
+@pytest.mark.asyncio
+async def test_soft_pane_holds_never_hide_a_human_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repainting pane or background agent does not mask the hard hold behind it.
+
+    :param tmp_path: Pytest temp dir for the pane and marker root.
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    conv_id = "conv_soft_hides_hard"
+    monkeypatch.setenv(_HUMAN_WAIT_HOLD_ENV, "60")
+    async with _claude_native_pane_app(tmp_path, monkeypatch, conv_id) as (app, instance):
+        instance.screen_changed_within.return_value = True
+        monkeypatch.setattr(
+            app.state.session_resource_registry,
+            "session_has_background_agents",
+            lambda session_id: True,
+        )
+        assert app.state.active_work_hold() == "background_agents"
+        _publish_native_status(app, conv_id, "running", "permission prompt")
+        assert app.state.active_work_hold() == "human_wait"
+        _publish_native_status(app, conv_id, "idle", None)
+        instance.client_interaction_within.return_value = True
+        assert app.state.active_work_hold() == "pane_input"
+
+
+@pytest.mark.asyncio
+async def test_every_hard_hold_has_its_own_name_and_none_is_soft() -> None:
+    """Each hard signal yields its own hold name, and no hard name is in the soft set.
+
+    :returns: None.
+    """
+    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
+    from tests.runner.conftest import _build_lifecycle_app, _runner_client
+
+    assert {"background_agents", "pane_output", "native_turn_in_flight"} == SOFT_ACTIVE_WORK_HOLDS
+    seen: dict[str, str | None] = {}
+
+    app = _scaffold_app()
+    app.state.active_turns["conv_hard_turn"] = None
+    seen["turn"] = app.state.active_work_hold()
+    app.state.active_turns.clear()
+
+    app.state.undelivered_input_reports["conv_hard_reports"] = [{}]
+    seen["undelivered_input_reports"] = app.state.active_work_hold()
+    app.state.undelivered_input_reports.clear()
+
+    finish = asyncio.Event()
+
+    async def _bg() -> str:
+        await finish.wait()
+        return "ok"
+
+    task = asyncio.create_task(_bg())
+    _register_async_handle(
+        app.state.session_async_tasks, session_id="conv_hard_async", handle_id="h", task=task
+    )
+    seen["async_tools"] = app.state.active_work_hold()
+    finish.set()
+    await task
+    app.state.session_async_tasks.clear()
+
+    lifecycle_app, process_manager, _client = _build_lifecycle_app()
+    async with _runner_client(lifecycle_app) as client:
+        created = await client.post(
+            "/v1/sessions", json={"session_id": "conv_hard_harness", "agent_id": "ag"}
+        )
+        assert created.status_code == 201, created.text
+        process_manager.mark_turn_active("conv_hard_harness")
+        seen["harness_turn"] = lifecycle_app.state.active_work_hold()
+
+    assert seen == {
+        "turn": "turn",
+        "undelivered_input_reports": "undelivered_input_reports",
+        "async_tools": "async_tools",
+        "harness_turn": "harness_turn",
+    }
+    assert not set(seen.values()) & SOFT_ACTIVE_WORK_HOLDS
+
+
+@pytest.mark.asyncio
+async def test_native_pane_owner_probes_report_served_sessions_and_attached_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner exposes a native pane's session and whether a tmux client is on it.
+
+    :param tmp_path: Pytest temp dir for the pane.
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    from omnigent.native import native_cost_popup
+
+    conv_id = "conv_owner_probe"
+    async with _claude_native_pane_app(tmp_path, monkeypatch, conv_id) as (app, _instance):
+        assert conv_id in app.state.served_session_ids()
+        monkeypatch.setattr(native_cost_popup, "tmux_client_attached", lambda *_: False)
+        assert app.state.native_pane_has_attached_client() is False
+        monkeypatch.setattr(native_cost_popup, "tmux_client_attached", lambda *_: True)
+        assert app.state.native_pane_has_attached_client() is True
+
+
+@pytest.mark.asyncio
+async def test_each_hard_live_work_signal_is_named() -> None:
+    """Async tools, timers and approvals report their own hold names.
+
+    :returns: None.
+    """
+    app = _scaffold_app()
+    assert app.state.active_work_hold() is None
+
+    task = asyncio.create_task(asyncio.sleep(60))
+    register_timer("conv_named_timer", "timer_named", task)
+    try:
+        assert app.state.active_work_hold() == "timers"
+    finally:
+        unregister_timer("conv_named_timer", "timer_named")
+        task.cancel()
+    assert app.state.active_work_hold() is None
+
+    pending_approvals.register("elicit_named")
+    assert app.state.active_work_hold() == "pending_approvals"
 
 
 @pytest.mark.asyncio
