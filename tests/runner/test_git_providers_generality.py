@@ -45,6 +45,7 @@ from omnigent.runner.pr_observer import extract_prs
 from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
 from tests.budgets import budget
 from tests.runner.git_provider_fixtures import register_provider
+from tests.runner.helpers import title_query_answer, title_query_prs
 
 HOST = "git.example.test"
 ORIGIN = f"https://{HOST}/g/s/p.git"
@@ -305,6 +306,66 @@ def test_unselected_titles_come_from_the_fake_facet(facet: FakeGitLabFacet, repo
     assert {pr["url"]: pr["title"] for pr in info["prs"]} == {MR: "MR 7", OTHER_MR: "MR 8"}
 
 
+def test_a_provider_that_batches_titles_looks_them_all_up_in_one_call(
+    facet: FakeGitLabFacet, repo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    later_mr = OTHER_MR.replace("/8", "/10")
+    SessionPrRegistry("session").record(
+        [PullRequestRef.from_url(url) for url in (MR, OTHER_MR, INACCESSIBLE_MR, later_mr)],
+        relationship="created",
+        source="test",
+    )
+    batches: list[list[int]] = []
+
+    def pr_titles(
+        _root: str, references: Sequence[PullRequestRef], _deadline: float
+    ) -> dict[str, tuple[str | None, bool]]:
+        batches.append([reference.number for reference in references])
+        # The deadline came before the last one; it is left out, not answered.
+        return {
+            reference.url: (f"Batched {reference.number}", False)
+            for reference in references
+            if reference.url != later_mr
+        }
+
+    monkeypatch.setattr(facet, "pr_titles", pr_titles, raising=False)
+    info = pr_resource.pr_info(repo, session_id="session", pr_url=MR)
+
+    assert batches == [[8, 9, 10]]
+    assert facet.calls == ["reference_info"]  # no per-PR lookup beside the batch
+    assert {pr["url"]: pr["title"] for pr in info["prs"]} == {
+        MR: "MR 7",
+        OTHER_MR: "Batched 8",
+        INACCESSIBLE_MR: "Batched 9",
+        later_mr: None,
+    }
+    checked = {entry.url: entry.title_checked_at for entry in SessionPrRegistry("session").list()}
+    assert checked[later_mr] == 0  # asked for again on the next poll
+    assert checked[OTHER_MR] > 0
+
+
+def test_a_failing_batch_lookup_keeps_the_cached_titles(
+    facet: FakeGitLabFacet, repo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = SessionPrRegistry("session")
+    registry.record(
+        [PullRequestRef.from_url(url) for url in (MR, OTHER_MR)],
+        relationship="created",
+        source="test",
+    )
+    registry.update_titles({OTHER_MR: "Last known"}, timestamp=1)
+    before = next(entry for entry in registry.list() if entry.url == OTHER_MR)
+
+    def broken(*_args: object) -> dict[str, tuple[str | None, bool]]:
+        raise RuntimeError("forge unavailable")
+
+    monkeypatch.setattr(facet, "pr_titles", broken, raising=False)
+    info = pr_resource.pr_info(repo, session_id="session", pr_url=MR)
+
+    assert {pr["url"]: pr["title"] for pr in info["prs"]} == {MR: "MR 7", OTHER_MR: "Last known"}
+    assert next(entry for entry in registry.list() if entry.url == OTHER_MR) == before
+
+
 def test_reads_go_to_the_fake_facet(facet: FakeGitLabFacet, repo: str) -> None:
     pr_resource.update_session_pr(repo, "session", MR, "attach")
     facet.calls.clear()
@@ -390,6 +451,11 @@ def test_legacy_resources_route_a_mixed_provider_session(
     def gh(args: list[str], **_kwargs) -> tuple[int, str, str]:
         calls.append(args)
         assert HOST not in " ".join(args)
+        if args[:2] == ["auth", "token"]:
+            return 1, "", "no oauth token found"
+        if (asked := title_query_prs(args)) is not None:
+            assert list(asked.values()) == [("example/project", 42)]
+            return 0, title_query_answer({"p0": {"title": "GitHub PR", "state": "OPEN"}}), ""
         if args[:2] == ["pr", "view"]:
             assert args[args.index("-R") + 1] == "github.com/example/project"
             return 0, json.dumps({"number": 42, "title": "GitHub PR", "state": "OPEN"}), ""
@@ -466,7 +532,13 @@ def test_optional_title_failure_keeps_selected_pr_and_healthy_titles(
         },
     )
     monkeypatch.setattr(github, "titles_available", lambda _root: True)
-    monkeypatch.setattr(github, "pr_title", lambda *_args: ("Healthy GitHub title", False))
+    monkeypatch.setattr(
+        github,
+        "pr_titles",
+        lambda _root, references, _deadline: {
+            reference.url: ("Healthy GitHub title", False) for reference in references
+        },
+    )
 
     def broken(*_args):
         raise RuntimeError("External forge unavailable")
@@ -528,7 +600,7 @@ def test_every_remote_provider_is_discovered_and_unlink_stays_removed(
     monkeypatch.setattr(github, "on_inferred_pr", lambda *_: None)
     monkeypatch.setattr(github, "titles_available", lambda _: True)
     monkeypatch.setattr(
-        github, "pr_title", lambda *_: pytest.fail("Discovery already read the title")
+        github, "pr_titles", lambda *_: pytest.fail("Discovery already read the title")
     )
     monkeypatch.setattr(
         github,
