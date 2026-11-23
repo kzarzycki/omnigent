@@ -414,6 +414,15 @@ describe("UserBubble messages from another session", () => {
     expect(screen.getByText("[System: build finished]")).toBeInTheDocument();
   });
 
+  it("collapses a sessionless sender's message under its name, with no session lookup", () => {
+    const client = new QueryClient();
+    renderOriginBubble(client, "[Message from Supervisor]\nact: b-1 stalled\nDetails follow");
+    expect(screen.getByTestId("collapsed-session-message")).toBeInTheDocument();
+    expect(screen.getByTestId("message-origin").textContent).toBe("FromSupervisor");
+    expect(screen.getByTestId("expand-session-message").textContent).toBe("act: b-1 stalled");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("collapses a message from another session to its first line until expanded", () => {
     const client = new QueryClient();
     client.setQueryData(["session", "s_src"], { title: "Reviewer", parentSessionId: null });
