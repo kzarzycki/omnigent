@@ -16,6 +16,7 @@ import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 import { ConversationScrollLockContext } from "@/components/ai-elements/conversation";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import { normalizeExplicitMathDelimiters } from "@/components/ai-elements/mathMarkdown";
+import { writeKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 import { BlockRenderer, mayDefineReferenceLink, rendersOnlyWorkedFold } from "./BlockRenderer";
 import { FilePathAwareMessageResponse } from "./ChatMarkdown";
 
@@ -820,6 +821,109 @@ describe("BlockRenderer dispatch", () => {
       view.rerender(<BlockRenderer items={items} sessionStatus="idle" defaultExpanded />);
       expect(folds[0]).toHaveAttribute("aria-expanded", "false");
       expect(folds[1]).toHaveAttribute("aria-expanded", "true");
+    });
+
+    describe("with keep thinking expanded", () => {
+      afterEach(() => localStorage.clear());
+
+      const reasoning = (text: string): RenderItem => ({
+        kind: "reasoning",
+        itemId: "r0",
+        text,
+        duration: 4,
+      });
+      const NOTE = "Weighing the inputs.\n\nChecking the edge cases.";
+      const answer: RenderItem = { kind: "text", itemId: "m1", text: "Done.", final: true };
+
+      it("opens a settled fold holding thinking text, with the note open inside", () => {
+        writeKeepThinkingExpanded(true);
+        render(
+          <BlockRenderer items={[reasoning(NOTE), tool(1, "Bash"), answer]} sessionStatus="idle" />,
+        );
+        const fold = screen.getByRole("button", { name: "Worked" });
+        expect(fold).toHaveAttribute("aria-expanded", "true");
+        expect(
+          screen.getByRole("button", { name: "Thinking: Weighing the inputs." }),
+        ).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByText("Checking the edge cases.")).toBeDefined();
+
+        fireEvent.click(fold);
+        expect(fold).toHaveAttribute("aria-expanded", "false");
+      });
+
+      it("opens a settled fold holding a Codex status update", () => {
+        writeKeepThinkingExpanded(true);
+        const items: RenderItem[] = [
+          {
+            kind: "text",
+            itemId: "m0",
+            text: "Reading the tests.",
+            final: true,
+            phase: "commentary",
+          },
+          tool(1, "Bash"),
+          { kind: "text", itemId: "m1", text: "Added it.", final: true, phase: "final_answer" },
+        ];
+        render(<BlockRenderer items={items} sessionStatus="idle" />);
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "true",
+        );
+        expect(screen.getByText("Reading the tests.")).toBeDefined();
+      });
+
+      it("keeps a fold of only tool calls and blank thinking closed", () => {
+        writeKeepThinkingExpanded(true);
+        render(
+          <BlockRenderer
+            items={[reasoning("  \n "), tool(1, "Bash"), tool(2), answer]}
+            sessionStatus="idle"
+          />,
+        );
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "false",
+        );
+      });
+
+      it("keeps a fold with thinking text closed when the preference is off", () => {
+        render(
+          <BlockRenderer items={[reasoning(NOTE), tool(1, "Bash"), answer]} sessionStatus="idle" />,
+        );
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "false",
+        );
+        expect(screen.queryByText("Checking the edge cases.")).toBeNull();
+      });
+
+      it("keeps the trace open when a turn with thinking text settles on screen", async () => {
+        writeKeepThinkingExpanded(true);
+        const items = [reasoning(NOTE), tool(1, "Bash"), answer];
+        const view = render(
+          <BlockRenderer items={items} sessionStatus="running" turnLifecycle="streaming" />,
+        );
+        expect(screen.queryByTestId("turn-worked-fold")).toBeNull();
+
+        view.rerender(
+          <BlockRenderer items={items} sessionStatus="idle" turnLifecycle="completed" />,
+        );
+        await waitFor(() => expect(screen.getByTestId("turn-worked-fold")).toBeDefined());
+        // Past the frame where the collapse animation would close the fold.
+        await act(async () => {
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => resolve());
+          });
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 50);
+          });
+        });
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "true",
+        );
+        expect(screen.getByText("Checking the edge cases.")).toBeDefined();
+      });
     });
 
     it("labels the Worked row with the turn duration when provided", () => {
