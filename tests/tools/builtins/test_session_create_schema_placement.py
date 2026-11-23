@@ -17,3 +17,8 @@ def test_environment_and_placement_properties_state_top_level() -> None:
     properties = SysSessionCreateTool().get_schema()["function"]["parameters"]["properties"]
     assert "top-level session" in properties["environment_id"]["description"]
     assert "top-level" in properties["placement"]["description"]
+
+
+def test_cloud_environment_id_is_an_advertised_argument() -> None:
+    properties = SysSessionCreateTool().get_schema()["function"]["parameters"]["properties"]
+    assert properties["cloud_environment_id"]["type"] == "string"
