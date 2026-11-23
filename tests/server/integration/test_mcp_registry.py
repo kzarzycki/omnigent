@@ -470,7 +470,9 @@ async def test_registry_child_preserves_interactive_launch_args(
             get_conversation_store().get_conversation(response.json()["id"]).terminal_launch_args
         )
     # With no args, the undeclared codex agent's default (bypass) applies.
-    expected = ["--dangerously-bypass-approvals-and-sandbox"] if launch_args is None else launch_args
+    expected = (
+        ["--dangerously-bypass-approvals-and-sandbox"] if launch_args is None else launch_args
+    )
     assert persisted == [expected, expected]
 
 
