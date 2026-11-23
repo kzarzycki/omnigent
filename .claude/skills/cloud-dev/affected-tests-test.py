@@ -31,7 +31,14 @@ def select(
     run("git", "commit", "-q", "-m", "change")
     out = subprocess.run(
         [sys.executable, str(HERE / "affected_tests.py"), *args],
-        env={**{k: v for k, v in os.environ.items() if k != "GATE_BASE"}, **env},
+        env={
+            **{
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("GATE_BASE", "AFFECTED_TESTS_NARROW")
+            },
+            **env,
+        },
         capture_output=True,
         text=True,
         check=True,
