@@ -173,3 +173,18 @@ def test_cancel_on_abandon_round_trips_only_when_disabled() -> None:
     assert acp_agents_settings(entries) == {"acp": {"agents": agents}}
     with pytest.raises(ValueError, match="cancel_on_abandon must be a boolean"):
         acp_agents({"acp": {"agents": [{**agents[0], "cancel_on_abandon": "false"}]}})
+
+
+def test_permission_mode_round_trips_and_rejects_unknown_modes() -> None:
+    agents = [
+        {"name": "Cloud", "command": "cloud-bridge", "permission_mode": "bypassPermissions"},
+        {"name": "Goose", "command": "goose acp"},
+    ]
+    entries = acp_agents({"acp": {"agents": agents}})
+
+    assert [entry.permission_mode for entry in entries] == ["bypassPermissions", None]
+    assert acp_agents_settings(entries) == {"acp": {"agents": agents}}
+    with pytest.raises(ValueError, match="expected one of: auto, bypassPermissions"):
+        acp_agents({"acp": {"agents": [{**agents[0], "permission_mode": "yolo"}]}})
+    with pytest.raises(ValueError, match="permission_mode must be a string"):
+        acp_agents({"acp": {"agents": [{**agents[0], "permission_mode": True}]}})

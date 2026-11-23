@@ -1616,7 +1616,7 @@ _ACP_AGENT_PROMPT = (
 )
 
 
-def _build_acp_bundle(*, harness: str, name: str) -> bytes:
+def _build_acp_bundle(*, harness: str, name: str, permission_mode: str | None = None) -> bytes:
     """
     Materialize a one-file ACP picker agent and tar it.
 
@@ -1629,6 +1629,8 @@ def _build_acp_bundle(*, harness: str, name: str) -> bytes:
     :param harness: The harness id, e.g. ``"acp:devin"`` or ``"grok"``.
     :param name: The agent name / stable-id seed — a valid ``[a-zA-Z0-9_-]+``
         slug (e.g. ``"devin"``, ``"grok"``), never a display label with spaces.
+    :param permission_mode: The agent's declared default ACP permission mode,
+        written as ``executor.config.permission_mode``; ``None`` omits it.
     :returns: Gzipped tarball bytes suitable for the artifact store.
     """
     import tempfile
@@ -1637,11 +1639,14 @@ def _build_acp_bundle(*, harness: str, name: str) -> bytes:
 
     from omnigent.spec import materialize_bundle
 
+    executor_config: dict[str, str] = {"harness": harness}
+    if permission_mode:
+        executor_config["permission_mode"] = permission_mode
     raw = {
         "spec_version": 1,
         "name": name,
         "prompt": _ACP_AGENT_PROMPT,
-        "executor": {"type": "omnigent", "config": {"harness": harness}},
+        "executor": {"type": "omnigent", "config": executor_config},
         "os_env": {"type": "caller_process", "cwd": ".", "sandbox": {"type": "none"}},
     }
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1729,7 +1734,11 @@ def _ensure_default_acp_agents(
             artifact_store,
             agent_cache,
             name=agent.slug,
-            bundle_bytes=_build_acp_bundle(harness=f"acp:{agent.slug}", name=agent.slug),
+            bundle_bytes=_build_acp_bundle(
+                harness=f"acp:{agent.slug}",
+                name=agent.slug,
+                permission_mode=agent.permission_mode,
+            ),
         )
 
     # (2) Builtin ACP CLI harnesses — one row each, seeded like the natives because
