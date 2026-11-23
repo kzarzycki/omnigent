@@ -14,6 +14,10 @@ import {
 } from "@/lib/nativeCodingAgents";
 import type { Session } from "@/lib/types";
 
+// Set on a child minted from an ACP agent's sub-agent, whose session_name is the
+// agent's opaque call id and whose tool holds its title.
+const ACP_SUBAGENT_ID_LABEL_KEY = "omnigent.acp.subagent_id";
+
 /**
  * Pick the primary label for a child-session row.
  *
@@ -33,7 +37,8 @@ export function childPrimaryLabel(child: ChildSessionInfo): string {
     childWrapper === OPENCODE_NATIVE_SUBAGENT_WRAPPER ||
     childWrapper === ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER ||
     childWrapper === CLAUDE_NATIVE_SUBAGENT_WRAPPER;
-  if (isNativeSubagent && !isUserAdded) {
+  const isAcpSubagent = Boolean(child.labels?.[ACP_SUBAGENT_ID_LABEL_KEY]);
+  if ((isNativeSubagent || isAcpSubagent) && !isUserAdded) {
     return child.tool ?? child.title ?? child.id;
   }
   let titleTask: string | null = null;

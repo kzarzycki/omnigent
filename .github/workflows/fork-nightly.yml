@@ -42,7 +42,7 @@ jobs:
       - name: Run the full suite
         env:
           OMNIGENT_SKIP_WEB_UI: "true"
-        run: uv run --no-sync pytest -n auto --dist=loadfile
+        run: uv run --no-sync pytest -n auto --dist=loadfile --timeout=90
 
       - name: Open or update the red issue
         if: ${{ failure() }}

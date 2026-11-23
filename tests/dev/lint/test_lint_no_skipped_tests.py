@@ -37,6 +37,23 @@ def test_scan_flags_module_level_pytestmark_skip(tmp_path: Path) -> None:
     assert hits[0][0] == 2  # the pytestmark assignment line
 
 
+def test_scan_allows_skip_whose_reason_links_a_fork_issue(tmp_path: Path) -> None:
+    """A skip naming its fork issue passes; any other reason, or none, is still flagged."""
+    linked = tmp_path / "test_linked.py"
+    linked.write_text(
+        "import pytest\n"
+        '@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")\n'
+        "def test_thing() -> None: ...\n"
+    )
+    assert scan(linked) == [], "A skip linking a fork issue is the allowed form."
+    for reason in ('"later"', '"https://github.com/other/repo/issues/1"', '"issues/584"'):
+        other = tmp_path / "test_other.py"
+        other.write_text(
+            f"import pytest\n@pytest.mark.skip(reason={reason})\ndef test_thing() -> None: ...\n"
+        )
+        assert len(scan(other)) == 1, f"reason {reason} must stay flagged."
+
+
 def test_scan_ignores_skipif(tmp_path: Path) -> None:
     """``@pytest.mark.skipif`` is a real environmental gate and must stay green."""
     f = tmp_path / "test_sample.py"
