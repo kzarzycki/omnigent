@@ -3120,6 +3120,10 @@ async def test_edit_and_delete_outside_workspace_round_trip(
     assert not target.exists()
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permission bits, so the write cannot fail",
+)
 @pytest.mark.asyncio
 async def test_unwritable_target_reports_an_error_not_a_crash(
     client: httpx.AsyncClient,

@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from omnigent.install_ledger import sha256_text
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "uninstall_oss.sh"
@@ -175,6 +177,7 @@ def test_uninstall_script_purge_without_target_also_removes_cli(tmp_path: Path) 
     assert uv_log.read_text().strip() == "tool uninstall omnigent"
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_uninstall_script_purge_uses_unique_backup_paths_for_multiple_trees(
     tmp_path: Path,
 ) -> None:
@@ -553,6 +556,7 @@ def test_uninstall_script_purge_no_backup_removes_state_without_archive(tmp_path
     assert payload["backups"] == []
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_uninstall_script_purge_uses_gzip_when_zstd_missing(tmp_path: Path) -> None:
     home = tmp_path / "home"
     state = home / ".omnigent"

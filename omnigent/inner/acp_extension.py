@@ -10,9 +10,10 @@ whatever an extension hands it.
 An extension is **composed at the harness boundary, not discovered**. A vendor's
 harness wrap passes its extension to the shared ACP wrap
 (:func:`omnigent.inner.acp_harness.create_app`); the generic ``acp`` harness and
-every other builtin ACP row run with :data:`NO_ACP_EXTENSION` and behave exactly
-as they did before any extension existed. There is no registry to consult and no
-harness-name branch anywhere in the generic path.
+every other builtin ACP row run with :func:`generic_acp_extension`, which reads only
+Omnigent's own sub-agent dialect, so an agent that never emits it behaves exactly
+as before. There is no registry to consult and no harness-name branch anywhere in
+the generic path.
 
 That composition is what keeps a vendor liftable. Everything vendor-specific is
 one package plus one ``create_app()`` — the same shape as a community harness
@@ -70,6 +71,14 @@ class AcpExtension:
         return bool(self.subagent_sources)
 
 
-# The generic ACP harness and every builtin ACP CLI row that declares no vendor
-# behavior. Reads as "protocol only".
+# Protocol only: the executor's own default, which reads no sub-agent frames.
 NO_ACP_EXTENSION = AcpExtension(name="acp")
+
+
+def generic_acp_extension() -> AcpExtension:
+    """What the generic ACP harness runs with: protocol only, plus Omnigent's own
+    sub-agent dialect, which only a bridge Omnigent ships emits.
+    """
+    from omnigent.inner.acp_bridge_subagents import BridgeSubAgentSource
+
+    return AcpExtension(name="acp", subagent_sources=(BridgeSubAgentSource(),))

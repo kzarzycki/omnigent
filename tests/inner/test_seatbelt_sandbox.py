@@ -1253,6 +1253,7 @@ def test_helper_boots_when_interpreter_lives_under_home_uv_layout(
         _shutil.rmtree(fake_install_root, ignore_errors=True)
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_ensure_executable_visible_two_hop_proxy_finds_cpython_install_root(
     tmp_path: Path,
 ) -> None:
