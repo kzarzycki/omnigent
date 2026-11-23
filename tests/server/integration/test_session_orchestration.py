@@ -598,11 +598,43 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             {},
             id="starting-run",
         ),
-        # A fork keeps the origin label but isn't the run.
-        pytest.param("approve-for-me", True, None, None, None, {}, id="fork"),
-        pytest.param("approve-for-me", True, "succeeded", None, None, {}, id="finished-run"),
-        pytest.param("approve-for-me", False, "running", None, None, {}, id="no-origin"),
-        pytest.param(None, True, "running", None, None, {}, id="no-mode"),
+        # A fork keeps the origin label but isn't the run, so the worker default applies.
+        pytest.param(
+            "approve-for-me",
+            True,
+            None,
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="fork",
+        ),
+        pytest.param(
+            "approve-for-me",
+            True,
+            "succeeded",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="finished-run",
+        ),
+        pytest.param(
+            "approve-for-me",
+            False,
+            "running",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="no-origin",
+        ),
+        pytest.param(
+            None,
+            True,
+            "running",
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="no-mode",
+        ),
         # The automation's own mode wins over a permissive worker spec...
         pytest.param("default", True, "running", {"yolo": True}, None, {}, id="default-over-spec"),
         # ...which still applies when the automation sets no mode.
@@ -624,6 +656,17 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             {CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY: "1"},
             id="bypass-label",
         ),
+        # An automation in bypass never widens a worker whose own default is stricter.
+        pytest.param(
+            "bypass",
+            True,
+            "running",
+            {"permission_mode": "read-only"},
+            PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"],
+            {},
+            id="looser-than-agent-default",
+        ),
+        pytest.param("bypass", True, "running", {"yolo": False}, None, {}, id="opt-out-default"),
     ],
 )
 async def test_scheduled_origin_workers_use_the_automation_permission_mode(
@@ -690,6 +733,51 @@ async def test_scheduled_origin_workers_use_the_automation_permission_mode(
     assert worker.labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == labels.get(
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
     )
+
+
+async def test_automation_skip_mode_is_dropped_for_a_worker_with_no_declared_default(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    source, _target, _captured = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, harness="claude-native")
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        permission_mode="bypassPermissions",
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    conversations.set_labels(source["id"], {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id})
+    schedules.create_run(
+        uuid4().hex, task.id, "running", scheduled_at=1, conversation_id=source["id"], fired_at=1
+    )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": worker_agent_id, "placement": "managed"}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+
+    assert result.get("conversation_id"), result
+    worker = conversations.get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args is None
 
 
 @pytest.mark.parametrize(
@@ -1445,13 +1533,15 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
     )
 
 
-async def _upload_codex_worker(auth_client, sub_agents=None, **config) -> str:
+async def _upload_codex_worker(
+    auth_client, sub_agents=None, harness="codex-native", **config
+) -> str:
     from tests._helpers.session import post_session_bundle
     from tests.server.helpers import build_agent_bundle
 
     bundle = build_agent_bundle(
         "codex-worker",
-        executor={"config": {"harness": "codex-native", **config}},
+        executor={"config": {"harness": harness, **config}},
         sub_agents=sub_agents,
     )
     uploaded = await post_session_bundle(auth_client.post, "/v1/sessions", bundle)
@@ -1533,17 +1623,10 @@ async def test_created_session_launches_in_the_requested_permission_mode(
 @pytest.mark.parametrize(
     ("fields", "error"),
     [
-        # An agent reading a ticket could be steered into asking for one.
-        ({"permission_mode": "full-access"}, "skips approval"),
         ({"permission_mode": "auto"}, "is not a mode of 'codex-native'"),
         (
             {"permission_mode": "approve-for-me", "terminal_launch_args": []},
             "can't be combined with terminal_launch_args",
-        ),
-        # A named sub-agent takes its launch settings from the trusted sub-spec only.
-        (
-            {"permission_mode": "approve-for-me", "sub_agent_name": "helper"},
-            "can't be combined with terminal_launch_args or sub_agent_name",
         ),
     ],
 )
@@ -1561,6 +1644,203 @@ async def test_created_session_refuses_an_unusable_permission_mode(
     assert response.status_code == 400, response.text
     assert error in response.text
     assert {conversation.id for conversation in store.list_conversations().data} == before
+
+
+@pytest.mark.parametrize(
+    ("requested", "accepted", "expected"),
+    [
+        ("approve-for-me", True, PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"]),
+        ("read-only", True, PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"]),
+        ("full-access", False, None),
+    ],
+)
+async def test_named_child_permission_mode_is_held_to_the_childs_own_default(
+    auth_client, peers, db_uri, monkeypatch, requested, accepted, expected
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    agent_id = await _upload_codex_worker(
+        auth_client,
+        sub_agents=[
+            {
+                "name": "helper",
+                "executor": {
+                    "config": {"harness": "codex-native", "permission_mode": "approve-for-me"}
+                },
+            }
+        ],
+    )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    response = await auth_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent_id,
+            "parent_session_id": source["id"],
+            "sub_agent_name": "helper",
+            "permission_mode": requested,
+        },
+    )
+
+    if accepted:
+        assert response.status_code == 201, response.text
+        child = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+        assert child.terminal_launch_args == expected
+    else:
+        assert response.status_code == 400, response.text
+        assert "looser than this agent's default" in response.text
+
+
+@pytest.mark.parametrize("placement", ["child", "orchestrated"])
+@pytest.mark.parametrize(
+    ("spec_config", "requested", "accepted"),
+    [
+        # An agent reading a ticket could be steered into asking for a looser mode.
+        pytest.param({"permission_mode": "approve-for-me"}, "full-access", False, id="looser"),
+        pytest.param({"permission_mode": "approve-for-me"}, "bypass", False, id="loosest"),
+        pytest.param({"permission_mode": "approve-for-me"}, "approve-for-me", True, id="equal"),
+        pytest.param({"permission_mode": "approve-for-me"}, "read-only", True, id="stricter"),
+        # No declared stance means the codex default, full bypass.
+        pytest.param({}, "bypass", True, id="default-equal"),
+        pytest.param({}, "full-access", True, id="default-stricter"),
+        # Opting out of bypass leaves no skipping mode to ask for.
+        pytest.param({"yolo": False}, "full-access", False, id="opt-out-looser"),
+    ],
+)
+async def test_created_session_permission_mode_can_only_tighten_the_agent_default(
+    auth_client, peers, db_uri, monkeypatch, placement, spec_config, requested, accepted
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, **spec_config)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    body = {"agent_id": worker_agent_id, "permission_mode": requested}
+    headers = {}
+    path = "/v1/sessions"
+    if placement == "child":
+        body["parent_session_id"] = source["id"]
+    else:
+        path = "/v1/sessions/orchestrated"
+        headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
+        body["host_type"] = "managed"
+
+    response = await auth_client.post(path, json=body, headers=headers)
+
+    if accepted:
+        assert response.status_code == 201, response.text
+    else:
+        assert response.status_code == 400, response.text
+        assert (
+            "skips approval" in response.text
+            or "looser than this agent's default" in response.text
+        )
+
+
+_BYPASS = ["--dangerously-bypass-approvals-and-sandbox"]
+_READ_ONLY = PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"]
+
+
+@pytest.mark.parametrize("placement", ["orchestrated", "child-from-agent", "child-from-person"])
+@pytest.mark.parametrize(
+    ("spec_config", "raw_args", "agent_accepts"),
+    [
+        # Raw launch args from an agent must spell one mode, no looser than the agent's default.
+        ({"permission_mode": "read-only"}, _BYPASS, False),
+        ({"permission_mode": "read-only"}, [*_BYPASS, "--model", "gpt-x"], False),
+        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], False),
+        (
+            {"permission_mode": "read-only"},
+            ["--ask-for-approval", "never", "--sandbox", "danger-full-access"],
+            False,
+        ),
+        ({"permission_mode": "read-only"}, _READ_ONLY, True),
+        # An empty list launches the harness default, which is looser than read-only.
+        ({"permission_mode": "read-only"}, [], False),
+        ({}, _BYPASS, True),
+        ({}, [], True),
+    ],
+)
+async def test_session_launch_args_are_held_to_the_agent_default_for_agents_only(
+    auth_client, peers, db_uri, monkeypatch, placement, spec_config, raw_args, agent_accepts
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, **spec_config)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    body = {"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
+    headers = {}
+    path = "/v1/sessions"
+    if placement == "orchestrated":
+        path = "/v1/sessions/orchestrated"
+        headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
+        body["host_type"] = "managed"
+    else:
+        body["parent_session_id"] = source["id"]
+        if placement == "child-from-person":
+            # The web client carries no runner token; ``peers`` gives the client one.
+            from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
+
+            auth_client.headers.pop(RUNNER_TUNNEL_TOKEN_HEADER, None)
+            auth_client.headers.pop(ORCHESTRATION_SOURCE_HEADER, None)
+
+    response = await auth_client.post(path, json=body, headers=headers)
+
+    if placement == "child-from-person" or agent_accepts:
+        # A person's own picker keeps its args.
+        assert response.status_code == 201, response.text
+        stored = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+        assert stored.terminal_launch_args == raw_args
+    else:
+        assert response.status_code == 400, response.text
+        assert (
+            "looser than this agent's default" in response.text or "exactly one" in response.text
+        )
+
+
+@pytest.mark.parametrize("placement", ["child", "managed"])
+async def test_created_session_without_a_mode_gets_the_agent_default(
+    auth_client, peers, db_uri, monkeypatch, placement
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    declared = await _upload_codex_worker(auth_client, permission_mode="approve-for-me")
+    undeclared = await _upload_codex_worker(auth_client)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    launched = {}
+    for name, agent_id in (("declared", declared), ("undeclared", undeclared)):
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": agent_id, "placement": placement}),
+                server_client=auth_client,
+                conversation_id=source["id"],
+            )
+        )
+        launched[name] = store.get_conversation(result["conversation_id"]).terminal_launch_args
+    assert launched == {
+        "declared": PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+        "undeclared": ["--dangerously-bypass-approvals-and-sandbox"],
+    }
 
 
 @pytest.mark.parametrize("orchestration_environment", ["workflows"], indirect=True)
