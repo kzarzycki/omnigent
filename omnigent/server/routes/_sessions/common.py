@@ -26,10 +26,12 @@ from omnigent._wrapper_labels import (
     ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER_VALUE,
     WRAPPER_LABEL_KEY,
 )
+from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_LABEL_KEY
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.db.workspace_cache import WorkspaceScopedCache, WorkspaceScopedSet
 from omnigent.entities.conversation import (
     ITEM_TYPE_TO_DATA_CLS,
+    Conversation,
 )
 from omnigent.errors import WrongReplicaError
 from omnigent.harness_capabilities import ForkHistory
@@ -46,6 +48,10 @@ from omnigent.harness_plugins import (
     harness_capabilities,
 )
 from omnigent.native.elicitation_reattach import PRE_RESOLVED_ELICITATION_TTL_S
+from omnigent.native.permission_modes import (
+    APPROVAL_SKIPPING_PERMISSION_MODES,
+    PERMISSION_LAUNCH_ARGS,
+)
 from omnigent.runner.routing import RunnerRouter
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.schemas import (
@@ -58,6 +64,7 @@ from omnigent.spec.types import (
     StateUpdate,
 )
 from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
 )
@@ -272,6 +279,47 @@ _CLAUDE_NATIVE_READABLE_PERMISSION_MODES: frozenset[str] = _CLAUDE_NATIVE_PERMIS
     "bypassPermissions",
     "dontAsk",
 }
+
+
+# Launch flags that start a native CLI without an approval gate, for sessions whose
+# live mode has no label; Codex's full bypass is what spec-derived args emit for ``yolo``.
+_APPROVAL_SKIPPING_LAUNCH_ARGS: tuple[tuple[str, ...], ...] = (
+    *(
+        tuple(args)
+        for modes in PERMISSION_LAUNCH_ARGS.values()
+        for mode, args in modes.items()
+        if mode in APPROVAL_SKIPPING_PERMISSION_MODES and args
+    ),
+    ("--dangerously-skip-permissions",),
+    ("--dangerously-bypass-approvals-and-sandbox",),
+    ("--ask-for-approval", "never"),
+)
+
+
+def _contains_args(args: list[str], needle: tuple[str, ...]) -> bool:
+    width = len(needle)
+    return any(tuple(args[i : i + width]) == needle for i in range(len(args) - width + 1))
+
+
+def session_approval_skipping_mode(conv: Conversation) -> str | None:
+    """The approval-skipping permission mode *conv* is running in, or ``None``.
+
+    The Claude and ACP labels track the live mode, including switches made after
+    launch, so either wins over the launch flags it may have replaced.
+    """
+    for key in (_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY, ACP_PERMISSION_MODE_LABEL_KEY):
+        live_mode = conv.labels.get(key)
+        if live_mode:
+            return live_mode if live_mode in APPROVAL_SKIPPING_PERMISSION_MODES else None
+    if conv.labels.get(_CODEX_NATIVE_APPROVAL_MODE_LABEL_KEY) == "full-access":
+        return "full-access"
+    if conv.labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1":
+        return "bypass"
+    launch_args = list(getattr(conv, "terminal_launch_args", None) or [])
+    for needle in _APPROVAL_SKIPPING_LAUNCH_ARGS:
+        if _contains_args(launch_args, needle):
+            return " ".join(needle)
+    return None
 
 
 _CODEX_NATIVE_SUBAGENT_DISPLAY_FALLBACK = "Codex"
