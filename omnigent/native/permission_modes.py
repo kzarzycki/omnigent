@@ -68,29 +68,107 @@ APPROVAL_SKIPPING_PERMISSION_MODES: frozenset[str] = frozenset(
 )
 
 
-def created_session_launch_args(harness: str | None, mode: str) -> list[str] | None:
-    """
-    Launch args for a session created with ``permission_mode``, e.g. by ``sys_session_create``.
+# Modes of each harness from strictest to loosest. A request may name a mode only when it is
+# no looser than the agent's default. Positions are a fixed policy, not a measurement:
+# a mode that asks the user before acting ranks stricter than one that decides alone.
+PERMISSION_MODE_STRICTNESS: dict[str, tuple[str, ...]] = {
+    "claude-native": ("plan", "default", "acceptEdits", "auto", "dontAsk", "bypassPermissions"),
+    "codex-native": (
+        "read-only",
+        "ask-for-approval",
+        "default",
+        "approve-for-me",
+        "full-access",
+        "bypass",
+    ),
+    "cursor-native": ("ask", "plan", "default", "auto-review", "yolo"),
+    "antigravity-native": ("default", "skip"),
+    "devin-native": ("normal", "accept-edits", "smart", "dangerous"),
+    "acp": ("auto", "bypassPermissions"),
+}
 
-    The creating agent chooses the mode, and what it reads (a ticket, a message)
-    can try to steer that choice, so a mode that skips approval is refused: the
-    new session keeps an approval prompt or the harness's own reviewer.
+# Launch args that stand for a mode whose table entry carries no args.
+_BYPASS_LAUNCH_ARGS: dict[str, tuple[tuple[str, ...], str]] = {
+    "codex-native": (("--dangerously-bypass-approvals-and-sandbox",), "bypass"),
+}
 
-    :param harness: The new session's canonical harness, e.g. ``"codex-native"``.
-    :param mode: A mode in that harness's vocabulary, e.g. ``"approve-for-me"``.
-    :returns: The CLI args, or ``None`` when the mode is the harness's own default.
-    :raises ValueError: The mode skips approval, or the harness doesn't offer it.
+
+def mode_for_launch_args(harness: str | None, args: list[str] | None) -> str | None:
     """
-    if mode in APPROVAL_SKIPPING_PERMISSION_MODES:
-        raise ValueError(
-            f"permission_mode {mode!r} skips approval, which a created session can't use; "
-            "choose a mode that asks for approval or uses the harness's reviewer"
-        )
-    modes = PERMISSION_LAUNCH_ARGS.get(harness or "", {})
-    if mode not in modes:
-        choices = [name for name in modes if name not in APPROVAL_SKIPPING_PERMISSION_MODES]
+    Name the mode that *args* launch *harness* in, for comparing against a requested mode.
+
+    :param harness: Canonical harness, e.g. ``"codex-native"``.
+    :param args: Launch args derived for the session, or ``None`` for the harness's own stance.
+    :returns: The mode, or ``None`` when *args* match no mode of the harness.
+    """
+    modes = PERMISSION_LAUNCH_ARGS.get(harness or "")
+    if modes is None:
+        return None
+    if not args:
+        if "default" in modes:
+            return "default"
+        return next((name for name, mode_args in modes.items() if not mode_args), None)
+    bypass = _BYPASS_LAUNCH_ARGS.get(harness or "")
+    if bypass is not None and tuple(args) == bypass[0]:
+        return bypass[1]
+    return next((name for name, mode_args in modes.items() if mode_args == args), None)
+
+
+def launch_args_for_mode(harness: str | None, mode: str) -> list[str] | None:
+    """Launch args of *mode*, for a mode the agent's default has already allowed."""
+    bypass = _BYPASS_LAUNCH_ARGS.get(harness or "")
+    if bypass is not None and mode == bypass[1]:
+        return list(bypass[0])
+    return list(PERMISSION_LAUNCH_ARGS.get(harness or "", {}).get(mode, [])) or None
+
+
+def permission_mode_is_looser(harness: str | None, mode: str | None, default: str | None) -> bool:
+    """Whether *mode* ranks looser than *default* for *harness*; unknown modes never do."""
+    order = PERMISSION_MODE_STRICTNESS.get(harness or "", ())
+    return mode in order and default in order and order.index(mode) > order.index(default)
+
+
+def permission_mode_exceeds_default(
+    harness: str | None, mode: str | None, default: str | None
+) -> bool:
+    """Whether *mode* is looser than *default*, or skips approval when no default is declared."""
+    if mode is None:
+        return False
+    if default is None:
+        return mode in APPROVAL_SKIPPING_PERMISSION_MODES
+    return permission_mode_is_looser(harness, mode, default)
+
+
+def check_permission_mode_not_looser(harness: str | None, mode: str, default: str | None) -> None:
+    """
+    Refuse *mode* when it is looser than the agent's *default*.
+
+    The agent's definition is the owner's word on how far it may skip approval; a mode a
+    session asks for is picked by an agent, and what it reads can steer that pick.
+
+    :param harness: Canonical harness of the new session.
+    :param mode: The mode the request names.
+    :param default: The agent's default mode, or ``None`` when its definition declares no
+        stance, which allows any mode that asks for approval.
+    :raises ValueError: *mode* is looser than the default, or not a mode of the harness.
+    """
+    order = PERMISSION_MODE_STRICTNESS.get(harness or "", ())
+    if mode not in order:
+        choices = [name for name in order if name not in APPROVAL_SKIPPING_PERMISSION_MODES]
         supported = f"use one of {', '.join(map(repr, choices))}" if choices else "omit it"
         raise ValueError(
             f"permission_mode {mode!r} is not a mode of {harness or 'this agent'!r}; {supported}"
         )
-    return list(modes[mode]) or None
+    if default is None:
+        if mode in APPROVAL_SKIPPING_PERMISSION_MODES:
+            raise ValueError(
+                f"permission_mode {mode!r} skips approval, but this agent's definition "
+                "declares no default that skips it; omit permission_mode or choose a mode "
+                "that asks for approval"
+            )
+        return
+    if permission_mode_is_looser(harness, mode, default):
+        raise ValueError(
+            f"permission_mode {mode!r} is looser than this agent's default {default!r}; "
+            "a request can only tighten the default, so omit it or choose a stricter mode"
+        )
