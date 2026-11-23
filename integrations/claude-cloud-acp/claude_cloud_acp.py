@@ -959,7 +959,7 @@ def _growth(total: float, before: float | None) -> float:
 
 
 class SessionStalled(RuntimeError):
-    """A cloud session showed no life for too long; *started* is whether it ever produced output."""
+    """No life for too long; *started* is whether the cloud session ever produced output."""
 
     def __init__(self, message: str, started: bool) -> None:
         super().__init__(message)
@@ -1078,7 +1078,9 @@ class Session:
                 elif quiet > limit:
                     why = f" (the stream fails: {self.stream_error})" if self.stream_error else ""
                     if first_turn:
-                        setup = f"; last setup output: {self.setup_note}" if self.setup_note else ""
+                        setup = (
+                            f"; last setup output: {self.setup_note}" if self.setup_note else ""
+                        )
                         raise SessionStalled(
                             f"cloud session https://claude.ai/code/{self.cloud_id} sent no "
                             f"output for {limit:.0f}s after its first prompt{why}{setup}; "

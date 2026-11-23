@@ -40,7 +40,7 @@ def cloud(monkeypatch, tmp_path):
     return created
 
 
-def start(acp_id: str, text: str, *events: dict) -> bridge.Session:
+def start(acp_id: str, *events: dict) -> bridge.Session:
     """An ACP session whose cloud stream yields *events* and then goes quiet."""
     session = bridge.SESSIONS[acp_id] = bridge.Session("/repo", acp_id)
     session.reader = threading.current_thread()  # no network stream
@@ -50,19 +50,20 @@ def start(acp_id: str, text: str, *events: dict) -> bridge.Session:
 
 
 def test_stalled_first_start_is_not_adopted_by_next_start_of_same_prompt(cloud):
-    start("acp-a", BRIEF)
-    with pytest.raises(RuntimeError, match="made no progress|no output"):
+    start("acp-a")
+    with pytest.raises(RuntimeError, match=r"no output"):
         bridge.run_turn("acp-a", BRIEF)
     # Another Omnigent session with the same first message and workspace.
     result = {"type": "result"}
-    start("acp-b", REPLAY, {"type": "assistant", "message": {}}, result)
+    start("acp-b", {"type": "assistant", "message": {}}, result)
     assert bridge.run_turn("acp-b", REPLAY) == "end_turn"
     assert cloud == ["session_00000000000", "session_00000000001"], cloud
     assert bridge.SESSIONS["acp-b"].cloud_id == "session_00000000001"
 
 
-def test_first_turn_error_names_session_and_setup_output(cloud):
-    start("acp-a", BRIEF, {"type": "env_manager_log", "data": {"content": "npm ci running"}})
+@pytest.mark.usefixtures("cloud")
+def test_first_turn_error_names_session_and_setup_output():
+    start("acp-a", {"type": "env_manager_log", "data": {"content": "npm ci running"}})
     with pytest.raises(RuntimeError) as caught:
         bridge.run_turn("acp-a", BRIEF)
     assert "session_00000000000" in str(caught.value)
@@ -70,8 +71,9 @@ def test_first_turn_error_names_session_and_setup_output(cloud):
     assert "after its first prompt" in str(caught.value)
 
 
-def test_stall_after_output_keeps_the_session_for_the_next_message(cloud):
-    start("acp-a", BRIEF, {"type": "assistant", "message": {}})
+@pytest.mark.usefixtures("cloud")
+def test_stall_after_output_keeps_the_session_for_the_next_message():
+    start("acp-a", {"type": "assistant", "message": {}})
     with pytest.raises(RuntimeError, match="made no progress"):
         bridge.run_turn("acp-a", BRIEF)
     assert bridge.recall()[bridge.first_prompt_key("/repo", BRIEF)] == "session_00000000000"
