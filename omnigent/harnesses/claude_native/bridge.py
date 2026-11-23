@@ -807,7 +807,19 @@ class ClaudeUserPromptPending(RuntimeError):
 
 
 class ClaudeMessageNotAccepted(RuntimeError):
+    """
+    Claude refused the message before accepting it.
+
+    :cvar code: Semantic failure code the turn error carries, or ``None``.
+    """
+
+    code: str | None = None
+
+
+class ClaudeSubmitNotAccepted(ClaudeMessageNotAccepted):
     """The submitted draft remained in Claude's input box until the deadline."""
+
+    code = "claude_submit_not_accepted"
 
 
 class ClaudeComposerNotCleared(ClaudeMessageNotAccepted):
@@ -5187,12 +5199,69 @@ def inject_user_message(
 
 @dataclass(frozen=True)
 class _SubmittedPrompt:
-    """A submitted message: its bridge, transcript boundary and time at its Enter, and text."""
+    """
+    A submitted message: its bridge, transcript boundary and time at its Enter, and text.
+
+    :param echoes_before: Echoes of the message's marker above the input box before the paste.
+    """
 
     bridge_dir: Path
     boundary: SubmitBoundary | None
     text: str
     submitted_at: float
+    echoes_before: int = 0
+
+
+# The last submit per bridge whose draft Claude never accepted in time; its Enter may still land.
+_UNACCEPTED_SUBMITS: dict[Path, _SubmittedPrompt] = {}
+
+
+def _unaccepted_submit_of(bridge_dir: Path, text: str) -> _SubmittedPrompt | None:
+    """Return the remembered unaccepted submit of *text*; a submit of other text is forgotten."""
+    earlier = _UNACCEPTED_SUBMITS.get(bridge_dir)
+    if earlier is not None and earlier.text != text:
+        # Another message went first: the old one is no longer the resend's concern.
+        del _UNACCEPTED_SUBMITS[bridge_dir]
+        return None
+    return earlier
+
+
+def _submit_recorded(submitted: _SubmittedPrompt) -> bool:
+    """Return whether Claude recorded *submitted*, which it did not accept in time."""
+    boundary = submitted.boundary or _transcript_start_boundary(
+        submitted.bridge_dir, submitted.submitted_at
+    )
+    return boundary is not None and has_recorded_prompt(
+        boundary, submitted.text, normalize_prompt=_recorded_prompt_text
+    )
+
+
+def _echoes_above_composer(pane: str, needle: str) -> int:
+    """Count *needle* in the pane above its input box, where a submitted prompt is echoed."""
+    lines = pane.splitlines()
+    rules = _composer_frame_rule_indices(lines)
+    above = lines[: rules[-2] if len(rules) >= 2 else rules[-1]] if rules else lines
+    return "\n".join(above).count(needle)
+
+
+def _submit_echoed(pane: str, needle: str, earlier: _SubmittedPrompt) -> bool:
+    """
+    Return whether *pane* shows *earlier* was submitted: a readable empty box and a new echo.
+
+    A capture with no box, or a box emptied with no echo, is no evidence either way.
+    """
+    return (
+        bool(needle)
+        and _composer_reads_clear(_composer_box(pane))
+        and _echoes_above_composer(pane, needle) > earlier.echoes_before
+    )
+
+
+def _landed_late(earlier: _SubmittedPrompt) -> _SubmittedPrompt:
+    """Forget *earlier* and return it as the submit a resend waits on instead of typing."""
+    _UNACCEPTED_SUBMITS.pop(earlier.bridge_dir, None)
+    _logger.info("claude-native: an unaccepted submit landed late; not typing it again")
+    return earlier
 
 
 @_serialize_bridge_injection
@@ -5316,6 +5385,10 @@ def _paste_and_submit(
         prompt appears after the submit Enter.
     """
     delivery_diagnostics.start_attempt()
+    earlier = _unaccepted_submit_of(bridge_dir, text)
+    if earlier is not None and _submit_recorded(earlier):
+        # The original Enter landed late: type nothing, wait on that submit.
+        return _landed_late(earlier)
     delivery_diagnostics.set_stage("checking_pending_prompt")
     if has_pending_user_prompt(bridge_dir):
         raise ClaudeUserPromptPending(
@@ -5335,11 +5408,32 @@ def _paste_and_submit(
         # Append a CR only when a trailing backslash would consume the submit Enter.
         payload += b"\r"
     tail_needle = _submit_tail_needle(text) if needle else ""
+    if earlier is not None and _submit_echoed(
+        _capture_pane(socket_path, tmux_target), needle, earlier
+    ):
+        # Echoed above an empty box: submitted, though Claude records it only after its hooks.
+        return _landed_late(earlier)
     delivery_diagnostics.set_stage("pasting")
     # Clear stale text first, or the paste lands inside the person's draft and
     # Enter submits both together.
-    _clear_composer(socket_path, tmux_target, bridge_dir=bridge_dir)
+    try:
+        _clear_composer(socket_path, tmux_target, bridge_dir=bridge_dir)
+    except ClaudeComposerNotCleared as not_cleared:
+        if earlier is None:
+            raise
+        if _submit_recorded(earlier):
+            return _landed_late(earlier)
+        # The pane is still stuck on the unaccepted draft: that refusal stands.
+        raise ClaudeSubmitNotAccepted(
+            "Claude Code still has not accepted the submitted message "
+            "(the draft is still in the input box). The message was not delivered."
+        ) from not_cleared
     transcript_before_paste = _capture_pane(socket_path, tmux_target)
+    if earlier is not None:
+        # The original may have landed while the box was cleared; typing now would double it.
+        if _submit_recorded(earlier) or _submit_echoed(transcript_before_paste, needle, earlier):
+            return _landed_late(earlier)
+        _UNACCEPTED_SUBMITS.pop(bridge_dir, None)
     draft_seen, pane, polls, empty_captures, paste_wait_started = _paste_and_await_draft(
         bridge_dir,
         socket_path,
@@ -5405,7 +5499,11 @@ def _paste_and_submit(
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
     submitted = _SubmittedPrompt(
-        bridge_dir=bridge_dir, boundary=submit_boundary, text=text, submitted_at=submitted_at
+        bridge_dir=bridge_dir,
+        boundary=submit_boundary,
+        text=text,
+        submitted_at=submitted_at,
+        echoes_before=_echoes_above_composer(transcript_before_paste, needle) if needle else 0,
     )
     if not draft_seen:
         delivery_diagnostics.record_details(verification="unverified")
@@ -5438,7 +5536,8 @@ def _paste_and_submit(
         ) from exc
     if accepted:
         return submitted
-    raise ClaudeMessageNotAccepted(
+    _UNACCEPTED_SUBMITS[bridge_dir] = submitted
+    raise ClaudeSubmitNotAccepted(
         f"Claude Code did not accept the submitted message within {_SUBMIT_VERIFY_TIMEOUT_S}s "
         "(the draft is still in the input box). The message was not delivered."
     )
