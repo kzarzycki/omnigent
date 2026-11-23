@@ -2298,6 +2298,11 @@ def paused_mid_turn_session(
 
 
 @pytest.fixture(autouse=True)
+def _isolated_global_config() -> None:
+    """Keep the suite-owned config home: its servers inherited it and read mock config there."""
+
+
+@pytest.fixture(autouse=True)
 def _ui_defaults() -> None:
     """
     SSE-friendly Playwright defaults applied to every test.

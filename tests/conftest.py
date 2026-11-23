@@ -404,6 +404,15 @@ def _isolated_gh_config(
 
 
 @pytest.fixture(autouse=True)
+def _isolated_global_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test its own user config home, so a config written by one test
+    (``omnigent setup``, ``_save_global_config``) never reaches a later one. It
+    stays under the suite's data dir, which ``test_suite_isolation`` checks."""
+    home = tempfile.mkdtemp(prefix="config-home-", dir=_TEST_OMNIGENT_DATA_DIR)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", home)
+
+
+@pytest.fixture(autouse=True)
 def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests off the network: the host's workspace probe answers "unknown".
 
