@@ -22,10 +22,10 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Generator
+from collections.abc import AsyncIterator, Callable, Generator, Iterable
 from pathlib import Path
 from tempfile import mkdtemp
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import psutil
@@ -64,6 +64,7 @@ _RUNNER_PREWARM_SPEC_PATH_ENV_VAR = "RUNNER_PREWARM_SPEC_PATH"
 _RUNNER_VERSION = VERSION
 _RUNNER_CONFIG_HOME_ENV_VAR = "OMNIGENT_CONFIG_HOME"
 _DEFAULT_RUNNER_IDLE_TIMEOUT_S = 60 * 60
+_DEFAULT_RUNNER_IDLE_HOLD_MAX_S = 4 * 60 * 60
 _RUNNER_IDLE_MONITOR_MAX_POLL_INTERVAL_S = 60.0
 _AUTH_DISCOVERY_RETRY_INTERVAL_S = 5.0
 # The runner offloads short native-CLI/IPC ops via asyncio.to_thread. Python's
@@ -163,44 +164,92 @@ def _runner_config_path() -> Path:
     return Path.home() / ".omnigent" / "config.yaml"
 
 
-def _load_runner_idle_timeout_s_from_config() -> float:
-    """Load the runner inactivity timeout from config.
+def _load_runner_seconds_setting(key: str, default_s: float) -> float:
+    """Load a non-negative ``runner.<key>`` duration from the global config.
 
-    Reads ``runner.idle_timeout_s`` from the global config file. Missing
-    config or missing key defaults to 1 hour. A value of ``0`` disables the
-    inactivity watchdog. Negative, boolean, or non-numeric values fail loud
-    during runner startup so the user does not get silently different
-    lifecycle behavior than requested.
+    Missing config or a missing key gives *default_s*. Negative, boolean, or
+    non-numeric values fail loud during runner startup so the user does not get
+    silently different lifecycle behavior than requested.
 
-    :returns: Idle timeout in seconds, e.g. ``3600.0``. ``0.0`` disables
-        the watchdog.
-    :raises RuntimeError: If ``runner.idle_timeout_s`` is invalid.
+    :param key: Key under ``runner``, e.g. ``"idle_timeout_s"``.
+    :param default_s: Value for a missing config or key, e.g. ``3600.0``.
+    :returns: The duration in seconds; ``0.0`` is how callers disable a feature.
+    :raises RuntimeError: If the config is unreadable or the value is invalid.
     """
     import yaml
 
     path = _runner_config_path()
     if not path.exists():
-        return float(_DEFAULT_RUNNER_IDLE_TIMEOUT_S)
+        return default_s
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise RuntimeError(f"failed to read runner config from {path}: {exc}") from exc
     if not isinstance(raw, dict):
-        return float(_DEFAULT_RUNNER_IDLE_TIMEOUT_S)
+        return default_s
     runner_cfg = raw.get("runner")
     if runner_cfg is None:
-        return float(_DEFAULT_RUNNER_IDLE_TIMEOUT_S)
+        return default_s
     if not isinstance(runner_cfg, dict):
         raise RuntimeError("runner config must be a mapping")
-    raw_timeout = runner_cfg.get("idle_timeout_s")
-    if raw_timeout is None:
-        return float(_DEFAULT_RUNNER_IDLE_TIMEOUT_S)
-    if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
-        raise RuntimeError("runner.idle_timeout_s must be a non-negative number of seconds")
-    timeout_s = float(raw_timeout)
-    if timeout_s < 0:
-        raise RuntimeError("runner.idle_timeout_s must be a non-negative number of seconds")
-    return timeout_s
+    raw_value = runner_cfg.get(key)
+    if raw_value is None:
+        return default_s
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        raise RuntimeError(f"runner.{key} must be a non-negative number of seconds")
+    value_s = float(raw_value)
+    if value_s < 0:
+        raise RuntimeError(f"runner.{key} must be a non-negative number of seconds")
+    return value_s
+
+
+def _load_runner_idle_timeout_s_from_config() -> float:
+    """Load the runner inactivity timeout from config.
+
+    Reads ``runner.idle_timeout_s``; defaults to 1 hour, ``0`` disables the
+    inactivity watchdog, and an invalid value raises (see
+    :func:`_load_runner_seconds_setting`).
+
+    :returns: Idle timeout in seconds, e.g. ``3600.0``.
+    :raises RuntimeError: If ``runner.idle_timeout_s`` is invalid.
+    """
+    return _load_runner_seconds_setting("idle_timeout_s", float(_DEFAULT_RUNNER_IDLE_TIMEOUT_S))
+
+
+def _load_runner_idle_hold_max_s_from_config() -> float:
+    """Load how long an idle runner honours a soft active-work hold.
+
+    Reads ``runner.idle_hold_max_s``; defaults to 4 hours and ``0`` keeps the
+    unbounded hold. An invalid value raises (see
+    :func:`_load_runner_seconds_setting`).
+
+    :returns: Ceiling in seconds, e.g. ``14400.0``.
+    :raises RuntimeError: If ``runner.idle_hold_max_s`` is invalid.
+    """
+    return _load_runner_seconds_setting("idle_hold_max_s", float(_DEFAULT_RUNNER_IDLE_HOLD_MAX_S))
+
+
+def _runner_keeps_idle_session(session_ids: Iterable[str]) -> bool:
+    """Whether the host's stale-runner exclude list names one of *session_ids*.
+
+    Re-reads the host config on every call. An unreadable or invalid list keeps
+    the runner, so a config typo never reaps a session the owner protected.
+
+    :param session_ids: Sessions this runner serves.
+    :returns: ``True`` when a listed session is served or the list cannot be read.
+    """
+    from omnigent.host.identity import host_config_path, load_stale_runner_replacement
+
+    try:
+        excluded = load_stale_runner_replacement(host_config_path()).excluded_session_ids
+    except Exception:
+        _logger.warning(
+            "host.replace_stale_runners_exclude is unreadable; keeping the idle runner",
+            exc_info=True,
+            extra={"session_id": runner_primary_session_id()},
+        )
+        return True
+    return any(session_id in excluded for session_id in session_ids)
 
 
 def _runner_threadpool_max_workers() -> int:
@@ -276,6 +325,88 @@ def _runner_last_activity(
     )
 
 
+def _app_active_work_hold(app: FastAPI, event_dispatcher: Any) -> str | None:
+    """Name what keeps the runner busy, or ``None`` when it is idle.
+
+    :param app: Runner app whose ``state.active_work_hold`` names its own holds.
+    :param event_dispatcher: Dispatcher whose undelivered batches hold the runner.
+    :returns: A hold name, e.g. ``"turn"`` or ``"pane_output"``.
+    """
+    if event_dispatcher.has_pending:
+        return "event_dispatch"
+    hold_callback = getattr(app.state, "active_work_hold", None)
+    if callable(hold_callback):
+        return cast("str | None", hold_callback())
+    callback = getattr(app.state, "has_active_work", None)
+    return "active_work" if callable(callback) and callback() else None
+
+
+def _app_keeps_idle_runner(app: FastAPI) -> bool:
+    """Whether an attached client or the host's exclude list keeps this runner up.
+
+    Blocking (tmux probe and a config read); run off the event loop.
+
+    :param app: Runner app exposing the pane and session probes on its state.
+    :returns: ``True`` to keep the runner past the soft-hold ceiling.
+    """
+    attached = getattr(app.state, "native_pane_has_attached_client", None)
+    if callable(attached) and attached():
+        return True
+    served = getattr(app.state, "served_session_ids", None)
+    session_ids = set(cast("Iterable[str]", served())) if callable(served) else set()
+    primary = runner_primary_session_id()
+    if primary:
+        session_ids.add(primary)
+    return _runner_keeps_idle_session(session_ids)
+
+
+def _start_idle_monitor(
+    *,
+    app: FastAPI,
+    event_dispatcher: Any,
+    idle_timeout_s: float,
+    idle_hold_max_s: float,
+    get_last_activity: Callable[[], float],
+    get_work_progress: Callable[[], float | None],
+    request_shutdown: Callable[[], None],
+    name: str,
+    poll_interval_s: float | None = None,
+) -> asyncio.Task[None]:
+    """Start the idle monitor wired to the runner app's holds and owner probes.
+
+    :param app: Runner app.
+    :param event_dispatcher: Runner event dispatcher.
+    :param idle_timeout_s: ``runner.idle_timeout_s``.
+    :param idle_hold_max_s: ``runner.idle_hold_max_s``.
+    :param get_last_activity: Newest real activity time (loop clock).
+    :param get_work_progress: Newest work-progress time (loop clock) or ``None``.
+    :param request_shutdown: Graceful shutdown request.
+    :param name: Task name.
+    :param poll_interval_s: Test override for the monitor cadence.
+    :returns: The running monitor task.
+    """
+    from omnigent.runner.app import SOFT_ACTIVE_WORK_HOLDS
+
+    def _hold() -> str | None:
+        return _app_active_work_hold(app, event_dispatcher)
+
+    return asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=idle_timeout_s,
+            get_last_activity=get_last_activity,
+            has_active_work=lambda: _hold() is not None,
+            request_shutdown=request_shutdown,
+            poll_interval_s=poll_interval_s,
+            get_hold=_hold,
+            soft_holds=SOFT_ACTIVE_WORK_HOLDS,
+            idle_hold_max_s=idle_hold_max_s,
+            get_work_progress=get_work_progress,
+            keeps_runner=lambda: _app_keeps_idle_runner(app),
+        ),
+        name=name,
+    )
+
+
 async def _run_inactivity_monitor(
     *,
     idle_timeout_s: float,
@@ -283,6 +414,11 @@ async def _run_inactivity_monitor(
     has_active_work: Callable[[], bool],
     request_shutdown: Callable[[], None],
     poll_interval_s: float | None = None,
+    get_hold: Callable[[], str | None] | None = None,
+    soft_holds: frozenset[str] = frozenset(),
+    idle_hold_max_s: float = 0.0,
+    get_work_progress: Callable[[], float | None] | None = None,
+    keeps_runner: Callable[[], bool] | None = None,
 ) -> None:
     """Request runner shutdown after the configured idle window expires.
 
@@ -290,6 +426,10 @@ async def _run_inactivity_monitor(
     ``idle_timeout_s`` and no agent work is active. If the timeout expires
     while an agent turn is running, the monitor keeps waiting and exits soon
     after the active work clears unless new activity resets the timer.
+
+    A *soft* hold (an inferred signal that can outlive the work) is honoured
+    only until no work progress was seen for ``idle_hold_max_s``; hard holds
+    always keep the runner.
 
     :param idle_timeout_s: Idle window in seconds, e.g. ``3600.0``. ``0``
         disables the monitor.
@@ -301,20 +441,72 @@ async def _run_inactivity_monitor(
     :param poll_interval_s: Optional test override for the monitor cadence,
         e.g. ``0.01``. ``None`` derives a bounded production cadence from
         ``idle_timeout_s``.
+    :param get_hold: Callback naming the active hold, e.g. ``"pane_output"``,
+        or ``None`` when idle. ``None`` derives it from *has_active_work*.
+    :param soft_holds: Hold names the ceiling applies to.
+    :param idle_hold_max_s: Progress-free seconds after which a soft hold is no
+        longer honoured. ``0`` keeps the unbounded hold.
+    :param get_work_progress: Callback returning the newest work-progress time
+        (event loop clock) or ``None`` if none yet; the monitor's start stands in.
+    :param keeps_runner: Blocking callback, ``True`` when an attached client or the
+        host's exclude list keeps the runner. Run off the event loop.
     :returns: None.
     """
     if idle_timeout_s <= 0:
         return
     loop = asyncio.get_running_loop()
+    started_at = loop.time()
     if poll_interval_s is None:
         poll_interval_s = min(
             _RUNNER_IDLE_MONITOR_MAX_POLL_INTERVAL_S,
             max(1.0, idle_timeout_s / 30.0),
         )
+    logged_hold: str | None = None
+
+    def _progress_free_s() -> float:
+        progress_at = get_work_progress() if get_work_progress is not None else None
+        return loop.time() - max(progress_at or started_at, started_at)
+
+    def _current_hold() -> str | None:
+        if get_hold is not None:
+            return get_hold()
+        return "active_work" if has_active_work() else None
+
     while True:
         elapsed_s = loop.time() - get_last_activity()
         if elapsed_s >= idle_timeout_s:
-            if has_active_work():
+            hold = _current_hold()
+            if hold is not None:
+                if hold != logged_hold:
+                    logged_hold = hold
+                    _logger.info(
+                        "idle runner kept up by %s hold after %.1fs idle",
+                        hold,
+                        elapsed_s,
+                        extra={"session_id": runner_primary_session_id()},
+                    )
+                if hold in soft_holds and idle_hold_max_s > 0:
+                    stale_s = _progress_free_s()
+                    if stale_s >= idle_hold_max_s and not (
+                        keeps_runner is not None and await asyncio.to_thread(keeps_runner)
+                    ):
+                        # The probe ran off the loop: work may have started meanwhile.
+                        stale_s = _progress_free_s()
+                        if (
+                            stale_s >= idle_hold_max_s
+                            and loop.time() - get_last_activity() >= idle_timeout_s
+                            and _current_hold() in soft_holds
+                        ):
+                            _logger.info(
+                                "runner idle timeout reached with only the %s hold and no work "
+                                "progress for %.1fs (ceiling %.1fs); shutting down",
+                                hold,
+                                stale_s,
+                                idle_hold_max_s,
+                                extra={"session_id": runner_primary_session_id()},
+                            )
+                            request_shutdown()
+                            return
                 await asyncio.sleep(poll_interval_s)
                 continue
             _logger.info(
@@ -2198,6 +2390,7 @@ async def _run_tunnel_from_env() -> None:
     event_dispatcher = RunnerEventDispatcher()
     app.state.runner_event_dispatcher = event_dispatcher
     idle_timeout_s = _load_runner_idle_timeout_s_from_config()
+    idle_hold_max_s = _load_runner_idle_hold_max_s_from_config()
     # starlette 1.x removed Router.startup/shutdown; drive the lifespan manually.
     _lifespan_cm = app.router.lifespan_context(app)
     await _lifespan_cm.__aenter__()
@@ -2392,13 +2585,14 @@ async def _run_tunnel_from_env() -> None:
             _record_exit_reason("idle timeout reached")
             tunnel_shutdown_event.set()
 
-        idle_task = asyncio.create_task(
-            _run_inactivity_monitor(
-                idle_timeout_s=idle_timeout_s,
-                get_last_activity=_last_activity,
-                has_active_work=_has_active_work,
-                request_shutdown=_request_idle_shutdown,
-            ),
+        idle_task = _start_idle_monitor(
+            app=app,
+            event_dispatcher=event_dispatcher,
+            idle_timeout_s=idle_timeout_s,
+            idle_hold_max_s=idle_hold_max_s,
+            get_last_activity=_last_activity,
+            get_work_progress=_last_work_progress,
+            request_shutdown=_request_idle_shutdown,
             name=f"runner-idle-monitor:{runner_id}",
         )
     if parent_pid is not None:
