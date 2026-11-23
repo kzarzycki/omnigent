@@ -1194,9 +1194,10 @@ _LISTING_FIELDS = (
     "number,title,state,url,isDraft,author,baseRefName,headRefName" + _REFERENCE_EXTRA_FIELDS
 )
 _LISTING_LIMIT = 100
-# A viewer sees CI and reviews change within its poll cadence. A merged PR doesn't change
-# back; a closed one can be reopened, so only the server's refresher skips re-reading it.
-_OPEN_PR_TTL_SECONDS = 10.0
+# A viewer sees CI and reviews change within a minute, so open tabs don't drain the token's
+# quota. A merged PR doesn't change back; a closed one can be reopened, so only the
+# server's refresher skips re-reading it.
+_OPEN_PR_TTL_SECONDS = 60.0
 # Background refreshes of one wave share a read; the server refreshes a PR every 300 s.
 _BACKGROUND_PR_TTL_SECONDS = 120.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
