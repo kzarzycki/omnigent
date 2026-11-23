@@ -1,10 +1,9 @@
 name: Gate
 
-# Fork only. The one proof per tree: the `mine` ruleset requires this `gate` check. It runs
-# `mise run check-fast` (the hooks, the skills' tests and the tests the change touches) on each PR head
-# and on Mergify's draft PRs (the tree it merges), so nothing else runs those tests; the full suite is
-# nightly (fork-nightly.yml). A PR head runs only the cheap part (the hooks, the skills' tests and the
-# tests the PR itself changes); the full affected-tests set runs once per Mergify batch, on its draft PR.
+# Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
+# the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
+# `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
+# is nightly (fork-nightly.yml).
 
 on:
   pull_request:
@@ -19,6 +18,8 @@ concurrency:
 
 jobs:
   gate:
+    # Mergify's draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
+    if: startsWith(github.head_ref, 'mergify/merge-queue/')
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -62,11 +63,8 @@ jobs:
       - name: Run the checks
         env:
           MISE_YES: "1"
-          # A PR, and Mergify's draft PR, diffs against the base branch tip.
+          # Mergify's draft PR diffs against the base branch tip.
           GATE_BASE: ${{ github.event.pull_request.base.sha }}
-          # Only Mergify's draft PR (head `mergify/merge-queue/*`) runs the full affected set; a PR head
-          # runs just the test files it changes.
-          AFFECTED_TESTS_NARROW: ${{ !startsWith(github.head_ref, 'mergify/merge-queue/') && '1' || '' }}
           OMNIGENT_SKIP_WEB_UI: "true"
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}

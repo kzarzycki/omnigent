@@ -2079,6 +2079,8 @@ async def test_run_turn_preserves_refused_input_but_keeps_post_submit_failures_a
     }[refusal]
     assert expected_detail in error.message
     assert error.undelivered is (refusal in {"draft_persisted", "missing_target"} or not submitted)
+    # Only the persisted-draft refusal can be resent; the rest carry no code.
+    assert error.code == ("claude_submit_not_accepted" if refusal == "draft_persisted" else None)
 
 
 @pytest.mark.asyncio

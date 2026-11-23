@@ -31,14 +31,7 @@ def select(
     run("git", "commit", "-q", "-m", "change")
     out = subprocess.run(
         [sys.executable, str(HERE / "affected_tests.py"), *args],
-        env={
-            **{
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("GATE_BASE", "AFFECTED_TESTS_NARROW")
-            },
-            **env,
-        },
+        env={**{k: v for k, v in os.environ.items() if k != "GATE_BASE"}, **env},
         capture_output=True,
         text=True,
         check=True,
@@ -92,35 +85,6 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "update-ref", "-d", "refs/remotes/origin/mine")
     assert select(repo, change, ()) == ["tests"]
     assert affected_tests.targets(None) == ["tests"]  # no base to diff
-    assert affected_tests.targets(None, narrow=True) == ["tests"]  # narrow keeps that fail-safe
-    # narrow (a PR head): only the changed test files, even for a module or conftest change
-    assert (
-        select(
-            repo,
-            {"omnigent/widgets/frob.py": "x = 5\n"},
-            (),
-            GATE_BASE="base",
-            AFFECTED_TESTS_NARROW="1",
-        )
-        == []
-    )
-    assert (
-        select(
-            repo,
-            {"tests/server/conftest.py": "# c\n"},
-            (),
-            GATE_BASE="base",
-            AFFECTED_TESTS_NARROW="1",
-        )
-        == []
-    )
-    assert select(
-        repo,
-        {widget: "# e\n", "omnigent/widgets/frob.py": "x = 6\n"},
-        (),
-        GATE_BASE="base",
-        AFFECTED_TESTS_NARROW="1",
-    ) == [widget]
     # a deleted test file selects nothing, not a path pytest can't find
     run("git", "checkout", "-q", "-B", "work", "base")
     (repo / widget).unlink()

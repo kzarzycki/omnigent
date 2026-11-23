@@ -54,8 +54,6 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish. The `pnpm install` gives the JS hooks
   (`vscode-tsc`, `web-tsc`, ...) their `node_modules`; without it they exit 1 silently on a
   branch that touches the pnpm lockfile.
-- **CI proof.** A PR head's `gate` run is cheap (hooks, skills' tests, the test files the PR changes); the full
-  affected-tests set runs once per Mergify batch on its draft PR, so don't rerun it on a head to land.
 - **Tests.** A tool call stops at 10 minutes. On the VM's 4 CPUs:
   - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
     seconds after setup's warm-up; cold, from 30 s to over 6 minutes, depending on the
@@ -88,7 +86,7 @@ the VM. Run them from the pack clone (Loop role files above; add `--branch engin
 
 **Runs in the VM:** `check build`, `check merge`, `record verdict` and `land`. `land` merges nothing: it posts the
 `land` status on the gated head and adds `loop:queued`, and Mergify merges (a squash, or a merge commit for a `sync/*`
-head). The PR's `gate` check in GitHub Actions is the proof, so no `record checks` run comes first.
+head). The `gate` check GitHub Actions runs on Mergify's draft of the merge is the proof, so no `record checks` run comes first.
 A PR's review threads are read through the proxy's `ccr/review_threads` route.
 Run `land` from a clean worktree of the PR head, after the setup steps below.
 
@@ -119,7 +117,8 @@ Run `land` from a clean worktree of the PR head, after the setup steps below.
 - **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
   new sandbox without the Omnigent tools (#116), and a full host `tests/server` run takes
   about 24 minutes. Run long suites in the VM; send the helper steps that finish in a few
-  minutes, and `land --wait` only once the PR's `gate` check is green.
+  minutes. `land` itself is quick, but `--wait` also waits out the queue's `gate` run, so send plain `land`
+  and wait on the merge from the VM with `wait-for --pr <n> --until merged`.
 - **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
   `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
   child's finish notice instead.

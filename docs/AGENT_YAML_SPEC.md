@@ -328,6 +328,30 @@ the next terminal launch. Codex has no equivalent switch: its
 `default_mode_request_user_input` feature is on), and no Codex feature flag
 removes it from Plan mode.
 
+### Claude Code settings per agent
+
+A `claude-native` agent can carry its own Claude Code
+[settings](https://code.claude.com/docs/en/settings) under `settings`. They
+apply to that agent's sessions only, so an agent can switch on a plugin the
+user keeps off everywhere else:
+
+```yaml
+spec_version: 1
+name: code-mode
+executor:
+  type: omnigent
+  config:
+    harness: claude-native
+    settings:
+      env: {CODE_MODE_GUIDE: system}
+      enabledPlugins: {"code-mode@claude-mods": true}
+```
+
+The runner merges them into the settings file it passes Claude Code at launch:
+over the host's `harness.claude-native.args` `--settings`, under a session's own
+`--settings`, and under Omnigent's own hooks. Other harnesses ignore the key. It
+applies on the next terminal launch.
+
 ### GitHub Copilot
 
 `harness: copilot` runs the agent through the
