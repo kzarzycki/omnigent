@@ -3,6 +3,7 @@
 Usage: python3 affected-tests-test.py
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -40,7 +41,8 @@ def select(
 
 
 with tempfile.TemporaryDirectory() as tmp:
-    repo = Path(tmp)
+    repo = Path(tmp) / "repo"  # records stay outside it
+    repo.mkdir()
     os.chdir(repo)
     run("git", "init", "-q", "-b", "main")
     run("git", "config", "user.email", "t@example.com")
@@ -91,4 +93,121 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "commit", "-qam", "drop")
     assert affected_tests.changed("base") == [widget, ""]
     assert affected_tests.targets(affected_tests.changed("base")) == []
+
+    # --since: a run on commit `then` left a record; what runs on HEAD now
+    other, third = "tests/server/test_other.py", "tests/server/test_third.py"
+    failed = f"{widget}::test_frob[a b]"  # a node id with a space stays whole
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / third).write_text("import omnigent.thing\n")
+    (repo / "omnigent" / "thing.py").write_text("t = 1\n")
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "third")
+    run("git", "tag", "-f", "base")
+
+    def commit(files: dict[str, str]) -> None:
+        for name, text in files.items():
+            (repo / name).write_text(text)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "--allow-empty", "-m", "change")
+
+    def record(
+        commit_id: str, selected: list[str], lastfailed: object, exit_code: str = "1"
+    ) -> Path:
+        path = Path(tempfile.mkdtemp(dir=tmp, prefix="record-"))
+        tree = subprocess.run(["git", "ls-tree", "-r", "-z", commit_id], capture_output=True)
+        (path / "tree").write_bytes(tree.stdout)
+        (path / "selected").write_text("".join(f"{t}\n" for t in selected))
+        (path / "lastfailed.json").write_text(json.dumps(lastfailed))
+        (path / "exit").write_text(f"{exit_code}\n")
+        return path
+
+    def since(rec: Path, base: str = "base") -> tuple[str, list[str]]:
+        """The selector's stdout and the flake candidates its stderr names; `why` gets stderr."""
+        out = subprocess.run(
+            [sys.executable, str(HERE / "affected_tests.py"), "--since", str(rec), base],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        why[:] = out.stderr.splitlines()
+        prefix = "affected tests: flake candidate: "
+        flakes = [
+            line[len(prefix) :] for line in out.stderr.splitlines() if line.startswith(prefix)
+        ]
+        return out.stdout, flakes
+
+    why: list[str] = []
+
+    def lines(text: str) -> list[str]:
+        return [line for line in text.split("\n") if line]
+
+    def today(base: str = "base") -> str:
+        out = subprocess.run(
+            [sys.executable, str(HERE / "affected_tests.py"), base],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout
+
+    # the PR changes frob and adds gadget: today's selection is both tests that name them
+    run("git", "checkout", "-q", "-B", "pr", "base")
+    commit({"omnigent/widgets/frob.py": "x = 10\n", "omnigent/gadget.py": "g = 1\n"})
+    then = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert lines(today()) == [other, widget]
+    earlier = record(then, [other, widget], {failed: True})
+    # same tree, one failed node id: exactly that node id, a flake candidate
+    out, flakes = since(earlier)
+    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    assert f"affected tests: {failed}: failed in that run" in why, why
+    # only the failed test's file changed: that file, and the node id runs with it
+    commit({widget: "from omnigent.widgets import frob  # fixed\n"})
+    out, flakes = since(earlier)
+    assert lines(out) == [widget] and flakes == [], (out, flakes)
+    # a module changed: the failed test plus what targets() picks for that module
+    run("git", "reset", "-q", "--hard", then)
+    commit({"omnigent/gadget.py": "g = 2\n"})
+    out, flakes = since(earlier)
+    assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
+    assert lines(out) == [other, failed] and flakes == [failed], (out, flakes)
+    assert f"affected tests: {other}: names a file that differs" in why, why
+    # a selected test file the earlier run didn't select runs
+    run("git", "reset", "-q", "--hard", then)
+    out, flakes = since(record(then, [widget], {failed: True}))
+    assert lines(out) == [other, failed], out
+    assert f"affected tests: {other}: selected now, not in that run" in why, why
+    # a test setup change reruns the whole selection, so no flake is named
+    commit({"tests/server/conftest.py": "# c\n"})
+    out, flakes = since(earlier)
+    assert lines(out) == ["tests"] and flakes == [], (out, flakes)
+    # a failed test gone from the tree, or outside today's selection, doesn't run
+    run("git", "reset", "-q", "--hard", then)
+    out, _ = since(
+        record(then, [other, widget], {"tests/server/test_gone.py::t": True, third: True})
+    )
+    assert lines(out) == [], out
+    # requeued onto a newer base: what the base moved doesn't run, the failed test does
+    run("git", "checkout", "-q", "-B", "newer", "base")
+    commit({"omnigent/thing.py": "t = 2\n"})
+    run("git", "checkout", "-q", "pr")
+    run("git", "rebase", "-q", "newer")
+    assert lines(today("newer")) == [other, widget]
+    out, flakes = since(earlier, "newer")
+    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    # no usable record: today's selection, byte for byte
+    unusable = [
+        tmp + "/missing",
+        record(then, [other, widget], {failed: True}, exit_code="124"),
+        record(then, [other, widget], {failed: True}, exit_code="2"),
+        record(then, [other, widget], {failed: True}, exit_code=""),
+        record(then, [other, widget], [failed]),
+    ]
+    malformed = record(then, [other, widget], {failed: True})
+    (malformed / "lastfailed.json").write_text("{not json")
+    empty_tree = record(then, [other, widget], {failed: True})
+    (empty_tree / "tree").write_text("")
+    for rec in [*unusable, malformed, empty_tree]:
+        assert since(Path(rec), "newer") == (today("newer"), []), rec
 print("affected-tests: ok")
