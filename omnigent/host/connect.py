@@ -4192,7 +4192,11 @@ class HostProcess:
                 return HostFsResultFrame(
                     request_id=frame.request_id,
                     status="ok",
-                    payload=read_text_file(frame.workspace),
+                    payload=read_text_file(
+                        frame.workspace,
+                        offset=frame.params.get("offset"),
+                        limit=frame.params.get("limit"),
+                    ),
                 )
             except HostTextFileError as exc:
                 return HostFsResultFrame(
