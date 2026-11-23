@@ -258,6 +258,10 @@ import {
 import { readDefaultBaseBranch, writeDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 import { readAlwaysSteer, writeAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import {
+  readKeepThinkingExpanded,
+  writeKeepThinkingExpanded,
+} from "@/lib/keepThinkingExpandedPreferences";
+import {
   readOpenSubagentsInPanel,
   writeOpenSubagentsInPanel,
 } from "@/lib/subagentPanelPreferences";
@@ -1835,6 +1839,36 @@ function AlwaysSteerControl() {
   );
 }
 
+function KeepThinkingExpandedControl() {
+  const [value, setValue] = useState(() => readKeepThinkingExpanded());
+  const labelId = useId();
+  const descriptionId = useId();
+  const toggle = useCallback((next: boolean) => {
+    setValue(next);
+    writeKeepThinkingExpanded(next);
+  }, []);
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <SettingsLabel
+        label="Keep thinking expanded"
+        labelId={labelId}
+        descriptionId={descriptionId}
+        className="flex-1"
+        description="Leave thinking notes open after the model finishes and after a reload. Click a note's header to fold it."
+      />
+      <Switch
+        aria-labelledby={labelId}
+        aria-describedby={descriptionId}
+        checked={value}
+        onCheckedChange={toggle}
+        data-testid="keep-thinking-expanded-toggle"
+        className="mt-0.5 shrink-0"
+        componentId="settings.general.keep_thinking_expanded"
+      />
+    </div>
+  );
+}
+
 function ComposerSendShortcutControl() {
   const [enabled, setEnabled] = useState(() => readSubmitWithModEnter());
   const labelId = useId();
@@ -2114,6 +2148,9 @@ function GeneralSection() {
           <div className="mt-4 border-t border-border pt-4">
             <OpenSubagentsInPanelControl />
           </div>
+        </SettingsGroup>
+        <SettingsGroup title="Chat" testId="settings-group-general-chat">
+          <KeepThinkingExpandedControl />
         </SettingsGroup>
         <SettingsGroup title="Terminal" testId="settings-group-terminal">
           <TerminalClipboardControl />

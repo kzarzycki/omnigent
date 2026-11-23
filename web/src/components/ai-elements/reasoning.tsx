@@ -9,6 +9,7 @@ import { useRevealedOpen } from "@/components/chat/chatFindReveal";
 import { Streamdown } from "streamdown";
 import { MERMAID_STREAMDOWN_PROPS } from "@/components/ai-elements/MermaidBlock";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
+import { readKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 
 import { normalizeExplicitMathDelimiters } from "./mathMarkdown";
 import { Shimmer } from "./shimmer";
@@ -68,14 +69,15 @@ export const Reasoning = memo(
     children,
     ...props
   }: ReasoningProps) => {
-    // Open state follows isStreaming by default, but a manual user
-    // toggle takes precedence until the next time streaming starts.
-    // Resetting on the next stream means a new reasoning section
-    // doesn't inherit the user's choice from the previous one.
+    // Open by default while streaming, or always when the reader keeps
+    // thinking expanded (read per render, so the setting applies without a
+    // reload). A manual toggle takes precedence until streaming next starts,
+    // so a new section doesn't inherit the choice from the previous one.
     const [userOverride, setUserOverride] = useState<boolean | null>(null);
+    const defaultOpen = isStreaming || readKeepThinkingExpanded();
     const [shownOpen, handleOpenChange] = useRevealedOpen(
       revealed,
-      userOverride ?? isStreaming,
+      userOverride ?? defaultOpen,
       setUserOverride,
     );
     // A non-expandable section is always closed — there's nothing inside.
