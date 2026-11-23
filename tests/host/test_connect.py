@@ -7115,6 +7115,7 @@ def test_read_text_file_range_inside_a_character_is_not_utf8(tmp_path: Path) -> 
     result = _read_text_file(_make_host_process(), str(target), {"offset": 1})
 
     assert (result.status, result.error_status, result.error_code) == ("error", 400, "not_utf8")
+    assert result.error == "offset is inside a UTF-8 character"
 
 
 def test_read_text_file_range_reads_at_most_limit_plus_three_bytes(

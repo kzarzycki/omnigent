@@ -270,3 +270,48 @@ async def test_read_host_file_malformed_range_raises(body: dict[str, Any]) -> No
             await client.read_host_file("host_a1", "/home/u/big.md", max_bytes=100)
     finally:
         await _close(client, original, mock_transport)
+
+
+@pytest.mark.asyncio
+async def test_read_host_file_restarts_when_the_file_changes_between_pages() -> None:
+    old_pages = {page["offset"]: page for page in _host_file_pages("o" * 25, 10)}
+    new_pages = {
+        page["offset"]: {**page, "mtime_ns": 2} for page in _host_file_pages("n" * 25, 10)
+    }
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        calls.append(offset)
+        # The file is rewritten after the first page was served.
+        pages = old_pages if len(calls) == 1 else new_pages
+        return httpx.Response(200, json=pages[offset])
+
+    client, original, mock_transport = _mock_client(handler)
+    try:
+        content = await client.read_host_file("host_a1", "~/big.md", max_bytes=100)
+    finally:
+        await _close(client, original, mock_transport)
+
+    assert content == "n" * 25
+    assert calls == [0, 10, 0, 10, 20]
+
+
+@pytest.mark.asyncio
+async def test_read_host_file_gives_up_on_a_file_that_keeps_changing() -> None:
+    pages = {page["offset"]: page for page in _host_file_pages("x" * 25, 10)}
+    served = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal served
+        served += 1
+        return httpx.Response(
+            200, json={**pages[int(request.url.params["offset"])], "mtime_ns": served}
+        )
+
+    client, original, mock_transport = _mock_client(handler)
+    try:
+        with pytest.raises(OmnigentError, match="kept changing"):
+            await client.read_host_file("host_a1", "~/big.md", max_bytes=100)
+    finally:
+        await _close(client, original, mock_transport)
