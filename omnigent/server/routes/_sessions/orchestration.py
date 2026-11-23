@@ -294,6 +294,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _unbound_managed_launch_tasks,
     get_caps,
     get_server_runner_router,
+    session_approval_skipping_mode,
     session_stream,
     set_server_runner_router,
 )
@@ -14124,12 +14125,13 @@ async def _create_session_from_existing_agent(
         creator_id = created_by_session_id or body.parent_session_id
         if acp_permission_mode in APPROVAL_SKIPPING_PERMISSION_MODES and creator_id is not None:
             creator = await asyncio.to_thread(conversation_store.get_conversation, creator_id)
-            creator_mode = creator.labels.get(ACP_PERMISSION_MODE_LABEL_KEY) if creator else None
-            if creator_mode != acp_permission_mode:
+            creator_mode = session_approval_skipping_mode(creator) if creator else None
+            # ``dontAsk`` denies what it would ask about, so it grants no approval to pass on.
+            if creator_mode is None or creator_mode == "dontAsk":
                 raise OmnigentError(
                     f"permission_mode {acp_permission_mode!r} skips approval, which a session "
-                    "created by another session can use only when its creator runs in the "
-                    "same mode",
+                    "created by another session can use only when its creator already skips "
+                    "approval",
                     code=ErrorCode.INVALID_INPUT,
                 )
     elif body.permission_mode is not None:
