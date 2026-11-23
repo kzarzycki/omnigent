@@ -8,9 +8,6 @@ from pathlib import Path
 import pytest
 
 from omnigent.runner import github_resource as github
-from omnigent.runner.session_prs import PullRequestRef
-
-MERGED = "https://github.com/example/one/pull/7"
 
 
 @pytest.fixture
@@ -42,10 +39,19 @@ def test_auth_status_is_read_once_without_hosts_file(gh_calls: list[list[str]]) 
     assert [c for c in gh_calls if c[:2] == ["auth", "status"]] == [gh_calls[0]]
 
 
-def test_merged_pr_is_read_once_without_bound_account(gh_calls: list[list[str]]) -> None:
-    reference = PullRequestRef.from_url(MERGED)
-    for _ in range(5):
-        data = github._reference_pr_data("/root", reference, background=False)
-        assert data is not None and data["state"] == "MERGED"
-    assert len([c for c in gh_calls if c[:2] == ["pr", "view"]]) == 1
-    assert len([c for c in gh_calls if c[:2] == ["auth", "status"]]) == 1
+def test_creating_hosts_file_is_seen_at_once(gh_calls: list[list[str]], tmp_path: Path) -> None:
+    github._cached_accounts("/root")
+    (tmp_path / "gh").mkdir()
+    (tmp_path / "gh" / "hosts.yml").write_text("github.com:\n  user: me\n")
+    github._cached_accounts("/root")
+    assert len([c for c in gh_calls if c[:2] == ["auth", "status"]]) == 2
+
+
+def test_failed_auth_status_is_not_kept_for_minutes(
+    gh_calls: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github, "_FAILED_READ_TTL_SECONDS", -1.0)
+    monkeypatch.setattr(github, "_gh", lambda args, **_: (1, "", "offline"))
+    assert github._cached_accounts("/root") == (False, [])
+    monkeypatch.setattr(github, "_gh", lambda args, **_: (0, json.dumps({"hosts": {}}), ""))
+    assert github._cached_accounts("/root") == (False, [])

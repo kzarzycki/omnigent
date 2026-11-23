@@ -1275,10 +1275,12 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     if hit and isinstance(cached, dict) and cached.get("stat") == stat:
         return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
     authenticated, accounts = _list_accounts(root)
+    # A failed lookup (offline, timeout) is retried soon; only a real answer is kept long.
+    ttl = _ACCOUNTS_TTL_SECONDS if accounts or authenticated else _FAILED_READ_TTL_SECONDS
     _cache_put(
         key,
         {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-        _ACCOUNTS_TTL_SECONDS,
+        ttl,
         shared=True,
     )
     return authenticated, accounts
@@ -1341,15 +1343,12 @@ def _resolve_read(
         return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
     # gh reads as the active account even when its auth check failed; only a
     # working active account names the identity.
-    listed = accounts()
-    active = next((a for a in listed if a.get("host") == host and a.get("active")), None)
-    # An older ``gh`` lists no accounts, so who answers is unknowable: don't cache.
-    unbound = "unbound:" + json.dumps(_hosts_signature(Path(gh_config_dir()))) if listed else None
+    active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
     if active is None or active.get("state") != "success" or not active.get("login"):
-        return None, unbound
+        return None, None
     active_token = _gh_auth_token(root, str(active["login"]), host)
     if not active_token:
-        return None, unbound
+        return None, None
     return active_token, "token:" + hashlib.sha256(active_token.encode()).hexdigest()
 
 
