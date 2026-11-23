@@ -549,7 +549,11 @@ class ClaudeNativeExecutor(Executor):
                 "claude-native: terminal refused delivery; message not delivered",
                 extra={"session_id": self._request_session_id},
             )
-            yield ExecutorError(message=describe_exception(exc), undelivered=True)
+            yield ExecutorError(
+                message=describe_exception(exc),
+                code=exc.code if isinstance(exc, ClaudeMessageNotAccepted) else None,
+                undelivered=True,
+            )
             return
         except RuntimeError as exc:
             _logger.exception(
