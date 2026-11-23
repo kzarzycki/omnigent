@@ -65,7 +65,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -1175,15 +1175,11 @@ def _pr_json(
     root: str, reference: PullRequestRef, fields: str, token: Any = _DERIVE_TOKEN
 ) -> dict[str, Any] | None:
     """``gh pr view`` of ``reference``, as ``token`` or, by default, its preferred account."""
-    if reference.host != "github.com":
-        _, accounts = _cached_accounts(root)
-        if reference.host not in {account.get("host") for account in accounts}:
-            return None
+    token = _pr_token(root, reference) if token is _DERIVE_TOKEN else token
+    if not _gh_can_read_host(root, reference.host, token):
+        return None
     return _gh_pr_view(
-        [str(reference.number), "-R", _repo_argument(reference)],
-        fields,
-        cwd=root,
-        token=_pr_token(root, reference) if token is _DERIVE_TOKEN else token,
+        [str(reference.number), "-R", _repo_argument(reference)], fields, cwd=root, token=token
     )
 
 
@@ -1277,25 +1273,35 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     """:func:`_list_accounts`, shared by the host's runners while ``hosts.yml`` is unchanged.
 
     An entry is used only inside its window and while the accounts file still has the
-    stat stored with it, so a switch is seen at once. A missing file is never cached.
-    The window still bounds a token that expires without the file changing.
+    stat stored with it, so a switch is seen at once. The window still bounds a token
+    that expires without the file changing. Concurrent callers, in any of the host's
+    runners, share one lookup per window.
     """
     config_dir = Path(gh_config_dir())
     key = _accounts_key()
     stat = _hosts_signature(config_dir)
-    hit, cached = _cache_get(key, shared=True)
-    if hit and isinstance(cached, dict) and cached.get("stat") == stat:
-        return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
-    authenticated, accounts = _list_accounts(root)
-    # A failed lookup (offline, timeout) is retried soon; only a real answer is kept long.
-    ttl = _ACCOUNTS_TTL_SECONDS if accounts or authenticated else _FAILED_READ_TTL_SECONDS
-    _cache_put(
-        key,
-        {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-        ttl,
-        shared=True,
-    )
-    return authenticated, accounts
+
+    def cached() -> tuple[bool, list[dict[str, Any]]] | None:
+        hit, entry = _cache_get(key, shared=True)
+        if hit and isinstance(entry, dict) and entry.get("stat") == stat:
+            return bool(entry.get("authenticated")), list(entry.get("accounts") or [])
+        return None
+
+    if (answer := cached()) is not None:
+        return answer
+    with _single_flight(key):
+        if (answer := cached()) is not None:
+            return answer
+        authenticated, accounts = _list_accounts(root)
+        # A failed lookup (offline, timeout) is retried soon; only a real answer is kept long.
+        ttl = _ACCOUNTS_TTL_SECONDS if accounts or authenticated else _FAILED_READ_TTL_SECONDS
+        _cache_put(
+            key,
+            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
+            ttl,
+            shared=True,
+        )
+        return authenticated, accounts
 
 
 def _hosts_signature(config_dir: Path) -> list[int]:
@@ -1331,12 +1337,42 @@ def _ambient_token(host: str) -> str | None:
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
 
 
-def _resolve_read(
-    root: str,
-    token: str | None,
-    host: str,
-    accounts: Callable[[], list[dict[str, Any]]],
-) -> tuple[str | None, str | None]:
+# Hosts whose active account had no token, per config dir: the ``hosts.yml`` stat and
+# when to ask again, so a host without a login isn't asked on every read.
+_missing_active_tokens: dict[tuple[str, str], tuple[list[int] | None, float]] = {}
+_missing_active_tokens_lock = threading.Lock()
+
+
+def _active_gh_token(root: str, host: str) -> str | None:
+    """The token of ``gh``'s active account for *host*, from ``gh auth token`` (no API call).
+
+    Remembered while ``hosts.yml`` keeps its stat, and dropped when a ``gh`` call fails to
+    authenticate. A host with no token is asked again after the accounts window, or at
+    once when ``hosts.yml`` changes.
+    """
+    config_dir = gh_config_dir()
+    stat = hosts_file_stat(config_dir)
+    miss_key = (config_dir, host)
+    with _missing_active_tokens_lock:
+        miss = _missing_active_tokens.get(miss_key)
+    if miss is not None and miss[0] == stat and miss[1] > time.monotonic():
+        return None
+    answered = False
+
+    def fetch() -> str | None:
+        nonlocal answered
+        rc, out, _ = _gh(["auth", "token", "--hostname", host], cwd=root)
+        answered = rc is not None  # a spawn failure or deadline is no answer
+        return out.strip() or None if rc == 0 else None
+
+    token = cached_gh_token(host, None, fetch)
+    if token is None and answered:
+        with _missing_active_tokens_lock:
+            _missing_active_tokens[miss_key] = (stat, time.monotonic() + _ACCOUNTS_TTL_SECONDS)
+    return token
+
+
+def _resolve_read(root: str, token: str | None, host: str) -> tuple[str | None, str | None]:
     """Decide once who a read is made as: ``(token, cache_identity)``.
 
     The read and its cache key both come from this, so they cannot disagree. ``token``,
@@ -1345,23 +1381,26 @@ def _resolve_read(
     host (see :func:`_ambient_token`), keyed by its hash, and otherwise its active
     account. That account's own token is then passed explicitly, so a ``gh auth switch``
     between this and the read cannot change who answers. A preferred account whose token
-    can't be read falls through to those, as ``gh`` does. When no credential can be
-    bound the identity is ``None``: don't cache.
+    can't be read falls through to those, as ``gh`` does. No call checks the token: the
+    read itself shows whether it works. When no credential can be bound the identity is
+    ``None``.
     """
     if token:
         return token, "token:" + hashlib.sha256(token.encode()).hexdigest()
     ambient = _ambient_token(host)
     if ambient:
         return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
-    # gh reads as the active account even when its auth check failed; only a
-    # working active account names the identity.
-    active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
-    if active is None or active.get("state") != "success" or not active.get("login"):
-        return None, None
-    active_token = _gh_auth_token(root, str(active["login"]), host)
+    active_token = _active_gh_token(root, host)
     if not active_token:
         return None, None
     return active_token, "token:" + hashlib.sha256(active_token.encode()).hexdigest()
+
+
+def _gh_can_read_host(root: str, host: str, token: str | None) -> bool:
+    """Whether ``gh`` has a credential for *host*: github.com, or a token it would use there."""
+    return host == "github.com" or bool(
+        token or _ambient_token(host) or _active_gh_token(root, host)
+    )
 
 
 def _unbound_identity(host: str) -> str:
@@ -1375,13 +1414,8 @@ def _unbound_identity(host: str) -> str:
 
 
 def _pr_read(root: str, reference: PullRequestRef) -> tuple[str | None, str | None]:
-    """``(token, cache_identity)`` for a PR read, with the accounts read fresh."""
-    return _resolve_read(
-        root,
-        _pr_token(root, reference),
-        reference.host,
-        lambda: _cached_accounts(root)[1],
-    )
+    """``(token, cache_identity)`` for a PR read; see :func:`_resolve_read`."""
+    return _resolve_read(root, _pr_token(root, reference), reference.host)
 
 
 @contextmanager
@@ -1566,6 +1600,8 @@ def invalidate_pr_reads(pr_url: str | None) -> None:
     with _preview_lock:
         for key in [key for key in _preview_cache if stale(key)]:
             del _preview_cache[key]
+        for key in [key for key in _finished_titles if stale(key)]:
+            del _finished_titles[key]
     for path in _cache_directory().glob("*.json"):
         try:
             key = json.loads(path.read_text(encoding="utf-8")).get("key")
@@ -1598,7 +1634,6 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
     }
     if not info["gh_available"] or _background_reads_paused():
         return info
-    # The PR read lists the accounts fresh, which the shared copy below then serves.
     data = _reference_pr_data(root, reference, background=_background_read.get())
     _, accounts = _cached_accounts(root)
     info["accounts"] = [a for a in accounts if a.get("host") == reference.host]
@@ -1650,8 +1685,19 @@ def _gh_installed() -> bool:
     return shutil.which("gh") is not None
 
 
-# A title rarely changes, so a lookup is remembered as long as the per-session copy is.
-_OPEN_PR_TITLE_TTL_SECONDS = 300.0
+# A merged or closed PR's title is kept for the runner's life, and shared with the host's
+# other runners this long; an open PR's title, or the answer that a PR can't be read, for
+# 30 minutes. A failed lookup is retried after the failed-read window.
+_FINISHED_TITLE_TTL_SECONDS = 30 * 24 * 3600.0
+_OPEN_PR_TITLE_TTL_SECONDS = 30 * 60.0
+_FINISHED_STATES = frozenset({"MERGED", "CLOSED"})
+# One title query reads at most this many PRs.
+_TITLE_QUERY_CHUNK = 50
+# GraphQL error types that mean the PR or repository can't be read by this identity.
+_UNREADABLE_ERROR_TYPES = frozenset({"NOT_FOUND", "FORBIDDEN"})
+_FINISHED_TITLES_MAX = 4096
+# Finished PRs' titles by title key, with when their lookup started; guarded by _preview_lock.
+_finished_titles: dict[tuple[str, ...], tuple[float, str | None]] = {}
 
 
 def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1668,52 +1714,194 @@ def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict
     return None
 
 
+def _title_key(identity: str, reference: PullRequestRef) -> tuple[str, ...]:
+    return ("pr", identity, _repo_argument(reference).lower(), str(reference.number), "title")
+
+
+def _remember_finished_title(key: tuple[str, ...], title: str | None, started: float) -> None:
+    """Keep a finished PR's title for the runner's life, unless a write began after ``started``."""
+    if _invalidated_since(key) >= started:
+        return
+    with _preview_lock:
+        if key not in _finished_titles and len(_finished_titles) >= _FINISHED_TITLES_MAX:
+            del _finished_titles[next(iter(_finished_titles))]
+        _finished_titles[key] = (started, title)
+
+
+def _known_title(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
+    """The title answer this runner or the host already holds, ``{title, timed_out}``, if any."""
+    key = _title_key(identity, reference)
+    with _preview_lock:
+        finished = _finished_titles.get(key)
+    if finished is not None:
+        # Another runner's write to the PR stamps it; this runner's own write drops the entry.
+        if _invalidated_since(key) < finished[0]:
+            return {"title": finished[1], "timed_out": False}
+        with _preview_lock:
+            _finished_titles.pop(key, None)
+    shared = _title_from_shared_pr_data(identity, reference)
+    if shared is not None:
+        return {"title": _pr_title(shared), "timed_out": False}
+    hit, answer = _cache_get(key, shared=True)
+    if not hit or not isinstance(answer, dict):
+        return None
+    if answer.get("finished"):
+        _remember_finished_title(key, answer.get("title"), float(answer.get("started") or 0))
+    return answer
+
+
+def _titles_query(references: Sequence[PullRequestRef]) -> list[str]:
+    """``gh api graphql`` arguments reading each PR's title and state under its own alias.
+
+    Owners and names travel as variables, so no repository name reaches the query text.
+    """
+    variables: list[str] = []
+    fields: list[str] = []
+    arguments: list[str] = []
+    for index, reference in enumerate(references):
+        owner, name = reference.repository.split("/", 1)
+        variables.append(f"$o{index}: String!, $n{index}: String!")
+        fields.append(
+            f"p{index}: repository(owner: $o{index}, name: $n{index}) "
+            f"{{ pullRequest(number: {int(reference.number)}) {{ title state }} }}"
+        )
+        arguments += ["-f", f"o{index}={owner}", "-f", f"n{index}={name}"]
+    query = "query(" + ", ".join(variables) + ") {\n  " + "\n  ".join(fields) + "\n}"
+    return ["-f", f"query={query}", *arguments]
+
+
+def _graphql_titles(
+    root: str, host: str, token: str | None, references: Sequence[PullRequestRef]
+) -> dict[str, dict[str, Any] | None]:
+    """Read the PRs' titles in one GraphQL query: ``{url: {title, state} | None}``.
+
+    ``None`` is a failed lookup. A PR or repository GitHub reports as not found or not
+    readable answers ``{title: None, state: None}``; other PRs in the query still answer.
+    """
+    rc, out, err = _gh(
+        ["api", "graphql", "--hostname", host, *_titles_query(references)], cwd=root, token=token
+    )
+    if rc != 0:
+        _note_rate_limit(err, cwd=root, token=token)
+    try:
+        body = json.loads(out) if out.strip() else None
+    except ValueError:
+        body = None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return {reference.url: None for reference in references}
+    errors: dict[str, set[str]] = {}
+    reported = body.get("errors") if isinstance(body, dict) else None
+    for error in reported if isinstance(reported, list) else []:
+        path = error.get("path") if isinstance(error, dict) else None
+        if isinstance(path, list) and path and isinstance(path[0], str):
+            errors.setdefault(path[0], set()).add(str(error.get("type") or ""))
+    found: dict[str, dict[str, Any] | None] = {}
+    for index, reference in enumerate(references):
+        alias = f"p{index}"
+        node = data.get(alias)
+        pull = node.get("pullRequest") if isinstance(node, dict) else None
+        if isinstance(pull, dict):
+            found[reference.url] = {"title": pull.get("title"), "state": pull.get("state")}
+        elif alias in data and errors.get(alias, set()) <= _UNREADABLE_ERROR_TYPES:
+            found[reference.url] = {"title": None, "state": None}
+        else:
+            found[reference.url] = None
+    return found
+
+
+def _query_titles(
+    root: str,
+    host: str,
+    identity: str,
+    token: str | None,
+    references: Sequence[PullRequestRef],
+    deadline: float,
+) -> dict[str, tuple[str | None, bool]]:
+    """Look up titles no one holds, one query per chunk, shared by the host's runners.
+
+    One lookup per host and identity runs at a time; a waiter then finds its titles cached.
+    A chunk the deadline reaches before it starts is left out.
+    """
+    answers: dict[str, tuple[str | None, bool]] = {}
+    if not _gh_can_read_host(root, host, token):
+        return {reference.url: (None, False) for reference in references}
+    for start in range(0, len(references), _TITLE_QUERY_CHUNK):
+        if time.monotonic() >= deadline:
+            break
+        with _single_flight(("pr-titles", identity, host.lower())):
+            missing: list[PullRequestRef] = []
+            for reference in references[start : start + _TITLE_QUERY_CHUNK]:
+                known = _known_title(identity, reference)
+                if known is None:
+                    missing.append(reference)
+                else:
+                    answers[reference.url] = (known["title"], bool(known["timed_out"]))
+            if not missing:
+                continue
+            if _background_reads_paused():  # asked again once the pause ends
+                answers.update({reference.url: (None, True) for reference in missing})
+                continue
+            started = time.time()
+            found = _graphql_titles(root, host, token, missing)
+            timed_out = _gh_timed_out.get()
+            for reference in missing:
+                pull = found.get(reference.url)
+                finished = pull is not None and pull.get("state") in _FINISHED_STATES
+                answer = {
+                    "title": _pr_title(pull),
+                    "timed_out": pull is None and timed_out,
+                    "finished": finished,
+                    "started": started,
+                }
+                if pull is None:
+                    ttl = _FAILED_READ_TTL_SECONDS
+                else:
+                    ttl = _FINISHED_TITLE_TTL_SECONDS if finished else _OPEN_PR_TITLE_TTL_SECONDS
+                key = _title_key(identity, reference)
+                _cache_put(key, answer, ttl, shared=True, started=started)
+                if finished:
+                    _remember_finished_title(key, answer["title"], started)
+                answers[reference.url] = (answer["title"], answer["timed_out"])
+    return answers
+
+
+def _pr_titles_before(
+    root: str, references: Sequence[PullRequestRef], deadline: float
+) -> dict[str, tuple[str | None, bool]]:
+    """Look up PRs' titles, with every ``gh`` call ending by ``deadline``.
+
+    A fresh shared read of a PR answers it; otherwise one title entry per identity and
+    PR is shared across sessions, a failed or timed-out lookup included, and the missing
+    ones are read with one GraphQL query per host and identity. An entry is dropped with
+    the PR's other entries when a write changes the PR.
+
+    :param deadline: A ``time.monotonic()`` value.
+    :returns: ``{url: (title, timed_out)}``; ``timed_out`` is true only when the deadline
+        ended the lookup, or a rate-limit pause skipped a background one. A PR whose
+        chunk the deadline reached first is left out.
+    """
+    answers: dict[str, tuple[str | None, bool]] = {}
+    groups: dict[tuple[str, str], tuple[str | None, list[PullRequestRef]]] = {}
+    with _gh_deadline_scope(deadline):
+        for reference in references:
+            token, identity = _pr_read(root, reference)
+            identity = identity or _unbound_identity(reference.host)
+            known = _known_title(identity, reference)
+            if known is not None:
+                answers[reference.url] = (known["title"], bool(known["timed_out"]))
+            else:
+                groups.setdefault((reference.host, identity), (token, []))[1].append(reference)
+        for (host, identity), (token, missing) in groups.items():
+            answers.update(_query_titles(root, host, identity, token, missing, deadline))
+    return answers
+
+
 def _pr_title_before(
     root: str, reference: PullRequestRef, deadline: float
 ) -> tuple[str | None, bool]:
-    """Look up one PR's title, with every ``gh`` call ending by ``deadline``.
-
-    A fresh shared read of the PR answers it; otherwise one title entry per identity
-    and PR is shared across sessions, a failed or timed-out lookup included. The entry
-    is dropped with the PR's other entries when a write changes the PR.
-
-    :param deadline: A ``time.monotonic()`` value.
-    :returns: ``(title, timed_out)``; ``timed_out`` is true only when the
-        deadline ended the lookup, or a rate-limit pause skipped a background one.
-    """
-    if _background_reads_paused():
-        return None, True  # looked up again once the pause ends; the cached title stays
-    with _gh_deadline_scope(deadline):
-        token, identity = _pr_read(root, reference)
-        if identity is None:
-            data = _pr_json(root, reference, "title", token)
-            return _pr_title(data), data is None and _gh_timed_out.get()
-        shared = _title_from_shared_pr_data(identity, reference)
-        if shared is not None:
-            return _pr_title(shared), False
-        key = (
-            "pr",
-            identity,
-            _repo_argument(reference).lower(),
-            str(reference.number),
-            "title",
-        )
-        hit, answer = _cache_get(key, shared=True)
-        if not hit:
-            with _single_flight(key):
-                hit, answer = _cache_get(key, shared=True)
-                if not hit:
-                    started = time.time()
-                    data = _pr_json(root, reference, "title,state", token)
-                    if data is None:
-                        answer = {"title": None, "timed_out": _gh_timed_out.get()}
-                        ttl = _FAILED_READ_TTL_SECONDS
-                    else:
-                        answer = {"title": _pr_title(data), "timed_out": False}
-                        merged = data.get("state") == "MERGED"
-                        ttl = _FINISHED_PR_TTL_SECONDS if merged else _OPEN_PR_TITLE_TTL_SECONDS
-                    _cache_put(key, answer, ttl, shared=True, started=started)
-        return answer["title"], answer["timed_out"]
+    """Look up one PR's title like :func:`_pr_titles_before`."""
+    return _pr_titles_before(root, [reference], deadline).get(reference.url, (None, True))
 
 
 def _verify_pr_access(root: str, reference: PullRequestRef) -> None:
@@ -2273,10 +2461,10 @@ def _pr_compare(
 
 
 def _host_args(root: str, reference: PullRequestRef) -> list[str]:
-    if reference.host != "github.com":
-        _, accounts = _cached_accounts(root)
-        if reference.host not in {account.get("host") for account in accounts}:
-            raise ValueError("Sign in to this GitHub host with gh before viewing its PRs")
+    if reference.host != "github.com" and not _gh_can_read_host(
+        root, reference.host, _pr_token(root, reference)
+    ):
+        raise ValueError("Sign in to this GitHub host with gh before viewing its PRs")
     return ["--hostname", reference.host]
 
 
@@ -3403,9 +3591,8 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
 def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, str | None]:
     """Decide once who a link preview reads as: ``(signed_in, token, cache_identity)``.
 
-    :func:`_resolve_read` names the identity from the accounts read fresh here. When the
-    accounts can't be listed (an older ``gh``) and no token names it, or the active one
-    isn't signed in properly, ``cache_identity`` is ``None``: don't cache.
+    The accounts tell whether ``gh`` is signed in; :func:`_resolve_read` names the identity.
+    When no credential can be bound, ``cache_identity`` is ``None``: don't cache.
     """
     authenticated, accounts = _cached_accounts(root)
     logins = [
@@ -3416,7 +3603,7 @@ def _read_identity(root: str, owner: str, repo: str) -> tuple[bool, str | None, 
     if (accounts and not logins) or (not authenticated and not accounts):
         return False, None, ""
     token, identity = _resolve_read(
-        root, _repo_token(root, f"github.com/{owner}/{repo}"), "github.com", lambda: accounts
+        root, _repo_token(root, f"github.com/{owner}/{repo}"), "github.com"
     )
     return True, token, identity
 
