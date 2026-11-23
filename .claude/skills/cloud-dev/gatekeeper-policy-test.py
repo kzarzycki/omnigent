@@ -27,9 +27,8 @@ GLOBS = [
 # the parsed policy: the settings moved from loop.md unchanged, and the globs above
 POLICY = {
     "spec": {"auto": [{"paths": GLOBS}]},
-    "ci": False,
     "delegate": "all",
-    "land": {"merge_commit_heads": ["sync/*"]},
+    "land": {"queue": "mergify", "merge_commit_heads": ["sync/*"]},
 }
 INSIDE = [
     "mise.toml",
@@ -126,9 +125,9 @@ def main() -> int:
     expect("delegate", approvals.delegation(read), "all")
 
     expect(
-        "land section: sync heads land as merge commits, the rest as squashes",
+        "land section: Mergify queues; sync heads land as merge commits, the rest as squashes",
         settings.get("land"),
-        {"merge_commit_heads": ["sync/*"]},
+        {"queue": "mergify", "merge_commit_heads": ["sync/*"]},
     )
     expect("the whole policy", settings, POLICY)
 
