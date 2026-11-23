@@ -671,12 +671,14 @@ async def test_session_permission_mode_reaches_that_sessions_runner_env_only(
 ) -> None:
     """``permission_mode`` on create reaches that session's ``HARNESS_ACP_PERMISSION_MODE``.
 
-    A sibling created without it keeps the default (an approval card), and a
-    client cannot forge the mode through a raw label or an unknown value.
+    A sibling created without it gets the agent's default, and a client cannot
+    forge the mode through a raw label or an unknown value.
     """
     from omnigent.runner._entry import _AgentSpecCache, _resolve_agent_spec_from_server
 
-    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+    executor = _executor()
+    executor["config"]["permission_mode"] = "bypassPermissions"
+    agent = await create_test_agent(client, executor=executor, include_llm=False)
 
     async def launch_env(**create_fields: Any) -> dict[str, str]:
         created = await client.post(
@@ -695,7 +697,8 @@ async def test_session_permission_mode_reaches_that_sessions_runner_env_only(
     assert (await launch_env(permission_mode="bypassPermissions"))[
         "HARNESS_ACP_PERMISSION_MODE"
     ] == "bypassPermissions"
-    assert "HARNESS_ACP_PERMISSION_MODE" not in await launch_env()
+    assert (await launch_env(permission_mode="auto"))["HARNESS_ACP_PERMISSION_MODE"] == "auto"
+    assert (await launch_env())["HARNESS_ACP_PERMISSION_MODE"] == "bypassPermissions"
 
     for rejected in (
         {"permission_mode": "yolo"},
@@ -730,35 +733,11 @@ async def test_a_session_created_by_another_session_cannot_bypass_acp_approval(
     assert allowed.status_code == 201, allowed.text
 
 
-async def test_a_child_may_bypass_acp_approval_when_its_creator_does(
-    client: httpx.AsyncClient,
-) -> None:
-    """A child's ``bypassPermissions`` is allowed only under a creator in the same mode."""
-    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
-    parent = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent["id"],
-            "initial_items": [],
-            "permission_mode": "bypassPermissions",
-        },
-    )
-    assert parent.status_code == 201, parent.text
-    child = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent["id"],
-            "initial_items": [],
-            "parent_session_id": parent.json()["id"],
-            "permission_mode": "bypassPermissions",
-        },
-    )
-    assert child.status_code == 201, child.text
-
-
 async def test_a_launcher_keeps_its_acp_permission_mode_choice(client: httpx.AsyncClient) -> None:
-    """A session launched outside a tool call may still ask for ``bypassPermissions``."""
-    agent = await create_test_agent(client, executor=_executor(), include_llm=False)
+    """A session launched outside a tool call may ask for what its agent's default allows."""
+    executor = _executor()
+    executor["config"]["permission_mode"] = "bypassPermissions"
+    agent = await create_test_agent(client, executor=executor, include_llm=False)
     launcher = await client.post(
         "/v1/sessions", json={"agent_id": agent["id"], "initial_items": []}
     )
