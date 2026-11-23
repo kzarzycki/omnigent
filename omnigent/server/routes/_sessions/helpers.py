@@ -6763,6 +6763,9 @@ async def _launch_runner_on_host_impl(
         # Every launch path relaunches from the stored row, so refuse here
         # whatever wrote the row's launch args.
         await machine_guard(conv)
+    orchestration_guard = getattr(host_registry, "orchestration_launch_guard", None)
+    if orchestration_guard is not None:
+        await orchestration_guard(conv, host_conn.host_id)
     lock = _relaunch_locks.setdefault(conv.id, asyncio.Lock())
     previous_attempt = _relaunch_last_attempt.get(conv.id)
     async with lock:
@@ -8105,7 +8108,12 @@ async def _forward_session_change_to_runner_impl(
 
     event_type = event.get("type")
     try:
-        if event_type in ("interrupt", "cost_approval_popup", "policy_blocked_notice"):
+        if event_type in (
+            "interrupt",
+            "cost_approval_popup",
+            "policy_blocked_notice",
+            "policy_change",
+        ):
             runner_client = await _get_runner_client(session_id, runner_router, for_control=True)
         else:
             runner_client = await _get_runner_client(session_id, runner_router)

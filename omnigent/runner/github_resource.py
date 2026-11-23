@@ -405,7 +405,7 @@ def _forget_account_lookups(token: str | None) -> None:
         for key in [k for k in _preview_cache if k[:1] == ("accounts",)]:
             del _preview_cache[key]
     with suppress(OSError):
-        _cache_path(("accounts", str(Path(gh_config_dir())))).unlink()
+        _cache_path(_accounts_key()).unlink()
 
 
 def _account_token_for(root: str, workspace_key: str | None = None) -> str | None:
@@ -1194,9 +1194,10 @@ _LISTING_FIELDS = (
     "number,title,state,url,isDraft,author,baseRefName,headRefName" + _REFERENCE_EXTRA_FIELDS
 )
 _LISTING_LIMIT = 100
-# A viewer sees CI and reviews change within its poll cadence. A merged PR doesn't change
-# back; a closed one can be reopened, so only the server's refresher skips re-reading it.
-_OPEN_PR_TTL_SECONDS = 10.0
+# A viewer sees CI and reviews change within a minute, so open tabs don't drain the token's
+# quota. A merged PR doesn't change back; a closed one can be reopened, so only the
+# server's refresher skips re-reading it.
+_OPEN_PR_TTL_SECONDS = 60.0
 # Background refreshes of one wave share a read; the server refreshes a PR every 300 s.
 _BACKGROUND_PR_TTL_SECONDS = 120.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
@@ -1261,6 +1262,17 @@ def _background_reads_paused() -> bool:
     return _background_read.get() and _cache_get(_RATE_LIMIT_KEY, shared=True)[0]
 
 
+def _accounts_key() -> tuple[str, ...]:
+    """The accounts cache key: the config dir and a hash of the environment's gh tokens.
+
+    Without ``hosts.yml`` the accounts come from those tokens, so runners holding
+    different ones must not share an entry.
+    """
+    names = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    tokens = json.dumps([os.environ.get(name, "") for name in names])
+    return ("accounts", gh_config_dir(), hashlib.sha256(tokens.encode()).hexdigest())
+
+
 def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     """:func:`_list_accounts`, shared by the host's runners while ``hosts.yml`` is unchanged.
 
@@ -1269,21 +1281,29 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     The window still bounds a token that expires without the file changing.
     """
     config_dir = Path(gh_config_dir())
-    key = ("accounts", str(config_dir))
-    stat = hosts_file_stat(config_dir)
-    if stat is not None:
-        hit, cached = _cache_get(key, shared=True)
-        if hit and isinstance(cached, dict) and cached.get("stat") == stat:
-            return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
+    key = _accounts_key()
+    stat = _hosts_signature(config_dir)
+    hit, cached = _cache_get(key, shared=True)
+    if hit and isinstance(cached, dict) and cached.get("stat") == stat:
+        return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
     authenticated, accounts = _list_accounts(root)
-    if stat is not None:
-        _cache_put(
-            key,
-            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-            _ACCOUNTS_TTL_SECONDS,
-            shared=True,
-        )
+    # A failed lookup (offline, timeout) is retried soon; only a real answer is kept long.
+    ttl = _ACCOUNTS_TTL_SECONDS if accounts or authenticated else _FAILED_READ_TTL_SECONDS
+    _cache_put(
+        key,
+        {"authenticated": authenticated, "accounts": accounts, "stat": stat},
+        ttl,
+        shared=True,
+    )
     return authenticated, accounts
+
+
+def _hosts_signature(config_dir: Path) -> list[int]:
+    """``hosts.yml``'s stat, or ``[]`` when it is missing (auth then comes from the environment).
+
+    Creating the file changes the signature, so a login is still seen at once.
+    """
+    return hosts_file_stat(config_dir) or []
 
 
 # Hosts ``gh`` reads GH_TOKEN for: github.com and github.localhost with their subdomains
@@ -1342,6 +1362,16 @@ def _resolve_read(
     if not active_token:
         return None, None
     return active_token, "token:" + hashlib.sha256(active_token.encode()).hexdigest()
+
+
+def _unbound_identity(host: str) -> str:
+    """Cache identity for a read no account was bound to: the config dir, its ``hosts.yml``
+    stat and the environment token's hash, so one login's or token's reads never serve another.
+    """
+    config_dir = Path(gh_config_dir())
+    ambient = _ambient_token(host) or ""
+    material = json.dumps([str(config_dir), _hosts_signature(config_dir), ambient])
+    return "unbound:" + hashlib.sha256(material.encode()).hexdigest()
 
 
 def _pr_read(root: str, reference: PullRequestRef) -> tuple[str | None, str | None]:
@@ -1419,8 +1449,9 @@ def _reference_pr_data(
     """
     fields = _LISTING_FIELDS if background else _PR_VIEW_FIELDS + _REFERENCE_EXTRA_FIELDS
     token, identity = _pr_read(root, reference)
+    unbound = identity is None
     if identity is None:
-        return _pr_json(root, reference, fields, token)
+        identity = _unbound_identity(reference.host)
     key = (
         "pr",
         identity,
@@ -1435,7 +1466,7 @@ def _reference_pr_data(
         hit, data = _cache_get(key, shared=True)
         if hit:
             return data
-        if background and reference.host == "github.com":
+        if background and reference.host == "github.com" and not unbound:
             listing = _open_pr_listing(root, reference, identity, token)
             for entry in listing or []:
                 if isinstance(entry, dict) and entry.get("number") == reference.number:
@@ -1445,10 +1476,14 @@ def _reference_pr_data(
         started = time.time()
         data = _pr_json(root, reference, fields, token)
         if data is None:
-            _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
+            if not unbound:
+                _cache_put(key, None, _FAILED_READ_TTL_SECONDS, shared=True, started=started)
             return None
         state = data.get("state")
-        if state == "MERGED" or (background and state == "CLOSED"):
+        finished = state == "MERGED" or (background and state == "CLOSED")
+        if unbound and not finished:
+            return data  # no known identity: only a finished PR's read is shared
+        if finished:
             ttl = _FINISHED_PR_TTL_SECONDS
         else:
             ttl = _BACKGROUND_PR_TTL_SECONDS if background else _OPEN_PR_TTL_SECONDS

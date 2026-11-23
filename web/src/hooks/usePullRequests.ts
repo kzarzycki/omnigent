@@ -518,6 +518,28 @@ export function computePullRequestPollInterval(
   return pr.checks.pending > 0 || pr.checks.total === 0 ? PULL_REQUEST_POLL_MS : false;
 }
 
+/** How often the details panel polls a host that tracks the session's linked PRs. */
+const TRACKING_PANEL_POLL_MS = 10_000;
+
+/**
+ * Poll interval for the details panel.
+ *
+ * A host that tracks linked PRs can link one at any time, so the panel never
+ * rests; it polls every 10 s while something is changing (checks running,
+ * setup, partial results) and slowly once settled, merged or still waiting for
+ * a PR. The turn-end refresh shows a PR the agent opens without waiting.
+ */
+export function computePanelPullRequestPollInterval(
+  info: PullRequestInfo | undefined,
+): number | false {
+  const interval = computePullRequestPollInterval(info);
+  if (!info?.tracking_available) return interval;
+  const { auth } = normalizePullRequestInfo(info);
+  const setUp = info.available && auth.authenticated && !!info.repo?.name_with_owner;
+  if (interval === false || (setUp && !info.pr)) return PULL_REQUEST_LIST_POLL_MS;
+  return Math.max(interval, TRACKING_PANEL_POLL_MS);
+}
+
 /** Poll linked PRs until all known states are terminal; unknown states keep refreshing. */
 export function computeLinkedPullRequestPollInterval(
   info: Pick<PullRequestInfo, "pr" | "prs"> | undefined,
@@ -556,7 +578,7 @@ function pullRequestInfoQueryOptions(
           const info = query.state.data;
           if (options.poll === "linked") return computeLinkedPullRequestPollInterval(info);
           if (options.poll === "list") return computePullRequestPollInterval(info, true);
-          return info?.tracking_available ? 10_000 : computePullRequestPollInterval(info);
+          return computePanelPullRequestPollInterval(info);
         }
       : false,
     refetchIntervalInBackground: false,

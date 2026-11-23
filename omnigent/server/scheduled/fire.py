@@ -86,10 +86,7 @@ from omnigent.debug_logging import set_current_session_id
 from omnigent.entities import Conversation, ScheduledTask, ScheduledTaskRun
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.mcp_selection import mcp_selection_revision
-from omnigent.native.permission_modes import (
-    APPROVAL_SKIPPING_PERMISSION_MODES,
-    PERMISSION_LAUNCH_ARGS,
-)
+from omnigent.native.permission_modes import APPROVAL_SKIPPING_PERMISSION_MODES
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
 from omnigent.server.bundles import agent_for_user
 from omnigent.server.host_registry import host_owner_scope
@@ -105,7 +102,7 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_agent,
     validate_session_model_metadata,
 )
-from omnigent.server.routes._sessions.common import _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY
+from omnigent.server.routes._sessions.common import session_approval_skipping_mode
 from omnigent.server.routes._sessions.helpers import (
     _announce_session_added,
     _session_status_from_cache,
@@ -164,7 +161,6 @@ from omnigent.server.session_mcp_selection import (
     session_mcp_label_keys,
 )
 from omnigent.stores.conversation_store import (
-    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     SCHEDULED_TASK_INITIAL_RUN_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SCHEDULED_TASK_RUN_LABEL_KEY,
@@ -1299,43 +1295,6 @@ def _recovery_hint(task: ScheduledTask) -> str:
 
 UNATTENDED_PERMISSION_ERROR_CODE = "permission_mode_not_allowed"
 
-# Launch flags that start a native CLI without an approval gate, for sessions whose
-# live mode has no label; Codex's full bypass is what spec-derived args emit for ``yolo``.
-_APPROVAL_SKIPPING_LAUNCH_ARGS: tuple[tuple[str, ...], ...] = (
-    *(
-        tuple(args)
-        for modes in PERMISSION_LAUNCH_ARGS.values()
-        for mode, args in modes.items()
-        if mode in APPROVAL_SKIPPING_PERMISSION_MODES and args
-    ),
-    ("--dangerously-skip-permissions",),
-    ("--dangerously-bypass-approvals-and-sandbox",),
-    ("--ask-for-approval", "never"),
-)
-
-
-def _contains_args(args: list[str], needle: tuple[str, ...]) -> bool:
-    width = len(needle)
-    return any(tuple(args[i : i + width]) == needle for i in range(len(args) - width + 1))
-
-
-def session_approval_skipping_mode(conv: Conversation) -> str | None:
-    """The approval-skipping permission mode *conv* is running in, or ``None``.
-
-    The Claude label tracks the live mode, including switches made inside the
-    CLI, so it wins over the launch flags it may have replaced.
-    """
-    claude_mode = conv.labels.get(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
-    if claude_mode:
-        return claude_mode if claude_mode in APPROVAL_SKIPPING_PERMISSION_MODES else None
-    if conv.labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1":
-        return "bypass"
-    launch_args = list(getattr(conv, "terminal_launch_args", None) or [])
-    for needle in _APPROVAL_SKIPPING_LAUNCH_ARGS:
-        if _contains_args(launch_args, needle):
-            return " ".join(needle)
-    return None
-
 
 async def _inherited_permission_problem(
     deps: FireDeps, task: ScheduledTask, agent: Any, *, continued: bool = False
@@ -2336,7 +2295,12 @@ async def _attach_cost_budget(
                 ):
                     raise _BudgetConflict from None
         if replace:
+            from omnigent.server.routes.session_policies import (
+                schedule_policy_change_notification,
+            )
+
             invalidate_session_policy_specs_cache(conversation_id)
+            schedule_policy_change_notification(deps.conversation_store, conversation_id)
     except _BudgetConflict:
         raise
     except Exception as exc:

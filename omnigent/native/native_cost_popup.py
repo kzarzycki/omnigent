@@ -50,6 +50,10 @@ _TMUX_CLIENT_POLL_INTERVAL_S = 0.25
 # Poll interval for the watcher that closes the popup when the elicitation
 # is resolved on another surface (e.g. answered in the web ApprovalCard).
 _RESOLUTION_POLL_INTERVAL_S = 1.5
+# Snapshot without transcript items, liveness probes or subtree usage.
+_SLIM_SNAPSHOT_QUERY = (
+    "include_items=false&include_liveness=false&include_live_status=false&include_usage=false"
+)
 
 
 def wait_for_tmux_client(socket_path: str, tmux_target: str, *, timeout_s: float) -> bool:
@@ -119,6 +123,37 @@ def _list_tmux_clients(socket_path: str, tmux_target: str) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def tmux_client_attached(socket_path: str, tmux_target: str) -> bool:
+    """
+    Whether a tmux client may be attached to *tmux_target*'s session.
+
+    A failed probe (timeout, ``OSError``, or an error from a live server) counts
+    as attached, so callers protecting an owner's session keep it. Only a missing
+    socket or a ``no server running`` answer reads as no client.
+
+    :param socket_path: Absolute path to the tmux socket.
+    :param tmux_target: tmux target whose session's clients to list, e.g. ``"main"``.
+    :returns: ``False`` only when tmux answered that no client is attached.
+    """
+    import subprocess
+
+    if not Path(socket_path).exists():
+        return False
+    try:
+        proc = subprocess.run(
+            ["tmux", "-S", socket_path, "list-clients", "-t", tmux_target, "-F", "#{client_name}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_TMUX_LIST_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return True
+    if proc.returncode != 0:
+        return "no server running" not in proc.stderr
+    return any(line.strip() for line in proc.stdout.splitlines())
 
 
 def _tmux_window_activity_at(socket_path: str, tmux_target: str) -> float | None:
@@ -548,7 +583,8 @@ def _start_resolution_watcher(
     :param elicitation_id: Elicitation id to watch, e.g. ``"elicit_x"``.
     :returns: None.
     """
-    url = f"{ap_server_url.rstrip('/')}/v1/sessions/{session_id}"
+    # Only pending_elicitations is read, which the slim snapshot still carries.
+    url = f"{ap_server_url.rstrip('/')}/v1/sessions/{session_id}?{_SLIM_SNAPSHOT_QUERY}"
 
     def _watch() -> None:
         while True:

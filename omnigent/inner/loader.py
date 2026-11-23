@@ -719,6 +719,8 @@ def _parse_executor_spec(
         system_prompt_mode = data.get("system_prompt_mode")
         if "system_prompt_mode" in data and system_prompt_mode not in ("append", "replace"):
             raise ValueError("executor.system_prompt_mode must be 'append' or 'replace'")
+        # Checked (claude-native only) by validate_omnigent_executor after translation.
+        settings = data.get("settings")
         return ExecutorSpec(
             model=data.get("model"),
             harness=data.get("harness"),
@@ -726,6 +728,7 @@ def _parse_executor_spec(
             auth=auth,
             context_files=context_files,
             system_prompt_mode=system_prompt_mode,
+            settings=settings,
         )
     return None
 

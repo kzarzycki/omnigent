@@ -1,36 +1,42 @@
 # yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
 #
 # The merge queue `approvals.py land` hands PRs to (`land.queue: mergify` in docs/agents/gatekeeper.md).
-# `land` judges each PR (proofs, the owner's go where high risk, the `gate` check green on its head), then posts the
-# `land` status on that head and adds `loop:queued`. Mergify takes a PR in only with both, tests it on a draft PR on
-# top of `mine` (`.github/workflows/gate.yml` runs again there: the proof of the merged tree) and merges it. A push
-# leaves a head with no `land` status, so the PR drops out. A PR Mergify drops gets `loop:dequeued`, which the next
-# `land` evicts back to draft. The `gate` check comes from the `mine` ruleset, so no check is named here.
+# `land` judges each PR (proofs, the owner's go where high risk), then posts the `land` status on its head and adds
+# `loop:queued`. Mergify takes a PR in only with both, tests it on a draft PR on top of `mine` and merges it only once
+# `gate` (`.github/workflows/gate.yml`, which runs on those drafts alone) is green there: one proof per change, on the
+# tree that merges. A push leaves a head with no `land` status, so the PR drops out. A PR Mergify drops gets
+# `loop:dequeued`, which the next `land` evicts back to draft. `merge_conditions` differ from `queue_conditions`, so
+# Mergify always tests on a draft and never in place, where `gate` would not run. `checks_timeout` sits above
+# `gate`'s 150-minute pytest wall clock (`run-affected-tests.sh`), since a whole-suite selection takes about 2 hours.
 
 queue_rules:
   - name: default
     merge_method: squash
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 1 hour
+    checks_timeout: 3 hours
     queue_conditions:
       - base = mine
       - -draft
       - -head ~= ^sync/
       - label = loop:queued
       - check-success = land
+    merge_conditions:
+      - check-success = gate
   # An upstream-sync PR keeps upstream's parent (docs/agents/gatekeeper.md).
   - name: sync
     merge_method: merge
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 1 hour
+    checks_timeout: 3 hours
     queue_conditions:
       - base = mine
       - -draft
       - head ~= ^sync/
       - label = loop:queued
       - check-success = land
+    merge_conditions:
+      - check-success = gate
 
 pull_request_rules:
   - name: queue what land handed over
