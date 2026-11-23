@@ -5817,7 +5817,6 @@ def test_load_global_config_uses_env_override(
     assert result == {"server": "https://isolated.example.com"}
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_load_global_config_returns_empty_when_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5836,7 +5835,6 @@ def test_load_global_config_returns_empty_when_missing(
     assert result == {}
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_save_and_load_global_config_round_trips(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5858,7 +5856,6 @@ def test_save_and_load_global_config_round_trips(
     assert result == {"default_agent": "examples/hello.yaml", "profile": "oss"}
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_save_global_config_merges_with_existing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5881,7 +5878,6 @@ def test_save_global_config_merges_with_existing(
     assert result == {"default_agent": "examples/hello.yaml", "profile": "oss"}
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_save_global_config_unset_removes_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5946,7 +5942,6 @@ def test_is_run_shorthand(argv: list[str], expected: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_config_list_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6031,7 +6026,6 @@ def test_config_set_global_writes_file(
     assert cfg["model"] == "databricks-claude-sonnet-4-6"
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_config_set_global_writes_auto_open_conversation_bool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6056,7 +6050,6 @@ def test_config_set_global_writes_auto_open_conversation_bool(
     assert _resolve_auto_open_conversation_from_config(cfg) is True
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_config_set_global_writes_session_title_instructions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6256,7 +6249,6 @@ def test_config_list_dedups_when_cwd_is_config_home(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_save_global_migrates_scalar_harness_to_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6274,7 +6266,6 @@ def test_save_global_migrates_scalar_harness_to_mapping(
     assert cfg["model"] == "x"
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_save_global_scalar_migration_notice_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6330,7 +6321,6 @@ def test_config_set_harness_deep_merges_preserving_overrides(
     assert cfg["harness"]["codex"] == {"command": "/bin/codex"}
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_config_set_harness_migrates_scalar_to_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6391,7 +6381,6 @@ def test_config_list_ignores_project_harness_launch_overrides(
     assert "--project-arg" not in result.output
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_config_list_shows_scalar_harness_without_note(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6685,7 +6674,6 @@ def test_run_interactive_defaults_browser_open_on(
     assert dispatched["auto_open_conversation"] is True
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_run_headless_prompt_defaults_browser_open_off(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6843,7 +6831,6 @@ def test_codex_applies_auto_open_conversation_config(
     assert captured["auto_open_conversation"] is True
 
 
-@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/528")
 def test_run_bare_omnigent_with_harness_only_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

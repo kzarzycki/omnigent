@@ -17,7 +17,8 @@ def _own_config_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     leaves a ``host:`` identity in the config home the whole session shares, which
     later tests then read as their starting config. The suite-wide
     ``$OMNIGENT_CONFIG_HOME`` also outranks a test's ``omnigent.cli._GLOBAL_CONFIG_PATH``
-    patch, so a test that seeds its own file would never read it back.
+    patch, so a test that seeds its own file would never read it back. That patch wins
+    only for the CLI's own path, unlike production, where the env var always wins.
     """
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
     import omnigent.cli as cli_module
