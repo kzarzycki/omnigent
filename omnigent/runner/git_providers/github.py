@@ -154,6 +154,14 @@ class GitHubPullRequests:
 
         return github_resource._pr_title_before(root, reference, deadline)
 
+    def pr_titles(
+        self, root: str, references: Sequence[PullRequestRef], deadline: float
+    ) -> dict[str, tuple[str | None, bool]]:
+        """Look up PRs' titles before ``deadline``, one GraphQL query per host and identity."""
+        from omnigent.runner import github_resource
+
+        return github_resource._pr_titles_before(root, references, deadline)
+
     def verify_accessible(self, root: str, reference: PullRequestRef) -> None:
         """Raise unless ``gh`` on the host can read the PR."""
         from omnigent.runner import github_resource
