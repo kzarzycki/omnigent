@@ -29,6 +29,13 @@ A = "https://github.com/example/one/pull/42"
 B = "https://github.com/example/two/pull/42"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_gh_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These reads assume gh has no identity; CI's ``GH_TOKEN`` would give it one."""
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def tracked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
