@@ -14306,6 +14306,51 @@ def _remember_default_server(server: str) -> None:
     click.echo(f"Set {display_server_url(server)} as your default server.")
 
 
+def _refresh_expires_at(login_response: dict[str, Any]) -> float | None:
+    """Absolute time the login's refresh grant stops renewing, if reported."""
+    import time as _time
+
+    remaining = login_response.get("refresh_expires_in")
+    if isinstance(remaining, (int, float)) and remaining > 0:
+        return _time.time() + float(remaining)
+    return None
+
+
+@cli.command("login-status")
+@click.argument("server_url")
+@click.option("--live", is_flag=True, help="Force one renewal to prove the grant is accepted.")
+@click.option(
+    "--warn-hours", default=72.0, show_default=True, help="Warn when the grant ends sooner."
+)
+@click.option("--json", "as_json", is_flag=True, help="Print one JSON object.")
+def login_status(server_url: str, live: bool, warn_hours: float, as_json: bool) -> None:
+    """Report whether the stored login can keep renewing.
+
+    Prints the state, the reason, and seconds until the access token and the
+    refresh grant expire; never a credential. Exit code 0 means ok, 1 means
+    the grant ends within ``--warn-hours``, 2 means the login cannot renew.
+
+    :param server_url: The server URL the login was stored for.
+    """
+    import json as _json
+
+    from omnigent.cli_auth import login_renewal_status
+
+    resolved = _resolve_server_url(server_url)
+    result = login_renewal_status(resolved.api_base, live=live, warn_seconds=warn_hours * 3600)
+    fields = {
+        "state": result.state,
+        "reason": result.reason,
+        "access_expires_in": result.access_expires_in,
+        "refresh_expires_in": result.refresh_expires_in,
+    }
+    if as_json:
+        click.echo(_json.dumps(fields))
+    else:
+        click.echo("  ".join(f"{key}={value}" for key, value in fields.items()))
+    raise SystemExit({"ok": 0, "expiring": 1}.get(result.state, 2))
+
+
 @cli.command("login")
 @click.argument("server_url")
 def login(server_url: str) -> None:
@@ -14511,6 +14556,7 @@ def login(server_url: str) -> None:
                 # Login-issued refresh grant (newer servers) — lets the
                 # host/CLI renew past session expiry unattended.
                 refresh_token=result.get("refresh_token"),
+                refresh_expires_at=_refresh_expires_at(result),
             )
             click.echo(f"Logged in as {user_id}")
             _remember_default_server(server)
@@ -14650,6 +14696,7 @@ def _accounts_login(server: str) -> None:
         user_id=user_id,
         expires_at=_time.time() + expires_in,
         refresh_token=body.get("refresh_token"),
+        refresh_expires_at=_refresh_expires_at(body),
     )
     click.echo(f"Logged in as {user_id}.")
 

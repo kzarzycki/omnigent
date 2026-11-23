@@ -63,7 +63,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import UnifiedAuthProvider
-from omnigent.server.device_grant_store import DeviceGrantStore, hash_secret
+from omnigent.server.device_grant_store import DeviceGrant, DeviceGrantStore, hash_secret
 from omnigent.server.routes._oauth import (
     NO_STORE_HEADERS,
     RATE_LIMITER_MAX_KEYS,
@@ -125,6 +125,11 @@ _GRANT_MAX_LIFETIME_SECONDS = 30 * 24 * 3600  # 30 days
 # running unattended hosts can extend the re-consent window deliberately;
 # the 30-day default stays the safe posture.
 _GRANT_MAX_LIFETIME_ENV = "OMNIGENT_GRANT_MAX_LIFETIME_DAYS"
+
+
+def grant_max_lifetime_seconds() -> int:
+    """Public alias of :func:`_grant_max_lifetime_seconds` for the login routes."""
+    return _grant_max_lifetime_seconds()
 
 
 def _grant_max_lifetime_seconds() -> int:
@@ -542,6 +547,7 @@ def create_oauth_token_router(
                     "refresh_token": refresh_token,
                     "token_type": "Bearer",
                     "expires_in": _ACCESS_TOKEN_TTL_SECONDS,
+                    "refresh_expires_in": _grant_remaining_seconds(grant),
                 },
                 headers=NO_STORE_HEADERS,
             )
@@ -573,9 +579,15 @@ def create_oauth_token_router(
                 "refresh_token": new_refresh,
                 "token_type": "Bearer",
                 "expires_in": _ACCESS_TOKEN_TTL_SECONDS,
+                "refresh_expires_in": _grant_remaining_seconds(rotated),
             },
             headers=NO_STORE_HEADERS,
         )
+
+    def _grant_remaining_seconds(grant: DeviceGrant) -> int:
+        """Seconds until the grant stops renewing (its absolute lifetime)."""
+        approved_at = grant.approved_at if grant.approved_at is not None else int(time.time())
+        return max(0, approved_at + _grant_max_lifetime - int(time.time()))
 
     # ── Revocation ────────────────────────────────────────────────
 
