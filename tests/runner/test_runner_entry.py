@@ -40,12 +40,15 @@ from omnigent.runner._entry import (
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
     _agent_cache_dest,
     _AgentSpecCache,
+    _app_active_work_hold,
+    _app_keeps_idle_runner,
     _apply_host_interactive_shells,
     _host_interactive_shells_from_env,
     _ignore_finish_work_signal_until_handled,
     _InitialAuthTokenFactory,
     _install_crash_logging,
     _install_signal_handlers,
+    _load_runner_idle_hold_max_s_from_config,
     _load_runner_idle_timeout_s_from_config,
     _make_auth_token_factory,
     _make_managed_mint_factory,
@@ -57,6 +60,7 @@ from omnigent.runner._entry import (
     _resolve_agent_spec_from_server,
     _run_inactivity_monitor,
     _run_parent_death_killer,
+    _runner_keeps_idle_session,
     _runner_last_activity,
     _runner_parent_pid_from_env,
     _runner_threadpool_max_workers,
@@ -65,6 +69,7 @@ from omnigent.runner._entry import (
     _RunnerDatabricksAuth,
     _server_url_from_env,
     _SessionSpecWorkdirs,
+    _start_idle_monitor,
     _work_still_active,
     main,
 )
@@ -89,6 +94,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
 )
 from omnigent.spec.tar_utils import ExtractionError
 from omnigent.util import event_loop_watchdog as watchdog
+from tests._helpers.polling import poll_until_async
 from tests._helpers.session import bundle_files
 from tests.budgets import budget
 from tests.runner.helpers import make_test_terminal_instance
@@ -2351,6 +2357,408 @@ async def test_inactivity_monitor_requests_shutdown_when_idle() -> None:
     )
 
     assert shutdowns == ["shutdown"]
+
+
+_SOFT_HOLDS = frozenset({"background_agents", "pane_output", "native_turn_in_flight"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hold", "fresh_progress", "keeps_runner", "reaped"),
+    [
+        pytest.param("background_agents", False, False, True, id="stale-background-agents"),
+        pytest.param("pane_output", False, False, True, id="stale-pane-output"),
+        pytest.param("native_turn_in_flight", False, False, True, id="stale-native-turn"),
+        pytest.param("pane_output", True, False, False, id="fresh-progress"),
+        pytest.param("turn", False, False, False, id="hard-turn"),
+        pytest.param("human_wait", False, False, False, id="hard-human-wait"),
+        pytest.param("pane_output", False, True, False, id="excluded-or-attached"),
+    ],
+)
+async def test_inactivity_monitor_bounds_a_soft_hold_without_work_progress(
+    hold: str, fresh_progress: bool, keeps_runner: bool, reaped: bool
+) -> None:
+    """Only a soft hold with no work progress for the ceiling lets an idle runner go.
+
+    :param hold: Hold name the runner reports while idle.
+    :param fresh_progress: Whether work progress keeps arriving.
+    :param keeps_runner: Whether an attached client or the exclude list keeps it.
+    :param reaped: Whether the monitor requests shutdown.
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    shutdowns: list[str] = []
+    task = asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: shutdowns.append("shutdown"),
+            poll_interval_s=0.005,
+            get_hold=lambda: hold,
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.05,
+            get_work_progress=(lambda: loop.time()) if fresh_progress else (lambda: None),
+            keeps_runner=lambda: keeps_runner,
+        )
+    )
+    if reaped:
+        await asyncio.wait_for(task, timeout=1.0)
+        assert shutdowns == ["shutdown"]
+        return
+    await asyncio.sleep(0.2)
+    assert shutdowns == []
+    assert not task.done()
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_inactivity_monitor_keeps_a_soft_hold_when_the_ceiling_is_zero() -> None:
+    """``idle_hold_max_s: 0`` keeps the unbounded hold.
+
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    shutdowns: list[str] = []
+    task = asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: shutdowns.append("shutdown"),
+            poll_interval_s=0.005,
+            get_hold=lambda: "pane_output",
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.0,
+            get_work_progress=lambda: None,
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert shutdowns == []
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_inactivity_monitor_logs_the_hold_once_and_the_reap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The monitor names the hold once while it holds, then again when it reaps.
+
+    :param caplog: Pytest log capture fixture.
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    caplog.set_level("INFO", logger="omnigent.runner._entry")
+    await asyncio.wait_for(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=lambda: loop.time() - 1.0,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: None,
+            poll_interval_s=0.005,
+            get_hold=lambda: "pane_output",
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.05,
+            get_work_progress=lambda: None,
+        ),
+        timeout=1.0,
+    )
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("kept up by pane_output hold" in message for message in messages) == 1
+    assert sum("only the pane_output hold" in message for message in messages) == 1
+
+
+def test_idle_hold_max_defaults_to_four_hours_and_zero_disables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``runner.idle_hold_max_s`` defaults to 4 h, ``0`` disables, and a negative value fails.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    assert _load_runner_idle_hold_max_s_from_config() == 4 * 60 * 60
+    config = tmp_path / "config.yaml"
+    config.write_text("runner:\n  idle_hold_max_s: 0\n", encoding="utf-8")
+    assert _load_runner_idle_hold_max_s_from_config() == 0.0
+    config.write_text("runner:\n  idle_hold_max_s: 90\n", encoding="utf-8")
+    assert _load_runner_idle_hold_max_s_from_config() == 90.0
+    for bad in ("-1", "true", "soon"):
+        config.write_text(f"runner:\n  idle_hold_max_s: {bad}\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match=r"runner\.idle_hold_max_s"):
+            _load_runner_idle_hold_max_s_from_config()
+
+
+def test_exclude_list_keeps_a_listed_session_and_an_unreadable_list_keeps_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The host exclude list is re-read per call; a listed or unreadable one keeps the runner.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "config.yaml"
+    assert _runner_keeps_idle_session(["conv_a"]) is False
+    config.write_text("host:\n  replace_stale_runners_exclude: [conv_keep]\n", encoding="utf-8")
+    assert _runner_keeps_idle_session(["conv_a", "conv_keep"]) is True
+    assert _runner_keeps_idle_session(["conv_a"]) is False
+    config.write_text("host:\n  replace_stale_runners_exclude: conv_keep\n", encoding="utf-8")
+    assert _runner_keeps_idle_session(["conv_a"]) is True
+    config.write_text("host: [unterminated\n", encoding="utf-8")
+    assert _runner_keeps_idle_session(["conv_a"]) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["hold", "activity", "progress"])
+async def test_inactivity_monitor_rechecks_work_after_the_off_loop_keep_probe(
+    changed: str,
+) -> None:
+    """Work that starts while the keep probe runs is not reaped, whichever signal shows it.
+
+    Each case changes one signal during the first probe; later probes keep the
+    runner, so only the recheck after that first probe can request a shutdown.
+
+    :param changed: The one signal the probe changes, e.g. ``"hold"``.
+    :returns: None.
+    """
+    loop = asyncio.get_running_loop()
+    state: dict[str, Any] = {
+        "hold": "pane_output",
+        "activity": loop.time() - 1.0,
+        "progress": None,
+        "probes": 0,
+        "reads_after_probe": 0,
+    }
+    shutdowns: list[str] = []
+
+    def _probe() -> bool:
+        state["probes"] += 1
+        if state["probes"] > 1:
+            return True
+        time.sleep(0.05)
+        if changed == "hold":
+            state["hold"] = "pending_approvals"
+        elif changed == "activity":
+            state["activity"] = loop.time()
+        else:
+            state["progress"] = loop.time()
+        state["probe_done"] = True
+        return False
+
+    def _last_activity() -> float:
+        if state.get("probe_done"):
+            state["reads_after_probe"] += 1
+        return state["activity"]
+
+    task = asyncio.create_task(
+        _run_inactivity_monitor(
+            idle_timeout_s=0.01,
+            get_last_activity=_last_activity,
+            has_active_work=lambda: True,
+            request_shutdown=lambda: shutdowns.append(state["hold"]),
+            poll_interval_s=0.005,
+            get_hold=lambda: state["hold"],
+            soft_holds=_SOFT_HOLDS,
+            idle_hold_max_s=0.02,
+            get_work_progress=lambda: state["progress"],
+            keeps_runner=_probe,
+        )
+    )
+    # Two activity reads after the probe: its recheck ran and the loop went on.
+    await poll_until_async(lambda: state["reads_after_probe"] >= 2 or shutdowns, timeout_s=5)
+    task.cancel()
+    assert shutdowns == []
+
+
+class _StubDispatcher:
+    """Event dispatcher stand-in with a settable pending flag."""
+
+    def __init__(self, *, has_pending: bool = False) -> None:
+        self.has_pending = has_pending
+
+
+def _stub_app(
+    *,
+    hold: str | None,
+    attached: bool = False,
+    served: tuple[str, ...] = (),
+) -> Any:
+    """Return an app stand-in exposing the runner state the idle monitor reads."""
+    import types
+
+    return types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            active_work_hold=lambda: hold,
+            native_pane_has_attached_client=lambda: attached,
+            served_session_ids=lambda: set(served),
+        )
+    )
+
+
+def test_event_dispatch_is_a_hard_hold_ahead_of_the_app_hold() -> None:
+    """Undelivered event batches hold the runner even when the app only has a soft hold.
+
+    :returns: None.
+    """
+    app = _stub_app(hold="pane_output")
+    assert _app_active_work_hold(app, _StubDispatcher(has_pending=True)) == "event_dispatch"
+    assert _app_active_work_hold(app, _StubDispatcher()) == "pane_output"
+    assert _app_active_work_hold(_stub_app(hold=None), _StubDispatcher()) is None
+
+
+@pytest.mark.parametrize(
+    ("attached", "served", "primary", "excluded", "kept"),
+    [
+        pytest.param(True, (), None, "", True, id="attached-client"),
+        pytest.param(False, ("conv_pane",), None, "conv_pane", True, id="served-session-listed"),
+        pytest.param(False, (), "conv_primary", "conv_primary", True, id="primary-listed"),
+        pytest.param(False, ("conv_pane",), "conv_primary", "conv_other", False, id="unlisted"),
+    ],
+)
+def test_owner_keep_probe_reads_the_attached_client_and_served_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attached: bool,
+    served: tuple[str, ...],
+    primary: str | None,
+    excluded: str,
+    kept: bool,
+) -> None:
+    """An attached client, or a served or primary session on the exclude list, keeps the runner.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :param attached: Whether a tmux client is attached.
+    :param served: Sessions the runner serves.
+    :param primary: The runner's primary session id.
+    :param excluded: Session id on the exclude list.
+    :param kept: Whether the runner is kept.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", raising=False)
+    if primary:
+        monkeypatch.setenv("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", primary)
+    (tmp_path / "config.yaml").write_text(
+        f"host:\n  replace_stale_runners_exclude: [{excluded or 'conv_none'}]\n", encoding="utf-8"
+    )
+    app = _stub_app(hold="pane_output", attached=attached, served=served)
+    assert _app_keeps_idle_runner(app) is kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hold_max_s", "attached", "excluded", "pending", "reaped"),
+    [
+        pytest.param(0.05, False, "", False, True, id="ceiling-reaps"),
+        pytest.param(0.0, False, "", False, False, id="ceiling-off-keeps"),
+        pytest.param(0.05, True, "", False, False, id="attached-keeps"),
+        pytest.param(0.05, False, "conv_pane", False, False, id="excluded-keeps"),
+        pytest.param(0.05, False, "", True, False, id="event-dispatch-keeps"),
+    ],
+)
+async def test_idle_monitor_wiring_applies_the_ceiling_and_owner_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hold_max_s: float,
+    attached: bool,
+    excluded: str,
+    pending: bool,
+    reaped: bool,
+) -> None:
+    """The production monitor wiring reaps a stale soft hold unless the owner or work keeps it.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Isolated config home.
+    :param hold_max_s: ``runner.idle_hold_max_s`` passed to the wiring.
+    :param attached: Whether a tmux client is attached.
+    :param excluded: Session id on the exclude list.
+    :param pending: Whether event batches await an ACK.
+    :param reaped: Whether the runner requests shutdown.
+    :returns: None.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        f"host:\n  replace_stale_runners_exclude: [{excluded or 'conv_none'}]\n", encoding="utf-8"
+    )
+    loop = asyncio.get_running_loop()
+    shutdowns: list[str] = []
+    task = _start_idle_monitor(
+        app=_stub_app(hold="pane_output", attached=attached, served=("conv_pane",)),
+        event_dispatcher=_StubDispatcher(has_pending=pending),
+        idle_timeout_s=0.01,
+        idle_hold_max_s=hold_max_s,
+        get_last_activity=lambda: loop.time() - 1.0,
+        get_work_progress=lambda: None,
+        request_shutdown=lambda: shutdowns.append("shutdown"),
+        name="test-idle-monitor",
+        poll_interval_s=0.005,
+    )
+    if reaped:
+        await asyncio.wait_for(task, timeout=1.0)
+        assert shutdowns == ["shutdown"]
+        return
+    await asyncio.sleep(0.2)
+    assert shutdowns == []
+    task.cancel()
+
+
+@pytest.mark.parametrize(
+    ("socket_exists", "outcome", "attached"),
+    [
+        pytest.param(False, None, False, id="socket-gone"),
+        pytest.param(True, "timeout", True, id="timeout-reads-attached"),
+        pytest.param(True, "oserror", True, id="oserror-reads-attached"),
+        pytest.param(True, "no-server", False, id="no-server-running"),
+        pytest.param(True, "tmux-error", True, id="live-server-error-reads-attached"),
+        pytest.param(True, "client", True, id="client-listed"),
+        pytest.param(True, "empty", False, id="no-client"),
+    ],
+)
+def test_a_failed_tmux_probe_reads_as_attached(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    socket_exists: bool,
+    outcome: str | None,
+    attached: bool,
+) -> None:
+    """Only tmux's own answer that nobody is attached counts as no client.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param tmp_path: Directory holding the stand-in socket.
+    :param socket_exists: Whether the socket file exists.
+    :param outcome: How the ``tmux list-clients`` call ends.
+    :param attached: Expected result.
+    :returns: None.
+    """
+    import subprocess
+
+    from omnigent.native.native_cost_popup import tmux_client_attached
+
+    socket = tmp_path / "tmux.sock"
+    if socket_exists:
+        socket.touch()
+
+    def _run(*_args: object, **_kwargs: object) -> object:
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired("tmux", 5.0)
+        if outcome == "oserror":
+            raise OSError("no tmux")
+        results = {
+            "no-server": (1, "", "no server running on /tmp/x"),
+            "tmux-error": (1, "", "protocol version mismatch"),
+            "client": (0, "/dev/pts/1\n", ""),
+            "empty": (0, "", ""),
+        }
+        code, out, err = results[cast("str", outcome)]
+        return subprocess.CompletedProcess([], code, out, err)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert tmux_client_attached(str(socket), "main") is attached
 
 
 @pytest.mark.asyncio
