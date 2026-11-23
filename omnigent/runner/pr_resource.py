@@ -403,8 +403,6 @@ def _session_prs_with_titles(
     def fetch_titles(
         facet: BatchTitlesFacet, batch: list[SessionPullRequest]
     ) -> list[_TitleLookup]:
-        if time.monotonic() >= deadline:
-            return []
         try:
             found = facet.pr_titles(root, batch, deadline)
         except Exception:  # keep the existing cache when an optional lookup fails

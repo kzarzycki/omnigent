@@ -993,6 +993,35 @@ def test_a_title_is_cached_while_gh_auth_status_reports_the_active_account_faili
     assert fake_gh.calls["auth status"] == 0
 
 
+def test_an_active_token_lookup_that_did_not_answer_is_asked_again(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = fake_gh.__call__
+    spawn_fails = [True]
+
+    def gh(argv: list[str], **kwargs: Any) -> tuple[int | None, str, str]:
+        if argv[:2] == ["auth", "token"] and spawn_fails[0]:
+            fake_gh.calls["auth token"] += 1
+            return None, "", "timed out"
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(github, "_gh", gh)
+    assert github._active_gh_token("/work", "github.com") is None
+    spawn_fails[0] = False
+    assert github._active_gh_token("/work", "github.com") == "active-token-reader"
+    assert fake_gh.calls["auth token"] == 2
+
+
+def test_a_login_after_a_missing_token_is_seen_at_once(fake_gh: FakeGh) -> None:
+    fake_gh.active_tokens = False
+    assert github._active_gh_token("/work", "github.com") is None
+    assert github._active_gh_token("/work", "github.com") is None
+    assert fake_gh.calls["auth token"] == 1
+    fake_gh.active_tokens = True
+    fake_gh.accounts = _accounts("reader")  # `gh auth login` rewrites hosts.yml
+    assert github._active_gh_token("/work", "github.com") == "active-token-reader"
+
+
 def test_a_title_with_no_bindable_credential_is_still_cached(fake_gh: FakeGh) -> None:
     fake_gh.active_tokens = False
     assert _lookup_title(1) == ("read as reader", False)
@@ -1134,6 +1163,105 @@ def test_a_partial_answer_answers_each_pr_by_its_own_result(
         [("acme/widgets", 1), ("acme/widgets", 2), ("acme/widgets", 3), ("acme/widgets", 4)],
         [("acme/widgets", 4)],
     ]
+
+
+def test_an_enterprise_host_without_a_gh_login_gets_no_title_query(fake_gh: FakeGh) -> None:
+    fake_gh.active_tokens = False
+    (reference,) = _references(1, repository=f"https://{ENTERPRISE_HOST}/acme/widgets")
+    assert github._pr_title_before("/work", reference, time.monotonic() + 5) == (None, False)
+    assert fake_gh.calls["api graphql"] == 0
+
+
+def test_a_malformed_answer_missing_a_pr_fails_only_that_pr(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pulls = {"p0": {"title": "Readable", "state": "OPEN"}}
+
+    def gh(argv: list[str], **_kwargs: object) -> tuple[int | None, str, str]:
+        if title_query_prs(argv) is None:
+            return fake_gh(argv, **_kwargs)  # type: ignore[arg-type]
+        fake_gh.calls["api graphql"] += 1
+        return 0, title_query_answer(pulls), ""  # no p1 at all
+
+    monkeypatch.setattr(github, "_gh", gh)
+    references = _references(1, 2)
+    answers = github._pr_titles_before("/work", references, time.monotonic() + 5)
+    assert [answers[reference.url] for reference in references] == [
+        ("Readable", False),
+        (None, False),
+    ]
+    _later(monkeypatch, github._FAILED_READ_TTL_SECONDS + 1)
+    github._preview_cache.clear()
+    pulls["p0"] = {"title": "Second", "state": "OPEN"}
+    assert github._pr_titles_before("/work", references, time.monotonic() + 5)[
+        references[1].url
+    ] == ("Second", False)  # asked again, alone, as p0
+
+
+def test_a_rate_limit_mid_batch_stops_the_later_background_chunks(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.quota_reset = time.time() + 600
+    original = fake_gh.__call__
+
+    def gh(argv: list[str], **kwargs: Any) -> tuple[int | None, str, str]:
+        if title_query_prs(argv) is not None:
+            fake_gh.rate_limited = True  # the quota runs out during the first chunk
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(github, "_gh", gh)
+    references = _references(*range(1, 61))
+    with github.background_reads(True):
+        answers = github._pr_titles_before("/work", references, time.monotonic() + 5)
+    assert fake_gh.calls["api graphql"] == 1
+    assert set(answers.values()) == {(None, False), (None, True)}
+    assert all(answers[reference.url] == (None, True) for reference in references[50:])
+
+
+def test_a_finished_title_read_in_flight_across_a_write_is_not_kept(fake_gh: FakeGh) -> None:
+    fake_gh.states[MERGED_NUMBER] = "MERGED"
+    fake_gh.delay = 0.4
+    reader = threading.Thread(target=_title_in_this_runner, args=(MERGED_NUMBER,))
+    reader.start()
+    poll_until(lambda: fake_gh.calls["api graphql"], timeout_s=5, interval_s=0.01)  # in flight
+    github.invalidate_pr_reads(f"{REPO}/pull/{MERGED_NUMBER}")
+    reader.join()
+    assert not github._finished_titles
+
+
+def test_this_runners_own_write_ends_its_finished_title_once_stamps_are_swept(
+    fake_gh: FakeGh,
+) -> None:
+    fake_gh.states[MERGED_NUMBER] = "MERGED"
+    assert _title_in_this_runner(MERGED_NUMBER)[0] == "read as reader"
+    fake_gh.titles[MERGED_NUMBER] = "edited"
+    github.invalidate_pr_reads(f"{REPO}/pull/{MERGED_NUMBER}")
+    for stamp in github._invalidation_directory().glob("*.json"):
+        stamp.unlink()  # an hour later the sweep has removed the write's stamp
+    assert _title_in_this_runner(MERGED_NUMBER)[0] == "edited"
+
+
+def test_a_finished_title_another_runner_read_is_kept_for_this_runners_life(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gh.states[MERGED_NUMBER] = "MERGED"
+    _lookup_title(MERGED_NUMBER)  # the other runner
+    github._preview_cache.clear()
+    github._finished_titles.clear()
+    assert _title_in_this_runner(MERGED_NUMBER)[0] == "read as reader"  # from its disk entry
+    _later_in_this_runner(monkeypatch, github._FINISHED_TITLE_TTL_SECONDS + 1)
+    assert _title_in_this_runner(MERGED_NUMBER)[0] == "read as reader"
+    assert fake_gh.calls["api graphql"] == 1
+
+
+def test_the_runner_keeps_a_bounded_number_of_finished_titles(
+    fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github, "_FINISHED_TITLES_MAX", 2)
+    for number in (11, 12, 13):
+        fake_gh.states[number] = "MERGED"
+        _title_in_this_runner(number)
+    assert [key[3] for key in github._finished_titles] == ["12", "13"]
 
 
 def test_batched_titles_fill_the_per_pr_entries_other_runners_read(fake_gh: FakeGh) -> None:

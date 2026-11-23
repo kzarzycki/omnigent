@@ -401,8 +401,6 @@ def _forget_account_lookups(token: str | None) -> None:
     A failed call as a chosen account drops that token; one as ``gh``'s own auth drops all.
     """
     forget_gh_tokens(token)
-    with _missing_active_tokens_lock:
-        _missing_active_tokens.clear()
     with _preview_lock:
         for key in [k for k in _preview_cache if k[:1] == ("accounts",)]:
             del _preview_cache[key]
@@ -1349,7 +1347,8 @@ def _active_gh_token(root: str, host: str) -> str | None:
     """The token of ``gh``'s active account for *host*, from ``gh auth token`` (no API call).
 
     Remembered while ``hosts.yml`` keeps its stat, and dropped when a ``gh`` call fails to
-    authenticate. A host with no token is asked again after the accounts window.
+    authenticate. A host with no token is asked again after the accounts window, or at
+    once when ``hosts.yml`` changes.
     """
     config_dir = gh_config_dir()
     stat = hosts_file_stat(config_dir)
@@ -1828,7 +1827,7 @@ def _query_titles(
     if not _gh_can_read_host(root, host, token):
         return {reference.url: (None, False) for reference in references}
     for start in range(0, len(references), _TITLE_QUERY_CHUNK):
-        if start and time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             break
         with _single_flight(("pr-titles", identity, host.lower())):
             missing: list[PullRequestRef] = []
@@ -1840,7 +1839,7 @@ def _query_titles(
                     answers[reference.url] = (known["title"], bool(known["timed_out"]))
             if not missing:
                 continue
-            if _background_reads_paused():  # an earlier chunk or another runner hit the limit
+            if _background_reads_paused():  # asked again once the pause ends
                 answers.update({reference.url: (None, True) for reference in missing})
                 continue
             started = time.time()
@@ -1882,9 +1881,6 @@ def _pr_titles_before(
         ended the lookup, or a rate-limit pause skipped a background one. A PR whose
         chunk the deadline reached first is left out.
     """
-    if _background_reads_paused():
-        # Looked up again once the pause ends; the cached titles stay.
-        return {reference.url: (None, True) for reference in references}
     answers: dict[str, tuple[str | None, bool]] = {}
     groups: dict[tuple[str, str], tuple[str | None, list[PullRequestRef]]] = {}
     with _gh_deadline_scope(deadline):

@@ -344,6 +344,28 @@ def test_a_provider_that_batches_titles_looks_them_all_up_in_one_call(
     assert checked[OTHER_MR] > 0
 
 
+def test_a_failing_batch_lookup_keeps_the_cached_titles(
+    facet: FakeGitLabFacet, repo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = SessionPrRegistry("session")
+    registry.record(
+        [PullRequestRef.from_url(url) for url in (MR, OTHER_MR)],
+        relationship="created",
+        source="test",
+    )
+    registry.update_titles({OTHER_MR: "Last known"}, timestamp=1)
+    before = next(entry for entry in registry.list() if entry.url == OTHER_MR)
+
+    def broken(*_args: object) -> dict[str, tuple[str | None, bool]]:
+        raise RuntimeError("forge unavailable")
+
+    monkeypatch.setattr(facet, "pr_titles", broken, raising=False)
+    info = pr_resource.pr_info(repo, session_id="session", pr_url=MR)
+
+    assert {pr["url"]: pr["title"] for pr in info["prs"]} == {MR: "MR 7", OTHER_MR: "Last known"}
+    assert next(entry for entry in registry.list() if entry.url == OTHER_MR) == before
+
+
 def test_reads_go_to_the_fake_facet(facet: FakeGitLabFacet, repo: str) -> None:
     pr_resource.update_session_pr(repo, "session", MR, "attach")
     facet.calls.clear()
