@@ -112,6 +112,7 @@ from omnigent.policies.types import (
     EvaluationContext,
     PolicyResult,
 )
+from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.launch_failure import RUNNER_PROCESS_CRASH
 from omnigent.runner.mcp_execution_registry import (
     MCP_OPERATION_ID_PARAM,
@@ -14248,28 +14249,31 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
-        from omnigent.server.routes.scheduled_task_permissions import request_from_agent
-
-        # Raw args an agent sends must name one mode no looser than the agent's
-        # default; a person's own picker keeps its args.
+        # Raw args from a request an agent makes must spell exactly one permission mode of
+        # the harness, no looser than the agent's default. A person's own picker keeps its args.
+        # Harnesses with no permission modes keep their args.
         if (
-            (created_by_session_id is not None or request_from_agent(request))
-            and validated_launch_args
+            validated_launch_args
             and selected_harness in PERMISSION_LAUNCH_ARGS
+            and (
+                created_by_session_id is not None
+                or ORCHESTRATION_SOURCE_HEADER in request.headers
+                or RUNNER_TUNNEL_TOKEN_HEADER in request.headers
+            )
         ):
-            raw_args_mode = mode_for_launch_args(selected_harness, validated_launch_args)
-            if raw_args_mode is None:
+            requested_mode = mode_for_launch_args(selected_harness, validated_launch_args)
+            if requested_mode is None:
                 raise OmnigentError(
-                    "terminal_launch_args from another session must be exactly one "
-                    "permission mode's args; ask for the mode with permission_mode",
+                    "terminal_launch_args from a session must be exactly one permission mode "
+                    "of the agent's harness; pass permission_mode instead",
                     code=ErrorCode.INVALID_INPUT,
                 )
             if permission_mode_exceeds_default(
-                selected_harness, raw_args_mode, agent_default_mode
+                selected_harness, requested_mode, agent_default_mode
             ):
                 raise OmnigentError(
                     "terminal_launch_args set a permission mode looser than this agent's "
-                    "default; a session created by another session can only tighten it",
+                    "default; a session can only tighten it",
                     code=ErrorCode.INVALID_INPUT,
                 )
 

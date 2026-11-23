@@ -667,16 +667,6 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             id="looser-than-agent-default",
         ),
         pytest.param("bypass", True, "running", {"yolo": False}, None, {}, id="opt-out-default"),
-        # A worker whose agent declares no default never gets a skipping mode from it.
-        pytest.param(
-            "bypassPermissions",
-            True,
-            "running",
-            {"harness": "claude-native"},
-            None,
-            {},
-            id="skipping-mode-without-agent-default",
-        ),
     ],
 )
 async def test_scheduled_origin_workers_use_the_automation_permission_mode(
@@ -743,6 +733,51 @@ async def test_scheduled_origin_workers_use_the_automation_permission_mode(
     assert worker.labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == labels.get(
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
     )
+
+
+async def test_automation_skip_mode_is_dropped_for_a_worker_with_no_declared_default(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    source, _target, _captured = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, harness="claude-native")
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        permission_mode="bypassPermissions",
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    conversations.set_labels(source["id"], {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id})
+    schedules.create_run(
+        uuid4().hex, task.id, "running", scheduled_at=1, conversation_id=source["id"], fired_at=1
+    )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": worker_agent_id, "placement": "managed"}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+
+    assert result.get("conversation_id"), result
+    worker = conversations.get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args is None
 
 
 @pytest.mark.parametrize(
@@ -1498,13 +1533,15 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
     )
 
 
-async def _upload_codex_worker(auth_client, sub_agents=None, **config) -> str:
+async def _upload_codex_worker(
+    auth_client, sub_agents=None, harness="codex-native", **config
+) -> str:
     from tests._helpers.session import post_session_bundle
     from tests.server.helpers import build_agent_bundle
 
     bundle = build_agent_bundle(
         "codex-worker",
-        executor={"config": {"harness": "codex-native", **config}},
+        executor={"config": {"harness": harness, **config}},
         sub_agents=sub_agents,
     )
     uploaded = await post_session_bundle(auth_client.post, "/v1/sessions", bundle)
@@ -1708,29 +1745,57 @@ async def test_created_session_permission_mode_can_only_tighten_the_agent_defaul
         )
 
 
-@pytest.mark.parametrize("placement", ["child", "managed"])
+async def test_agent_launch_args_for_a_harness_without_modes_are_kept(
+    auth_client, peers, db_uri, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, harness="kimi-native")
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    raw_args = ["--model", "kimi-x"]
+    response = await auth_client.post(
+        "/v1/sessions/orchestrated",
+        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+        json={
+            "agent_id": worker_agent_id,
+            "host_type": "managed",
+            "terminal_launch_args": raw_args,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    stored = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+    assert stored.terminal_launch_args == raw_args
+
+
+_BYPASS = ["--dangerously-bypass-approvals-and-sandbox"]
+_READ_ONLY = PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"]
+
+
+@pytest.mark.parametrize("placement", ["orchestrated", "child-from-agent", "child-from-person"])
 @pytest.mark.parametrize(
-    ("spec_config", "raw_args", "refusal"),
+    ("spec_config", "raw_args", "agent_accepts"),
     [
-        # Raw launch args are held to the agent's default like a requested mode.
+        # Raw launch args from an agent must spell one mode, no looser than the agent's default.
+        ({"permission_mode": "read-only"}, _BYPASS, False),
+        ({"permission_mode": "read-only"}, [*_BYPASS, "--model", "gpt-x"], False),
+        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], False),
         (
             {"permission_mode": "read-only"},
-            ["--dangerously-bypass-approvals-and-sandbox"],
-            "looser",
+            ["--ask-for-approval", "never", "--sandbox", "danger-full-access"],
+            False,
         ),
-        (
-            {"permission_mode": "read-only"},
-            PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"],
-            None,
-        ),
-        ({}, ["--dangerously-bypass-approvals-and-sandbox"], None),
-        # Args that name no single mode would replace the default's own args.
-        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], "exactly one"),
-        ({}, ["--dangerously-bypass-approvals-and-sandbox", "--verbose"], "exactly one"),
+        ({"permission_mode": "read-only"}, _READ_ONLY, True),
+        ({}, _BYPASS, True),
     ],
 )
-async def test_created_session_launch_args_are_held_to_the_agent_default(
-    auth_client, peers, db_uri, monkeypatch, placement, spec_config, raw_args, refusal
+async def test_session_launch_args_are_held_to_the_agent_default_for_agents_only(
+    auth_client, peers, db_uri, monkeypatch, placement, spec_config, raw_args, agent_accepts
 ):
     from omnigent.server.routes.sessions import routes_core
 
@@ -1744,41 +1809,31 @@ async def test_created_session_launch_args_are_held_to_the_agent_default(
     body = {"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
     headers = {}
     path = "/v1/sessions"
-    if placement == "child":
-        body["parent_session_id"] = source["id"]
-    else:
+    if placement == "orchestrated":
         path = "/v1/sessions/orchestrated"
         headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
         body["host_type"] = "managed"
+    else:
+        body["parent_session_id"] = source["id"]
+        if placement == "child-from-person":
+            # The web client carries no runner token; ``peers`` gives the client one.
+            from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
+
+            auth_client.headers.pop(RUNNER_TUNNEL_TOKEN_HEADER, None)
+            auth_client.headers.pop(ORCHESTRATION_SOURCE_HEADER, None)
 
     response = await auth_client.post(path, json=body, headers=headers)
 
-    if refusal is None:
+    if placement == "child-from-person" or agent_accepts:
+        # A person's own picker keeps its args.
         assert response.status_code == 201, response.text
+        stored = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+        assert stored.terminal_launch_args == raw_args
     else:
         assert response.status_code == 400, response.text
-        assert refusal in response.text
-
-
-async def test_persons_top_level_launch_args_are_kept(auth_client, peers, db_uri, monkeypatch):
-    from omnigent.server.routes.sessions import routes_core
-
-    store = SqlAlchemyConversationStore(db_uri)
-    worker_agent_id = await _upload_codex_worker(auth_client, permission_mode="read-only")
-
-    async def launch(**kwargs):
-        pass
-
-    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
-    # The web picker sends no runner token or source session.
-    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
-    raw_args = ["--dangerously-bypass-approvals-and-sandbox"]
-    response = await auth_client.post(
-        "/v1/sessions", json={"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
-    )
-
-    assert response.status_code == 201, response.text
-    assert store.get_conversation(response.json()["id"]).terminal_launch_args == raw_args
+        assert (
+            "looser than this agent's default" in response.text or "exactly one" in response.text
+        )
 
 
 @pytest.mark.parametrize("placement", ["child", "managed"])
