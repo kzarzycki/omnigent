@@ -4652,9 +4652,11 @@ async def test_sdk_agent_default_mode_gates_a_continued_session(
             ["--permission-mode", "bypassPermissions"],
             None,
         ),
-        ({}, ["--permission-mode", "bypassPermissions"], "--permission-mode bypassPermissions"),
-        ({}, ["--dangerously-skip-permissions"], "--dangerously-skip-permissions"),
-        ({}, ["--yolo"], "--yolo"),
+        ({}, ["--permission-mode", "bypassPermissions"], "bypassPermissions"),
+        # A creator launched into dontAsk reports the mode, so the bypass-child guard sees it.
+        ({}, ["--permission-mode", "dontAsk"], "dontAsk"),
+        ({}, ["--dangerously-skip-permissions"], "skip"),
+        ({}, ["--yolo"], "yolo"),
         (
             {},
             ["--dangerously-bypass-approvals-and-sandbox"],
@@ -4671,6 +4673,12 @@ async def test_sdk_agent_default_mode_gates_a_continued_session(
         ({"omnigent.acp.permission_mode": "auto"}, ["--dangerously-skip-permissions"], None),
         ({"omnigent.codex_native.approval_mode": "full-access"}, None, "full-access"),
         ({"omnigent.codex_native.approval_mode": "approve-for-me"}, None, None),
+        (
+            {"omnigent.codex_native.approval_mode": "approve-for-me"},
+            ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+            None,
+        ),
+        ({}, ["--sandbox", "danger-full-access", "--ask-for-approval", "never"], "full-access"),
     ],
 )
 def test_session_approval_skipping_mode(
