@@ -907,7 +907,8 @@ async def test_unpinned_spec_without_any_default_is_refused(
         # codex flag, and codex would exit before its thread starts. Codex gets
         # its own default bypass instead.
         (None, "codex-native", ["--dangerously-bypass-approvals-and-sandbox"]),
-        ("claude-native", "codex-native", ["--dangerously-bypass-approvals-and-sandbox"]),
+        # A spec that pins another harness and declares a stance is not moved to bypass.
+        ("claude-native", "codex-native", None),
     ],
 )
 async def test_spec_claude_keys_follow_the_session_harness(
