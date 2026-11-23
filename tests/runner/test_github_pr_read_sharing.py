@@ -229,12 +229,16 @@ def test_the_background_listing_reads_no_nested_lists(fake_gh: FakeGh) -> None:
     assert {"number", "title", "state", "isDraft"} <= fields
 
 
-def test_a_viewer_reads_again_after_15_seconds(
+def test_a_viewer_reads_again_only_after_the_open_pr_window(
     fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A viewer re-reads an open PR at most once a minute.
     _read(1, background=True)
     _read(1, background=False)
-    _later(monkeypatch, 15)
+    _later(monkeypatch, 59)
+    _read(1, background=False)
+    assert fake_gh.calls["pr view"] == 1
+    _later(monkeypatch, 61)
     _read(1, background=False)
     assert fake_gh.calls["pr view"] == 2
 
