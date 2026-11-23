@@ -1854,7 +1854,7 @@ function KeepThinkingExpandedControl() {
         labelId={labelId}
         descriptionId={descriptionId}
         className="flex-1"
-        description="Leave thinking notes open after the model finishes and after a reload. Click a note's header to fold it."
+        description="Leave thinking notes and status updates open in finished turns, also after a reload. Click a header to fold it."
       />
       <Switch
         aria-labelledby={labelId}
