@@ -12,7 +12,9 @@
 queue_rules:
   - name: default
     merge_method: squash
-    batch_size: 1
+    # One draft PR proves up to 5 PRs' merged tree, so `gate` runs once per batch; Mergify splits a red batch.
+    batch_size: 5
+    batch_max_wait_time: 5 minutes
     max_checks_retries: 1
     checks_timeout: 3 hours
     queue_conditions:
