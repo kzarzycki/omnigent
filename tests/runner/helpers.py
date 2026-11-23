@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,42 @@ def accept_subagent_turn(
         )
     finally:
         subagent_work.finish_subagent_child_acceptance(request)
+
+
+_TITLE_FIELD = re.compile(
+    r"(p\d+): repository\(owner: \$(o\d+), name: \$(n\d+)\) \{ pullRequest\(number: (\d+)\)"
+)
+
+
+def title_query_prs(argv: Sequence[str]) -> dict[str, tuple[str, int]] | None:
+    """The PRs a runner's batched title query asks for: ``{alias: (owner/name, number)}``.
+
+    :param argv: The ``gh`` arguments, without ``gh`` itself.
+    :returns: ``None`` when ``argv`` is not that query.
+    """
+    if list(argv[:2]) != ["api", "graphql"]:
+        return None
+    values = dict(argv[index + 1].split("=", 1) for index, arg in enumerate(argv) if arg == "-f")
+    fields = _TITLE_FIELD.findall(values.get("query", ""))
+    if not fields:
+        return None
+    return {
+        alias: (f"{values[owner]}/{values[name]}", int(number))
+        for alias, owner, name, number in fields
+    }
+
+
+def title_query_answer(pulls: Mapping[str, Mapping[str, Any] | None]) -> str:
+    """GitHub's answer to that query: each alias's ``{title, state}``, ``None`` for not found."""
+    data: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    for alias, pull in pulls.items():
+        data[alias] = {"pullRequest": dict(pull) if pull is not None else None}
+        if pull is None:
+            errors.append(
+                {"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "not found"}
+            )
+    return json.dumps({"data": data, **({"errors": errors} if errors else {})})
 
 
 class NullServerClient:

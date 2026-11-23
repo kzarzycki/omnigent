@@ -30,6 +30,8 @@ def gh_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]
         if args[:2] == ["auth", "status"]:
             hosts = {"github.com": [{"login": "me", "active": True, "state": "error"}]}
             return 0, json.dumps({"hosts": hosts}), ""
+        if args[:2] == ["auth", "token"]:
+            return 1, "", "no oauth token found for github.com"
         return 0, json.dumps({"number": 7, "state": "MERGED", "title": "t"}), ""
 
     monkeypatch.setattr(github, "_gh", gh)
@@ -77,6 +79,8 @@ def test_open_pr_is_still_read_every_time_when_no_account_can_be_bound(
 ) -> None:
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         gh_calls.append(args)
+        if args[:2] == ["auth", "token"]:
+            return 1, "", "no oauth token found for github.com"
         return 0, json.dumps({"number": 7, "state": "OPEN", "title": "t"}), ""
 
     monkeypatch.setattr(github, "_gh", gh)
