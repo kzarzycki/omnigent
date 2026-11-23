@@ -2193,6 +2193,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "kiro",
         "lakebox",
         "login",
+        "login-status",
         "opencode",
         "pane-picker",
         "pane-split",
