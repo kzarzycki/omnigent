@@ -54,6 +54,9 @@ RUNNER_LAUNCH_HARNESS_ENV_VAR = "OMNIGENT_RUNNER_LAUNCH_HARNESS"
 RUNNER_MCP_DISABLED_SERVERS_ACTIVE_HARNESSES_ENV_VAR = (
     "OMNIGENT_RUNNER_MCP_DISABLED_SERVERS_ACTIVE_HARNESSES"
 )
+# "1" when the session owner asks Claude and Codex for thinking summaries.
+# Absent when off, for CLI-local runners and from hosts that predate it.
+RUNNER_THINKING_SUMMARIES_ENV_VAR = "OMNIGENT_RUNNER_THINKING_SUMMARIES"
 # JSON-encoded ordered shell inventory discovered by the host daemon. The
 # runner uses this exact snapshot for native wrapper terminal declarations.
 RUNNER_INTERACTIVE_SHELLS_ENV_VAR = "OMNIGENT_RUNNER_INTERACTIVE_SHELLS"
@@ -123,6 +126,12 @@ def runner_mcp_disabled_servers_active_harnesses(
     from omnigent.mcp_disabled_servers import HARNESS_EXECUTORS
 
     return [harness for harness in HARNESS_EXECUTORS if harness in decoded]
+
+
+def runner_thinking_summaries(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this runner's launch asked for thinking summaries; absent or malformed is off."""
+    source = os.environ if env is None else env
+    return source.get(RUNNER_THINKING_SUMMARIES_ENV_VAR) == "1"
 
 
 def touch_connect_marker(env: Mapping[str, str] | None = None) -> None:

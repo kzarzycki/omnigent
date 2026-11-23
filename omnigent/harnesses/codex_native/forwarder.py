@@ -772,9 +772,11 @@ class _CodexForwarderState:
     # When a delta arrives for a different item, it opens a new reasoning
     # block (``started=True`` → ``response.reasoning.started``). Reset at each
     # ``turn/started`` so the next turn's first reasoning delta opens a fresh
-    # block. Reasoning is transient — it has no completed conversation item;
-    # the block finalizes when the turn's assistant message arrives.
+    # block. The block finalizes when the turn's assistant message arrives.
     reasoning_stream_item_id: str | None = None
+    # Whether completed reasoning items with text are saved as ``reasoning``
+    # conversation items; on when the session owner asks for thinking summaries.
+    persist_reasoning: bool = False
     # Latest turn whose ``running`` edge this connection published, so a turn
     # whose ``turn/started`` was missed publishes it once from its first item.
     running_reported_turn_id: str | None = None
@@ -979,7 +981,11 @@ class _CodexForwarderState:
         stream = self.child_streams.get(thread_id)
         if stream is None:
             stream = _CodexChildStream(
-                state=_CodexForwarderState(model=self.model, codex_client=self.codex_client),
+                state=_CodexForwarderState(
+                    model=self.model,
+                    codex_client=self.codex_client,
+                    persist_reasoning=self.persist_reasoning,
+                ),
                 delta_coalescer=_OutputTextDeltaCoalescer(client, session_id),
             )
             self.child_streams[thread_id] = stream
@@ -2796,6 +2802,7 @@ async def supervise_forwarder(
     client: CodexAppServerClient | None = None,
     auth: httpx.Auth | None = None,
     ap_transport: httpx.AsyncBaseTransport | None = None,
+    persist_reasoning: bool = False,
 ) -> None:
     """
     Mirror Codex app-server notifications into an Omnigent session.
@@ -2818,6 +2825,7 @@ async def supervise_forwarder(
     :param auth: Optional HTTP auth for long-lived remote sessions.
     :param ap_transport: Optional HTTP transport for the Omnigent client,
         e.g. ``httpx.MockTransport(...)`` for tests.
+    :param persist_reasoning: Save completed reasoning items that have text.
     :returns: None. Runs until cancelled or the app-server connection
         closes.
     """
@@ -2861,6 +2869,7 @@ async def supervise_forwarder(
             parent_session_id=session_id,
             codex_client=client,
             child_usage_baseline_dir=bridge_dir,
+            persist_reasoning=persist_reasoning,
         )
         side_chat.register_side_chat_forwarder(
             bridge_dir,
@@ -7348,6 +7357,10 @@ async def _handle_completed_item_inner(
     if item_type == "plan":
         await _post_plan_item(client, session_id, params, item, source_id=source_id)
         return
+    if item_type == "reasoning":
+        if forwarder_state is not None and forwarder_state.persist_reasoning:
+            await _post_reasoning_item(client, session_id, params, item, source_id=source_id)
+        return
     if _user_shell_command(item) is not None:
         await _post_user_shell_item(
             client,
@@ -8795,6 +8808,50 @@ async def _post_plan_item(
         },
         response_id=_response_id(params),
         message_id=_completed_streaming_message_id(params, item, "plan"),
+        source_id=source_id or _source_id(params, item),
+    )
+
+
+def _reasoning_blocks(value: object, block_type: str) -> list[dict[str, str]]:
+    """Convert a Codex reasoning item's string list into non-empty text blocks."""
+    if not isinstance(value, list):
+        return []
+    return [
+        {"type": block_type, "text": text}
+        for text in value
+        if isinstance(text, str) and text.strip()
+    ]
+
+
+async def _post_reasoning_item(
+    client: httpx.AsyncClient,
+    session_id: str,
+    params: _JsonObject,
+    item: _JsonObject,
+    *,
+    source_id: str | None = None,
+) -> bool:
+    """
+    Persist one completed Codex reasoning item that has summary or raw text.
+
+    :param client: HTTP client for Omnigent event posts.
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param params: Codex ``item/completed`` params.
+    :param item: Codex ``reasoning`` thread item, e.g.
+        ``{"type": "reasoning", "id": "rs_1", "summary": ["Checking"], "content": []}``.
+    :param source_id: Stable native item id used for server-side deduplication.
+    :returns: Whether an item was posted and accepted; ``False`` when it has no text.
+    """
+    summary = _reasoning_blocks(item.get("summary"), "summary_text")
+    content = _reasoning_blocks(item.get("content"), "reasoning_text")
+    if not summary and not content:
+        return False
+    return await _post_external_item(
+        client,
+        session_id,
+        item_type="reasoning",
+        item_data={"agent": _AGENT_NAME, "summary": summary, "content": content or None},
+        response_id=_response_id(params),
         source_id=source_id or _source_id(params, item),
     )
 
