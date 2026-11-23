@@ -667,6 +667,16 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
             id="looser-than-agent-default",
         ),
         pytest.param("bypass", True, "running", {"yolo": False}, None, {}, id="opt-out-default"),
+        # A worker whose agent declares no default never gets a skipping mode from it.
+        pytest.param(
+            "bypassPermissions",
+            True,
+            "running",
+            {"harness": "claude-native"},
+            None,
+            {},
+            id="skipping-mode-without-agent-default",
+        ),
     ],
 )
 async def test_scheduled_origin_workers_use_the_automation_permission_mode(
@@ -1698,22 +1708,29 @@ async def test_created_session_permission_mode_can_only_tighten_the_agent_defaul
         )
 
 
+@pytest.mark.parametrize("placement", ["child", "managed"])
 @pytest.mark.parametrize(
-    ("spec_config", "raw_args", "accepted"),
+    ("spec_config", "raw_args", "refusal"),
     [
         # Raw launch args are held to the agent's default like a requested mode.
-        ({"permission_mode": "read-only"}, ["--dangerously-bypass-approvals-and-sandbox"], False),
+        (
+            {"permission_mode": "read-only"},
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            "looser",
+        ),
         (
             {"permission_mode": "read-only"},
             PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"],
-            True,
+            None,
         ),
-        ({}, ["--dangerously-bypass-approvals-and-sandbox"], True),
-        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], True),
+        ({}, ["--dangerously-bypass-approvals-and-sandbox"], None),
+        # Args that name no single mode would replace the default's own args.
+        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], "exactly one"),
+        ({}, ["--dangerously-bypass-approvals-and-sandbox", "--verbose"], "exactly one"),
     ],
 )
-async def test_orchestrated_session_launch_args_are_held_to_the_agent_default(
-    auth_client, peers, db_uri, monkeypatch, spec_config, raw_args, accepted
+async def test_created_session_launch_args_are_held_to_the_agent_default(
+    auth_client, peers, db_uri, monkeypatch, placement, spec_config, raw_args, refusal
 ):
     from omnigent.server.routes.sessions import routes_core
 
@@ -1724,21 +1741,44 @@ async def test_orchestrated_session_launch_args_are_held_to_the_agent_default(
         pass
 
     monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
-    response = await auth_client.post(
-        "/v1/sessions/orchestrated",
-        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
-        json={
-            "agent_id": worker_agent_id,
-            "host_type": "managed",
-            "terminal_launch_args": raw_args,
-        },
-    )
+    body = {"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
+    headers = {}
+    path = "/v1/sessions"
+    if placement == "child":
+        body["parent_session_id"] = source["id"]
+    else:
+        path = "/v1/sessions/orchestrated"
+        headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
+        body["host_type"] = "managed"
 
-    if accepted:
+    response = await auth_client.post(path, json=body, headers=headers)
+
+    if refusal is None:
         assert response.status_code == 201, response.text
     else:
         assert response.status_code == 400, response.text
-        assert "looser than this agent's default" in response.text
+        assert refusal in response.text
+
+
+async def test_persons_top_level_launch_args_are_kept(auth_client, peers, db_uri, monkeypatch):
+    from omnigent.server.routes.sessions import routes_core
+
+    store = SqlAlchemyConversationStore(db_uri)
+    worker_agent_id = await _upload_codex_worker(auth_client, permission_mode="read-only")
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    # The web picker sends no runner token or source session.
+    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
+    raw_args = ["--dangerously-bypass-approvals-and-sandbox"]
+    response = await auth_client.post(
+        "/v1/sessions", json={"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
+    )
+
+    assert response.status_code == 201, response.text
+    assert store.get_conversation(response.json()["id"]).terminal_launch_args == raw_args
 
 
 @pytest.mark.parametrize("placement", ["child", "managed"])
