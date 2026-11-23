@@ -2461,7 +2461,9 @@ def _pr_compare(
 
 
 def _host_args(root: str, reference: PullRequestRef) -> list[str]:
-    if not _gh_can_read_host(root, reference.host, _pr_token(root, reference)):
+    if reference.host != "github.com" and not _gh_can_read_host(
+        root, reference.host, _pr_token(root, reference)
+    ):
         raise ValueError("Sign in to this GitHub host with gh before viewing its PRs")
     return ["--hostname", reference.host]
 
