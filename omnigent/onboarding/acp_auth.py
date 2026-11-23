@@ -34,6 +34,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+from omnigent.acp_permission_mode import validate_acp_permission_mode
 from omnigent.onboarding.provider_config import load_config
 
 # The dedicated top-level config block and the list field inside it.
@@ -68,6 +69,9 @@ class AcpAgentEntry:
         authenticates with, so an agent that reads one must name it here or it
         starts unauthenticated. Names only — values are read from the host
         environment at spawn, never stored in the config file.
+    :param permission_mode: The agent's default ACP permission mode, e.g.
+        ``"bypassPermissions"``; ``None`` keeps the server default. A session
+        that names no mode starts in it, and a stricter request still tightens it.
     """
 
     slug: str
@@ -80,6 +84,7 @@ class AcpAgentEntry:
     inject_system_prompt: bool = True
     cancel_on_abandon: bool = True
     env_passthrough: tuple[str, ...] = ()
+    permission_mode: str | None = None
 
 
 def slugify(name: str) -> str:
@@ -175,6 +180,11 @@ def acp_agents(config: dict[str, object] | None = None) -> list[AcpAgentEntry]:
         cancel_on_abandon = raw.get("cancel_on_abandon", True)
         if not isinstance(cancel_on_abandon, bool):
             raise ValueError("acp agent cancel_on_abandon must be a boolean")
+        permission_mode = raw.get("permission_mode")
+        if permission_mode is not None:
+            if not isinstance(permission_mode, str):
+                raise ValueError("acp agent permission_mode must be a string")
+            validate_acp_permission_mode(permission_mode)
         entries.append(
             AcpAgentEntry(
                 slug=slug,
@@ -187,6 +197,7 @@ def acp_agents(config: dict[str, object] | None = None) -> list[AcpAgentEntry]:
                 inject_system_prompt=inject_system_prompt,
                 cancel_on_abandon=cancel_on_abandon,
                 env_passthrough=parse_env_passthrough(raw.get("env_passthrough")),
+                permission_mode=permission_mode,
             )
         )
     return entries
@@ -253,6 +264,8 @@ def acp_agents_settings(entries: list[AcpAgentEntry]) -> dict[str, object]:
             item["cancel_on_abandon"] = False
         if e.env_passthrough:
             item["env_passthrough"] = list(e.env_passthrough)
+        if e.permission_mode:
+            item["permission_mode"] = e.permission_mode
         agents.append(item)
     return {ACP_CONFIG_KEY: {_AGENTS_FIELD: agents}}
 
