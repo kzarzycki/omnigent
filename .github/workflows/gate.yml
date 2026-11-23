@@ -3,7 +3,8 @@ name: Gate
 # Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
 # the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
 # `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
-# is nightly (fork-nightly.yml).
+# is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: it runs the
+# tests that failed, those the difference touches and newly selected ones; a pass on that rerun is a flake.
 
 on:
   pull_request:
@@ -24,6 +25,10 @@ jobs:
     if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read  # find and download an earlier run's record
+      issues: write  # comment on or open the `Flaky:` issues
     steps:
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -61,9 +66,54 @@ jobs:
           # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
+      # The newest record a gate run for this PR left (this run's earlier attempts included) whose pytest ran
+      # to its end. Finding none, or any failure here, leaves the output empty: the full selection runs.
+      - name: Find the PR's last complete gate record
+        id: earlier
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: ${{ github.event.pull_request.title }}
+          RECORDS: ${{ runner.temp }}/earlier-records
+        run: |
+          # ponytail: the PR number comes from Mergify's draft title ("merge queue: checking #<n> on ...");
+          # another title finds nothing and the full selection runs. Upgrade path: key on the PR head
+          # commits the draft contains.
+          pr=$(printf '%s\n' "$TITLE" | sed -n 's/.*checking #\([0-9][0-9]*\).*/\1/p' | head -1)
+          if [ -z "$pr" ]; then echo "No PR number in the title '$TITLE': the full selection runs."; exit 0; fi
+          created=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          { echo "$GITHUB_RUN_ID"
+            for status in failure success; do
+              gh api --paginate "repos/$GH_REPO/actions/workflows/gate.yml/runs?status=$status&created=%3E%3D$created&per_page=100" \
+                --jq ".workflow_runs[] | select(.display_title | test(\"checking #$pr([^0-9]|\$)\")) | .id" < /dev/null
+            done; } | awk '!seen[$0]++ && ++kept <= 10' > "$RUNNER_TEMP/runs"
+          while read -r run; do
+            gh api "repos/$GH_REPO/actions/runs/$run/artifacts?per_page=100" --jq \
+              '.artifacts[] | select((.name | startswith("gate-record-attempt-")) and (.expired | not))
+               | [.created_at, .workflow_run.id, .name, .workflow_run.head_sha] | @tsv' < /dev/null
+          done < "$RUNNER_TEMP/runs" | sort -r > "$RUNNER_TEMP/records"
+          while IFS=$'\t' read -r _ run name sha; do
+            dir="$RECORDS/$run-$name"
+            gh run download "$run" --name "$name" --dir "$dir" < /dev/null || continue
+            code=$(cat "$dir/exit" 2>/dev/null || true)
+            url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run/attempts/${name#gate-record-attempt-}"
+            if [ "$code" = 0 ] || [ "$code" = 1 ]; then
+              echo "Building on $url (head $sha): its pytest exited $code."
+              echo "Building on $url, whose pytest exited $code." >> "$GITHUB_STEP_SUMMARY"
+              { echo "record=$dir"; echo "run=$url"; echo "sha=$sha"; echo "pr=$pr"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Skipping $url: its pytest exited '${code:-no code}', so it didn't run to its end."
+          done < "$RUNNER_TEMP/records"
+          echo "No complete gate record for #$pr in the last 7 days: the full selection runs."
+
       # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
       - name: Run the checks
         env:
+          # run-affected-tests.sh: build on the earlier record, and write this run's.
+          AFFECTED_TESTS_SINCE: ${{ steps.earlier.outputs.record }}
+          AFFECTED_TESTS_RECORD: ${{ runner.temp }}/gate-record
           MISE_YES: "1"
           DRAFT_HEAD: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -90,3 +140,29 @@ jobs:
           if [ "$GATE_BASE" = "$DRAFT_HEAD" ]; then GATE_BASE=$BASE_SHA; fi
           echo "GATE_BASE=$GATE_BASE"
           GATE_BASE=$GATE_BASE mise run check-fast
+
+      # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
+      # its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
+      # next run reruns it. Before the upload, which carries that record.
+      - name: Record flakes on their Flaky issues
+        if: always() && steps.earlier.outputs.run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EARLIER_RECORD: ${{ steps.earlier.outputs.record }}
+          EARLIER_RUN: ${{ steps.earlier.outputs.run }}
+          EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
+          PR: ${{ steps.earlier.outputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          THIS_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/gate-record" "$EARLIER_RECORD"
+
+      - name: Upload this run's record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: gate-record-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gate-record/
+          retention-days: 7
+          if-no-files-found: ignore
