@@ -20,6 +20,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import click
@@ -126,6 +127,7 @@ from omnigent.host.runner_registry import (
 )
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.host.session_env import session_env_handoff
+from omnigent.host.text_file import MAX_TEXT_FILE_BYTES
 from omnigent.native.owner_claim import current_boot_id
 from omnigent.onboarding import harness_install
 from omnigent.onboarding.harness_install import READINESS_CLI_PROBE_TIMEOUT_S
@@ -7005,13 +7007,157 @@ async def test_dispatch_clone_repository_keeps_orphan_reaper_paused(
 # ── host.fs_request read_text_file op ───────────────────
 
 
-def _read_text_file(host: HostProcess, path: str) -> HostFsResultFrame:
-    """Run a ``read_text_file`` fs request for ``path`` through the host handler."""
+def _read_text_file(
+    host: HostProcess, path: str, params: dict[str, Any] | None = None
+) -> HostFsResultFrame:
+    """Run a ``read_text_file`` fs request for ``path`` (and range ``params``) on the host."""
     return host._handle_fs_request(
         HostFsRequestFrame(
-            request_id="rt1", op="read_text_file", workspace=path, session_id="", params={}
+            request_id="rt1",
+            op="read_text_file",
+            workspace=path,
+            session_id="",
+            params=params or {},
         )
     )
+
+
+def _range_page(host: HostProcess, path: Path, offset: int, limit: int | None) -> dict[str, Any]:
+    """Read one range of ``path`` and return its payload, asserting the read succeeded."""
+    params: dict[str, Any] = {"offset": offset}
+    if limit is not None:
+        params["limit"] = limit
+    result = _read_text_file(host, str(path), params)
+    assert result.status == "ok", result.error
+    assert result.payload is not None
+    return result.payload
+
+
+def _read_all_ranges(host: HostProcess, path: Path, limit: int | None) -> list[dict[str, Any]]:
+    """Follow ``next_offset`` from byte 0 until the end of ``path``."""
+    pages = [_range_page(host, path, 0, limit)]
+    while pages[-1]["next_offset"] is not None:
+        pages.append(_range_page(host, path, pages[-1]["next_offset"], limit))
+    return pages
+
+
+def _large_text_with_emoji_on_boundary() -> bytes:
+    """About 200 KB of UTF-8 with a 4-byte emoji straddling the 64 KiB mark."""
+    emoji = "\N{GRINNING FACE}".encode()
+    head = b"a" * (MAX_TEXT_FILE_BYTES - 2)
+    return head + emoji + "zażółć ".encode() * 2000 + b"b" * 120_000
+
+
+@pytest.mark.parametrize("limit", [None, MAX_TEXT_FILE_BYTES, 10 * MAX_TEXT_FILE_BYTES, 1000])
+def test_read_text_file_ranges_join_to_the_whole_file(tmp_path: Path, limit: int | None) -> None:
+    """Pages split at whole characters, each at most 64 KiB, join to the file's bytes."""
+    data = _large_text_with_emoji_on_boundary()
+    target = tmp_path / "report.md"
+    target.write_bytes(data)
+
+    pages = _read_all_ranges(_make_host_process(), target, limit)
+
+    page_limit = min(limit or MAX_TEXT_FILE_BYTES, MAX_TEXT_FILE_BYTES)
+    assert len(pages) > 1
+    assert all(page["size"] == len(data) for page in pages)
+    assert all(0 < page["length"] <= page_limit for page in pages)
+    assert all(len(page["content"].encode()) == page["length"] for page in pages)
+    assert [page["offset"] for page in pages[1:]] == [page["next_offset"] for page in pages[:-1]]
+    assert pages[-1]["next_offset"] is None
+    assert "".join(page["content"] for page in pages).encode() == data
+    assert pages[0]["mtime_ns"] == target.stat().st_mtime_ns
+
+
+def test_read_text_file_range_never_returns_less_than_one_character(tmp_path: Path) -> None:
+    """A limit narrower than the character at offset returns that one character."""
+    target = tmp_path / "emoji.txt"
+    target.write_text("\N{GRINNING FACE}x", encoding="utf-8")
+
+    page = _range_page(_make_host_process(), target, 0, 1)
+
+    assert (page["content"], page["length"], page["next_offset"]) == ("\N{GRINNING FACE}", 4, 4)
+
+
+@pytest.mark.parametrize("offset", [5, 6])
+def test_read_text_file_range_at_or_past_the_end_is_empty(tmp_path: Path, offset: int) -> None:
+    """An offset at or past the end returns no content and no next offset."""
+    target = tmp_path / "short.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    page = _range_page(_make_host_process(), target, offset, None)
+
+    assert (page["content"], page["length"], page["next_offset"], page["size"]) == ("", 0, None, 5)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"offset": -1}, {"limit": 0}, {"offset": 0, "limit": -5}, {"offset": "1"}, {"limit": True}],
+)
+def test_read_text_file_invalid_range_is_400(tmp_path: Path, params: dict[str, Any]) -> None:
+    """A negative offset, a limit below 1 or a non-integer is a 400 ``invalid_range``."""
+    target = tmp_path / "note.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    result = _read_text_file(_make_host_process(), str(target), params)
+
+    assert (result.status, result.error_status, result.error_code) == (
+        "error",
+        400,
+        "invalid_range",
+    )
+
+
+def test_read_text_file_range_inside_a_character_is_not_utf8(tmp_path: Path) -> None:
+    """An offset that lands inside a multi-byte character is a 400 ``not_utf8``."""
+    target = tmp_path / "note.txt"
+    target.write_text("ż", encoding="utf-8")
+
+    result = _read_text_file(_make_host_process(), str(target), {"offset": 1})
+
+    assert (result.status, result.error_status, result.error_code) == ("error", 400, "not_utf8")
+    assert result.error == "offset is inside a UTF-8 character"
+
+
+def test_read_text_file_range_reads_at_most_limit_plus_three_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A range seeks and reads its slice instead of the whole file."""
+    import builtins
+
+    from omnigent.host import text_file
+
+    target = tmp_path / "big.txt"
+    target.write_bytes(b"a" * (3 * MAX_TEXT_FILE_BYTES))
+    read_sizes: list[int] = []
+    real_open = builtins.open
+
+    def counting_open(*args: Any, **kwargs: Any) -> Any:
+        handle = real_open(*args, **kwargs)
+        real_read = handle.read
+
+        def read(size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return real_read(size)
+
+        handle.read = read
+        return handle
+
+    monkeypatch.setattr(text_file, "open", counting_open, raising=False)
+
+    page = _range_page(_make_host_process(), target, MAX_TEXT_FILE_BYTES, 100)
+
+    assert page["length"] == 100
+    assert read_sizes and all(0 <= size <= 103 for size in read_sizes)
+
+
+def test_read_text_file_range_over_non_utf8_is_400(tmp_path: Path) -> None:
+    """Bytes that are not valid UTF-8 are still a 400 ``not_utf8`` with a range."""
+    target = tmp_path / "binary.bin"
+    target.write_bytes(b"ok\xff\xfe\x00bad")
+
+    result = _read_text_file(_make_host_process(), str(target), {"offset": 0})
+
+    assert (result.status, result.error_status, result.error_code) == ("error", 400, "not_utf8")
 
 
 def test_read_text_file_returns_content_and_resolved_path(tmp_path: Path) -> None:
@@ -7038,9 +7184,10 @@ def test_read_text_file_missing_is_404(tmp_path: Path) -> None:
     assert (result.status, result.error_status) == ("error", 404)
 
 
-def test_read_text_file_directory_is_400(tmp_path: Path) -> None:
-    """A directory is a 400 that points at the listing route."""
-    result = _read_text_file(_make_host_process(), str(tmp_path))
+@pytest.mark.parametrize("params", [{}, {"offset": 0}])
+def test_read_text_file_directory_is_400(tmp_path: Path, params: dict[str, Any]) -> None:
+    """A directory is a 400 that points at the listing route, ranged or not."""
+    result = _read_text_file(_make_host_process(), str(tmp_path), params)
 
     assert (result.status, result.error_status) == ("error", 400)
     assert "/filesystem" in (result.error or "")
@@ -7057,6 +7204,7 @@ def test_read_text_file_over_limit_is_413(tmp_path: Path) -> None:
     assert _read_text_file(host, str(at_limit)).status == "ok"
     result = _read_text_file(host, str(over))
     assert (result.status, result.error_status) == ("error", 413)
+    assert "use offset/limit" in (result.error or "")
 
 
 def test_read_text_file_non_utf8_is_400(tmp_path: Path) -> None:
@@ -7082,35 +7230,42 @@ def test_read_text_file_non_utf8_is_400(tmp_path: Path) -> None:
         ".SSH/id_rsa",
     ],
 )
-def test_read_text_file_refuses_credential_paths(tmp_path: Path, relative: str) -> None:
-    """Credential basenames and anything under a .ssh directory are a 403."""
+@pytest.mark.parametrize("params", [{}, {"offset": 0, "limit": 10}])
+def test_read_text_file_refuses_credential_paths(
+    tmp_path: Path, relative: str, params: dict[str, Any]
+) -> None:
+    """Credential basenames and anything under a .ssh directory are a 403, ranged or not."""
     target = tmp_path / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("secret", encoding="utf-8")
 
-    result = _read_text_file(_make_host_process(), str(target))
+    result = _read_text_file(_make_host_process(), str(target), params)
 
     assert (result.status, result.error_status) == ("error", 403)
 
 
-def test_read_text_file_refuses_symlink_to_credential_file(tmp_path: Path) -> None:
-    """A symlink under an innocent name cannot reach a credential file."""
+@pytest.mark.parametrize("params", [{}, {"offset": 0}])
+def test_read_text_file_refuses_symlink_to_credential_file(
+    tmp_path: Path, params: dict[str, Any]
+) -> None:
+    """A symlink under an innocent name cannot reach a credential file, ranged or not."""
     secret = tmp_path / ".credentials.json"
     secret.write_text("secret", encoding="utf-8")
     link = tmp_path / "notes.txt"
     link.symlink_to(secret)
 
-    result = _read_text_file(_make_host_process(), str(link))
+    result = _read_text_file(_make_host_process(), str(link), params)
 
     assert (result.status, result.error_status) == ("error", 403)
 
 
-def test_read_text_file_refuses_non_regular_file(tmp_path: Path) -> None:
-    """A FIFO is a 400 and never blocks on open."""
+@pytest.mark.parametrize("params", [{}, {"limit": 10}])
+def test_read_text_file_refuses_non_regular_file(tmp_path: Path, params: dict[str, Any]) -> None:
+    """A FIFO is a 400 and never blocks on open, ranged or not."""
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
 
-    result = _read_text_file(_make_host_process(), str(fifo))
+    result = _read_text_file(_make_host_process(), str(fifo), params)
 
     assert (result.status, result.error_status) == ("error", 400)
 
