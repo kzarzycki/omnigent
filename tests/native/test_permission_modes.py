@@ -82,6 +82,8 @@ def test_harness_without_modes_is_refused(harness: str | None) -> None:
     ("harness", "args", "mode"),
     [
         ("codex-native", None, "default"),
+        ("codex-native", [], "default"),
+        ("devin-native", [], "normal"),
         ("codex-native", ["--dangerously-bypass-approvals-and-sandbox"], "bypass"),
         ("codex-native", PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"], "read-only"),
         ("claude-native", ["--permission-mode", "plan"], "plan"),

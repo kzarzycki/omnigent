@@ -1763,7 +1763,10 @@ _READ_ONLY = PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"]
             False,
         ),
         ({"permission_mode": "read-only"}, _READ_ONLY, True),
+        # An empty list launches the harness default, which is looser than read-only.
+        ({"permission_mode": "read-only"}, [], False),
         ({}, _BYPASS, True),
+        ({}, [], True),
     ],
 )
 async def test_session_launch_args_are_held_to_the_agent_default_for_agents_only(

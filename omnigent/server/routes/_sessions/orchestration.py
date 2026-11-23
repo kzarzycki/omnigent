@@ -14249,8 +14249,9 @@ async def _create_session_from_existing_agent(
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
         # Raw args from a request an agent makes must spell exactly one permission mode of
-        # the harness, no looser than the agent's default. A person's own picker keeps its args.
-        if validated_launch_args and (
+        # the harness, no looser than the agent's default; an empty list counts as one, since it
+        # drops the spec's mode. A person's own picker keeps its args.
+        if validated_launch_args is not None and (
             created_by_session_id is not None
             or ORCHESTRATION_SOURCE_HEADER in request.headers
             or RUNNER_TUNNEL_TOKEN_HEADER in request.headers

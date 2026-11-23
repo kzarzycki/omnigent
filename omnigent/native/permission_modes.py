@@ -105,7 +105,9 @@ def mode_for_launch_args(harness: str | None, args: list[str] | None) -> str | N
     if modes is None:
         return None
     if not args:
-        return "default" if "default" in modes else None
+        if "default" in modes:
+            return "default"
+        return next((name for name, mode_args in modes.items() if not mode_args), None)
     bypass = _BYPASS_LAUNCH_ARGS.get(harness or "")
     if bypass is not None and tuple(args) == bypass[0]:
         return bypass[1]
