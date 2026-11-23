@@ -2959,10 +2959,13 @@ def build_hook_settings(
         # for the transcript forwarder (the observer ``hook``). Append
         # a catch-all policy evaluation entry so TOOL_RESULT policies
         # fire for all tools, not just the forwarder-specific ones.
-        hooks["PostToolUse"].append({"hooks": [evaluate_policy_hook]})
+        # The tool already ran, so these only add context: run them in the
+        # background. The relay orders the next blocking evaluation after them.
+        tool_result_policy_hook: _JsonObject = {**evaluate_policy_hook, "async": True}
+        hooks["PostToolUse"].append({"hooks": [tool_result_policy_hook]})
         # A failed tool call (e.g. Bash exiting non-zero) fires
         # PostToolUseFailure instead of PostToolUse.
-        hooks["PostToolUseFailure"] = [{"hooks": [evaluate_policy_hook]}]
+        hooks["PostToolUseFailure"] = [{"hooks": [tool_result_policy_hook]}]
         # UserPromptSubmit already carries the transcript forwarder's
         # status hook (running). Append the policy hook so REQUEST-phase
         # policies gate native prompts — for native sessions this is the
@@ -9058,6 +9061,47 @@ _POLICY_PROXY_ERROR_DETAIL_MAX = 400
 _FILE_CHANGE_OBSERVER_TIMEOUT_S = 10.0
 
 
+# Claude runs the tool-result policy hooks in the background, so a blocking
+# hook that follows must wait for their label writes. Bounded by the retry
+# budget a tool-result evaluation itself gets, plus slack for a slow answer.
+_TOOL_RESULT_HOOK_EVENTS = frozenset({"PostToolUse", "PostToolUseFailure"})
+_TOOL_RESULT_BARRIER_TIMEOUT_S = 90.0
+
+
+class _ToolResultBarrier:
+    """Orders blocking policy evaluations after in-flight tool-result ones.
+
+    One per relay. Tool-result evaluations may set session labels that a
+    later tool-call or prompt policy reads, so a blocking evaluation waits
+    until every tool-result evaluation that reached the relay first is done.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._in_flight = 0
+
+    @contextlib.contextmanager
+    def evaluating(self) -> Iterator[None]:
+        """Mark one tool-result evaluation as running for the block's duration."""
+        with self._condition:
+            self._in_flight += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._in_flight -= 1
+                self._condition.notify_all()
+
+    def wait_idle(self, timeout_s: float) -> bool:
+        """Wait until no tool-result evaluation is running.
+
+        :param timeout_s: Longest wait in seconds, e.g. ``90.0``.
+        :returns: ``True`` when idle, ``False`` when the wait timed out.
+        """
+        with self._condition:
+            return self._condition.wait_for(lambda: self._in_flight == 0, timeout_s)
+
+
 def _tool_relay_handler_factory(
     token: str,
     tool_executor: ToolExecutor,
@@ -9085,6 +9129,8 @@ def _tool_relay_handler_factory(
         registry.
     :returns: A concrete :class:`BaseHTTPRequestHandler` subclass.
     """
+
+    tool_result_barrier = _ToolResultBarrier()
 
     class _ToolRelayHandler(BaseHTTPRequestHandler):
         """HTTP handler for active Omnigent tool relay calls."""
@@ -9141,6 +9187,18 @@ def _tool_relay_handler_factory(
                 self._send_json({})
                 return
             if self.path == "/hook/claude/evaluate-policy":
+                if payload.get("hook_event_name") in _TOOL_RESULT_HOOK_EVENTS:
+                    with tool_result_barrier.evaluating():
+                        self._handle_hook_evaluate(payload)
+                    return
+                if not tool_result_barrier.wait_idle(_TOOL_RESULT_BARRIER_TIMEOUT_S):
+                    _logger.warning(
+                        "policy_eval_relay: session=%s tool-result evaluation still "
+                        "running after %.0fs; evaluating the blocking hook anyway",
+                        session_id,
+                        _TOOL_RESULT_BARRIER_TIMEOUT_S,
+                        extra={"session_id": session_id},
+                    )
                 self._handle_hook_evaluate(payload)
                 return
             if self.path == "/hook/claude/event":
