@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     # import annotations`` is in effect).
     from omnigent.inner.datamodel import OSEnvSpec
 
+from omnigent.acp_cloud_environment import apply_cloud_environment_env
 from omnigent.acp_permission_mode import acp_permission_mode_from_config
 from omnigent.cli_invocation import cli_invocation
 from omnigent.entities import (
@@ -1896,6 +1897,7 @@ def _build_acp_cli_spawn_env(
     permission_mode = acp_permission_mode_from_config(spec.executor.config)
     if permission_mode is not None:
         env["HARNESS_ACP_PERMISSION_MODE"] = permission_mode
+    apply_cloud_environment_env(env, spec.executor.config)
 
     # Managed-connect support for jcode: point it at a session-private JCODE_HOME
     # (with a config.toml pinning the gateway provider) + a fresh broker bearer. A
@@ -2117,6 +2119,7 @@ def _build_acp_spawn_env(
     permission_mode = acp_permission_mode_from_config(spec.executor.config)
     if permission_mode is not None:
         env["HARNESS_ACP_PERMISSION_MODE"] = permission_mode
+    apply_cloud_environment_env(env, spec.executor.config)
     return env
 
 
