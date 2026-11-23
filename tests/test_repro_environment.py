@@ -126,6 +126,10 @@ def test_relay_requires_private_socket_directory(tmp_path):
     assert not path.exists()
 
 
+# A full collection in a busy test worker can take seconds; this waits for it, not times it.
+_COLLECTION_WAIT_S = 60
+
+
 def test_relay_preserves_half_closed_connection_during_collection():
     import asyncio
     import gc
@@ -148,7 +152,7 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     request += data
                 received.append(request)
                 request_received.set()
-                if respond_now.wait(5):
+                if respond_now.wait(_COLLECTION_WAIT_S):
                     conn.sendall(payload)
 
         async def collect():
@@ -165,7 +169,9 @@ def test_relay_preserves_half_closed_connection_during_collection():
                     client.sendall(b"request")
                     client.shutdown(socket.SHUT_WR)
                     assert request_received.wait(5)
-                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(timeout=5)
+                    asyncio.run_coroutine_threadsafe(collect(), relay.loop).result(
+                        timeout=_COLLECTION_WAIT_S
+                    )
                     respond_now.set()
                     response = b""
                     while data := client.recv(65536):

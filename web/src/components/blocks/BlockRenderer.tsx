@@ -30,6 +30,7 @@ import {
   findRevealsFor,
   useRevealedOpen,
 } from "@/components/chat/chatFindReveal";
+import { readKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 import { formatDuration } from "@/lib/relativeTime";
 import type { RenderItem } from "@/lib/renderItems";
 import type { SessionStatus } from "@/lib/types";
@@ -208,6 +209,13 @@ function hasFoldableShape(
   );
 }
 
+/** A work run with a thinking note that has text, or a status update folded with the work. */
+function holdsReadableNotes(items: RenderItem[]): boolean {
+  return items.some(
+    (item) => item.kind === "text" || (item.kind === "reasoning" && item.text.trim().length > 0),
+  );
+}
+
 /** Hide bubble actions only when settled work is its sole visible content. */
 export function rendersOnlyWorkedFold(inputs: FoldInputs): boolean {
   if (inputs.defaultExpanded) return false;
@@ -363,7 +371,9 @@ export function BlockRenderer({
           key={`worked:${segment.startIndex}`}
           workedForS={workRunCount === 1 ? workedForS : undefined}
           animateCollapse={animateCollapse}
-          defaultOpen={defaultExpanded}
+          defaultOpen={
+            defaultExpanded || (readKeepThinkingExpanded() && holdsReadableNotes(segment.items))
+          }
           revealed={revealsAllFolds || segment.items.some((item) => findReveals.has(item))}
         >
           {renderSequence(segment.items, {

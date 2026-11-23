@@ -2336,7 +2336,12 @@ async def _attach_cost_budget(
                 ):
                     raise _BudgetConflict from None
         if replace:
+            from omnigent.server.routes.session_policies import (
+                schedule_policy_change_notification,
+            )
+
             invalidate_session_policy_specs_cache(conversation_id)
+            schedule_policy_change_notification(deps.conversation_store, conversation_id)
     except _BudgetConflict:
         raise
     except Exception as exc:
