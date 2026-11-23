@@ -283,6 +283,33 @@ def _wait_for_host_online(
     raise AssertionError(f"Host {host_id!r} did not appear online within {timeout}s")
 
 
+def _assert_large_file_reads_in_pages(http_client: httpx.Client, host_id: str, home: Path) -> None:
+    """Page a ~200 KB file through the host file route and match it byte for byte.
+
+    :param http_client: Client for the live server.
+    :param host_id: The connected host's id.
+    :param home: The daemon's ``HOME``, where the file is written.
+    """
+    emoji = "\N{GRINNING FACE}".encode()
+    data = b"a" * 65534 + emoji + "zażółć\n".encode() * 100 + b"b" * 138_000
+    (home / "big.md").write_bytes(data)
+    url = f"/v1/hosts/{host_id}/files/~/big.md"
+
+    whole = http_client.get(url)
+    assert whole.status_code == 413, whole.text
+    assert "offset/limit" in whole.text
+
+    pages = [http_client.get(url, params={"offset": 0, "limit": 65536}).json()]
+    while pages[-1]["next_offset"] is not None:
+        resp = http_client.get(url, params={"offset": pages[-1]["next_offset"], "limit": 65536})
+        assert resp.status_code == 200, resp.text
+        pages.append(resp.json())
+
+    assert len(pages) == 4
+    assert all(page["size"] == len(data) and page["length"] <= 65536 for page in pages)
+    assert "".join(page["content"] for page in pages).encode() == data
+
+
 def test_host_connect_and_list(
     live_server: str,
     http_client: httpx.Client,
@@ -291,8 +318,8 @@ def test_host_connect_and_list(
 ) -> None:
     """
     Start ``omnigent connect`` as a subprocess, verify the host
-    appears in ``GET /v1/hosts`` with status online, stop it, and
-    verify it goes offline.
+    appears in ``GET /v1/hosts`` with status online, read a file over
+    64 KiB from it in pages, stop it, and verify it goes offline.
 
     This is the basic registration smoke test — if the host never
     appears online, the WS tunnel handshake or DB upsert is broken.
@@ -318,6 +345,8 @@ def test_host_connect_and_list(
             f"Expected 1 host with id {host_id!r}, got {len(matching)}. All hosts: {hosts}"
         )
         assert matching[0]["status"] == "online"
+
+        _assert_large_file_reads_in_pages(http_client, host_id, tmp_path)
 
     finally:
         proc.send_signal(signal.SIGTERM)
