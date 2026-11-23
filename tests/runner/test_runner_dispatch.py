@@ -8331,6 +8331,105 @@ async def test_session_close_rejects_top_level_target() -> None:
     assert patched is False
 
 
+@pytest.mark.asyncio
+async def test_session_close_allows_the_creator_of_an_independent_session() -> None:
+    """
+    ``sys_session_close`` lets a session close an independent session it created
+    (no parent, its own root) and still PATCHes the tombstone.
+    """
+    from omnigent.runner.tool_dispatch import _execute_session_query_tool
+
+    patched: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_target":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_target",
+                    "title": "worker one",
+                    "agent_name": "worker",
+                    "root_conversation_id": "conv_target",
+                    "parent_session_id": None,
+                    "labels": {"omnigent.created_by_session_id": "conv_caller"},
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_caller":
+            return httpx.Response(
+                200, json={"id": "conv_caller", "root_conversation_id": "conv_caller"}
+            )
+        if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_target":
+            patched.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "conv_target"})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        out = json.loads(
+            await _execute_session_query_tool(
+                "sys_session_close",
+                json.dumps({"conversation_id": "conv_target"}),
+                conversation_id="conv_caller",
+                server_client=client,
+            )
+        )
+    assert out["closed"] is True
+    assert patched["archived"] is True
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        ({"labels": {"omnigent.acp.permission_mode": "auto"}}, "auto"),
+        ({"terminal_launch_args": ["--permission-mode", "acceptEdits"]}, "acceptEdits"),
+        ({"terminal_launch_args": ["--dangerously-skip-permissions"]}, "bypassPermissions"),
+        ({"terminal_launch_args": ["--permission-mode=auto"]}, "auto"),
+        (
+            {"terminal_launch_args": ["--permission-mode", "auto", "--permission-mode", "plan"]},
+            "plan",
+        ),
+        ({"terminal_launch_args": ["--", "--dangerously-skip-permissions"]}, None),
+        ({}, None),
+    ],
+)
+def test_session_permission_mode_reads_label_then_launch_args(
+    snapshot: dict[str, Any], expected: str | None
+) -> None:
+    """``sys_session_get_info``'s ``permission_mode`` comes from the ACP label or launch args."""
+    from omnigent.runner.tool_dispatch import _session_permission_mode
+
+    assert _session_permission_mode(snapshot) == expected
+
+
+@pytest.mark.asyncio
+async def test_sys_session_get_info_reports_the_acp_permission_mode() -> None:
+    """``sys_session_get_info`` returns the session's ACP permission-mode label."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_acp":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_acp",
+                    "agent_name": "worker",
+                    "status": "idle",
+                    "labels": {"omnigent.acp.permission_mode": "auto"},
+                },
+            )
+        return httpx.Response(404, json={})
+
+    async with _session_query_client(handler) as client:
+        info = json.loads(
+            await execute_tool(
+                tool_name="sys_session_get_info",
+                arguments=json.dumps({"session_id": "conv_acp"}),
+                server_client=client,
+                conversation_id="conv_acp",
+            )
+        )
+    assert info["permission_mode"] == "auto"
+
+
 def test_agent_tools_are_runner_local() -> None:
     """
     ``sys_agent_get`` / ``sys_agent_download`` dispatch locally in the
@@ -8914,6 +9013,20 @@ async def test_sys_agent_list_merges_three_sources(tmp_path: Path) -> None:
     )
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/agents" and request.url.params.get("scope") == "user":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "ag_u",
+                            "name": "claude-cloud",
+                            "description": "Installed worker instructions",
+                            "harness": "acp:claude",
+                        }
+                    ]
+                },
+            )
         if request.url.path == "/v1/agents":
             return httpx.Response(
                 200,
@@ -8957,6 +9070,15 @@ async def test_sys_agent_list_merges_three_sources(tmp_path: Path) -> None:
             "harness": "claude",
             "available_on_host": None,
             "unavailable_reason": None,
+        }
+    ]
+    # The caller's own installed agents are launchable by agent_id.
+    assert info["user_agents"] == [
+        {
+            "agent_id": "ag_u",
+            "name": "claude-cloud",
+            "description": "Installed worker instructions",
+            "harness": "acp:claude",
         }
     ]
     # Session-bound agents carry session_id so the caller can then

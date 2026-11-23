@@ -190,6 +190,7 @@ from omnigent.host.session_slice import (
     activate_session_slice,
     load_session_slice_config,
 )
+from omnigent.host.text_file import HostTextFileError, read_text_file
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
@@ -4184,6 +4185,31 @@ class HostProcess:
         from pathlib import Path
 
         from omnigent.workspace_fs import WorkspaceReaderError, read_repository_branches
+
+        if frame.op == "read_text_file":
+            # ``workspace`` carries the file path: no workspace root exists before a session.
+            try:
+                return HostFsResultFrame(
+                    request_id=frame.request_id,
+                    status="ok",
+                    payload=read_text_file(frame.workspace),
+                )
+            except HostTextFileError as exc:
+                return HostFsResultFrame(
+                    request_id=frame.request_id,
+                    status="error",
+                    error_status=exc.status,
+                    error_code=exc.code,
+                    error=exc.message,
+                )
+            except (OSError, ValueError) as exc:
+                return HostFsResultFrame(
+                    request_id=frame.request_id,
+                    status="error",
+                    error_status=400,
+                    error_code="invalid_path",
+                    error=f"cannot read path: {exc}",
+                )
 
         try:
             expanded = os.path.expanduser(frame.workspace)
