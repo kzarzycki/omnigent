@@ -232,6 +232,7 @@ class SysAgentListTool(Tool):
             "agent_id that launches the agent directly via "
             "sys_session_create(agent_id=...) — an already-registered "
             "agent never needs its bundle downloaded or re-uploaded. "
+            "A claude-cloud caller also gets caller_agent: [its own agent]. "
             "Builtins include available_on_host (true, false, or null for unknown) "
             "and unavailable_reason; do not launch entries marked false. "
             "Use sys_agent_get with a session_agents row's session_id for "

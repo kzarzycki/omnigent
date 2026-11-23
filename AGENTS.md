@@ -241,10 +241,11 @@ fork the default for bare `gh` commands; run it once per clone (worktrees share
 it), and `mise run check:all` runs it too.
 
 Land a PR with the engineering loop's `uv run <gatekeeper skill>/scripts/approvals.py
-land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
-the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
-(head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
-other PR as a squash (`land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
+land <pr> --wait`, run from a checkout of the PR's head (its worktree). It posts
+the `land` status on the head the gates checked and adds `loop:queued`, and
+Mergify merges it: an upstream-sync PR (head `sync/*`) as a merge commit, so
+`mine` keeps upstream's history, and every other PR as a squash
+(`land.queue` and `land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
 Nothing is signed or checked against a signer list.
 The `gate` check in GitHub Actions is the proof and `land` queues the PR with Mergify,
 so no local gate is recorded first (`mise run check:all` stays the pre-push check;
