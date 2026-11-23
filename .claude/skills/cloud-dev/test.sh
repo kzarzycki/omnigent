@@ -3,7 +3,8 @@
 # FAILED; with every tool present it logs done. Both exit 0 (setup.sh says why).
 # The uv step replaces a uv older than uv.toml requires, or logs FAILED and goes on.
 # The uv warm-up syncs with the Gate's flags from the repo root; a failed or
-# timed-out warm-up is logged and still ends in done.
+# timed-out warm-up is logged and still ends in done. A gh-quota shim that fails to
+# fetch or its checksum is logged, installs nothing, and still ends in done.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -38,7 +39,7 @@ if [ -z "${POLICY_ONLY:-}" ]; then
 run() {  # run <bin dir>: setup.sh with only that dir on PATH, so installed tools can't count
   sed -e "s#/tmp/omnigent-dev-init.log#$tmp/init.log#" -e '/^export PATH=/d' \
     -e "s#/home/user#$tmp/user#g" -e 's#^warm_up_seconds=.*#warm_up_seconds=1#' "$here/setup.sh" > "$tmp/setup.sh"
-  for tool in id head sleep grep sed sort cat mv sh mkdir cp touch; do ln -sf "$(command -v "$tool")" "$1/"; done
+  for tool in id head sleep grep sed sort cat mv sh mkdir cp touch mktemp sha256sum; do ln -sf "$(command -v "$tool")" "$1/"; done
   if command -v timeout >/dev/null; then ln -sf "$(command -v timeout)" "$1/"; else stand_in_timeout "$1/timeout"; fi
   rm -f "$tmp/init.log"
   HOME="$tmp/home" PATH="$1" "$BASH" "$tmp/setup.sh" >/dev/null 2>&1
@@ -63,8 +64,11 @@ printf 'required-version = ">=0.13.4"\n' > "$tmp/user/omnigent/uv.toml"
 for t in apt-get uv npm sudo; do fake "$tmp/fail/$t" "exit 42"; done
 run "$tmp/fail"; rc=$?
 [ "$rc" = 0 ] && grep -q "FAILED, missing: uv bwrap ssh-keygen pre-commit mise$" "$tmp/init.log" \
+  && grep -q "gh-quota shim install failed" "$tmp/init.log" \
   || { echo "!! failed installs: exit $rc, log: $(cat "$tmp/init.log")"; exit 1; }
 for t in apt-get npm sudo bwrap ssh-keygen pre-commit mise; do fake "$tmp/ok/$t" "echo $t 1.0"; done
+# curl fetches files whose sums don't match the pinned ones: the shim step must refuse them
+fake "$tmp/ok/curl" 'while [ $# -gt 0 ]; do [ "$1" = -o ] && { echo tampered > "$2"; shift; }; shift; done'
 # fake_uv <path> <version> <tag> <sync step>: logs "<tag> <args>" per call, records sync's context
 fake_uv() {
   fake "$1" "echo \"$3 \$*\" >> $tmp/uv.calls; case \$1 in --version) echo \"uv $2 (fake)\";; sync) echo \"\$PWD \$OMNIGENT_SKIP_WEB_UI \$*\" > $tmp/sync.args; $4;; esac"
@@ -82,6 +86,8 @@ check() {  # check <case> <sync step of the fake uv> <expected warm-up log line>
     || { echo "!! $1: exit $rc, sync: $(cat "$tmp/sync.args" 2>/dev/null), log: $(cat "$tmp/init.log")"; exit 1; }
 }
 check "satisfying uv" "exit 0" "uv warm-up done in"
+grep -q "gh-quota shim install failed" "$tmp/init.log" && [ ! -e "$tmp/home/.local/share/gh-quota" ] \
+  || { echo "!! gh-quota: a checksum mismatch installed or went unlogged: $(cat "$tmp/init.log")"; exit 1; }
 [ ! -e "$tmp/pip.ran" ] && ! grep -q '^new' "$tmp/uv.calls" && ! grep -q omnigent-dev "$tmp/home/.bashrc" \
   || { echo "!! satisfying uv was replaced"; exit 1; }
 check "failed warm-up" "exit 3" "uv warm-up FAILED with exit 3"

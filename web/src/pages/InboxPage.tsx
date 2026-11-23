@@ -147,7 +147,7 @@ import {
   HOST_OFFLINE_CODE,
   approve,
   fetchSessionItemsPage,
-  getSession,
+  getSessionSlim,
   postEvent,
 } from "@/lib/sessionsApi";
 import { userColor, userInitials } from "@/lib/userBadge";
@@ -180,6 +180,9 @@ type ReplyStatus =
 // An answer saved in the reply's own `updated_at` second leaves the row
 // unchanged, so the preview is refetched once after that second has passed.
 const SAME_SECOND_RECHECK_MS = 2000;
+// Re-read a session whose prompt is native-delivered or briefly out of step with
+// its count, until the snapshot settles.
+const INBOX_SNAPSHOT_POLL_MS = 2000;
 
 // The server's hold message promises a resend the Inbox doesn't do.
 const HOST_OFFLINE_REPLY_MESSAGE =
@@ -318,7 +321,9 @@ export function InboxPage() {
   const snapshotQueries = useQueries({
     queries: rows.map((row) => ({
       queryKey: ["inbox-elicitations", row.id, row.pending_elicitations_count, row.updated_at],
-      queryFn: () => getSession(row.id),
+      // Only the pending prompts are read, and the slim snapshot still carries
+      // them; the full one rebuilds the whole transcript on every poll.
+      queryFn: () => getSessionSlim(row.id),
       retry: 1,
       // A list poll bumps `updated_at` and so the key. Show this session's
       // last snapshot until the new one lands, so the card isn't remounted.
@@ -334,7 +339,7 @@ export function InboxPage() {
           const params = event.params as Record<string, unknown> | undefined;
           return params?.native_delivery !== undefined;
         })
-          ? 1000
+          ? INBOX_SNAPSHOT_POLL_MS
           : false,
     })),
   });

@@ -8760,6 +8760,37 @@ def create_runner_app(
             await _forward_session_ended(conversation_id)
             return Response(status_code=204)
 
+        if body_type == "policy_change":
+            # A policy list changed on the server: close any no-policy ALLOW
+            # window the session's native hooks are reusing.
+            harness = _session_harness_name(conversation_id)
+            if harness not in ("claude-native", "codex-native"):
+                return Response(status_code=204)
+            from omnigent.native import policy_allow_cache
+
+            try:
+                bridge_dir = (
+                    await _claude_prompt_bridge_dir(conversation_id)
+                    if harness == "claude-native"
+                    else await _codex_native_bridge_dir_for_session(conversation_id)
+                )
+                await asyncio.to_thread(policy_allow_cache.invalidate, bridge_dir)
+            except (OSError, httpx.HTTPError) as exc:
+                _logger.warning(
+                    "policy change: could not close the allow window for session=%s",
+                    conversation_id,
+                    exc_info=True,
+                    extra={"session_id": conversation_id},
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "policy_allow_cache_invalidate_failed",
+                        "detail": _client_safe_error_detail(exc, context="policy change"),
+                    },
+                )
+            return Response(status_code=204)
+
         if body_type == "effort_change":
             harness = _session_harness_name(conversation_id)
             effort = body.get("effort") if isinstance(body, dict) else None
