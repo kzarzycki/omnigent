@@ -109,9 +109,12 @@ def _isolated_model_catalog_store(
 
 @pytest.fixture(autouse=True)
 def _isolated_github_read_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Give each test an empty GitHub read cache, in memory and on disk."""
+    """Give each test an empty GitHub read cache, in memory and on disk, and no ambient
+    gh token (CI sets ``GH_TOKEN``), so a read's identity comes only from the test."""
     github_resource._preview_cache.clear()
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
