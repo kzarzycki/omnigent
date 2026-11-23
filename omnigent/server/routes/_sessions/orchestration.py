@@ -99,13 +99,19 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
-from omnigent.native.permission_modes import APPROVAL_SKIPPING_PERMISSION_MODES
+from omnigent.native.permission_modes import (
+    check_permission_mode_not_looser,
+    launch_args_for_mode,
+    mode_for_launch_args,
+    permission_mode_exceeds_default,
+)
 from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import (
     ElicitationRequest,
     EvaluationContext,
     PolicyResult,
 )
+from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.launch_failure import RUNNER_PROCESS_CRASH
 from omnigent.runner.mcp_execution_registry import (
     MCP_OPERATION_ID_PARAM,
@@ -294,7 +300,6 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _unbound_managed_launch_tasks,
     get_caps,
     get_server_runner_router,
-    session_approval_skipping_mode,
     session_stream,
     set_server_runner_router,
 )
@@ -302,7 +307,10 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
+    _CODEX_DEFAULT_LAUNCH_ARGS,
+    _CODEX_NATIVE_HARNESS,
     SessionLiveness,
+    _agent_default_permission_mode,
     _ancestor_session_ids,
     _antigravity_subagent_labels_from_body,
     _antigravity_subagent_title,
@@ -416,6 +424,7 @@ from omnigent.server.routes._sessions.helpers import (
     _session_status_with_child_rollup,
     _SessionEventDispatchResult,
     _signal_terminal_resolved_harness_elicitation,
+    _spec_declares_stance,
     _spec_harness,
     _stable_id_reuse_is_exact_retry,
     _stop_session_via_runner,
@@ -493,6 +502,7 @@ from omnigent.spec.types import (
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
     PINNED_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
@@ -14115,39 +14125,38 @@ async def _create_session_from_existing_agent(
     # An ACP session carries its mode as a label its ACP builder reads; every other
     # harness turns it into launch args.
     acp_permission_mode: str | None = None
-    if body.permission_mode is not None and canonicalize_harness(selected_harness) == "acp":
+    is_acp_session = canonicalize_harness(selected_harness) == "acp"
+    # The agent's definition is the ceiling a request can only tighten.
+    agent_default_mode = _agent_default_permission_mode(
+        selection_spec, selected_harness, headless=bool(body.sub_agent_name)
+    )
+    if (
+        body.permission_mode is not None
+        and not is_acp_session
+        and body.terminal_launch_args is not None
+    ):
+        raise OmnigentError(
+            "permission_mode can't be combined with terminal_launch_args",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if body.permission_mode is not None:
         try:
-            acp_permission_mode = validate_acp_permission_mode(body.permission_mode)
-        except ValueError as exc:
-            raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
-        # An agent picks this value, and text it reads can steer it, so it can't skip
-        # approval, unless its creator already runs without approval.
-        creator_id = created_by_session_id or body.parent_session_id
-        if acp_permission_mode in APPROVAL_SKIPPING_PERMISSION_MODES and creator_id is not None:
-            creator = await asyncio.to_thread(conversation_store.get_conversation, creator_id)
-            creator_mode = session_approval_skipping_mode(creator) if creator else None
-            # ``dontAsk`` denies what it would ask about, so it grants no approval to pass on.
-            if creator_mode is None or creator_mode == "dontAsk":
-                raise OmnigentError(
-                    f"permission_mode {acp_permission_mode!r} skips approval, which a session "
-                    "created by another session can use only when its creator already skips "
-                    "approval",
-                    code=ErrorCode.INVALID_INPUT,
+            if is_acp_session:
+                acp_permission_mode = validate_acp_permission_mode(body.permission_mode)
+            check_permission_mode_not_looser(
+                "acp" if is_acp_session else selected_harness,
+                body.permission_mode,
+                agent_default_mode,
+            )
+            if not is_acp_session:
+                permission_launch_args = launch_args_for_mode(
+                    selected_harness, body.permission_mode
                 )
-    elif body.permission_mode is not None:
-        from omnigent.native.permission_modes import created_session_launch_args
-
-        if body.sub_agent_name or body.terminal_launch_args is not None:
-            raise OmnigentError(
-                "permission_mode can't be combined with terminal_launch_args or sub_agent_name",
-                code=ErrorCode.INVALID_INPUT,
-            )
-        try:
-            permission_launch_args = created_session_launch_args(
-                selected_harness, body.permission_mode
-            )
         except ValueError as exc:
             raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+    elif is_acp_session:
+        # No mode asked: the session gets the agent's own default.
+        acp_permission_mode = agent_default_mode
 
     # A blocked default is refused, not run silently; checked before any worktree exists.
     await refuse_blocked_start_defaults(
@@ -14197,41 +14206,32 @@ async def _create_session_from_existing_agent(
 
     # Native-terminal pass-through args.
     #
-    # Named sub-agent creates (``body.sub_agent_name`` set) DERIVE these
-    # from the trusted, server-loaded sub-spec only — any caller-supplied
-    # ``body.terminal_launch_args`` is ignored. This is the YOLO seam:
-    # claude-native maps ``permission_mode`` to ``--permission-mode``,
-    # codex-native defaults to full bypass
-    # (``--dangerously-bypass-approvals-and-sandbox``), and cursor-native
-    # defaults to ``--yolo`` so a headless worker can edit/run unattended
-    # without stalling on native approval prompts (opt out with
-    # ``yolo: false``). A caller cannot inject launch wiring by smuggling
-    # args through the spawn body.
+    # Named sub-agent creates (``body.sub_agent_name`` set) derive them from the
+    # trusted, server-loaded sub-spec only; a caller-supplied
+    # ``body.terminal_launch_args`` is ignored. The spec's declared mode, else the
+    # harness default (codex-native and, for a named worker, cursor-native bypass
+    # unless ``yolo: false``), is the agent's default.
     #
-    # Sessions that resolve their own agent (top-level sessions and the
-    # manual Add Agent child flow where ``sub_agent_name`` is null) keep
-    # the validated body args (e.g. ``["--permission-mode",
-    # "bypassPermissions"]`` from the web permission-mode selector). The
-    # flat-list shape plus this bounds check is the security boundary;
-    # mirrors the multipart create + PATCH paths. A ``permission_mode``
-    # (from ``sys_session_create``) maps to its harness's args instead, and
-    # never to a mode that skips approval. When the body carries neither,
-    # the agent's own trusted spec seeds them below — explicit opt-ins
-    # only, never the headless worker default bypass.
+    # Sessions that resolve their own agent (top-level and the manual Add Agent
+    # flow where ``sub_agent_name`` is null) keep the validated body args from the
+    # web permission-mode selector. A ``permission_mode`` maps to its harness's
+    # args instead and may not be looser than the agent's default. With neither,
+    # the agent's own spec seeds them below.
     sub_spec: AgentSpec | None = None
+    launch_args_spec_consulted = False
     if body.sub_agent_name:
         sub_spec = _resolve_subagent_spec(
             agent=agent,
             sub_agent_name=body.sub_agent_name,
             agent_cache=agent_cache,
         )
+        launch_args_spec_consulted = sub_spec is not None and (
+            not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
+        )
         try:
             validated_launch_args = (
                 _derive_terminal_launch_args_from_spec(sub_spec, harness=selected_harness)
-                if sub_spec is not None
-                and (
-                    not spec_names_harness(sub_spec) or _spec_harness(sub_spec) == selected_harness
-                )
+                if launch_args_spec_consulted
                 else None
             )
         except ValueError as exc:
@@ -14239,6 +14239,9 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args in sub-agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        if body.permission_mode is not None and not is_acp_session:
+            # Already held to the child's own default above.
+            validated_launch_args = permission_launch_args
     elif body.permission_mode is not None and acp_permission_mode is None:
         validated_launch_args = permission_launch_args
     else:
@@ -14249,6 +14252,29 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        # Raw args from a request an agent makes must spell exactly one permission mode of
+        # the harness, no looser than the agent's default; an empty list counts as one, since it
+        # drops the spec's mode. A person's own picker keeps its args.
+        if validated_launch_args is not None and (
+            created_by_session_id is not None
+            or ORCHESTRATION_SOURCE_HEADER in request.headers
+            or RUNNER_TUNNEL_TOKEN_HEADER in request.headers
+        ):
+            requested_mode = mode_for_launch_args(selected_harness, validated_launch_args)
+            if requested_mode is None:
+                raise OmnigentError(
+                    "terminal_launch_args from a session must be exactly one permission mode "
+                    "of the agent's harness; pass permission_mode instead",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if permission_mode_exceeds_default(
+                selected_harness, requested_mode, agent_default_mode
+            ):
+                raise OmnigentError(
+                    "terminal_launch_args set a permission mode looser than this agent's "
+                    "default; a session can only tighten it",
+                    code=ErrorCode.INVALID_INPUT,
+                )
 
     # Workers an automation's run starts are unattended like the run itself, so they
     # use the automation's permission mode instead of their agent's default. A mode
@@ -14264,6 +14290,15 @@ async def _create_session_from_existing_agent(
             user_id=user_id,
             harness=selected_harness,
         )
+    # An automation's mode may tighten the worker's agent default but never widen it.
+    if automation_launch_options is not None and permission_mode_exceeds_default(
+        selected_harness,
+        "bypass"
+        if CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY in automation_launch_options[1]
+        else mode_for_launch_args(selected_harness, automation_launch_options[0]),
+        agent_default_mode,
+    ):
+        automation_launch_options = None
     automation_permission_labels: dict[str, str] = {}
     if automation_launch_options is not None:
         validated_launch_args, automation_permission_labels = automation_launch_options
@@ -14307,6 +14342,7 @@ async def _create_session_from_existing_agent(
         and own_spec is not None
         and (not spec_names_harness(own_spec) or _spec_harness(own_spec) == selected_harness)
     ):
+        launch_args_spec_consulted = True
         try:
             validated_launch_args = _derive_terminal_launch_args_from_spec(
                 own_spec, headless_defaults=False, harness=selected_harness
@@ -14316,6 +14352,18 @@ async def _create_session_from_existing_agent(
                 f"invalid terminal_launch_args in agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+
+    # No spec spoke for this harness (not loaded, or it names another one, as for a
+    # named child overridden to codex): codex still gets the default bypass stance.
+    if (
+        selected_harness == _CODEX_NATIVE_HARNESS
+        and validated_launch_args is None
+        and not launch_args_spec_consulted
+        and body.permission_mode is None
+        and not (selection_spec is not None and _spec_declares_stance(selection_spec))
+        and (body.sub_agent_name or needs_launch_args_from_spec)
+    ):
+        validated_launch_args = list(_CODEX_DEFAULT_LAUNCH_ARGS)
 
     if reasoning_effort is None:
         effort_spec: AgentSpec | None = sub_spec if sub_spec is not None else own_spec
@@ -14798,8 +14846,8 @@ def _create_session_from_bundle(
         metadata = metadata.model_copy(update={"terminal_launch_args": terminal_launch_args})
     elif metadata.terminal_launch_args is None:
         # Top-level bundle create (the ``omnigent run <dir>`` shape): honor the
-        # spec's explicit bypass opt-ins (e.g. codex-native ``yolo: true``);
-        # an interactive session never inherits the headless default bypass.
+        # spec's declared mode and bypass opt-ins (e.g. codex-native ``yolo: true``);
+        # codex-native bypasses by default here too, other harnesses only on an opt-in.
         try:
             terminal_launch_args = _derive_terminal_launch_args_from_spec(
                 spec, headless_defaults=False
