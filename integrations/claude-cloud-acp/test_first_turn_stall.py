@@ -61,6 +61,17 @@ def test_stalled_first_start_is_not_adopted_by_next_start_of_same_prompt(cloud):
     assert bridge.SESSIONS["acp-b"].cloud_id == "session_00000000001"
 
 
+def test_same_session_retry_after_a_stalled_start_creates_a_new_cloud_session(cloud):
+    start("acp-a")
+    with pytest.raises(RuntimeError, match=r"no output"):
+        bridge.run_turn("acp-a", BRIEF)
+    retry = bridge.SESSIONS["acp-a"]
+    retry.reader = threading.current_thread()
+    retry.events.put({"sequence_num": "1", "payload": {"type": "result"}})
+    assert bridge.run_turn("acp-a", BRIEF) == "end_turn"
+    assert retry.cloud_id == "session_00000000001", cloud
+
+
 @pytest.mark.usefixtures("cloud")
 def test_first_turn_error_names_session_and_setup_output():
     start("acp-a", {"type": "env_manager_log", "data": {"content": "npm ci running"}})

@@ -1323,6 +1323,8 @@ def run_turn(acp_id: str, text: str) -> str:
         if isinstance(exc, SessionStalled) and not exc.started:
             # Never started: another start of the same prompt must not adopt it.
             forget_unstarted(s)
+            fresh = SESSIONS[acp_id] = Session(s.cwd, acp_id)
+            fresh.mcp, fresh.model, fresh.effort = s.mcp, s.model, s.effort
         # Omnigent drops a failed turn's output, marker included, so the error names it.
         if s.cloud_id and s.cloud_id not in str(exc):
             raise RuntimeError(
@@ -1331,6 +1333,7 @@ def run_turn(acp_id: str, text: str) -> str:
         raise
     finally:
         # Joined before the prompt's response goes out, so no update follows it.
+        s.created_here = False  # only the turn that created the cloud session is a first turn
         turn_done.set()
         beat.join()
         s.running = False
