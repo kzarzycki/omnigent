@@ -3641,6 +3641,7 @@ _SESSION_CREATE_FIELDS = (
     ("model", "model_override"),
     ("reasoning_effort", "reasoning_effort"),
     ("permission_mode", "permission_mode"),
+    ("cloud_environment_id", "cloud_environment_id"),
 )
 
 
@@ -3667,6 +3668,7 @@ def _build_session_create_body(
     model: object = None,
     reasoning_effort: object = None,
     permission_mode: object = None,
+    cloud_environment_id: object = None,
 ) -> _JsonObject:
     """
     Build the JSON ``POST /v1/sessions`` body for ``sys_session_create``.
@@ -3693,6 +3695,8 @@ def _build_session_create_body(
         written as ``reasoning_effort`` on the session.
     :param permission_mode: Optional native permission mode, e.g.
         ``"approve-for-me"``; the server maps it to the harness's launch args.
+    :param cloud_environment_id: Optional Claude cloud environment id, e.g.
+        ``"env_01AbCdEfGhIjKlMn"``, for an ``acp:claude-cloud`` agent.
     :returns: The JSON request body.
     """
     return {
@@ -3704,6 +3708,7 @@ def _build_session_create_body(
                 "model": model,
                 "reasoning_effort": reasoning_effort,
                 "permission_mode": permission_mode,
+                "cloud_environment_id": cloud_environment_id,
             }
         ),
     }
@@ -4052,6 +4057,16 @@ async def _execute_session_create(
         if has_config_path:
             # The bundled create doesn't copy a workflow's plan into the journal.
             return json.dumps({"error": "workflow_id requires agent_id"})
+    cloud_environment_id = args.get("cloud_environment_id")
+    if cloud_environment_id is not None:
+        from omnigent.acp_cloud_environment import validate_cloud_environment_id
+
+        if has_config_path:
+            return json.dumps({"error": "cloud_environment_id requires agent_id"})
+        try:
+            validate_cloud_environment_id(str(cloud_environment_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
     if has_config_path:
         return await _session_create_from_config_path(
             str(config_path),
@@ -4069,6 +4084,7 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
         permission_mode=permission_mode,
+        cloud_environment_id=cloud_environment_id,
     )
     if workflow_id is not None:
         body["workflow_id"] = workflow_id
@@ -6452,6 +6468,27 @@ def _session_permission_mode(snap: _JsonObject) -> str | None:
     return _claude_launch_permission_mode([a for a in args if isinstance(a, str)])
 
 
+def _optional_int(value: object) -> int | None:
+    """Return *value* when it is a plain integer, else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _visible_status(status: object, pending_count: int) -> object:
+    """
+    The status a caller of the session tools sees.
+
+    A running session whose input is held by an approval prompt reads
+    ``awaiting_approval`` so a poller does not take it for working; every other
+    status, and a session with no prompt, is unchanged. The server's own status
+    value is not touched.
+
+    :param status: The session's stored status, e.g. ``"running"``.
+    :param pending_count: Open approval prompts and questions, e.g. ``1``.
+    :returns: ``"awaiting_approval"`` or *status* as given.
+    """
+    return "awaiting_approval" if status == "running" and pending_count > 0 else status
+
+
 async def _session_get_info_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -6517,7 +6554,10 @@ async def _session_get_info_via_rest(
     return json.dumps(
         {
             "session_id": snap.get("id"),
-            "status": snap.get("status"),
+            "status": _visible_status(
+                snap.get("status"),
+                max(len(pending), _optional_int(snap.get("pending_elicitations_count")) or 0),
+            ),
             # Persisted conversation activity is distinct from lifecycle
             # status: repeated polls with an unchanged value let an
             # orchestrator detect a running session that is not advancing.
@@ -8107,7 +8147,9 @@ async def _collect_global_sessions(
                 # above still receives the caller's raw argument unchanged.
                 "agent_name": public_agent_name(_optional_string(r.get("agent_name"))),
                 "title": r.get("title"),
-                "status": r.get("status"),
+                "status": _visible_status(
+                    r.get("status"), _optional_int(r.get("pending_elicitations_count")) or 0
+                ),
                 "runner_id": r.get("runner_id"),
                 "runner_online": _RUNNER_ONLINE_SIZING_PLACEHOLDER,
                 "parent_session_id": r.get("parent_session_id"),

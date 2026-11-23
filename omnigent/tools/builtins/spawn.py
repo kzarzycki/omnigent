@@ -1160,6 +1160,15 @@ class SysSessionCreateTool(Tool):
                                 "agent's default."
                             ),
                         },
+                        "cloud_environment_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional Claude cloud environment id (form 'env_01...', "
+                                "agent_id only) for an acp:claude-cloud agent: the cloud "
+                                "session starts in that environment. Omit to use the "
+                                "bridge's default. A malformed id is refused."
+                            ),
+                        },
                         "permission_mode": {
                             "type": "string",
                             "description": (
@@ -1167,9 +1176,8 @@ class SysSessionCreateTool(Tool):
                                 "harness's vocabulary, e.g. Claude Code 'auto' or Codex "
                                 "'approve-for-me' (agent_id only). Modes that skip "
                                 "approval, such as 'bypassPermissions' or 'full-access', "
-                                "are refused, except an ACP agent's 'bypassPermissions' "
-                                "when this session runs in it too. Omit to use the agent's "
-                                "default."
+                                "are refused unless the agent's own default is as loose. "
+                                "Omit to use the agent's default."
                             ),
                         },
                         "workflow_id": {
