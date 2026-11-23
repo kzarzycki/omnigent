@@ -32,6 +32,8 @@ B = "https://github.com/example/two/pull/42"
 @pytest.fixture
 def tracked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)  # an ambient token would bind a cache identity
     monkeypatch.setattr(github.shutil, "which", lambda _: "/bin/gh")
     monkeypatch.setattr(github._config, "github_account_preference", lambda _: None)
     monkeypatch.setattr(github, "_list_accounts", lambda _: (True, []))
