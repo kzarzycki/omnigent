@@ -6,9 +6,13 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { writeKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 import { ReasoningView } from "./ReasoningView";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe("ReasoningView — expandable gating", () => {
   it("a settled section with empty text is NOT expandable", () => {
@@ -127,5 +131,23 @@ describe("ReasoningView — header preview", () => {
   it("falls back to the duration label when a settled thought has no text", () => {
     render(<ReasoningView text="" isStreaming={false} duration={3} />);
     expect(screen.getByText("Thought for 3.0 seconds")).toBeTruthy();
+  });
+});
+
+describe("ReasoningView — keep thinking expanded", () => {
+  it("shows a settled section's text without a click when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="Considered the options." isStreaming={false} duration={2.5} />);
+    // The header previews the first line, so check the trigger's state rather than the text.
+    const trigger = screen.getByRole("button");
+    expect(trigger.getAttribute("data-state")).toBe("open");
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("data-state")).toBe("closed");
+  });
+
+  it("keeps a settled empty section a flat header when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="" isStreaming={false} duration={undefined} />);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });
