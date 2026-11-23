@@ -61,6 +61,7 @@ from omnigent.server.feature_flags import FeatureFlags, McpDisabledServersGate, 
 
 if TYPE_CHECKING:
     from omnigent.entities import Conversation
+    from omnigent.stores.host_store import Host
 
 _logger = logging.getLogger(__name__)
 
@@ -692,6 +693,12 @@ class HostRegistry:
         # Re-checks a machine-owned session before any runner launch; see
         # ``omnigent.server.routes._machine_start.MachineLaunchGuard``.
         self.machine_launch_guard: Callable[[Conversation], Awaitable[None]] | None = None
+        # Refuses a local work session on an orchestration-only host; see
+        # ``omnigent.server.orchestration_hosts``.
+        self.orchestration_launch_guard: Callable[[Conversation, str], Awaitable[None]] | None = (
+            None
+        )
+        self.orchestration_host_check: Callable[[Host, Conversation], None] | None = None
 
     def mcp_disabled_servers_active_harnesses(self) -> list[str] | None:
         """Resolve launch activation; omit the wire field when no harness is active."""
