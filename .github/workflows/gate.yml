@@ -8,6 +8,8 @@ name: Gate
 on:
   pull_request:
     branches: [mine]
+    # `closed` joins the PR's concurrency group, so a closed draft's run is cancelled, not left running.
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -18,8 +20,8 @@ concurrency:
 
 jobs:
   gate:
-    # Mergify's draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
-    if: startsWith(github.head_ref, 'mergify/merge-queue/')
+    # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
+    if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -63,8 +65,8 @@ jobs:
       - name: Run the checks
         env:
           MISE_YES: "1"
-          # Mergify's draft PR diffs against the base branch tip.
-          GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          DRAFT_HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           OMNIGENT_SKIP_WEB_UI: "true"
           # The full suite (run on a uv.lock change) needs ~200 min on the 4-core runner; stays under the 240-min job timeout.
           AFFECTED_TESTS_WALL_SECONDS: "13800"
@@ -75,5 +77,9 @@ jobs:
           GIT_AUTHOR_EMAIL: gate@example.invalid
           GIT_COMMITTER_NAME: gate
           GIT_COMMITTER_EMAIL: gate@example.invalid
+        # A draft's head is "Merge of PR <n>" on top of the PRs queued ahead. Diff from its first parent,
+        # so a PR selects only its own tests; the PRs ahead run theirs on their own drafts.
         run: |
-          mise run check-fast
+          if git rev-parse -q --verify "$DRAFT_HEAD^2" >/dev/null; then GATE_BASE=$(git rev-parse "$DRAFT_HEAD^1"); else GATE_BASE=$BASE_SHA; fi
+          echo "GATE_BASE=$GATE_BASE"
+          GATE_BASE=$GATE_BASE mise run check-fast
