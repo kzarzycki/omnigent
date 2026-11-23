@@ -232,12 +232,13 @@ def test_the_background_listing_reads_no_nested_lists(fake_gh: FakeGh) -> None:
 def test_a_viewer_reads_again_only_after_the_open_pr_window(
     fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A viewer re-reads an open PR at most once a minute.
     _read(1, background=True)
     _read(1, background=False)
-    _later(monkeypatch, github._OPEN_PR_TTL_SECONDS - 1)
+    _later(monkeypatch, 59)
     _read(1, background=False)
     assert fake_gh.calls["pr view"] == 1
-    _later(monkeypatch, github._OPEN_PR_TTL_SECONDS + 1)
+    _later(monkeypatch, 61)
     _read(1, background=False)
     assert fake_gh.calls["pr view"] == 2
 
