@@ -11438,6 +11438,12 @@ def _derive_terminal_launch_args_from_spec(
     return None
 
 
+def _spec_declares_stance(spec: AgentSpec) -> bool:
+    """Whether the spec names a permission mode or a ``yolo`` flag, whatever its harness."""
+    config = spec.executor.config
+    return config.get("permission_mode") is not None or config.get("yolo") is not None
+
+
 def _agent_default_permission_mode(
     spec: AgentSpec | None, harness: str | None, *, headless: bool = False
 ) -> str | None:
@@ -11464,7 +11470,10 @@ def _agent_default_permission_mode(
     if canonical == "acp":
         return declared if isinstance(declared, str) and declared in ACP_PERMISSION_MODES else None
     if spec is None or (spec_names_harness(spec) and _spec_harness(spec) != canonical):
-        # No spec speaks for this harness: codex keeps its own default stance.
+        # No spec speaks for this harness: codex keeps its own default stance, unless the
+        # spec declares a stance of its own, which an override must not turn into bypass.
+        if spec is not None and _spec_declares_stance(spec):
+            return None
         args = list(_CODEX_DEFAULT_LAUNCH_ARGS) if canonical == _CODEX_NATIVE_HARNESS else None
         return mode_for_launch_args(canonical, args) if args else None
     if isinstance(declared, str) and declared in PERMISSION_MODE_STRICTNESS.get(

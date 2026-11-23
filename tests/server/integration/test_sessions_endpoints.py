@@ -4281,6 +4281,30 @@ async def test_named_child_overridden_to_codex_keeps_an_explicit_default_mode(
     assert response.json()["terminal_launch_args"] is None
 
 
+@pytest.mark.parametrize("fields", [{}, {"permission_mode": "bypass"}])
+async def test_harness_override_cannot_turn_a_declared_stance_into_codex_bypass(
+    client: httpx.AsyncClient, fields: dict[str, Any]
+) -> None:
+    """A spec that declares a stance keeps it off the codex default when the harness changes."""
+    agent = await create_test_agent(
+        client,
+        name="claude-plan-codex-override",
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-native", "permission_mode": "plan"},
+        },
+    )
+    response = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "harness_override": "codex-native", **fields},
+    )
+    if fields:
+        assert response.status_code == 400, response.text
+    else:
+        assert response.status_code == 201, response.text
+        assert response.json()["terminal_launch_args"] != _CODEX_BYPASS_ARGS
+
+
 _CODEX_OPT_OUTS = [{"yolo": False}, {"permission_mode": "default"}]
 
 
