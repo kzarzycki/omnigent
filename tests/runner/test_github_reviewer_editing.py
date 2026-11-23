@@ -142,6 +142,7 @@ def test_review_candidate_failures_are_user_facing(
 
 def test_enterprise_reviewers_require_a_signed_in_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(github, "_list_accounts", lambda _root: (True, [{"host": "github.com"}]))
+    monkeypatch.setattr(github, "_active_gh_token", lambda _root, _host: None)  # no login there
     monkeypatch.setattr(github, "_gh", _fake_gh([], []))
     reference = PullRequestRef.from_url(ENTERPRISE_PR_URL)
     octocat = ReviewerRef(login="octocat", kind="user")
