@@ -38,7 +38,6 @@ while IFS= read -r test; do
     url=$(gh api "repos/$GH_REPO/issues/$number/comments" -f body="$body" --jq .html_url < /dev/null) || url=
   else
     url=$(gh api "repos/$GH_REPO/issues" -f title="$title" -f body="$body" -f 'labels[]=bug' --jq .html_url < /dev/null) || url=
-    [ -z "$url" ] || printf '%s\t%s\n' "${url##*/}" "$title" >> "$work/open-issues"
   fi
   if [ -n "$url" ]; then
     echo "Flaky: $test: $url"
