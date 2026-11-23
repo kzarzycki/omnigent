@@ -12,6 +12,8 @@ since=${AFFECTED_TESTS_SINCE:-}
 record=${AFFECTED_TESTS_RECORD:-}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+# No exit code until pytest ends, so a run that dies early leaves a record nothing builds on.
+[ -z "$record" ] || { mkdir -p "$record" && rm -f "$record/exit"; }
 targets=$(python3 "$selector")
 run=$targets
 : > "$work/candidates"
@@ -25,8 +27,6 @@ if [ -n "$since" ]; then
   cat "$work/why" >&2
 fi
 if [ -n "$record" ]; then
-  mkdir -p "$record"
-  rm -f "$record/exit"
   git ls-tree -r -z HEAD > "$record/tree"
   printf '%s\n' "$targets" > "$record/selected"
   printf '{}\n' > "$record/lastfailed.json"

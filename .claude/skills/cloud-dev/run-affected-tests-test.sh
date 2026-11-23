@@ -17,7 +17,8 @@ case "\$1" in
       echo "affected tests: flake candidate: tests/example_test.py::test_a" >&2
       echo "tests/example_test.py::test_a"
     else
-      echo tests/example_test.py
+      [ -z "\${FULL_FAILS:-}" ] || exit 3
+      [ -n "\${SELECTS_NOTHING:-}" ] || echo tests/example_test.py
     fi ;;
   *) exec $(command -v python3) "\$@" ;;
 esac
@@ -37,6 +38,7 @@ chmod +x "$tmp/bin/python3" "$tmp/bin/uv"
 fail() { echo "!! affected tests: $*"; exit 1; }
 # The gate runs this test with its own record variables set; each case sets only its own.
 affected() {
+  rm -f "$tmp/args"
   env -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD RECEIVED="$tmp/args" PATH="$tmp/bin:$PATH" "$@" \
     bash "$here/run-affected-tests.sh" >"$tmp/out" 2>&1
 }
@@ -72,12 +74,21 @@ affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record"; 
 [ "$rc" = 0 ] || fail "a rerun that passed exited $rc"
 [ "$(tail -1 "$tmp/args")" = tests/example_test.py::test_a ] || fail "the rerun ran $(tail -1 "$tmp/args")"
 [ "$(cat "$tmp/record/flakes")" = tests/example_test.py::test_a ] || fail "no flake recorded: $(cat "$tmp/out")"
+[ "$(cat "$tmp/record/selected")" = tests/example_test.py ] || fail "a rerun's record holds $(cat "$tmp/record/selected"), not the full selection"
 grep -qx 'affected tests: flaky, passed on the rerun: tests/example_test.py::test_a' "$tmp/out" || fail "no flake in the log"
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py::test_a PYTEST_EXIT=1; rc=$?
 [ "$rc" = 1 ] || fail "a rerun whose failed test failed again exited $rc, not 1"
 [ ! -s "$tmp/record/flakes" ] || fail "a test that failed again was called a flake"
+affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py::test_c PYTEST_EXIT=1; rc=$?
+[ "$rc" = 1 ] && [ "$(cat "$tmp/record/flakes")" = tests/example_test.py::test_a ] ||
+  fail "a passing candidate in a failed rerun exited $rc and recorded flakes '$(cat "$tmp/record/flakes")'"
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 [ "$rc" = 124 ] && [ ! -s "$tmp/record/flakes" ] || fail "a timed-out rerun exited $rc or named a flake"
 affected AFFECTED_TESTS_SINCE="$tmp/since" SELECTOR_FAILS=1; rc=$?
 [ "$rc" = 0 ] && [ "$(tail -1 "$tmp/args")" = tests/example_test.py ] || fail "a failed selector didn't run the full selection"
+# Nothing selected: a pass with exit 0; a selector that dies leaves no exit code from an earlier run.
+affected AFFECTED_TESTS_RECORD="$tmp/record" SELECTS_NOTHING=1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$tmp/record/exit")" = 0 ] && [ ! -e "$tmp/args" ] || fail "an empty selection exited $rc or ran pytest"
+affected AFFECTED_TESTS_RECORD="$tmp/record" FULL_FAILS=1; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$tmp/record/exit" ] || fail "a failed selector exited $rc and left exit $(cat "$tmp/record/exit")"
 echo "cloud-dev run-affected-tests.sh: ok"

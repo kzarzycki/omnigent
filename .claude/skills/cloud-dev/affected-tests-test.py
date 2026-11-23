@@ -86,6 +86,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, change, ()) == [widget]
     run("git", "update-ref", "-d", "refs/remotes/origin/mine")
     assert select(repo, change, ()) == ["tests"]
+    # an empty base argument skips GATE_BASE, as before
+    assert select(repo, change, ("",), GATE_BASE="base") == ["tests"]
     assert affected_tests.targets(None) == ["tests"]  # no base to diff
     # a deleted test file selects nothing, not a path pytest can't find
     run("git", "checkout", "-q", "-B", "work", "base")
@@ -151,11 +153,16 @@ with tempfile.TemporaryDirectory() as tmp:
         return out.stdout
 
     # the PR changes frob and adds gadget: today's selection is both tests that name them
+    def head() -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
     run("git", "checkout", "-q", "-B", "pr", "base")
-    commit({"omnigent/widgets/frob.py": "x = 10\n", "omnigent/gadget.py": "g = 1\n"})
-    then = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    commit({"omnigent/widgets/frob.py": "x = 10\n"})
+    before_gadget = head()
+    commit({"omnigent/gadget.py": "g = 1\n"})
+    then = head()
     assert lines(today()) == [other, widget]
     earlier = record(then, [other, widget], {failed: True})
     # same tree, one failed node id: exactly that node id, a flake candidate
@@ -173,6 +180,18 @@ with tempfile.TemporaryDirectory() as tmp:
     assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
     assert lines(out) == [other, failed] and flakes == [failed], (out, flakes)
     assert f"affected tests: {other}: names a file that differs" in why, why
+    # a file added or deleted since counts as changed
+    run("git", "reset", "-q", "--hard", then)
+    out, _ = since(record(before_gadget, [other, widget], {failed: True}))
+    assert lines(out) == [other, failed], out
+    run("git", "rm", "-q", "omnigent/widgets/frob.py")
+    commit({})
+    out, flakes = since(earlier)
+    assert lines(out) == [widget] and flakes == [], (out, flakes)
+    # a collection error names the file: rerun with it, not a flake candidate
+    commit({widget: "# rewritten\n"})
+    out, flakes = since(record(then, [other, widget], {widget: True}))
+    assert lines(out) == [widget] and flakes == [], (out, flakes)
     # a selected test file the earlier run didn't select runs
     run("git", "reset", "-q", "--hard", then)
     out, flakes = since(record(then, [widget], {failed: True}))
