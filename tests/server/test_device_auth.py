@@ -1170,3 +1170,63 @@ def test_sliding_renewal_revocation_still_refuses(sliding_app: TestClient, tmp_p
     assert sliding_app.post("/oauth/revoke", data={"refresh_token": refresh}).status_code == 200
     assert _refresh(sliding_app, refresh).status_code == 400
     assert sliding_app.get("/v1/hosts", headers=auth).status_code == 401
+
+
+def test_sliding_renewal_records_each_renewal(sliding_app: TestClient, tmp_path: Path) -> None:
+    """The renewal is persisted, so the next refresh sees the restarted idle clock."""
+    import time
+
+    refresh = _sliding_login_grant(tmp_path, approved_days_ago=5, renewed_days_ago=None)
+    assert _refresh(sliding_app, refresh).status_code == 200
+    store = DeviceGrantStore(f"sqlite:///{tmp_path}/test.db")
+    secret = bytes.fromhex(__import__("os").environ["OMNIGENT_ACCOUNTS_COOKIE_SECRET"])
+    grant = store.get_by_refresh_hash(hash_secret(refresh, secret))
+    assert grant is not None and grant.last_polled_at is not None
+    assert abs(grant.last_polled_at - time.time()) < 60
+
+
+def test_sliding_policy_never_fails_open_to_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omnigent.server.routes.device_auth import (
+        _GRANT_MAX_LIFETIME_SECONDS,
+        login_grant_policy,
+    )
+
+    monkeypatch.setenv("OMNIGENT_GRANT_SLIDING_RENEWAL", "1")
+    monkeypatch.delenv("OMNIGENT_GRANT_MAX_LIFETIME_DAYS", raising=False)
+    monkeypatch.delenv("OMNIGENT_GRANT_IDLE_DAYS", raising=False)
+    assert login_grant_policy().cap_seconds is None  # unset: idle limit only
+    assert login_grant_policy().idle_seconds == 30 * _DAY
+    for bad in ("90d", "0", "-5"):
+        monkeypatch.setenv("OMNIGENT_GRANT_MAX_LIFETIME_DAYS", bad)
+        monkeypatch.setenv("OMNIGENT_GRANT_IDLE_DAYS", bad)
+        policy = login_grant_policy()
+        assert policy.cap_seconds == _GRANT_MAX_LIFETIME_SECONDS
+        assert policy.idle_seconds == 30 * _DAY
+    monkeypatch.delenv("OMNIGENT_GRANT_SLIDING_RENEWAL")
+    assert login_grant_policy().idle_seconds is None
+
+
+def test_sliding_purge_keeps_the_fixed_lifetime_for_device_grants(tmp_path: Path) -> None:
+    """With sliding on, a device grant dies at its fixed lifetime; a recently
+    used login grant of the same age survives."""
+    store = DeviceGrantStore(f"sqlite:///{tmp_path}/test.db")
+    now = 100 * _DAY
+    for grant_id, client_id in (("dev", "slack"), ("login", "omnigent-cli")):
+        store.create_redeemed_grant(
+            grant_id,
+            user_id="admin",
+            client_id=client_id,
+            refresh_token_hash=f"h-{grant_id}",
+            created_at=now - 31 * _DAY,
+        )
+    store.touch_login_grant("login", now - _DAY)
+    deleted = store.purge_expired(
+        now,
+        max_lifetime_seconds=30 * _DAY,
+        login_client_id="omnigent-cli",
+        login_idle_seconds=30 * _DAY,
+        login_cap_seconds=None,
+    )
+    assert deleted == 1
+    assert store.get_by_id("dev") is None
+    assert store.get_by_id("login") is not None

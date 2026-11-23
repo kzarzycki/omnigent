@@ -179,10 +179,12 @@ def login_grant_policy() -> _LoginGrantPolicy:
     """Read the login-grant renewal policy from the environment."""
     if os.environ.get(_GRANT_SLIDING_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
         idle_days = _positive_days_env(_GRANT_IDLE_DAYS_ENV) or _GRANT_IDLE_DAYS_DEFAULT
-        cap_days = _positive_days_env(_GRANT_MAX_LIFETIME_ENV)
+        # Unset means no absolute cap; a set but invalid value falls back to
+        # the default cap, never to unbounded.
+        cap_set = bool(os.environ.get(_GRANT_MAX_LIFETIME_ENV, "").strip())
         return _LoginGrantPolicy(
             idle_seconds=idle_days * 86400,
-            cap_seconds=cap_days * 86400 if cap_days else None,
+            cap_seconds=_grant_max_lifetime_seconds() if cap_set else None,
         )
     return _LoginGrantPolicy(idle_seconds=None, cap_seconds=_grant_max_lifetime_seconds())
 
