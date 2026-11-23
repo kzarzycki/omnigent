@@ -56,6 +56,12 @@ flakes GH_FAILS=create; rc=$?
   fail "the unfiled flake isn't recorded as failed: $(cat "$tmp/record/lastfailed.json") exit $(cat "$tmp/record/exit")"
 grep -q 'tests/b.py::u v`: not filed' "$tmp/summary" || fail "the summary doesn't say the flake wasn't filed"
 setup aaa aaa
+flakes GH_FAILS=comment; rc=$?
+[ "$rc" = 1 ] && [ "$(cat "$tmp/record/exit")" = 1 ] || fail "a failed comment call exited $rc"
+[ "$(cat "$tmp/record/lastfailed.json")" = '{"tests/a.py::t": true, "tests/c.py::w [x y]": true}' ] ||
+  fail "the uncommented flakes aren't recorded as failed: $(cat "$tmp/record/lastfailed.json")"
+grep -q 'tests/b.py::u v`: https://github.example/o/r/issues/77' "$tmp/summary" || fail "the created issue wasn't filed"
+setup aaa aaa
 flakes GH_FAILS=list; rc=$?
 [ "$rc" = 1 ] && [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$tmp/record/lastfailed.json")" = 3 ] ||
   fail "without the issue list every flake should wait for the next run"
