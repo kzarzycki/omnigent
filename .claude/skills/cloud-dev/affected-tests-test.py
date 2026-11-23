@@ -243,4 +243,5 @@ with tempfile.TemporaryDirectory() as tmp:
     (empty_tree / "tree").write_text("")
     for rec in [*unusable, malformed, empty_tree]:
         assert since(Path(rec), "newer") == (today("newer"), []), rec
+        assert any(line.startswith("affected tests: no usable record") for line in why), (rec, why)
 print("affected-tests: ok")
