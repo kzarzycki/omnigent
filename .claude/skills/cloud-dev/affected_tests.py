@@ -135,6 +135,9 @@ def since(
         return f"pytest exited {exit_code or 'without a code'} in that run"
     if not then or not isinstance(lastfailed, dict):
         return "the record holds no tree listing or no lastfailed mapping"
+    # pytest also exits 1 when it dies before its session starts, and then names no failed test
+    if exit_code == "1" and not lastfailed:
+        return "pytest exited 1 with no failed test recorded, so it may not have run"
     now = git("ls-tree", "-r", "-z", "HEAD")
     if now is None:
         return "git ls-tree HEAD failed"

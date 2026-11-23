@@ -235,6 +235,7 @@ with tempfile.TemporaryDirectory() as tmp:
         record(then, [other, widget], {failed: True}, exit_code="2"),
         record(then, [other, widget], {failed: True}, exit_code=""),
         record(then, [other, widget], [failed]),
+        record(then, [other, widget], {}, exit_code="1"),  # pytest died at startup
     ]
     malformed = record(then, [other, widget], {failed: True})
     (malformed / "lastfailed.json").write_text("{not json")
