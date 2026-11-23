@@ -5492,6 +5492,17 @@ def test_augment_claude_args_registers_policy_hook_for_failed_tool_calls(
     entries = settings["hooks"].get("PostToolUseFailure", [])
     assert ["matcher" in entry for entry in entries] == [False]
     assert "evaluate-policy" in entries[0]["hooks"][0]["command"]
+    # Tool-result hooks only add context, so Claude runs them in the background;
+    # the blocking tool-call gate stays synchronous.
+    post_policy = [
+        hook
+        for entry in settings["hooks"]["PostToolUse"]
+        for hook in entry["hooks"]
+        if "evaluate-policy" in hook["command"]
+    ]
+    assert [hook.get("async") for hook in [*post_policy, entries[0]["hooks"][0]]] == [True, True]
+    pre_policy = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert "evaluate-policy" in pre_policy["command"] and "async" not in pre_policy
 
     ungoverned = _load_invocation_settings(augment_claude_args((), bridge_dir=tmp_path))
     assert "PostToolUseFailure" not in ungoverned["hooks"]
@@ -16294,6 +16305,68 @@ async def test_hook_evaluate_endpoint_allows(
         assert "OMNIGENT_RELAY_URL=" in env_text and "OMNIGENT_RELAY_TOKEN=" in env_text
     finally:
         relay.close()
+
+
+@pytest.mark.asyncio
+async def test_hook_evaluate_orders_tool_call_after_running_tool_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool-call evaluation waits for a background tool-result one.
+
+    Claude runs PostToolUse policy hooks asynchronously, and a result policy
+    may set a label the next tool-call policy reads, so the relay must not
+    forward the PreToolUse until the PostToolUse evaluation has finished.
+    """
+    release_result = threading.Event()
+    upstream_order: list[str] = []
+
+    class _GatedClient(_ScriptedPolicyClient):
+        async def post(self, url, json=None, extensions=None):  # type: ignore[no-untyped-def]
+            phase = (json or {}).get("event", {}).get("type", "")
+            upstream_order.append(f"start:{phase}")
+            if phase == "PHASE_TOOL_RESULT":
+                await asyncio.to_thread(release_result.wait, 10)
+            response = await super().post(url, json=json, extensions=extensions)
+            upstream_order.append(f"end:{phase}")
+            return response
+
+    client = _GatedClient({"result": "POLICY_ACTION_ALLOW"})
+    relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
+    post_payload = {
+        **_PRE_TOOL_USE_PAYLOAD,
+        "hook_event_name": "PostToolUse",
+        "tool_response": "ok",
+    }
+    try:
+        post_task = asyncio.create_task(
+            asyncio.to_thread(
+                _relay_request_raw, bridge_dir, "/hook/claude/evaluate-policy", post_payload
+            )
+        )
+        while "start:PHASE_TOOL_RESULT" not in upstream_order:
+            await asyncio.sleep(0.01)
+        pre_task = asyncio.create_task(
+            asyncio.to_thread(
+                _relay_request_raw,
+                bridge_dir,
+                "/hook/claude/evaluate-policy",
+                _PRE_TOOL_USE_PAYLOAD,
+            )
+        )
+        await asyncio.sleep(0.3)  # custom-lint: disable=sleep-then-assert -- PreToolUse held
+        assert upstream_order == ["start:PHASE_TOOL_RESULT"], upstream_order
+        release_result.set()
+        await asyncio.wait_for(asyncio.gather(post_task, pre_task), 10)
+    finally:
+        release_result.set()
+        relay.close()
+
+    assert upstream_order == [
+        "start:PHASE_TOOL_RESULT",
+        "end:PHASE_TOOL_RESULT",
+        "start:PHASE_TOOL_CALL",
+        "end:PHASE_TOOL_CALL",
+    ]
 
 
 _NO_POLICY_ALLOW: dict[str, object] = {
