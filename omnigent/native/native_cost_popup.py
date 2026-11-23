@@ -125,6 +125,37 @@ def _list_tmux_clients(socket_path: str, tmux_target: str) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
+def tmux_client_attached(socket_path: str, tmux_target: str) -> bool:
+    """
+    Whether a tmux client may be attached to *tmux_target*'s session.
+
+    A failed probe (timeout, ``OSError``, or an error from a live server) counts
+    as attached, so callers protecting an owner's session keep it. Only a missing
+    socket or a ``no server running`` answer reads as no client.
+
+    :param socket_path: Absolute path to the tmux socket.
+    :param tmux_target: tmux target whose session's clients to list, e.g. ``"main"``.
+    :returns: ``False`` only when tmux answered that no client is attached.
+    """
+    import subprocess
+
+    if not Path(socket_path).exists():
+        return False
+    try:
+        proc = subprocess.run(
+            ["tmux", "-S", socket_path, "list-clients", "-t", tmux_target, "-F", "#{client_name}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_TMUX_LIST_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return True
+    if proc.returncode != 0:
+        return "no server running" not in proc.stderr
+    return any(line.strip() for line in proc.stdout.splitlines())
+
+
 def _tmux_window_activity_at(socket_path: str, tmux_target: str) -> float | None:
     """
     Epoch seconds of the last output activity in *tmux_target*'s window.
