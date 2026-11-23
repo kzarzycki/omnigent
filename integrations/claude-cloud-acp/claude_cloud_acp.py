@@ -2469,6 +2469,7 @@ def self_check() -> None:
     )
     stalled = SESSIONS["acp-stalled"] = Session("/repo", "acp-stalled")
     stalled.reader = threading.current_thread()
+    stalled.events.put({"sequence_num": "1", "payload": {"type": "assistant", "message": {}}})
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             run_turn("acp-stalled", prompt_text([{"type": "text", "text": "the brief\nstep 2 "}]))
