@@ -201,6 +201,10 @@ with tempfile.TemporaryDirectory() as tmp:
     commit({"tests/server/conftest.py": "# c\n"})
     out, flakes = since(earlier)
     assert lines(out) == ["tests"] and flakes == [], (out, flakes)
+    # with the whole tree selected, a failed test still runs alone, unless its file is gone
+    whole = record(head(), ["tests"], {failed: True, "tests/server/test_gone.py::t": True})
+    out, flakes = since(whole)
+    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
     # a failed test gone from the tree, or outside today's selection, doesn't run
     run("git", "reset", "-q", "--hard", then)
     out, _ = since(
@@ -215,6 +219,15 @@ with tempfile.TemporaryDirectory() as tmp:
     assert lines(today("newer")) == [other, widget]
     out, flakes = since(earlier, "newer")
     assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    # the base moved a test setup file: every selected test reruns, and no flake is named
+    run("git", "checkout", "-q", "-B", "newest", "newer")
+    commit({"tests/server/conftest.py": "# c\n"})
+    run("git", "checkout", "-q", "-B", "pr-newest", "pr")
+    run("git", "rebase", "-q", "newest")
+    assert lines(today("newest")) == [other, widget]
+    out, flakes = since(earlier, "newest")
+    assert lines(out) == [other, widget] and flakes == [], (out, flakes)
+    run("git", "checkout", "-q", "pr")
     # no usable record: today's selection, byte for byte
     unusable = [
         tmp + "/missing",
