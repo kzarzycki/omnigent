@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from omnigent.runner import github_resource as github
+from omnigent.runner.session_prs import PullRequestRef
+
+MERGED = "https://github.com/example/one/pull/7"
 
 
 @pytest.fixture
@@ -55,3 +58,50 @@ def test_failed_auth_status_is_not_kept_for_minutes(
     assert github._cached_accounts("/root") == (False, [])
     monkeypatch.setattr(github, "_gh", lambda args, **_: (0, json.dumps({"hosts": {}}), ""))
     assert github._cached_accounts("/root") == (False, [])
+
+
+def _pr_views(calls: list[list[str]]) -> int:
+    return len([c for c in calls if c[:2] == ["pr", "view"]])
+
+
+def test_merged_pr_is_read_once_when_no_account_can_be_bound(gh_calls: list[list[str]]) -> None:
+    reference = PullRequestRef.from_url(MERGED)
+    for _ in range(5):
+        data = github._reference_pr_data("/root", reference, background=False)
+        assert data is not None and data["state"] == "MERGED"
+    assert _pr_views(gh_calls) == 1
+
+
+def test_open_pr_is_still_read_every_time_when_no_account_can_be_bound(
+    gh_calls: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
+        gh_calls.append(args)
+        return 0, json.dumps({"number": 7, "state": "OPEN", "title": "t"}), ""
+
+    monkeypatch.setattr(github, "_gh", gh)
+    reference = PullRequestRef.from_url(MERGED)
+    for _ in range(3):
+        github._reference_pr_data("/root", reference, background=False)
+    assert _pr_views(gh_calls) == 3
+
+
+def test_unbound_reads_are_not_shared_between_environment_tokens(
+    gh_calls: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reference = PullRequestRef.from_url(MERGED)
+    github._reference_pr_data("/root", reference, background=False)
+    monkeypatch.setenv("GH_TOKEN", "another-token")
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    github._preview_cache.clear()
+    github._reference_pr_data("/root", reference, background=False)
+    assert _pr_views(gh_calls) == 2
+
+
+def test_accounts_are_not_shared_between_environment_tokens(
+    gh_calls: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github._cached_accounts("/root")
+    monkeypatch.setenv("GH_TOKEN", "another-token")
+    github._cached_accounts("/root")
+    assert len([c for c in gh_calls if c[:2] == ["auth", "status"]]) == 2
