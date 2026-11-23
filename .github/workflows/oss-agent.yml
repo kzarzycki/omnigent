@@ -1,0 +1,32 @@
+# Runs a coding agent on one task on a free model and opens a draft PR with its change.
+# The job is defined upstream in kzarzycki/agent-skills, pinned by commit; this file only
+# starts it. Start it from the Actions tab or with `gh workflow run oss-agent.yml -f task=...`.
+name: OSS agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What the agent should do
+        required: true
+      test_command:
+        description: Test command run after the agent (empty runs none)
+        default: ""
+      model:
+        description: Model as provider/model
+        default: nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b
+
+permissions: {}
+
+jobs:
+  agent:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: kzarzycki/agent-skills/.github/workflows/oss-agent.yml@ab6543edc403f32c06956a96b1a7d77af5893530
+    with:
+      task: ${{ inputs.task }}
+      test_command: ${{ inputs.test_command }}
+      model: ${{ inputs.model }}
+    secrets:
+      NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
