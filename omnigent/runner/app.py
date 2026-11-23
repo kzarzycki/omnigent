@@ -257,12 +257,16 @@ _CLAUDE_PENDING_PROMPT_POLL_S = 0.5
 _SIGN_IN_HOLD_MAX_S = 8 * 60.0
 # Refusals one sign-in wait absorbs; a pane that keeps asking after it looked ready fails.
 _SIGN_IN_HOLD_MAX_REPEATS = 3
+# Code of a Claude message whose submit the pane never accepted in time, and the waits
+# before each resend; the refusal after the last wait stands.
+_CLAUDE_RESUBMIT_CODE = "claude_submit_not_accepted"
+_CLAUDE_RESUBMIT_WAITS_S = (5.0, 15.0, 45.0, 120.0)
 
 
 @dataclasses.dataclass
 class _SignInHold:
     """
-    One session's wait for a launcher sign-in that refused its queued message.
+    One session's wait for a launcher sign-in, or a timed resend, of a refused queued message.
 
     :param deadline: ``time.monotonic()`` at which the wait gives up.
     :param holds: Refusals absorbed so far.
@@ -271,6 +275,10 @@ class _SignInHold:
         announcing the resend; until it resumes the queue, the deadline can't.
     :param resent: Whether the wait ran out and its message is being resent, so
         a watcher that sees the agent ready meanwhile asks for no resend.
+    :param resubmits: Refusals of a message Claude never accepted, each absorbed by
+        one timed wait.
+    :param resume_at: ``time.monotonic()`` at which a timed wait resends; ``None``
+        while the wait is for a sign-in.
     """
 
     deadline: float
@@ -278,6 +286,8 @@ class _SignInHold:
     waiting: bool = False
     releasing: bool = False
     resent: bool = False
+    resubmits: int = 0
+    resume_at: float | None = None
 
 
 def _sign_in_hold_deadline(body: Mapping[str, Any]) -> float:
@@ -5510,7 +5520,7 @@ def create_runner_app(
         """
         if (
             error is None
-            or error.get("code") != "databricks_sign_in_pending"
+            or error.get("code") not in ("databricks_sign_in_pending", _CLAUDE_RESUBMIT_CODE)
             or not error.get("undelivered")
             or _session_harness_name(conv_id) != "claude-native"
             or conv_id not in _turn_message_bodies
@@ -5522,11 +5532,13 @@ def create_runner_app(
         if hold is None:
             # A message the server queued too long ago fails while it can still be recorded.
             return time.monotonic() < _sign_in_hold_deadline(_turn_message_bodies[conv_id])
-        if hold.holds >= _SIGN_IN_HOLD_MAX_REPEATS or time.monotonic() >= hold.deadline:
-            # The wait ran out, or the pane kept asking after it looked signed in: this
-            # refusal stands, and so do those of the messages queued during the wait.
-            return False
-        return True
+        if error.get("code") == _CLAUDE_RESUBMIT_CODE:
+            exhausted = hold.resubmits >= len(_CLAUDE_RESUBMIT_WAITS_S)
+        else:
+            exhausted = hold.holds >= _SIGN_IN_HOLD_MAX_REPEATS
+        # The wait ran out, or the pane kept refusing: this refusal stands. A sign-in's
+        # queue fails with it; a resubmit refusal ends the hold, so the queue waits afresh.
+        return not exhausted and time.monotonic() < hold.deadline
 
     def _is_sub_agent_session(conv_id: str) -> bool:
         """Return whether *conv_id* runs a sub-agent dispatch rather than a main session."""
@@ -5556,6 +5568,20 @@ def create_runner_app(
         hold = _sign_in_holds.get(conv_id)
         if hold is None:
             hold = _sign_in_holds[conv_id] = _SignInHold(deadline=_sign_in_hold_deadline(body))
+        if error.get("code") == _CLAUDE_RESUBMIT_CODE:
+            wait_s = _CLAUDE_RESUBMIT_WAITS_S[hold.resubmits]
+            hold.resubmits += 1
+            hold.waiting = True
+            hold.resume_at = time.monotonic() + wait_s
+            _logger.info(
+                "Holding a message for %s to resend in %.0fs: Claude Code did not accept it "
+                "(refusal %d)",
+                conv_id,
+                wait_s,
+                hold.resubmits,
+                extra={"session_id": conv_id, "event_name": "native_input_held_for_resubmit"},
+            )
+            return
         hold.holds += 1
         hold.waiting = True
         _logger.info(
@@ -5575,7 +5601,12 @@ def create_runner_app(
     def _message_held_for_sign_in(conv_id: str) -> bool:
         """Return whether a queued message waits on the session's sign-in, without resuming it."""
         hold = _sign_in_holds.get(conv_id)
-        return hold is not None and hold.waiting
+        return hold is not None and hold.waiting and hold.resume_at is None
+
+    def _message_held_for_resubmit(conv_id: str) -> bool:
+        """Return whether a queued message waits to be resent after Claude refused it."""
+        hold = _sign_in_holds.get(conv_id)
+        return hold is not None and hold.waiting and hold.resume_at is not None
 
     def _claim_sign_in_release(conv_id: str) -> bool:
         """
@@ -5603,6 +5634,12 @@ def create_runner_app(
         """Return whether queued input still waits on a sign-in; an expired wait resumes."""
         hold = _sign_in_holds.get(session_id)
         if hold is None or not hold.waiting:
+            return False
+        if hold.resume_at is not None:
+            if time.monotonic() < hold.resume_at:
+                return True
+            hold.waiting = False
+            hold.resume_at = None
             return False
         if hold.releasing or time.monotonic() < hold.deadline:
             return True
@@ -7567,7 +7604,8 @@ def create_runner_app(
                                     if (
                                         harness_name == "claude-native"
                                         and isinstance(error, dict)
-                                        and error.get("code") == "databricks_sign_in_pending"
+                                        and error.get("code")
+                                        in ("databricks_sign_in_pending", _CLAUDE_RESUBMIT_CODE)
                                         and error.get("undelivered") is True
                                         and (
                                             "input_stable_id" in turn_input_identity
@@ -8534,6 +8572,8 @@ def create_runner_app(
                                 "detail": (
                                     "Message buffered until the Databricks sign-in completes."
                                     if _message_held_for_sign_in(conversation_id)
+                                    else "Message buffered until Claude Code accepts input."
+                                    if _message_held_for_resubmit(conversation_id)
                                     else "Message buffered until the pending prompt is resolved."
                                 ),
                             },
