@@ -82,6 +82,9 @@ affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" F
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py::test_c PYTEST_EXIT=1; rc=$?
 [ "$rc" = 1 ] && [ "$(cat "$tmp/record/flakes")" = tests/example_test.py::test_a ] ||
   fail "a passing candidate in a failed rerun exited $rc and recorded flakes '$(cat "$tmp/record/flakes")'"
+# A rerun whose pytest exits 1 with nothing failed died at startup: its candidates never ran, so none is a flake.
+affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" PYTEST_EXIT=1; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$tmp/record/flakes" ] || fail "a rerun that died at startup exited $rc and named flakes '$(cat "$tmp/record/flakes")'"
 # A file that failed to collect is no flake while a test in it fails, nor a test while its file fails to collect.
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" CANDIDATE=tests/example_test.py \
   FAILED=tests/example_test.py::test_x PYTEST_EXIT=1; rc=$?

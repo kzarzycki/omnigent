@@ -59,11 +59,14 @@ fi
 # A flake: failed in the earlier run, reselected by nothing, and not failed in this complete run. A file
 # (a collection error) failed when a test in it did, and a test failed when its file failed to collect.
 if [ -s "$work/candidates" ] && { [ "$rc" = 0 ] || [ "$rc" = 1 ]; }; then
-  python3 - "$work/candidates" "$lastfailed" > "$work/flakes" <<'PY'
+  python3 - "$work/candidates" "$lastfailed" "$rc" > "$work/flakes" <<'PY'
 import json, os, sys
 candidates = [line for line in open(sys.argv[1]).read().split("\n") if line]
 path = sys.argv[2]
 failed = list(json.load(open(path))) if os.path.isfile(path) and os.path.getsize(path) else []
+# exit 1 with nothing failed: pytest died before its session started, so nothing ran (as for a record)
+if sys.argv[3] == "1" and not failed:
+    candidates = []
 for test in candidates:
     if not any(f == test or f.startswith(test + "::") or test.startswith(f + "::") for f in failed):
         print(test)
