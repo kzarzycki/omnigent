@@ -105,3 +105,6 @@ deploy/databricks/.databricks/
 web/package-lock.json
 # Generated demo recordings belong in PR evidence or artifacts, not Git.
 recordings/
+
+# Agent loop reports and logs, never committed
+tmp/loop/
