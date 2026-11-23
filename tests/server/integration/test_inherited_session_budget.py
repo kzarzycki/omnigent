@@ -19,6 +19,7 @@ from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
+from tests._helpers.polling import poll_until_async
 from tests.server.helpers import create_test_agent
 
 pytestmark = pytest.mark.asyncio
@@ -174,6 +175,39 @@ async def test_descendant_without_inherited_policies_gets_allow_window(
     evaluated = await _evaluate(client, child.id, "PHASE_TOOL_CALL")
     assert evaluated["result"] == "POLICY_ACTION_ALLOW", evaluated
     assert "allow_cache_seconds" not in evaluated
+
+
+async def test_session_policy_changes_reach_the_tree_runners(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding or removing a session policy tells every runner in its tree.
+
+    Native hooks may be reusing a no-policy ALLOW, so the runner of the
+    session and of each sub-agent that inherits its policies must hear of the
+    change instead of waiting for the window to expire.
+    """
+    notified: list[str] = []
+
+    async def forward(session_id: str, router: Any, change: Any, *a: Any, **k: Any) -> None:
+        if isinstance(change, dict) and change.get("type") == "policy_change":
+            notified.append(session_id)
+
+    monkeypatch.setattr(sessions_routes, "_forward_session_change_to_runner", forward)
+    store = SqlAlchemyConversationStore(db_uri)
+    tree = await _create_budget_tree(client, store)
+
+    await poll_until_async(lambda: len(notified) >= len(tree), timeout_s=5)
+    assert sorted(notified) == sorted(tree)
+
+    notified.clear()
+    listed = await client.get(f"/v1/sessions/{tree[0]}/policies")
+    policy_id = next(p["id"] for p in listed.json()["data"] if p.get("source") == "session")
+    deleted = await client.delete(f"/v1/sessions/{tree[0]}/policies/{policy_id}")
+    assert deleted.status_code < 300, deleted.text
+    await poll_until_async(lambda: len(notified) >= len(tree), timeout_s=5)
+    assert sorted(notified) == sorted(tree)
 
 
 @pytest.mark.parametrize("phase", ["PHASE_REQUEST", "PHASE_TOOL_CALL"])
