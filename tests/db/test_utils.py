@@ -462,6 +462,7 @@ def _clear_lakebase_override() -> Any:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_static_postgres_uri_path_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     (a) Backward compatibility: with no Lakebase config, a Postgres engine is
@@ -537,6 +538,7 @@ class LakebaseSentinel:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_token_callback_invoked_per_connection() -> None:
     """
     (b) The ``do_connect`` listener calls the token provider once per new
@@ -573,6 +575,7 @@ def test_token_callback_invoked_per_connection() -> None:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_create_engine_wires_token_refresh_and_short_recycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

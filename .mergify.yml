@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
+#
+# The merge queue `approvals.py land` hands PRs to (`land.queue: mergify` in docs/agents/gatekeeper.md).
+# `land` judges each PR (proofs, the owner's go where high risk, the `gate` check green on its head), then posts the
+# `land` status on that head and adds `loop:queued`. Mergify takes a PR in only with both, tests it on a draft PR on
+# top of `mine` (`.github/workflows/gate.yml` runs again there: the proof of the merged tree) and merges it. A push
+# leaves a head with no `land` status, so the PR drops out. A PR Mergify drops gets `loop:dequeued`, which the next
+# `land` evicts back to draft. The `gate` check comes from the `mine` ruleset, so no check is named here.
+
+queue_rules:
+  - name: default
+    merge_method: squash
+    batch_size: 1
+    max_checks_retries: 1
+    checks_timeout: 1 hour
+    queue_conditions:
+      - base = mine
+      - -draft
+      - -head ~= ^sync/
+      - label = loop:queued
+      - check-success = land
+  # An upstream-sync PR keeps upstream's parent (docs/agents/gatekeeper.md).
+  - name: sync
+    merge_method: merge
+    batch_size: 1
+    max_checks_retries: 1
+    checks_timeout: 1 hour
+    queue_conditions:
+      - base = mine
+      - -draft
+      - head ~= ^sync/
+      - label = loop:queued
+      - check-success = land
+
+pull_request_rules:
+  - name: queue what land handed over
+    conditions:
+      - base = mine
+      - -draft
+      - -head ~= ^sync/
+      - label = loop:queued
+      - check-success = land
+    actions:
+      queue:
+        name: default
+  - name: queue a handed-over upstream sync
+    conditions:
+      - base = mine
+      - -draft
+      - head ~= ^sync/
+      - label = loop:queued
+      - check-success = land
+    actions:
+      queue:
+        name: sync
+
+merge_queue:
+  dequeued_label: loop:dequeued
+
+commands_restrictions:
+  queue:
+    conditions:
+      - sender-permission >= write

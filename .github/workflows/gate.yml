@@ -1,0 +1,75 @@
+name: Gate
+
+# Fork only. The one proof per tree: the `mine` ruleset requires this `gate` check. It runs
+# `mise run check-fast` (the hooks, the skills' tests and the tests the change touches) on each PR head
+# and on Mergify's draft PRs (the tree it merges), so nothing else runs those tests; the full suite is
+# nightly (fork-nightly.yml).
+
+on:
+  pull_request:
+    branches: [mine]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Set up Node and pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install test system dependencies
+        # ripgrep: the Grep tool prefers it. bubblewrap: the linux_bwrap sandbox needs it.
+        # tmux: harness terminal tests spawn it. apparmor sysctl: Ubuntu 24.04 blocks the
+        # user namespaces bwrap needs (ephemeral runner).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap tmux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install mise
+        env:
+          MISE_VERSION: v2026.11.10
+        run: |
+          curl -fsSL https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
+      - name: Run the checks
+        env:
+          MISE_YES: "1"
+          # A PR, and Mergify's draft PR, diffs against the base branch tip.
+          GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          OMNIGENT_SKIP_WEB_UI: "true"
+          # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
+          GH_TOKEN: ${{ github.token }}
+          # The skills' tests commit in scratch repos and need an identity.
+          GIT_AUTHOR_NAME: gate
+          GIT_AUTHOR_EMAIL: gate@example.invalid
+          GIT_COMMITTER_NAME: gate
+          GIT_COMMITTER_EMAIL: gate@example.invalid
+        run: |
+          mise run check-fast

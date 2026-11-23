@@ -8108,7 +8108,12 @@ async def _forward_session_change_to_runner_impl(
 
     event_type = event.get("type")
     try:
-        if event_type in ("interrupt", "cost_approval_popup", "policy_blocked_notice"):
+        if event_type in (
+            "interrupt",
+            "cost_approval_popup",
+            "policy_blocked_notice",
+            "policy_change",
+        ):
             runner_client = await _get_runner_client(session_id, runner_router, for_control=True)
         else:
             runner_client = await _get_runner_client(session_id, runner_router)

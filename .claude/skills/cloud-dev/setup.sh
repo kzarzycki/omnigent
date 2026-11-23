@@ -61,6 +61,21 @@ warm_up &
 uv tool install -q pre-commit || echo "uv tool install pre-commit failed" >> "$log"
 # from npm: the mise.run installer left no mise in the cloud image
 command -v mise >/dev/null || npm install -g -s @jdxcode/mise || echo "npm install mise failed" >> "$log"
+# gh-quota's logging shim ahead of the image's gh, so every session logs its gh calls by caller: the pack's two
+# files at a pinned commit (github-v0.1.1; move the commit and both sums together), checked against their sums.
+# `install` wants ~/.local/bin ahead of /usr/local/bin, as session shells have it.
+ghq=c08d02c488c50fc5aa6dce31b59471e7cb41a6ae
+ghq_src=${CLOUD_SETUP_GH_QUOTA:-https://raw.githubusercontent.com/kzarzycki/agent-skills/$ghq/github/skills/gh-quota/scripts}
+gh_quota() {
+  local d="$HOME/.local/share/gh-quota" t f; t=$(mktemp -d)
+  for f in gh gh_quota.py; do curl -fsSL -o "$t/$f" "$ghq_src/$f" || return 1; done
+  (cd "$t" && sha256sum -c -) <<'EOF' || return 1
+31c9eeae51cf1fc772ccdea078384e6219d2d67f608e86d771a7de8130ff2a65  gh
+2f2b0d4b5adb627ef3087765e76cbe411cd19ffdb6e099a76dd8af2d8ae16417  gh_quota.py
+EOF
+  mkdir -p "$d" && cp "$t/gh" "$t/gh_quota.py" "$d/" && PATH="$HOME/.local/bin:$PATH" python3 "$d/gh_quota.py" install
+}
+gh_quota >/dev/null 2>&1 || echo "gh-quota shim install failed" >> "$log"
 wait
 missing=""
 uv_ok || missing=" uv"
