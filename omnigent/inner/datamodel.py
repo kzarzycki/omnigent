@@ -364,7 +364,7 @@ class ExecutorSpec:
     auth: object | None = None  # ApiKeyAuth | DatabricksAuth | None
     context_files: bool | None = None
     system_prompt_mode: str | None = None
-    settings: dict[str, object] | None = None
+    settings: object | None = None
 
 
 # ---------------------------------------------------------------------------
