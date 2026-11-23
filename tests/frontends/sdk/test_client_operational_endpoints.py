@@ -273,10 +273,19 @@ async def test_read_host_file_malformed_range_raises(body: dict[str, Any]) -> No
 
 
 @pytest.mark.asyncio
-async def test_read_host_file_restarts_when_the_file_changes_between_pages() -> None:
+@pytest.mark.parametrize(
+    "new_text,new_mtime",
+    [
+        pytest.param("n" * 25, 2, id="mtime-changes"),
+        pytest.param("n" * 26, 1, id="size-changes-within-one-mtime-tick"),
+    ],
+)
+async def test_read_host_file_restarts_when_the_file_changes_between_pages(
+    new_text: str, new_mtime: int
+) -> None:
     old_pages = {page["offset"]: page for page in _host_file_pages("o" * 25, 10)}
     new_pages = {
-        page["offset"]: {**page, "mtime_ns": 2} for page in _host_file_pages("n" * 25, 10)
+        page["offset"]: {**page, "mtime_ns": new_mtime} for page in _host_file_pages(new_text, 10)
     }
     calls: list[int] = []
 
@@ -293,7 +302,7 @@ async def test_read_host_file_restarts_when_the_file_changes_between_pages() -> 
     finally:
         await _close(client, original, mock_transport)
 
-    assert content == "n" * 25
+    assert content == new_text
     assert calls == [0, 10, 0, 10, 20]
 
 
