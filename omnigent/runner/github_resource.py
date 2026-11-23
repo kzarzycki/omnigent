@@ -1200,7 +1200,7 @@ _OPEN_PR_TTL_SECONDS = 10.0
 # Background refreshes of one wave share a read; the server refreshes a PR every 300 s.
 _BACKGROUND_PR_TTL_SECONDS = 120.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
-_ACCOUNTS_TTL_SECONDS = 30.0
+_ACCOUNTS_TTL_SECONDS = 300.0
 # A failed read is remembered briefly so waiters on one lock don't each retry ``gh``.
 _FAILED_READ_TTL_SECONDS = 5.0
 
@@ -1270,20 +1270,26 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     """
     config_dir = Path(gh_config_dir())
     key = ("accounts", str(config_dir))
-    stat = hosts_file_stat(config_dir)
-    if stat is not None:
-        hit, cached = _cache_get(key, shared=True)
-        if hit and isinstance(cached, dict) and cached.get("stat") == stat:
-            return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
+    stat = _hosts_signature(config_dir)
+    hit, cached = _cache_get(key, shared=True)
+    if hit and isinstance(cached, dict) and cached.get("stat") == stat:
+        return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
     authenticated, accounts = _list_accounts(root)
-    if stat is not None:
-        _cache_put(
-            key,
-            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-            _ACCOUNTS_TTL_SECONDS,
-            shared=True,
-        )
+    _cache_put(
+        key,
+        {"authenticated": authenticated, "accounts": accounts, "stat": stat},
+        _ACCOUNTS_TTL_SECONDS,
+        shared=True,
+    )
     return authenticated, accounts
+
+
+def _hosts_signature(config_dir: Path) -> list[int]:
+    """``hosts.yml``'s stat, or ``[]`` when it is missing (auth then comes from the environment).
+
+    Creating the file changes the signature, so a login is still seen at once.
+    """
+    return hosts_file_stat(config_dir) or []
 
 
 # Hosts ``gh`` reads GH_TOKEN for: github.com and github.localhost with their subdomains
@@ -1335,12 +1341,15 @@ def _resolve_read(
         return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
     # gh reads as the active account even when its auth check failed; only a
     # working active account names the identity.
-    active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
+    listed = accounts()
+    active = next((a for a in listed if a.get("host") == host and a.get("active")), None)
+    # An older ``gh`` lists no accounts, so who answers is unknowable: don't cache.
+    unbound = "unbound:" + json.dumps(_hosts_signature(Path(gh_config_dir()))) if listed else None
     if active is None or active.get("state") != "success" or not active.get("login"):
-        return None, None
+        return None, unbound
     active_token = _gh_auth_token(root, str(active["login"]), host)
     if not active_token:
-        return None, None
+        return None, unbound
     return active_token, "token:" + hashlib.sha256(active_token.encode()).hexdigest()
 
 
