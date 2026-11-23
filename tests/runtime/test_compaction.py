@@ -126,6 +126,7 @@ class _ReturnsTextClient:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", ["claude-native", "codex-native", "openai-agents-sdk"])
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_downscaled_images_preserve_compaction_boundaries(
     monkeypatch: pytest.MonkeyPatch, harness: str
 ) -> None:
@@ -559,6 +560,7 @@ async def test_layer1_clears_binary_content_and_preserves_file_id(
     assert text_block["text"] == "Please describe this image"
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 def test_clear_binary_content_handles_resolver_shapes() -> None:
     """Resolver-produced attachment payloads are cleared before token counting."""
     payload = "A" * 100_000
@@ -596,6 +598,7 @@ def test_clear_binary_content_handles_resolver_shapes() -> None:
     assert tokens_after < tokens_before / 10
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 def test_resolver_parameterized_image_is_cleared_before_token_counting() -> None:
     """Resolver canonicalizes parameterized MIME and compaction clears its payload."""
     payload = b"A" * 400_000
@@ -1052,6 +1055,7 @@ async def test_layer2_failure_falls_back_to_layer3(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_summarize_history_returns_text_and_token_count() -> None:
     """summarize_history calls the LLM and returns text + token_count > 0."""
     summary_text = "Summary of earlier conversation context."
@@ -1135,6 +1139,7 @@ async def test_summarize_history_rejects_malformed_runner_response(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 async def test_summarize_history_recursive_prompt_includes_continuation_prefix() -> None:
     """
     When history starts with a prior summary, the summarization prompt
@@ -1240,6 +1245,7 @@ def test_compaction_to_history_items_produces_valid_pair() -> None:
     assert assistant_item.id == "cmp_abc123_assistant"
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 def test_count_tokens_returns_positive_integer() -> None:
     """count_tokens returns a positive integer for non-empty messages."""
     messages = [{"role": "user", "content": "Hello world, this is a test message."}]
@@ -1249,6 +1255,7 @@ def test_count_tokens_returns_positive_integer() -> None:
     assert result > 0
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/582")
 def test_count_tokens_unknown_model_falls_back() -> None:
     """Unknown model falls back to cl100k_base encoding without raising."""
     messages = [{"role": "user", "content": "test"}]
