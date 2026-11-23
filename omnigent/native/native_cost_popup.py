@@ -50,6 +50,10 @@ _TMUX_CLIENT_POLL_INTERVAL_S = 0.25
 # Poll interval for the watcher that closes the popup when the elicitation
 # is resolved on another surface (e.g. answered in the web ApprovalCard).
 _RESOLUTION_POLL_INTERVAL_S = 1.5
+# Snapshot without transcript items, liveness probes or subtree usage.
+_SLIM_SNAPSHOT_QUERY = (
+    "include_items=false&include_liveness=false&include_live_status=false&include_usage=false"
+)
 
 
 def wait_for_tmux_client(socket_path: str, tmux_target: str, *, timeout_s: float) -> bool:
@@ -579,7 +583,8 @@ def _start_resolution_watcher(
     :param elicitation_id: Elicitation id to watch, e.g. ``"elicit_x"``.
     :returns: None.
     """
-    url = f"{ap_server_url.rstrip('/')}/v1/sessions/{session_id}"
+    # Only pending_elicitations is read, which the slim snapshot still carries.
+    url = f"{ap_server_url.rstrip('/')}/v1/sessions/{session_id}?{_SLIM_SNAPSHOT_QUERY}"
 
     def _watch() -> None:
         while True:
