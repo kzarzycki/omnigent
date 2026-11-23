@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, overload
+from urllib.parse import quote
 
 import httpx
 from pydantic import ValidationError
@@ -75,6 +76,10 @@ async def _refuse_cross_origin_redirects(response: httpx.Response) -> None:
         f"to {location}",
         response.status_code,
     )
+
+
+# Reads of a host file restart when it changes between pages; give up after this many.
+_HOST_FILE_READ_ATTEMPTS = 3
 
 
 class OmnigentClient:
@@ -422,6 +427,75 @@ class OmnigentClient:
                 "GET /v1/hosts returned a malformed 'hosts' array", resp.status_code
             )
         return hosts
+
+    async def read_host_file(self, host_id: str, path: str, *, max_bytes: int) -> str:
+        """
+        Read a UTF-8 text file on a host, following its byte ranges.
+
+        Pages ``GET /v1/hosts/{host_id}/files/{path}`` on ``next_offset``
+        (up to 64 KiB a request) until the file ends, so files over the
+        route's single-response cap can be read before any session exists.
+        A file whose ``size`` or ``mtime_ns`` changes between pages is read
+        again from the start, up to :data:`_HOST_FILE_READ_ATTEMPTS` times.
+
+        :param host_id: Host identifier, e.g. ``"host_a1"``.
+        :param path: Absolute or ``~``-prefixed path on the host, e.g. ``"~/.claude.json"``.
+        :param max_bytes: Most bytes the caller accepts, e.g. ``1_048_576``.
+        :returns: The whole file's text.
+        :raises OmnigentError: On non-2xx status (409 when the host predates
+            ranged reads), a malformed range body, a file over ``max_bytes``,
+            or a file that kept changing while it was read.
+        """
+        encoded_path = quote(path.lstrip("/"), safe="/~")
+        url = f"{self._base_url}/v1/hosts/{quote(host_id, safe='')}/files/{encoded_path}"
+        for _attempt in range(_HOST_FILE_READ_ATTEMPTS):
+            content = await self._read_host_file_once(url, max_bytes)
+            if content is not None:
+                return content
+        raise OmnigentError(f"host file {path} kept changing while it was read", 409)
+
+    async def _read_host_file_once(self, url: str, max_bytes: int) -> str | None:
+        """
+        Page through one host file once.
+
+        :param url: The host file route URL for the file.
+        :param max_bytes: Most bytes the caller accepts.
+        :returns: The file's text, or ``None`` when it changed between pages.
+        :raises OmnigentError: As :meth:`read_host_file`, except for a change.
+        """
+        parts: list[str] = []
+        offset: int | None = 0
+        total = 0
+        version: tuple[object, object] | None = None
+        while offset is not None:
+            resp = await self._http.get(url, params={"offset": offset})
+            raise_for_status(resp.status_code, response_body(resp))
+            page = require_json_object(resp, "GET /v1/hosts/{id}/files")
+            content, length, next_offset = (
+                page.get("content"),
+                page.get("length"),
+                page.get("next_offset"),
+            )
+            if (
+                not isinstance(content, str)
+                or not isinstance(length, int)
+                or not (
+                    next_offset is None or (isinstance(next_offset, int) and next_offset > offset)
+                )
+            ):
+                raise OmnigentError(
+                    "GET /v1/hosts/{id}/files returned a malformed range", resp.status_code
+                )
+            page_version = (page.get("size"), page.get("mtime_ns"))
+            if version is not None and page_version != version:
+                return None
+            version = page_version
+            total += length
+            if total > max_bytes:
+                raise OmnigentError(f"host file is larger than {max_bytes} bytes", 413)
+            parts.append(content)
+            offset = next_offset
+        return "".join(parts)
 
     async def _fetch_agent_tools(
         self, agent_id: str, session_id: str | None = None
