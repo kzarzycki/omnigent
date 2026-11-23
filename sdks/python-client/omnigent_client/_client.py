@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, overload
+from urllib.parse import quote
 
 import httpx
 from pydantic import ValidationError
@@ -422,6 +423,52 @@ class OmnigentClient:
                 "GET /v1/hosts returned a malformed 'hosts' array", resp.status_code
             )
         return hosts
+
+    async def read_host_file(self, host_id: str, path: str, *, max_bytes: int) -> str:
+        """
+        Read a UTF-8 text file on a host, following its byte ranges.
+
+        Pages ``GET /v1/hosts/{host_id}/files/{path}`` on ``next_offset``
+        (up to 64 KiB a request) until the file ends, so files over the
+        route's single-response cap can be read before any session exists.
+
+        :param host_id: Host identifier, e.g. ``"host_a1"``.
+        :param path: Absolute or ``~``-prefixed path on the host, e.g. ``"~/.claude.json"``.
+        :param max_bytes: Most bytes the caller accepts, e.g. ``1_048_576``.
+        :returns: The whole file's text.
+        :raises OmnigentError: On non-2xx status (409 when the host predates
+            ranged reads), a malformed range body, or a file over ``max_bytes``.
+        """
+        encoded_path = quote(path.lstrip("/"), safe="/~")
+        url = f"{self._base_url}/v1/hosts/{quote(host_id, safe='')}/files/{encoded_path}"
+        parts: list[str] = []
+        offset: int | None = 0
+        total = 0
+        while offset is not None:
+            resp = await self._http.get(url, params={"offset": offset})
+            raise_for_status(resp.status_code, response_body(resp))
+            page = require_json_object(resp, "GET /v1/hosts/{id}/files")
+            content, length, next_offset = (
+                page.get("content"),
+                page.get("length"),
+                page.get("next_offset"),
+            )
+            if (
+                not isinstance(content, str)
+                or not isinstance(length, int)
+                or not (
+                    next_offset is None or (isinstance(next_offset, int) and next_offset > offset)
+                )
+            ):
+                raise OmnigentError(
+                    "GET /v1/hosts/{id}/files returned a malformed range", resp.status_code
+                )
+            total += length
+            if total > max_bytes:
+                raise OmnigentError(f"host file is larger than {max_bytes} bytes", 413)
+            parts.append(content)
+            offset = next_offset
+        return "".join(parts)
 
     async def _fetch_agent_tools(
         self, agent_id: str, session_id: str | None = None

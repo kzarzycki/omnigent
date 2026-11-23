@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
+    CAP_TEXT_FILE_RANGES,
     HostFsRequestFrame,
     HostFsResultFrame,
     HostHelloFrame,
@@ -62,10 +63,12 @@ _HOST_ID = "9ab0645ef9c07bb922a404d4ec2466a9"
 _HOST_NAME = "fs-test-laptop"
 
 
-def _hello_text(name: str = _HOST_NAME) -> str:
+def _hello_text(name: str = _HOST_NAME, capabilities: list[str] | None = None) -> str:
     """Encode a hello frame for tests.
 
     :param name: Host name reported in the hello frame.
+    :param capabilities: Capability tokens the fake host advertises, e.g.
+        ``[CAP_TEXT_FILE_RANGES]``; none by default.
     :returns: JSON-encoded hello frame.
     """
     return encode_host_frame(
@@ -73,6 +76,7 @@ def _hello_text(name: str = _HOST_NAME) -> str:
             version="0.1.0-test",
             frame_protocol_version=1,
             name=name,
+            capabilities=capabilities or [],
         )
     )
 
@@ -118,6 +122,7 @@ def fs_app(
 
 @pytest.fixture()
 async def fs_setup(
+    request: pytest.FixtureRequest,
     fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> AsyncIterator[
     tuple[
@@ -137,16 +142,20 @@ async def fs_setup(
     them, and resolves the matching pending future — mirroring
     what host_tunnel.py does in production.
 
+    :param request: Indirect parametrization may pass the host's capability tokens.
     :param fs_app: The fixture above.
     :returns: Async iterator yielding the wired-up state.
     """
     app, registry, _hs, _cs = fs_app
+    capabilities: list[str] = getattr(request, "param", [])
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
     comm = ApplicationCommunicator(app, _websocket_scope(path))
     await comm.send_input({"type": "websocket.connect"})
     accepted = await comm.receive_output(timeout=1.0)
     assert accepted["type"] == "websocket.accept"
-    await comm.send_input({"type": "websocket.receive", "text": _hello_text()})
+    await comm.send_input(
+        {"type": "websocket.receive", "text": _hello_text(capabilities=capabilities)}
+    )
     while registry.get(_HOST_ID) is None:
         await asyncio.sleep(0.01)
 
@@ -154,7 +163,9 @@ async def fs_setup(
     assert conn is not None
     replies: dict[str, dict[str, Any]] = {}
     requested_ops: list[tuple[str, str]] = []
+    requested_params: list[dict[str, Any]] = []
     app.state.requested_fs_ops = requested_ops
+    app.state.requested_fs_params = requested_params
 
     async def _drain() -> None:
         """Drain outbound WS frames from the communicator and reply.
@@ -215,6 +226,7 @@ async def fs_setup(
             if isinstance(frame, HostFsRequestFrame):
                 reply = replies[f"fs:{frame.workspace}"]
                 requested_ops.append((frame.op, frame.workspace))
+                requested_params.append(frame.params)
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -918,10 +930,12 @@ _FsSetup = tuple[
 ]
 
 
-async def _get_host_file(app: FastAPI, path: str, host_id: str = _HOST_ID) -> Any:
-    """GET the host file route for ``path`` (as written in the URL)."""
+async def _get_host_file(
+    app: FastAPI, path: str, host_id: str = _HOST_ID, params: dict[str, Any] | None = None
+) -> Any:
+    """GET the host file route for ``path`` (as written in the URL) with query ``params``."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        return await client.get(f"/v1/hosts/{host_id}/files/{path}")
+        return await client.get(f"/v1/hosts/{host_id}/files/{path}", params=params)
 
 
 async def test_read_host_file_returns_text_without_a_session(fs_setup: _FsSetup) -> None:
@@ -988,17 +1002,94 @@ async def test_read_host_file_maps_host_errors(
     assert detail in resp.text
 
 
+@pytest.mark.parametrize("fs_setup", [[CAP_TEXT_FILE_RANGES]], indirect=True)
+@pytest.mark.parametrize(
+    "query,forwarded",
+    [
+        ({"offset": "65535"}, {"offset": 65535, "limit": 65536}),
+        ({"limit": "100"}, {"offset": 0, "limit": 100}),
+        ({"offset": "0", "limit": "1000000"}, {"offset": 0, "limit": 65536}),
+    ],
+)
+async def test_read_host_file_forwards_a_range_and_its_fields(
+    fs_setup: _FsSetup, query: dict[str, str], forwarded: dict[str, int]
+) -> None:
+    """Range parameters reach the frame (limit cut to 64 KiB) and range fields pass through."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    payload = {
+        "object": "file",
+        "path": "/work/big.md",
+        "size": 204800,
+        "offset": forwarded["offset"],
+        "length": 10,
+        "next_offset": forwarded["offset"] + 10,
+        "mtime_ns": 1763900000000000000,
+        "content": "0123456789",
+    }
+    replies["fs:/work/big.md"] = {"status": "ok", "payload": payload}
+
+    resp = await _get_host_file(app, "work/big.md", params=query)
+
+    assert resp.status_code == 200
+    assert resp.json() == payload
+    assert app.state.requested_fs_params == [forwarded]
+
+
+async def test_read_host_file_without_a_range_forwards_no_params(fs_setup: _FsSetup) -> None:
+    """A request with no range keeps today's frame, even on a host that predates ranges."""
+    app, _reg, _comm, replies, _drain = fs_setup
+    replies["fs:/work/x"] = {
+        "status": "ok",
+        "payload": {"object": "file", "path": "/work/x", "size": 2, "content": "hi"},
+    }
+
+    resp = await _get_host_file(app, "work/x")
+
+    assert resp.status_code == 200
+    assert app.state.requested_fs_params == [{}]
+
+
+@pytest.mark.parametrize("fs_setup", [[CAP_TEXT_FILE_RANGES]], indirect=True)
+@pytest.mark.parametrize(
+    "query", [{"offset": "-1"}, {"limit": "0"}, {"offset": "0", "limit": "-3"}]
+)
+async def test_read_host_file_invalid_range_is_400_before_asking_the_host(
+    fs_setup: _FsSetup, query: dict[str, str]
+) -> None:
+    """A negative offset or a limit below 1 is a 400 ``invalid_range``; the host is not asked."""
+    app, _reg, _comm, _replies, _drain = fs_setup
+
+    resp = await _get_host_file(app, "work/big.md", params=query)
+
+    assert resp.status_code == 400
+    assert "invalid_range" in resp.text
+    assert app.state.requested_fs_ops == []
+
+
+async def test_read_host_file_range_on_a_host_without_ranges_is_409(fs_setup: _FsSetup) -> None:
+    """A host that does not advertise ``text_file_ranges`` is a 409 and is never asked."""
+    app, _reg, _comm, _replies, _drain = fs_setup
+
+    resp = await _get_host_file(app, "work/big.md", params={"offset": "65535"})
+
+    assert resp.status_code == 409
+    assert "host_upgrade_required" in resp.text
+    assert app.state.requested_fs_ops == []
+
+
+@pytest.mark.parametrize("fs_setup", [[CAP_TEXT_FILE_RANGES]], indirect=True)
+@pytest.mark.parametrize("query", [{}, {"offset": "0", "limit": "10"}])
 @pytest.mark.parametrize(
     "path",
     ["work/.credentials.json", "work/auth.json", "work/.env", "work/.env.local", "~/.ssh/id_rsa"],
 )
 async def test_read_host_file_refuses_credential_paths_before_asking_the_host(
-    fs_setup: _FsSetup, path: str
+    fs_setup: _FsSetup, path: str, query: dict[str, str]
 ) -> None:
-    """A deny-listed path is a 403 and never reaches the host."""
+    """A deny-listed path is a 403 and never reaches the host, ranged or not."""
     app, _reg, _comm, _replies, _drain = fs_setup
 
-    resp = await _get_host_file(app, path)
+    resp = await _get_host_file(app, path, params=query)
 
     assert resp.status_code == 403
     assert app.state.requested_fs_ops == []
@@ -1028,8 +1119,10 @@ async def test_read_host_file_unknown_host_returns_404(
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize("query", [{}, {"offset": "0", "limit": "10"}])
 async def test_read_host_file_non_owner_returns_403(
     fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    query: dict[str, str],
 ) -> None:
     """Only the host owner can read: another user gets 403 and the host is never asked."""
     from omnigent.server.auth import AuthProvider
@@ -1057,7 +1150,9 @@ async def test_read_host_file_non_owner_returns_403(
         transport=ASGITransport(app=auth_app), base_url="http://test"
     ) as client:
         resp = await client.get(
-            f"/v1/hosts/{_HOST_ID}/files/work/x", headers={"X-Test-User": "bob@example.com"}
+            f"/v1/hosts/{_HOST_ID}/files/work/x",
+            headers={"X-Test-User": "bob@example.com"},
+            params=query,
         )
 
     assert resp.status_code == 403

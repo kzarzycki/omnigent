@@ -194,3 +194,79 @@ async def test_list_hosts_malformed_body_raises_omnigent_error(body: dict[str, A
             await client.list_hosts()
     finally:
         await _close(client, original, mock_transport)
+
+
+def _host_file_pages(text: str, page_bytes: int) -> list[dict[str, Any]]:
+    """Split ASCII ``text`` into range bodies the host file route would return."""
+    size = len(text)
+    starts = list(range(0, size, page_bytes))
+    return [
+        {
+            "object": "file",
+            "path": "/home/u/big.md",
+            "size": size,
+            "offset": start,
+            "length": len(text[start : start + page_bytes]),
+            "next_offset": start + page_bytes if start + page_bytes < size else None,
+            "mtime_ns": 1,
+            "content": text[start : start + page_bytes],
+        }
+        for start in starts
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_host_file_follows_next_offset_to_the_end() -> None:
+    text = "x" * 25
+    pages = {page["offset"]: page for page in _host_file_pages(text, 10)}
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.url.raw_path.decode()}")
+        return httpx.Response(200, json=pages[int(request.url.params["offset"])])
+
+    client, original, mock_transport = _mock_client(handler)
+    try:
+        content = await client.read_host_file("host_a1", "~/big.md", max_bytes=100)
+    finally:
+        await _close(client, original, mock_transport)
+
+    assert content == text
+    assert calls == [f"/v1/hosts/host_a1/files/~/big.md?offset={offset}" for offset in (0, 10, 20)]
+
+
+@pytest.mark.asyncio
+async def test_read_host_file_over_max_bytes_raises() -> None:
+    pages = {page["offset"]: page for page in _host_file_pages("x" * 25, 10)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=pages[int(request.url.params["offset"])])
+
+    client, original, mock_transport = _mock_client(handler)
+    try:
+        with pytest.raises(OmnigentError, match="larger than 15 bytes"):
+            await client.read_host_file("host_a1", "/home/u/big.md", max_bytes=15)
+    finally:
+        await _close(client, original, mock_transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"content": "x", "length": 1, "next_offset": 0}, id="offset-goes-back"),
+        pytest.param({"content": "x", "next_offset": None}, id="missing-length"),
+        pytest.param({"length": 1, "next_offset": None}, id="missing-content"),
+    ],
+)
+async def test_read_host_file_malformed_range_raises(body: dict[str, Any]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json=body)
+
+    client, original, mock_transport = _mock_client(handler)
+    try:
+        with pytest.raises(OmnigentError, match="malformed range"):
+            await client.read_host_file("host_a1", "/home/u/big.md", max_bytes=100)
+    finally:
+        await _close(client, original, mock_transport)
