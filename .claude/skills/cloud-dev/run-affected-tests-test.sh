@@ -7,15 +7,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
-# The selector prints one file; with --since, one node id and that node id as a flake candidate.
+# The selector prints one file; with --since, CANDIDATE (default one node id) as the run and its flake candidate.
 cat > "$tmp/bin/python3" <<EOF
 #!/bin/bash
 case "\$1" in
   *affected_tests.py)
     if [ "\${2:-}" = --since ]; then
       [ -z "\${SELECTOR_FAILS:-}" ] || exit 3
-      echo "affected tests: flake candidate: tests/example_test.py::test_a" >&2
-      echo "tests/example_test.py::test_a"
+      echo "affected tests: flake candidate: \${CANDIDATE:-tests/example_test.py::test_a}" >&2
+      echo "\${CANDIDATE:-tests/example_test.py::test_a}"
     else
       [ -z "\${FULL_FAILS:-}" ] || exit 3
       [ -n "\${SELECTS_NOTHING:-}" ] || echo tests/example_test.py
@@ -82,6 +82,12 @@ affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" F
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py::test_c PYTEST_EXIT=1; rc=$?
 [ "$rc" = 1 ] && [ "$(cat "$tmp/record/flakes")" = tests/example_test.py::test_a ] ||
   fail "a passing candidate in a failed rerun exited $rc and recorded flakes '$(cat "$tmp/record/flakes")'"
+# A file that failed to collect is no flake while a test in it fails, nor a test while its file fails to collect.
+affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" CANDIDATE=tests/example_test.py \
+  FAILED=tests/example_test.py::test_x PYTEST_EXIT=1; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$tmp/record/flakes" ] || fail "a file whose test failed was called a flake: $(cat "$tmp/record/flakes")"
+affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" FAILED=tests/example_test.py PYTEST_EXIT=1; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$tmp/record/flakes" ] || fail "a test whose file failed to collect was called a flake"
 affected AFFECTED_TESTS_SINCE="$tmp/since" AFFECTED_TESTS_RECORD="$tmp/record" HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 [ "$rc" = 124 ] && [ ! -s "$tmp/record/flakes" ] || fail "a timed-out rerun exited $rc or named a flake"
 affected AFFECTED_TESTS_SINCE="$tmp/since" SELECTOR_FAILS=1; rc=$?

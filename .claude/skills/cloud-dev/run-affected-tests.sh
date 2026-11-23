@@ -56,14 +56,18 @@ if [ -n "$record" ]; then
   [ ! -s "$lastfailed" ] || cp "$lastfailed" "$record/lastfailed.json"
   echo "$rc" > "$record/exit"
 fi
-# A flake: failed in the earlier run, reselected by nothing, and not failed in this complete run.
+# A flake: failed in the earlier run, reselected by nothing, and not failed in this complete run. A file
+# (a collection error) failed when a test in it did, and a test failed when its file failed to collect.
 if [ -s "$work/candidates" ] && { [ "$rc" = 0 ] || [ "$rc" = 1 ]; }; then
-  if [ -s "$lastfailed" ]; then
-    python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))))' "$lastfailed" > "$work/failed"
-  else
-    : > "$work/failed"
-  fi
-  grep -vxFf "$work/failed" "$work/candidates" > "$work/flakes" || true
+  python3 - "$work/candidates" "$lastfailed" > "$work/flakes" <<'PY'
+import json, os, sys
+candidates = [line for line in open(sys.argv[1]).read().split("\n") if line]
+path = sys.argv[2]
+failed = list(json.load(open(path))) if os.path.isfile(path) and os.path.getsize(path) else []
+for test in candidates:
+    if not any(f == test or f.startswith(test + "::") or test.startswith(f + "::") for f in failed):
+        print(test)
+PY
   sed 's/^/affected tests: flaky, passed on the rerun: /' "$work/flakes" >&2
   [ -z "$record" ] || cp "$work/flakes" "$record/flakes"
 fi
