@@ -6653,6 +6653,20 @@
             "default": null,
             "title": "Agent Id"
           },
+          "cloud_environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cloud Environment Id"
+          },
           "cost_control_mode_override": {
             "anyOf": [
               {
@@ -9471,6 +9485,20 @@
           "agent_id": {
             "title": "Agent Id",
             "type": "string"
+          },
+          "cloud_environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cloud Environment Id"
           },
           "cost_control_mode_override": {
             "anyOf": [
