@@ -83,6 +83,13 @@ async def validate_create_harness_readiness(
             "Omnigent app, or choose another harness.",
             code=ErrorCode.HARNESS_NOT_CONFIGURED,
         )
+    if harness.startswith("acp:"):
+        raise OmnigentError(
+            f"ACP agent {harness.removeprefix('acp:')!r} is not configured on the target "
+            f"host ({reason}). Add it to the `acp.agents` entries on that host, or choose "
+            "another host.",
+            code=ErrorCode.HARNESS_NOT_CONFIGURED,
+        )
     raise OmnigentError(
         f"Harness {harness!r} is not configured on the target host ({reason}). "
         "Install or configure the harness on that host, or choose an available harness.",

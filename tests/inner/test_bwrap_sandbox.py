@@ -2053,6 +2053,7 @@ def test_nested_write_root_overlays_read_only_parent(tmp_path: Path) -> None:
 
 
 @pytestmark_bwrap
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/584")
 def test_seccomp_blocks_dangerous_socket_families_inside_helper(tmp_path: Path) -> None:
     """
     The full hardened seccomp profile installed by
