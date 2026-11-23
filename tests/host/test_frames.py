@@ -3203,6 +3203,24 @@ def test_mcp_launch_activation_round_trip(activation):
     )
 
 
+@pytest.mark.parametrize("thinking_summaries", [None, True, False])
+def test_thinking_summaries_launch_round_trip(thinking_summaries):
+    frame = HostLaunchRunnerFrame(
+        "request", "token", "/repo", thinking_summaries=thinking_summaries
+    )
+    wire = encode_host_frame(frame)
+    assert decode_host_frame(wire) == frame
+    # Off is the field's absence, so an off launch is the frame an older server sends.
+    assert ("thinking_summaries" in json.loads(wire)) is (thinking_summaries is not None)
+
+
+def test_thinking_summaries_launch_rejects_a_non_boolean():
+    wire = json.loads(encode_host_frame(HostLaunchRunnerFrame("request", "token", "/repo")))
+    wire["thinking_summaries"] = "yes"
+    with pytest.raises(ValueError, match="thinking_summaries"):
+        decode_host_frame(json.dumps(wire))
+
+
 def test_enablement_fields_survive_inventory_allow_list():
     frame = HostMcpServersResultFrame(
         "request",
