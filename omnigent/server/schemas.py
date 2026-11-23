@@ -1747,8 +1747,8 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         ``"auto"`` (approval cards) or ``"bypassPermissions"`` (no card for a
         request no TOOL_CALL policy decided; a policy deny still denies), which
         reaches its ``HARNESS_ACP_PERMISSION_MODE``; a session another session
-        creates can use ``bypassPermissions`` only when its creator runs in
-        it too. ``None`` keeps the agent's mode.
+        creates can use a mode only when it is no looser than the agent's
+        default. ``None`` gives the agent's default.
     :param created_by_session_id: Optional session that launched this one from
         outside a tool call (e.g. a host script), recorded as its creator so it can
         message back. The caller must own that session; ignored for tool-created
