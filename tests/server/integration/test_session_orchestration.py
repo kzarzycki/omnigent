@@ -735,6 +735,51 @@ async def test_scheduled_origin_workers_use_the_automation_permission_mode(
     )
 
 
+async def test_automation_skip_mode_is_dropped_for_a_worker_with_no_declared_default(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    source, _target, _captured = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, harness="claude-native")
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        permission_mode="bypassPermissions",
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    conversations.set_labels(source["id"], {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id})
+    schedules.create_run(
+        uuid4().hex, task.id, "running", scheduled_at=1, conversation_id=source["id"], fired_at=1
+    )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": worker_agent_id, "placement": "managed"}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+
+    assert result.get("conversation_id"), result
+    worker = conversations.get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args is None
+
+
 @pytest.mark.parametrize(
     ("automation_mode", "requested_mode", "launch_args"),
     [
@@ -1488,13 +1533,15 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
     )
 
 
-async def _upload_codex_worker(auth_client, sub_agents=None, **config) -> str:
+async def _upload_codex_worker(
+    auth_client, sub_agents=None, harness="codex-native", **config
+) -> str:
     from tests._helpers.session import post_session_bundle
     from tests.server.helpers import build_agent_bundle
 
     bundle = build_agent_bundle(
         "codex-worker",
-        executor={"config": {"harness": "codex-native", **config}},
+        executor={"config": {"harness": harness, **config}},
         sub_agents=sub_agents,
     )
     uploaded = await post_session_bundle(auth_client.post, "/v1/sessions", bundle)
@@ -1698,22 +1745,29 @@ async def test_created_session_permission_mode_can_only_tighten_the_agent_defaul
         )
 
 
+_BYPASS = ["--dangerously-bypass-approvals-and-sandbox"]
+_READ_ONLY = PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"]
+
+
+@pytest.mark.parametrize("placement", ["orchestrated", "child-from-agent", "child-from-person"])
 @pytest.mark.parametrize(
-    ("spec_config", "raw_args", "accepted"),
+    ("spec_config", "raw_args", "agent_accepts"),
     [
-        # Raw launch args are held to the agent's default like a requested mode.
-        ({"permission_mode": "read-only"}, ["--dangerously-bypass-approvals-and-sandbox"], False),
+        # Raw launch args from an agent must spell one mode, no looser than the agent's default.
+        ({"permission_mode": "read-only"}, _BYPASS, False),
+        ({"permission_mode": "read-only"}, [*_BYPASS, "--model", "gpt-x"], False),
+        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], False),
         (
             {"permission_mode": "read-only"},
-            PERMISSION_LAUNCH_ARGS["codex-native"]["read-only"],
-            True,
+            ["--ask-for-approval", "never", "--sandbox", "danger-full-access"],
+            False,
         ),
-        ({}, ["--dangerously-bypass-approvals-and-sandbox"], True),
-        ({"permission_mode": "read-only"}, ["--model", "gpt-x"], True),
+        ({"permission_mode": "read-only"}, _READ_ONLY, True),
+        ({}, _BYPASS, True),
     ],
 )
-async def test_orchestrated_session_launch_args_are_held_to_the_agent_default(
-    auth_client, peers, db_uri, monkeypatch, spec_config, raw_args, accepted
+async def test_session_launch_args_are_held_to_the_agent_default_for_agents_only(
+    auth_client, peers, db_uri, monkeypatch, placement, spec_config, raw_args, agent_accepts
 ):
     from omnigent.server.routes.sessions import routes_core
 
@@ -1724,21 +1778,34 @@ async def test_orchestrated_session_launch_args_are_held_to_the_agent_default(
         pass
 
     monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
-    response = await auth_client.post(
-        "/v1/sessions/orchestrated",
-        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
-        json={
-            "agent_id": worker_agent_id,
-            "host_type": "managed",
-            "terminal_launch_args": raw_args,
-        },
-    )
+    body = {"agent_id": worker_agent_id, "terminal_launch_args": raw_args}
+    headers = {}
+    path = "/v1/sessions"
+    if placement == "orchestrated":
+        path = "/v1/sessions/orchestrated"
+        headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
+        body["host_type"] = "managed"
+    else:
+        body["parent_session_id"] = source["id"]
+        if placement == "child-from-person":
+            # The web client carries no runner token; ``peers`` gives the client one.
+            from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
 
-    if accepted:
+            auth_client.headers.pop(RUNNER_TUNNEL_TOKEN_HEADER, None)
+            auth_client.headers.pop(ORCHESTRATION_SOURCE_HEADER, None)
+
+    response = await auth_client.post(path, json=body, headers=headers)
+
+    if placement == "child-from-person" or agent_accepts:
+        # A person's own picker keeps its args.
         assert response.status_code == 201, response.text
+        stored = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+        assert stored.terminal_launch_args == raw_args
     else:
         assert response.status_code == 400, response.text
-        assert "looser than this agent's default" in response.text
+        assert (
+            "looser than this agent's default" in response.text or "exactly one" in response.text
+        )
 
 
 @pytest.mark.parametrize("placement", ["child", "managed"])
