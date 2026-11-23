@@ -8,6 +8,8 @@ name: Gate
 on:
   pull_request:
     branches: [mine]
+    # `closed` joins the PR's concurrency group, so a closed draft's run is cancelled, not left running.
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -18,8 +20,8 @@ concurrency:
 
 jobs:
   gate:
-    # Mergify's draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
-    if: startsWith(github.head_ref, 'mergify/merge-queue/')
+    # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
+    if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
