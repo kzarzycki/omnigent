@@ -232,3 +232,8 @@ def journey_session(
         http_client, agent_name=agent_name, runner_id=live_runner_id
     )
     return JourneySession(agent_name=agent_name, session_id=session_id)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_config() -> None:
+    """Keep the suite-owned config home: session-scoped servers inherited it."""

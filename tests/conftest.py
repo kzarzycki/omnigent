@@ -404,12 +404,12 @@ def _isolated_gh_config(
 
 
 @pytest.fixture(autouse=True)
-def _isolated_global_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> None:
+def _isolated_global_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give each test its own user config home, so a config written by one test
-    (``omnigent setup``, ``_save_global_config``) never reaches a later one."""
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path_factory.mktemp("config-home")))
+    (``omnigent setup``, ``_save_global_config``) never reaches a later one. It
+    stays under the suite's data dir, which ``test_suite_isolation`` checks."""
+    home = tempfile.mkdtemp(prefix="config-home-", dir=_TEST_OMNIGENT_DATA_DIR)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", home)
 
 
 @pytest.fixture(autouse=True)
