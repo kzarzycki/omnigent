@@ -611,3 +611,70 @@ def test_tmux_last_client_input_at_none_on_unparseable_output(
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
     assert native_cost_popup._tmux_last_client_input_at("/tmp/x.sock", "main") is None
+
+
+def test_resolution_watcher_reads_slim_snapshot_and_exits_once_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watcher polls a snapshot without items and closes on resolution.
+
+    It reads only ``pending_elicitations``, so it must not make the server
+    rebuild the transcript, probe liveness or sum usage on every poll.
+    """
+    snapshots = [
+        {"pending_elicitations": [{"elicitation_id": _ELICITATION_ID}]},
+        {"pending_elicitations": []},
+    ]
+    urls: list[str] = []
+
+    class _SnapshotResponse(_FakeResponse):
+        def __init__(self, snapshot: dict[str, object]) -> None:
+            super().__init__(status=200)
+            self.body = json.dumps(snapshot).encode()
+
+        def read(self) -> bytes:
+            return self.body
+
+    def _fake_urlopen(req: request.Request, timeout: float | None = None) -> _SnapshotResponse:
+        urls.append(req.full_url)
+        return _SnapshotResponse(snapshots[len(urls) - 1])
+
+    class _Exited(Exception):
+        pass
+
+    def _exit(code: int) -> None:
+        raise _Exited(code)
+
+    class _InlineThread:
+        def __init__(self, target: Any, daemon: bool) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            self.target()
+
+    monkeypatch.setattr(
+        native_cost_popup,
+        "request",
+        types.SimpleNamespace(Request=request.Request, urlopen=_fake_urlopen),
+    )
+    monkeypatch.setattr(native_cost_popup.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(native_cost_popup.os, "_exit", _exit)
+    monkeypatch.setattr(native_cost_popup.threading, "Thread", _InlineThread)
+
+    with pytest.raises(_Exited):
+        native_cost_popup._start_resolution_watcher(
+            ap_server_url=_AP_URL,
+            auth_headers={},
+            session_id=_SESSION_ID,
+            elicitation_id=_ELICITATION_ID,
+        )
+
+    assert len(urls) == 2
+    query = urls[0].split("?", 1)[1].split("&")
+    assert urls[0].startswith(f"{_AP_URL}/v1/sessions/{_SESSION_ID}?")
+    assert sorted(query) == [
+        "include_items=false",
+        "include_live_status=false",
+        "include_liveness=false",
+        "include_usage=false",
+    ]
