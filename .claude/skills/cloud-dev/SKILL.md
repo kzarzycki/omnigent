@@ -84,10 +84,11 @@ Checked in a VM against pack `engineering-v0.35.1` (`approvals.py check merge <p
 the VM. Run them from the pack clone (Loop role files above; add `--branch engineering-v0.35.1` to pin it), as
 `gatekeeper/skills/gatekeeper/scripts/approvals.py`.
 
-**Runs in the VM:** `check build`, `check merge`, `record verdict`, `record checks` (the `local-ci` gate and its
-record) and `land`. `land` merges over REST (`PUT pulls/N/merge`, squash, or a merge commit for a `sync/*` head, pinned to the gated head), which needs no
-signing key. A PR's review threads are read through the proxy's `ccr/review_threads` route.
-Run `record checks` and `land` from a clean worktree of the PR head, after the setup steps below.
+**Runs in the VM:** `check build`, `check merge`, `record verdict` and `land`. `land` merges nothing: it posts the
+`land` status on the gated head and adds `loop:queued`, and Mergify merges (a squash, or a merge commit for a `sync/*`
+head). The PR's `gate` check in GitHub Actions is the proof, so no `record checks` run comes first.
+A PR's review threads are read through the proxy's `ccr/review_threads` route.
+Run `land` from a clean worktree of the PR head, after the setup steps below.
 
 **Still needs the host:**
 
@@ -107,16 +108,16 @@ Run `record checks` and `land` from a clean worktree of the PR head, after the s
   a child with no host runs on the bridge host, which may lack `gh` and the report paths.
   It runs in your host workspace, the checkout your session started from. Send it exact commands and ask for
   their output and exit codes in its reply. It also writes your final report to the host path your brief names.
-  A gatekeeper step run on the host (`record checks`, `land`) checks the checkout's HEAD against the PR head, so it
+  A gatekeeper step run on the host (`land`) checks the checkout's HEAD against the PR head, so it
   runs in a clean worktree of the PR head, after these there (AGENTS.md, landing PRs into `mine`):
   `mise trust -q`, `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group lint` and
   `pnpm install --frozen-lockfile --filter web --filter ./editors/vscode` (the session-list
   lint is TypeScript, and the VS Code extension's type check runs once a branch touches the
-  pnpm lockfile). Without them `record checks` stops without checking anything.
+  pnpm lockfile). Without them `land` stops without checking anything.
 - **Keep host waits short.** A wait longer than the VM's idle window resumes the VM in a
   new sandbox without the Omnigent tools (#116), and a full host `tests/server` run takes
   about 24 minutes. Run long suites in the VM; send the helper steps that finish in a few
-  minutes, and `land --wait` only once `record checks` has recorded its pass.
+  minutes, and `land --wait` only once the PR's `gate` check is green.
 - **Wake-ups.** A wake from a GitHub notification comes outside an Omnigent turn, where
   `sys_read_inbox` answers `runner_turn_context_desync`. End the turn and wait for the
   child's finish notice instead.
