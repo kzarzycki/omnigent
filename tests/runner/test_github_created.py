@@ -159,7 +159,9 @@ def test_candidates_share_one_deadline(
     gh: list[list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The scripted clock counts only the deadline checks, so read the accounts uncached.
-    monkeypatch.setattr(github_resource, "hosts_file_stat", lambda *_args: None)
+    monkeypatch.setattr(
+        github_resource, "_cached_accounts", lambda root: github_resource._list_accounts(root)
+    )
     clock = iter([0.0, 1.0, 6.0])
     monkeypatch.setattr(github_created.time, "monotonic", lambda: next(clock, 6.0))
 
