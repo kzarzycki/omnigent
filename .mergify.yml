@@ -6,14 +6,15 @@
 # `gate` (`.github/workflows/gate.yml`, which runs on those drafts alone) is green there: one proof per change, on the
 # tree that merges. A push leaves a head with no `land` status, so the PR drops out. A PR Mergify drops gets
 # `loop:dequeued`, which the next `land` evicts back to draft. `merge_conditions` differ from `queue_conditions`, so
-# Mergify always tests on a draft and never in place, where `gate` would not run.
+# Mergify always tests on a draft and never in place, where `gate` would not run. `checks_timeout` sits above
+# `gate`'s 150-minute pytest wall clock (`run-affected-tests.sh`), since a whole-suite selection takes about 2 hours.
 
 queue_rules:
   - name: default
     merge_method: squash
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 1 hour
+    checks_timeout: 3 hours
     queue_conditions:
       - base = mine
       - -draft
@@ -27,7 +28,7 @@ queue_rules:
     merge_method: merge
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 1 hour
+    checks_timeout: 3 hours
     queue_conditions:
       - base = mine
       - -draft
