@@ -128,6 +128,51 @@ class _RecordingCodexAppServerClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
+async def test_events_policy_change_closes_native_allow_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    harness: str,
+) -> None:
+    """A forwarded ``policy_change`` closes the bridge's no-policy ALLOW window.
+
+    The server sends it when a session policy is added, changed or removed, so
+    native hooks stop reusing an ALLOW that predates the change.
+    """
+    import time as _time
+
+    from omnigent.native import policy_allow_cache
+
+    conv_id = "6a0d7e1c2b3f4a5d9e8f7a6b5c4d3e2f"
+    bridge_module = claude_native_bridge if harness == "claude-native" else codex_native_bridge
+    monkeypatch.setattr(bridge_module, "_BRIDGE_ROOT", tmp_path / "bridge")
+    # Without a bridge-id label both harnesses key the bridge by session id.
+    bridge_dir = bridge_module.bridge_dir_for_bridge_id(conv_id)
+    bridge_dir.mkdir(parents=True)
+    cache_file = bridge_dir / "policy_allow_until"
+
+    app, _ = await _build_app_for_spec(_harness_spec(harness))
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        # Open the window once the session exists: setting a bridge up resets it.
+        policy_allow_cache.record(
+            bridge_dir,
+            policy_allow_cache.generation(bridge_dir),
+            {"result": "POLICY_ACTION_ALLOW", "allow_cache_seconds": 60.0},
+            _time.time(),
+        )
+        assert int(cache_file.read_text().split()[0]) > _time.time()
+        resp = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "policy_change"})
+
+    assert resp.status_code == 204, resp.text
+    assert int(cache_file.read_text().split()[0]) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_payload,expected_params",
     [
