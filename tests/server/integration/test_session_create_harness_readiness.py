@@ -422,3 +422,42 @@ async def test_nested_parent_readiness_has_bounded_reads(
     with pytest.raises(OmnigentError, match="not configured"):
         await validation
     assert read.call_count == min(depth, 16)
+
+
+async def test_acp_agent_missing_from_host_report_is_refused_by_name(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """A host with other ACP agents but no ``claude-cloud`` entry refuses the create."""
+    from omnigent.errors import OmnigentError
+    from omnigent.server.routes._session_harness_readiness import validate_create_harness_readiness
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+    from omnigent.stores.host_store import HostStore
+
+    host_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    hosts = HostStore(db_uri)
+    hosts.upsert_on_connect(
+        host_id,
+        "test-host",
+        "local",
+        configured_harnesses={"acp": True, "acp:other": True},
+    )
+    arguments = {
+        "harness": "acp:claude-cloud",
+        "host_id": host_id,
+        "parent_session_id": None,
+        "inherited_runner_id": None,
+        "user_id": None,
+        "conversation_store": SqlAlchemyConversationStore(db_uri),
+        "host_store": hosts,
+    }
+
+    with pytest.raises(OmnigentError, match="claude-cloud"):
+        await validate_create_harness_readiness(**arguments)
+
+    hosts.upsert_on_connect(
+        host_id,
+        "test-host",
+        "local",
+        configured_harnesses={"acp": True, "acp:other": True, "acp:claude-cloud": True},
+    )
+    await validate_create_harness_readiness(**arguments)

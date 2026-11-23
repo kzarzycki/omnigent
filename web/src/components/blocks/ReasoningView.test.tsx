@@ -6,9 +6,13 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { writeKeepThinkingExpanded } from "@/lib/keepThinkingExpandedPreferences";
 import { ReasoningView } from "./ReasoningView";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe("ReasoningView — expandable gating", () => {
   it("a settled section with empty text is NOT expandable", () => {
@@ -53,11 +57,97 @@ describe("ReasoningView — expandable gating", () => {
     // the trigger to expand first. Asserting on the actual text after
     // expanding proves the content path still renders end-to-end, not
     // just that a button exists.
-    render(<ReasoningView text="Considered the options." isStreaming={false} duration={2.5} />);
+    render(
+      <ReasoningView
+        text={"Weighing the options.\n\nPicked the cheaper one."}
+        isStreaming={false}
+        duration={2.5}
+      />,
+    );
     const trigger = screen.getByRole("button");
     expect(trigger).toBeTruthy();
-    expect(screen.queryByText("Considered the options.")).toBeNull(); // collapsed
+    expect(screen.queryByText("Picked the cheaper one.")).toBeNull(); // collapsed
     fireEvent.click(trigger);
-    expect(screen.getByText("Considered the options.")).toBeTruthy(); // expanded
+    expect(screen.getByText("Picked the cheaper one.")).toBeTruthy(); // expanded
+  });
+});
+
+describe("ReasoningView — header preview", () => {
+  it("previews the first non-blank line of a settled thought instead of its duration", () => {
+    render(
+      <ReasoningView
+        text={"\n  Checking the lockfile first.\nThen the build config."}
+        isStreaming={false}
+        duration={2.5}
+      />,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent(
+      /^Thinking: Checking the lockfile first\.$/,
+    );
+    expect(screen.queryByText(/Thought for/)).toBeNull();
+  });
+
+  it("strips markdown markers from the preview line", () => {
+    render(
+      <ReasoningView
+        text={"## **Planning** the `retry` fix\n\nDetails."}
+        isStreaming={false}
+        duration={undefined}
+      />,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent(/^Thinking: Planning the retry fix$/);
+  });
+
+  it("keeps dunder names intact in the preview", () => {
+    render(
+      <ReasoningView
+        text="Checking __init__.py and `__main__` first."
+        isStreaming={false}
+        duration={undefined}
+      />,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent(
+      /^Thinking: Checking __init__\.py and __main__ first\.$/,
+    );
+  });
+
+  it("skips code fence and thematic break lines when choosing the preview", () => {
+    render(
+      <ReasoningView
+        text={"---\n```python\nimport os\n```"}
+        isStreaming={false}
+        duration={undefined}
+      />,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent(/^Thinking: import os$/);
+  });
+
+  it("keeps the shimmer while streaming rather than previewing partial text", () => {
+    render(<ReasoningView text="Checking the lockfile" isStreaming={true} duration={undefined} />);
+    expect(screen.getByText("Thinking...")).toBeTruthy();
+    expect(screen.queryByText(/Thinking:/)).toBeNull();
+  });
+
+  it("falls back to the duration label when a settled thought has no text", () => {
+    render(<ReasoningView text="" isStreaming={false} duration={3} />);
+    expect(screen.getByText("Thought for 3.0 seconds")).toBeTruthy();
+  });
+});
+
+describe("ReasoningView — keep thinking expanded", () => {
+  it("shows a settled section's text without a click when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="Considered the options." isStreaming={false} duration={2.5} />);
+    // The header previews the first line, so check the trigger's state rather than the text.
+    const trigger = screen.getByRole("button");
+    expect(trigger.getAttribute("data-state")).toBe("open");
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("data-state")).toBe("closed");
+  });
+
+  it("keeps a settled empty section a flat header when the preference is on", () => {
+    writeKeepThinkingExpanded(true);
+    render(<ReasoningView text="" isStreaming={false} duration={undefined} />);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });

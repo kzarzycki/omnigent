@@ -40,6 +40,11 @@ import * as adminView from "@/lib/adminView";
 import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 import { UI_FONT_SIZE_MOBILE_QUERY } from "@/lib/uiFontPreferences";
 import {
+  CODE_BLOCK_WORD_WRAP_STORAGE_KEY,
+  useCodeBlockWordWrap,
+  writeCodeBlockWordWrap,
+} from "@/lib/codeWrapPreferences";
+import {
   readTerminalClipboardPreference,
   writeTerminalClipboardPreference,
 } from "@/lib/terminalClipboardPreferences";
@@ -66,6 +71,8 @@ const mocks = vi.hoisted(() => ({
   bootFallback: false,
   sessionTitleInstructions: false,
   nestedAgents: false,
+  advisorAvailable: false,
+  authenticatedFetch: vi.fn(),
   // Identity from the mode-agnostic `/v1/me` probe (resolveIdentity returns
   // the id, getCurrentIsAdmin the flag). null → unauthenticated.
   me: { id: "alice", is_admin: false } as { id: string; is_admin: boolean } | null,
@@ -102,6 +109,7 @@ vi.mock("@/lib/CapabilitiesContext", () => ({
           sibling_sessions: mocks.nestedAgents,
           enabled_connections: mocks.enabledConnections,
           session_title_instructions: mocks.sessionTitleInstructions,
+          proactive_agent_available: mocks.advisorAvailable,
         },
 }));
 vi.mock("@/components/SessionTitleInstructionsControl", () => ({
@@ -115,6 +123,7 @@ vi.mock("@/lib/accountsApi", () => ({
   changePassword: vi.fn(),
 }));
 vi.mock("@/lib/identity", () => ({
+  authenticatedFetch: (...args: unknown[]) => mocks.authenticatedFetch(...args),
   resolveIdentity: () => Promise.resolve(mocks.me?.id ?? null),
   getCurrentIsAdmin: () => mocks.effectiveAdmin ?? mocks.me?.is_admin ?? false,
   getCurrentAdminEligibility: () => mocks.me?.is_admin ?? false,
@@ -301,6 +310,8 @@ beforeEach(() => {
   mocks.bootFallback = false;
   mocks.sessionTitleInstructions = false;
   mocks.nestedAgents = false;
+  mocks.advisorAvailable = false;
+  mocks.authenticatedFetch.mockReset();
   mocks.importSessionsPanel.mockClear();
   mocks.enabledConnections = [];
   mocks.loginUrl = "/login";
@@ -336,6 +347,34 @@ describe("Import sessions", () => {
     expect(screen.getByRole("heading", { name: "Import from a machine" })).toBeTruthy();
     expect(mocks.importSessionsPanel).toHaveBeenCalled();
     expect(screen.queryByRole("heading", { name: "Harness imports" })).toBeNull();
+  });
+});
+
+describe("Omni Advisor", () => {
+  it("shows a settings load failure with a retry instead of dropping the switch", async () => {
+    mocks.advisorAvailable = true;
+    mocks.authenticatedFetch.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          workspace_enabled: true,
+          user_enabled: true,
+          enabled: true,
+          can_manage_workspace: false,
+        }),
+        { status: 200 },
+      ),
+    );
+    renderPage();
+
+    const group = await screen.findByTestId("settings-group-proactive-agent");
+    expect(await within(group).findByRole("alert")).toHaveTextContent(
+      "Couldn’t load Omni Advisor settings.",
+    );
+    expect(within(group).queryByRole("switch")).toBeNull();
+
+    fireEvent.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(await within(group).findByRole("switch", { name: "Omni Advisor" })).toBeChecked();
+    expect(mocks.authenticatedFetch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -532,6 +571,29 @@ describe("SettingsPage", () => {
 
     expect(toggle).not.toBeChecked();
     expect(localStorage.getItem(BACKGROUND_SESSION_TITLES_STORAGE_KEY)).toBe("off");
+  });
+
+  it("shows and persists the keep-thinking-expanded switch, off by default", async () => {
+    renderPage("/settings/general");
+    const toggle = await screen.findByTestId("keep-thinking-expanded-toggle");
+    expect(screen.getByTestId("settings-group-general-chat")).toContainElement(toggle);
+    expect(toggle).toHaveAccessibleName("Keep thinking expanded");
+    expect(toggle).toHaveAttribute("data-component-id", "settings.general.keep_thinking_expanded");
+    expect(toggle).not.toBeChecked();
+
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(localStorage.getItem("omnigent:keep-thinking-expanded")).toBe("true");
+
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    expect(localStorage.getItem("omnigent:keep-thinking-expanded")).toBe("false");
+  });
+
+  it("reflects a stored keep-thinking-expanded preference", async () => {
+    localStorage.setItem("omnigent:keep-thinking-expanded", "true");
+    renderPage("/settings/general");
+    expect(await screen.findByTestId("keep-thinking-expanded-toggle")).toBeChecked();
   });
 
   it("opens sub-agents full screen by default and persists the panel setting", async () => {
@@ -845,8 +907,8 @@ describe("SettingsPage", () => {
 
     const group = screen.getByRole("radiogroup", { name: "Default Workspace tab" });
     const options = within(group).getAllByRole("radio");
-    expect(options).toHaveLength(4);
-    ["Files", "Changes", "Pull Requests", "Agents"].forEach((label, index) => {
+    expect(options).toHaveLength(5);
+    ["Files", "Changes", "Pull Requests", "Agents", "Tasks"].forEach((label, index) => {
       expect(options[index]).toHaveAccessibleName(label);
     });
     expect(screen.getByTestId("workspace-tab-default-files")).toHaveAttribute(
@@ -862,7 +924,7 @@ describe("SettingsPage", () => {
     );
     expect(
       screen.getByRole("img", {
-        name: "Sidebar preview: Agents, Files, Changes, Pull Requests pinned.",
+        name: "Sidebar preview: Agents, Files, Changes, Pull Requests, Tasks pinned.",
       }),
     ).toBeInTheDocument();
     expect(localStorage.getItem("omnigent:default-workspace-tab")).toBe("subagents");
@@ -878,7 +940,7 @@ describe("SettingsPage", () => {
     );
     expect(
       screen.getByRole("img", {
-        name: "Sidebar preview: Changes, Files, Pull Requests, Agents pinned.",
+        name: "Sidebar preview: Changes, Files, Pull Requests, Agents, Tasks pinned.",
       }),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Pin Changes" }));
@@ -906,7 +968,7 @@ describe("SettingsPage", () => {
       selectedBrowserId: "one",
     });
     const page = renderPage("/settings/appearance");
-    for (const label of ["Files", "Changes", "Pull Requests", "Agents"]) {
+    for (const label of ["Files", "Changes", "Pull Requests", "Tasks", "Agents"]) {
       const toggle = screen.getByRole("button", { name: `Pin ${label}` });
       expect(toggle).toHaveAttribute("aria-pressed", "true");
       fireEvent.click(toggle);
@@ -1317,6 +1379,10 @@ describe("SettingsPage", () => {
     });
     fireEvent.click(screen.getByTestId("heavier-code-text-toggle"));
     localStorage.setItem("omnigent:hidden-picker-agents", '["polly"]');
+    // Code block wrap is toggled from a code block, not this page.
+    act(() => writeCodeBlockWordWrap(false));
+    const codeWrap = renderHook(() => useCodeBlockWordWrap());
+    expect(codeWrap.result.current).toBe(false);
 
     // Sanity: the non-default choices were persisted.
     expect(localStorage.getItem("omnigent:terminal-theme")).toBe("dark");
@@ -1355,6 +1421,8 @@ describe("SettingsPage", () => {
     expect(localStorage.getItem("omnigent:ui-font-size")).toBeNull();
     expect(localStorage.getItem("omnigent:code-font-size")).toBeNull();
     expect(localStorage.getItem("omnigent:code-font-weight")).toBeNull();
+    expect(localStorage.getItem(CODE_BLOCK_WORD_WRAP_STORAGE_KEY)).toBeNull();
+    expect(codeWrap.result.current).toBe(true);
 
     // Color theme is back to Omnigent.
     expect((screen.getByTestId("color-theme-select") as HTMLSelectElement).value).toBe("omni");

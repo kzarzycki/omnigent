@@ -59,6 +59,7 @@ _BOOT_STORE_CLASSES = (
     "omnigent.stores.conversation_store.sqlalchemy_store.SqlAlchemyConversationStore",
     "omnigent.stores.file_store.sqlalchemy_store.SqlAlchemyFileStore",
     "omnigent.stores.host_store.HostStore",
+    "omnigent.stores.memory_store.sqlalchemy_store.SqlAlchemyMemoryStore",
     "omnigent.stores.permission_store.sqlalchemy_store.SqlAlchemyPermissionStore",
     "omnigent.stores.policy_store.sqlalchemy_store.SqlAlchemyPolicyStore",
     "omnigent.stores.project_store.sqlalchemy_store.SqlAlchemyProjectStore",
@@ -196,6 +197,7 @@ def _transient_resume_error() -> OperationalError:
     )
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_boot_retries_past_transient_resume_error(
     boot_exit_codes: list[int],
     monkeypatch: pytest.MonkeyPatch,
@@ -231,6 +233,7 @@ def test_boot_retries_past_transient_resume_error(
     assert boot_exit_codes == []
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_boot_gives_up_loudly_when_db_never_comes_up(
     boot_exit_codes: list[int],
     monkeypatch: pytest.MonkeyPatch,
@@ -260,6 +263,7 @@ def test_boot_gives_up_loudly_when_db_never_comes_up(
     )
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_boot_fails_fast_on_non_transient_migration_error(
     boot_exit_codes: list[int],
     monkeypatch: pytest.MonkeyPatch,
@@ -278,6 +282,7 @@ def test_boot_fails_fast_on_non_transient_migration_error(
     assert attempts["n"] == 1
 
 
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/595: xdist shadows deploy")
 def test_boot_without_migration_failure_does_not_exit(
     boot_exit_codes: list[int],
     monkeypatch: pytest.MonkeyPatch,

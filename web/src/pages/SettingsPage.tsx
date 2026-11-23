@@ -45,6 +45,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useViewerId } from "@/hooks/useViewerId";
+import { useProactiveAgentSettings } from "@/hooks/useProactiveAgentSettings";
 import {
   ArchiveRestoreIcon,
   AlertTriangleIcon,
@@ -54,6 +55,7 @@ import {
   FilesIcon,
   GitPullRequestIcon,
   KeyRoundIcon,
+  ListChecksIcon,
   Loader2Icon,
   LogOutIcon,
   EyeIcon,
@@ -81,6 +83,7 @@ import { useTheme } from "next-themes";
 import { PageScroll } from "@/components/PageScroll";
 import { SettingsGroup } from "@/components/SettingsGroup";
 import { SettingsLabel } from "@/components/SettingsLabel";
+import { ProactiveAgentSettingControl } from "@/components/ProactiveAgentSettingControl";
 import { SessionTitleInstructionsControl } from "@/components/SessionTitleInstructionsControl";
 import { McpRegistryConnections } from "@/components/McpRegistry";
 import { ThemeColorPicker } from "@/components/theme/ThemeColorPicker";
@@ -90,6 +93,7 @@ import { PaletteChip, PaletteSwatchPreview } from "@/components/theme/Appearance
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { BrowserAgentToolsSettingsGroup } from "@/components/BrowserPane/agentTools/BrowserAgentToolsSettingsGroup";
 import {
   Select,
   SelectContent,
@@ -181,6 +185,11 @@ import {
   writeCodeFontWeight,
 } from "@/lib/codeFontPreferences";
 import {
+  CODE_BLOCK_WORD_WRAP_STORAGE_KEY,
+  DEFAULT_CODE_BLOCK_WORD_WRAP,
+  writeCodeBlockWordWrap,
+} from "@/lib/codeWrapPreferences";
+import {
   readTerminalThemeMode,
   TERMINAL_THEME_DEFAULT,
   writeTerminalThemeMode,
@@ -249,6 +258,10 @@ import {
 import { readDefaultBaseBranch, writeDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 import { readAlwaysSteer, writeAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import {
+  readKeepThinkingExpanded,
+  writeKeepThinkingExpanded,
+} from "@/lib/keepThinkingExpandedPreferences";
+import {
   readOpenSubagentsInPanel,
   writeOpenSubagentsInPanel,
 } from "@/lib/subagentPanelPreferences";
@@ -315,6 +328,7 @@ import {
   updateBridge,
 } from "@/lib/nativeBridge";
 import { readOpenLinksInApp, writeOpenLinksInApp } from "@/lib/linkOpenPreferences";
+import { PROACTIVE_AGENT_DISPLAY_NAME } from "@/lib/proactiveInbox";
 import { cn } from "@/lib/utils";
 import {
   readBackgroundSessionTitlesEnabled,
@@ -495,6 +509,7 @@ const workspaceTabCards: {
   { value: "changes", label: "Changes", icon: FileDiffIcon },
   { value: "github", label: "Pull Requests", icon: GitPullRequestIcon },
   { value: "subagents", label: "Agents", icon: BotIcon },
+  { value: "tasks", label: "Tasks", icon: ListChecksIcon },
 ];
 
 /** Inline icon and label for compact settings choices. */
@@ -1163,6 +1178,7 @@ function AppearanceSection() {
     writeCodeFontSizePx(CODE_FONT_SIZE_DEFAULT);
     writeCodeFontFamily(CODE_FONT_FAMILY_DEFAULT);
     writeCodeFontWeight(CODE_FONT_WEIGHT_DEFAULT);
+    writeCodeBlockWordWrap(DEFAULT_CODE_BLOCK_WORD_WRAP);
 
     // Remove the persisted keys so this device has no appearance overrides at
     // all. Some write helpers already remove the key for the default value;
@@ -1176,6 +1192,7 @@ function AppearanceSection() {
           "omnigent:code-font-size",
           "omnigent:code-font-family",
           "omnigent:code-font-weight",
+          CODE_BLOCK_WORD_WRAP_STORAGE_KEY,
           "omnigent:terminal-theme",
           "omnigent:ui-theme-palette",
           "omnigent:custom-theme",
@@ -1822,6 +1839,36 @@ function AlwaysSteerControl() {
   );
 }
 
+function KeepThinkingExpandedControl() {
+  const [value, setValue] = useState(() => readKeepThinkingExpanded());
+  const labelId = useId();
+  const descriptionId = useId();
+  const toggle = useCallback((next: boolean) => {
+    setValue(next);
+    writeKeepThinkingExpanded(next);
+  }, []);
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <SettingsLabel
+        label="Keep thinking expanded"
+        labelId={labelId}
+        descriptionId={descriptionId}
+        className="flex-1"
+        description="Leave thinking notes open after the model finishes and after a reload. Click a note's header to fold it."
+      />
+      <Switch
+        aria-labelledby={labelId}
+        aria-describedby={descriptionId}
+        checked={value}
+        onCheckedChange={toggle}
+        data-testid="keep-thinking-expanded-toggle"
+        className="mt-0.5 shrink-0"
+        componentId="settings.general.keep_thinking_expanded"
+      />
+    </div>
+  );
+}
+
 function ComposerSendShortcutControl() {
   const [enabled, setEnabled] = useState(() => readSubmitWithModEnter());
   const labelId = useId();
@@ -2068,6 +2115,17 @@ function AdminViewControl() {
 }
 
 /** App-wide behavior settings. */
+/** The viewer's Omni Advisor switch, where the server offers it. */
+function ProactiveAgentGroup() {
+  const { available } = useProactiveAgentSettings();
+  if (!available) return null;
+  return (
+    <SettingsGroup title={PROACTIVE_AGENT_DISPLAY_NAME} testId="settings-group-proactive-agent">
+      <ProactiveAgentSettingControl scope="me" />
+    </SettingsGroup>
+  );
+}
+
 function GeneralSection() {
   const info = useServerInfo();
   const titleInstructions = info !== "loading" && info.session_title_instructions === true;
@@ -2091,14 +2149,19 @@ function GeneralSection() {
             <OpenSubagentsInPanelControl />
           </div>
         </SettingsGroup>
+        <SettingsGroup title="Chat" testId="settings-group-general-chat">
+          <KeepThinkingExpandedControl />
+        </SettingsGroup>
         <SettingsGroup title="Terminal" testId="settings-group-terminal">
           <TerminalClipboardControl />
         </SettingsGroup>
+        <ProactiveAgentGroup />
         {supportsBrowser() && (
           <SettingsGroup title="Links" testId="settings-group-links">
             <OpenLinksInAppControl />
           </SettingsGroup>
         )}
+        <BrowserAgentToolsSettingsGroup />
         {supportsGlobalShortcut() && (
           <SettingsGroup title="Desktop app" testId="settings-group-desktop-app">
             <GlobalShortcutControl />

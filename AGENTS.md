@@ -240,15 +240,16 @@ every fork-only commit in it. As a backstop, `mise run pin-pr-target` makes the
 fork the default for bare `gh` commands; run it once per clone (worktrees share
 it), and `mise run check:all` runs it too.
 
-Land a PR with the engineering loop's `uv run <engineering-loop skill>/scripts/approvals.py
-land <pr> --wait`, run from a checkout of the PR's head (its worktree). It merges
-the PR through GitHub, pinned to the head the gates checked: an upstream-sync PR
-(head `sync/*`) as a merge commit, so `mine` keeps upstream's history, and every
-other PR as a squash (`land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
+Land a PR with the engineering loop's `uv run <gatekeeper skill>/scripts/approvals.py
+land <pr> --wait`, run from a checkout of the PR's head (its worktree). It posts
+the `land` status on the head the gates checked and adds `loop:queued`, and
+Mergify merges it: an upstream-sync PR (head `sync/*`) as a merge commit, so
+`mine` keeps upstream's history, and every other PR as a squash
+(`land.queue` and `land.merge_commit_heads` in `docs/agents/gatekeeper.md`).
 Nothing is signed or checked against a signer list.
-The fork runs no GitHub Actions (`loop.ci: false`), so first record `mise run
-check:all` passing on the head with `approvals.py local-ci <pr>` (run `mise trust`
-once in a new checkout).
+The `gate` check in GitHub Actions is the proof and `land` queues the PR with Mergify,
+so no local gate is recorded first (`mise run check:all` stays the pre-push check;
+run `mise trust` once in a new checkout).
 
 A landing host needs `gh` logged in to an account that can push to
 `kzarzycki/omnigent`. Their names are machine-specific, so they stay out of this
@@ -262,8 +263,11 @@ Omnigent development runs in Claude cloud sessions (the `claude-cloud` agent,
 environment `omnigent-dev`), so the load is off the owner's machines. In such a
 session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
 first. The VM can't reach GitHub's GraphQL API, so every
-`approvals.py` step, the land and the Codex verifier run on the bridge host,
-through a host helper session the skill describes.
+`approvals.py` step, the land and the Codex verifier run on the landing host (the
+one with `gh`, the agent-skills checkout, signing and the report paths), through a
+host helper session the skill describes. Any host that bridges cloud sessions is a
+bridge host; the helper and verifier are created on the landing host by naming it
+(`placement='host'`, `host_id`, `workspace`), whichever host bridges the lead.
 
 ## This fork: filing upstream issues and PRs
 

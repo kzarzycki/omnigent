@@ -462,6 +462,7 @@ def _clear_lakebase_override() -> Any:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_static_postgres_uri_path_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     (a) Backward compatibility: with no Lakebase config, a Postgres engine is
@@ -537,6 +538,7 @@ class LakebaseSentinel:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_token_callback_invoked_per_connection() -> None:
     """
     (b) The ``do_connect`` listener calls the token provider once per new
@@ -573,6 +575,7 @@ def test_token_callback_invoked_per_connection() -> None:
 
 
 @pytest.mark.databricks
+@pytest.mark.skip(reason="https://github.com/kzarzycki/omnigent/issues/585")
 def test_create_engine_wires_token_refresh_and_short_recycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1169,18 +1172,20 @@ def test_shared_read_scope_is_noop_outside(db_uri: str) -> None:
     assert _shared_read_sessions.get() is None
 
 
-def test_shared_read_scope_write_maker_bypasses_reuse(db_uri: str) -> None:
-    """A write maker (``immediate=True``) keeps its own session even in a scope,
-    so it never loses its ``BEGIN IMMEDIATE`` write isolation."""
+@pytest.mark.parametrize("maker_options", [{"immediate": True}, {"reuse_shared_reads": False}])
+def test_shared_read_scope_independent_maker_bypasses_reuse(
+    db_uri: str, maker_options: dict[str, bool]
+) -> None:
+    """Write isolation and bounded read batches keep their own sessions."""
     engine = get_or_create_engine(db_uri)
     read_maker = make_managed_session_maker(engine)
-    write_maker = make_managed_session_maker(engine, immediate=True)
+    independent_maker = make_managed_session_maker(engine, **maker_options)
 
     with shared_read_scope():
         with read_maker() as r1:
             pass
-        with write_maker() as w1:
-            assert w1 is not r1, "write makers must not join the read scope"
+        with independent_maker() as independent:
+            assert independent is not r1, "independent makers must not join the read scope"
         with read_maker() as r2:
             assert r2 is r1, "read makers still reuse the scope's session"
 

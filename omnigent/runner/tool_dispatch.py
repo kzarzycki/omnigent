@@ -33,7 +33,8 @@ import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 from urllib.parse import quote
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
     from omnigent.inner.datamodel import OSEnvSpec
     from omnigent.inner.os_env import OSEnvironment
     from omnigent.runner.mcp_manager import RunnerMcpManager
-    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.runner.resource_registry import SessionResourceRegistry, ToolEnvironmentLease
     from omnigent.runtime.filesystem_registry import FilesystemRegistry
     from omnigent.spec.types import AgentSpec, SkillSpec
     from omnigent.terminals.registry import TerminalRegistry
@@ -70,9 +71,17 @@ from omnigent.models.model_override import (
 from omnigent.native.native_coding_agents import public_agent_name
 from omnigent.policies.builtins.safety import scheduled_task_review_error
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
+from omnigent.runner.journal_tools import (
+    JOURNAL_TOOL_NAMES,
+    execute_journal_tool,
+    server_workflows_enabled,
+)
+from omnigent.runner.session_requests import remember_session_host
 from omnigent.runtime.mcp_tool_result import encode_mcp_image_result, native_image_payload
+from omnigent.spec.types import MEMORY_TOOL_NAMES
 from omnigent.tools import ToolManager
 from omnigent.tools.base import Tool, ToolContext
+from omnigent.tools.browser_agent_tools import ADVANCED_BROWSER_TOOL_NAMES
 from omnigent.tools.builtins._arguments import parse_json_object_arguments
 from omnigent.tools.builtins.ask_user_question import (
     SysAskUserQuestionTool,
@@ -95,8 +104,16 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
+from omnigent.tools.builtins.scheduled_tasks import (
+    reminder_name,
+    reminder_prompt,
+    reminder_rrule,
+    resolve_reminder_time,
+)
 from omnigent.tools.builtins.session_keep import KEEP_LABEL_KEY, SysSessionKeepTool
 from omnigent.tools.builtins.session_message import (
+    LEGACY_SESSION_MESSAGE_MAX_CHARS,
+    SESSION_MESSAGE_MAX_CHARS,
     SysSessionMessageTool,
     peer_session_messaging_enabled,
 )
@@ -483,14 +500,38 @@ _POLICY_TOOLS = frozenset({"sys_add_policy", "sys_policy_registry"})
 
 # Priority 5l.1: Scheduled-task management — the runner proxies the Omnigent
 # server's /v1/scheduled-tasks REST endpoints (same posture as _POLICY_TOOLS).
+# sys_reminder_set creates a one-time task that continues the calling session.
 _SCHEDULED_TASK_TOOLS = frozenset(
     {
         "sys_scheduled_task_create",
         "sys_scheduled_task_list",
         "sys_scheduled_task_update",
         "sys_scheduled_task_delete",
+        "sys_reminder_set",
     }
 )
+
+# Priority 5l.2: The session journal — the runner proxies the server's
+# /v1/sessions/{id}/journal routes (see omnigent/runner/journal_tools.py).
+_JOURNAL_TOOLS = JOURNAL_TOOL_NAMES
+# Priority 5l.2: Owner Inbox — the runner proxies /v1/inbox/items. Registered
+# only for agents that opt into ``tool_groups.user_inbox``.
+_USER_INBOX_TOOLS = frozenset({"sys_user_inbox_post", "sys_user_inbox_list"})
+
+# Priority 5l.3: Long-term memory — proxied to the server's /v1/memory routes, which
+# decide whose memory it is. Proxy them only for memory-enabled specs; otherwise
+# an agent's own tool may use these names.
+_MEMORY_TOOLS = MEMORY_TOOL_NAMES
+
+
+def _memory_tool_on(agent_spec: object, tool_name: str) -> bool:
+    """Whether *tool_name* is one of *agent_spec*'s memory tools, so the name means memory."""
+    if not getattr(getattr(agent_spec, "tool_groups", None), "memory", False):
+        return False
+    return tool_name != "memory_search" or bool(
+        getattr(agent_spec, "memory_search_available", True)
+    )
+
 
 # Priority 5m: Embedded-browser tools.
 # Runner dispatch POSTs a blocking action request to the server, which parks a
@@ -498,8 +539,8 @@ _SCHEDULED_TASK_TOOLS = frozenset(
 # Omnigent desktop renderer claims and executes the action, then POSTs the
 # result back. Execution lives HERE (not in Tool.invoke) because the browser
 # protocol needs the runner's ``server_client`` and ``ToolContext`` carries
-# none. See omnigent/tools/builtins/browser.py for the schema-only classes.
-_BROWSER_TOOLS = BROWSER_TOOL_NAMES
+# none. See omnigent/tools/builtins/browser.py and browser_agent_tools.py.
+_BROWSER_TOOLS = BROWSER_TOOL_NAMES | ADVANCED_BROWSER_TOOL_NAMES
 
 # Runner-side outer HTTP read timeout for a browser action POST. The read
 # budget (60s) MUST exceed the server-side browser-action await (30s) so the
@@ -526,10 +567,9 @@ _BROWSER_TIMEOUT_ERROR = (
 # free: the relay only advertises names that ``ToolManager(spec)``
 # actually registered, and terminal tools register only when the spec
 # declares a non-empty ``terminals:`` block.
-# ``sys_os_*`` is intentionally excluded: the
-# bridge exposes static ``sys_os_*`` tools and the relay overrides them
-# unconditionally for policy enforcement (independent of the spec's
-# ``os_env`` gate), so the native relay assembles them separately.
+# ``sys_os_*`` is intentionally excluded: every native harness has its own
+# shell and file tools, and a relayed copy would be a second route to the
+# workspace that a same-uid caller holding the relay token could use.
 _NATIVE_RELAY_BUILTIN_TOOLS = (
     {SysSessionMessageTool.name()}
     | _COMMENT_TOOLS
@@ -549,6 +589,9 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     | _AGENT_TOOLS
     | _POLICY_TOOLS
     | _SCHEDULED_TASK_TOOLS
+    | _JOURNAL_TOOLS
+    | _USER_INBOX_TOOLS
+    | _MEMORY_TOOLS
     | _TERMINAL_TOOLS
     # ``browser_*`` must ride the native relay: the Omnigent desktop app
     # runs native (claude/codex/pi) sessions, which ignore ``request.tools``
@@ -580,13 +623,26 @@ def strip_browser_tool_schemas(schemas: list[_JsonObject]) -> list[_JsonObject]:
     :param schemas: Tool schemas in either supported shape.
     :returns: The same list minus any ``browser_*`` entries.
     """
+    return _strip_tool_schemas(schemas, _BROWSER_TOOLS)
+
+
+def filter_workflow_tool_schemas(
+    schemas: list[_JsonObject], *, enabled: bool
+) -> list[_JsonObject]:
+    """Hide journal and workflow tools unless the server enables workflows."""
+    return schemas if enabled else _strip_tool_schemas(schemas, _JOURNAL_TOOLS)
+
+
+def _strip_tool_schemas(
+    schemas: list[_JsonObject], names: set[str] | frozenset[str]
+) -> list[_JsonObject]:
     kept: list[_JsonObject] = []
     for schema in schemas:
         name: object = schema.get("name")
         if not isinstance(name, str):
             function = _string_object_dict(schema.get("function"))
             name = function.get("name") if function is not None else None
-        if isinstance(name, str) and name in _BROWSER_TOOLS:
+        if isinstance(name, str) and name in names:
             continue
         kept.append(schema)
     return kept
@@ -598,9 +654,8 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     Returns the same tool set the claude-native / codex-native relay advertises
     and that pi-native registers via ``pi.registerTool``: the spec-gated builtin
     surface (``_NATIVE_RELAY_BUILTIN_TOOLS`` — comment, session read/write,
-    agent-discovery, policy, and terminal families) plus the ``sys_os_*`` tools,
-    relayed unconditionally so they override any harness-static versions and get
-    centralized policy enforcement on the Omnigent server.
+    agent-discovery, policy, and terminal families). It never includes
+    ``sys_os_*``: native harnesses use their own shell and file tools.
 
     Each entry is a flat ``{"name", "description", "parameters"}`` dict (the
     ``"function"`` sub-dict of an OpenAI tool schema), which is exactly what
@@ -648,7 +703,14 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
 
         for schema in ToolManager(spec, os_env_schema_only=True).get_tool_schemas():
             function = _string_object_dict(schema.get("function"))
-            if function is not None and function.get("name") in _NATIVE_RELAY_BUILTIN_TOOLS:
+            if function is None:
+                continue
+            name = function.get("name")
+            if (
+                isinstance(name, str)
+                and name in _NATIVE_RELAY_BUILTIN_TOOLS
+                and (name not in _MEMORY_TOOLS or _memory_tool_on(spec, name))
+            ):
                 _append(function)
     else:
         from omnigent.tools.builtins.policy import SysAddPolicyTool, SysPolicyRegistryTool
@@ -688,14 +750,6 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             if function is not None:
                 _append(function)
 
-    # Relay OS tools unconditionally for centralized policy enforcement.
-    # Their schemas are static and need no OS environment or working directory.
-    for tool_cls in OS_ENV_TOOL_TYPES:
-        tool_schema = _string_object_dict(tool_cls.get_schema())
-        function = _string_object_dict(tool_schema.get("function")) if tool_schema else None
-        if function is not None:
-            _append(function)
-
     return schemas
 
 
@@ -718,6 +772,8 @@ _RUNNER_STATUS_CONCURRENCY = 8
 _SESSION_LIST_DEFAULT_VISIBILITY = "mine"
 # Newest sessions ``sys_session_list`` returns when the agent passes no ``limit``.
 _SESSION_LIST_DEFAULT_LIMIT = 50
+# Most sessions one ``created_by_this_session`` call scans before it returns a cursor.
+_CREATED_SESSIONS_SCAN_LIMIT = 5 * _AGENT_LIST_PAGE_LIMIT
 _SESSION_LIST_VISIBILITIES = ("mine", "shared", "all")
 
 _DISCOVERY_LIST_MAX_LIMIT = 100
@@ -823,6 +879,9 @@ class _DiscoveryPage:
     has_more: bool
     next_after: str | None = None
     failed: bool = False
+    # Whether a row id is a valid server cursor, so a trimmed page can resume
+    # mid-page. Servers may issue opaque page tokens instead.
+    row_cursors: bool = False
 
 
 def _parse_discovery_page(body: object) -> _DiscoveryPage:
@@ -898,7 +957,9 @@ def _bounded_discovery_result(
             has_more[name] = len(rows) > candidate_limit or source_page.has_more
             if not has_more[name]:
                 next_state[name] = (_DISCOVERY_END, None)
-            elif page_rows:
+            elif page_rows and (
+                name == "local_configs" or (source_page.row_cursors and len(page_rows) < len(rows))
+            ):
                 if name == "local_configs":
                     position = _optional_string(page_rows[-1].get("path"))
                 else:
@@ -906,7 +967,8 @@ def _bounded_discovery_result(
                     position = _optional_string(page_rows[-1].get(identifier))
                 if position is not None:
                     next_state[name] = (_DISCOVERY_AT, position)
-            elif source_page.has_more and source_page.next_after is not None:
+            elif source_page.next_after is not None:
+                # The server's own cursor; it may be an opaque page token.
                 next_state[name] = (_DISCOVERY_AT, source_page.next_after)
         metadata: dict[str, object] = {
             "limit": candidate_limit,
@@ -956,6 +1018,73 @@ def _bounded_discovery_result(
     )
 
 
+_DiscoveryFetch = Callable[
+    [int | None],
+    Awaitable[tuple[dict[str, list[_JsonObject]], dict[str, _DiscoveryPage]]],
+]
+
+
+async def _fitted_discovery_result(
+    fetch: _DiscoveryFetch,
+    *,
+    limit: int | None,
+    cursor_state: dict[str, _DiscoveryState],
+    continued: bool,
+    tool_name: str,
+    filters: _JsonObject,
+    page_sections: tuple[str, ...] | None = None,
+    default_limit: int | None = None,
+) -> str:
+    """
+    Build :func:`_bounded_discovery_result`, refetching server pages it trims.
+
+    A server cursor marks the end of the page it was issued with. When the
+    output budget keeps only part of a page whose rows are not valid cursors,
+    the sources are read again at the kept size so the continuation can resume
+    from the server's cursor without skipping rows.
+
+    :param fetch: Reads every source, given a per-source row limit or ``None``
+        for the caller's default, and returns ``(sections, source_pages)``.
+    :param limit: The caller's ``limit`` argument, if any.
+    :param cursor_state: Continuation positions decoded from the caller's cursor.
+    :param continued: Whether the caller passed a cursor.
+    :param tool_name: The tool the cursor belongs to, e.g. ``"sys_session_list"``.
+    :param filters: The filter arguments the cursor is bound to.
+    :param page_sections: The sections that page; every section when omitted.
+    :param default_limit: Row cap when the caller passes no ``limit``.
+    :returns: The serialized tool result.
+    """
+    source_limit: int | None = None
+    while True:
+        sections, source_pages = await fetch(source_limit)
+        result = _bounded_discovery_result(
+            sections,
+            # A refetched page keeps the size it was read at.
+            limit=limit if source_limit is None else source_limit,
+            cursor_state=cursor_state,
+            continued=continued,
+            source_pages=source_pages,
+            page_sections=page_sections,
+            default_limit=default_limit,
+            tool_name=tool_name,
+            filters=filters,
+        )
+        page = json.loads(result).get("page")
+        kept = page.get("limit") if isinstance(page, dict) else None
+        if not isinstance(kept, int) or not any(
+            len(sections[name]) > kept
+            for name, source_page in source_pages.items()
+            if not source_page.row_cursors and not source_page.failed
+        ):
+            return result
+        if source_limit is not None and kept >= source_limit:
+            # The server ignored the smaller limit, so its cursor can't follow the kept rows.
+            return json.dumps(
+                {"error": f"{tool_name}: the server returned more rows than requested"}
+            )
+        source_limit = kept
+
+
 # Union of all locally-dispatched tools.
 _ALL_LOCAL_TOOLS = (
     {SysSessionMessageTool.name()}
@@ -988,6 +1117,9 @@ _ALL_LOCAL_TOOLS = (
     | _AGENT_TOOLS
     | _POLICY_TOOLS
     | _SCHEDULED_TASK_TOOLS
+    | _JOURNAL_TOOLS
+    | _USER_INBOX_TOOLS
+    | _MEMORY_TOOLS
 )
 _PLACEHOLDER_CWDS = (None, "", ".", "./")
 
@@ -1023,14 +1155,20 @@ def get_arguments(event: _JsonObject) -> str:
     return arguments if isinstance(arguments, str) else "{}"
 
 
-def should_dispatch_locally(tool_name: str) -> bool:
+def should_dispatch_locally(tool_name: str, agent_spec: object = None) -> bool:
     """Return True if this tool should be dispatched by the runner locally.
 
     Used by BOTH the runner's proxy_stream (to decide whether to
     dispatch) AND the server-side executor (to skip its own dispatch
     for tools the runner already handled). The executor imports this
     function directly — Phase 5 of RUNNER_TOOL_DISPATCH.md.
+
+    :param tool_name: The tool the model called.
+    :param agent_spec: The session's spec, if known. The memory tool names
+        count only when it has memory on.
     """
+    if tool_name in _MEMORY_TOOLS:
+        return _memory_tool_on(agent_spec, tool_name)
     return tool_name in _ALL_LOCAL_TOOLS
 
 
@@ -1066,11 +1204,12 @@ def _effective_harness_name(agent_spec: AgentSpec, effective_harness: str | None
 def _granted_tool_names(agent_spec: AgentSpec, harness: str | None = None) -> frozenset[str]:
     """Return the non-MCP tool surface advertised for *agent_spec* on *harness*.
 
-    Mirrors advertisement: the names ``ToolManager`` registers, spec-local
-    tools by declared name (no workdir load needed), and ``sys_os_*`` when the
-    session runs a native harness, whose relay advertises them unconditionally
-    (see :func:`build_native_relay_tool_schemas`). MCP tools are runner-owned
-    and resolved by the MCP manager, never by this set.
+    Mirrors advertisement: the names ``ToolManager`` registers and spec-local
+    tools by declared name (no workdir load needed). A native harness gets no
+    ``sys_os_*`` even when the spec declares ``os_env``, matching its relay (see
+    :func:`build_native_relay_tool_schemas`), so ``sys_call_async`` or
+    ``execute_tool`` can't reach a shell the relay withholds. MCP tools are
+    runner-owned and resolved by the MCP manager, never by this set.
 
     :param agent_spec: The session's resolved agent spec.
     :param harness: Canonical harness the session runs, from
@@ -1090,7 +1229,7 @@ def _granted_tool_names(agent_spec: AgentSpec, harness: str | None = None) -> fr
         manager.shutdown()
     names.update(info.name for info in agent_spec.local_tools)
     if is_native_harness(harness):
-        names.update(_OS_ENV_TOOLS)
+        names.difference_update(_OS_ENV_TOOLS)
     granted = frozenset(names)
     if len(_granted_tool_names_cache) >= _GRANTED_TOOL_NAMES_CACHE_MAX:
         _granted_tool_names_cache.clear()
@@ -1158,6 +1297,7 @@ async def _execute_local_python_tool(
     agent_id: str | None,
     runner_workspace: Path | None,
     local_tool_workdir: Path | None,
+    caller_user_id: str | None,
 ) -> str:
     if agent_spec is None:
         return f"Error: {tool_name} not in local dispatch table (no agent spec)"
@@ -1168,6 +1308,7 @@ async def _execute_local_python_tool(
             agent_id=agent_id or agent_spec.name or "runner-agent",
             workspace=runner_workspace,
             conversation_id=conversation_id,
+            caller_user_id=caller_user_id,
         )
         return await asyncio.to_thread(manager.call_tool, tool_name, args, ctx)
     except Exception as exc:
@@ -1850,7 +1991,6 @@ async def _send_to_in_flight_child(
             f"Error: failed to steer in-flight sub-agent {agent!r} title {title!r}: "
             f"{msg_resp.status_code} {msg_resp.text[:200]}"
         )
-
     async with _subagent_work.in_flight_send_lock(child_session_id):
         entry = _subagent_work.get_subagent_work(child_session_id)
         if entry is not None and entry.status in ("running", "waiting"):
@@ -1881,6 +2021,7 @@ async def _send_to_in_flight_child(
                 work_id=work_id,
             )
             fresh.status = "running"
+            _subagent_work.apply_child_start_evidence(fresh)
             # Best-effort dispatch-id stamp for restart recovery only; the
             # in-memory entry above already makes the completion deliverable, so
             # a stamp failure degrades recovery but never live delivery.
@@ -2624,6 +2765,7 @@ async def _execute_subagent_tool(
     agent_spec: AgentSpec | None = None,
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     session_inbox: asyncio.Queue[_JsonObject] | None = None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Dispatch a sub-agent tool call (``sys_session_send``).
@@ -2947,6 +3089,15 @@ async def _execute_subagent_tool(
                 )
             harness_override_canonical = canonical
             child_harness = canonical
+        from omnigent.runner import cloud_children
+        from omnigent.server.machine_access import CLOUD_SESSION_HARNESS
+
+        if (
+            cloud_children.is_cloud_session(agent_spec, effective_harness)
+            and child_harness != CLOUD_SESSION_HARNESS
+        ):
+            # A new child shares this cloud session's runner, which is the bridge host.
+            return "Error: " + cloud_children.local_child_refusal(str(sub_agent_name))
         # Fail loud at dispatch when the child's harness needs a CLI binary
         # that isn't on PATH. Otherwise a missing CLI surfaces only as a lazy
         # first-turn failure (e.g. the pi harness raises ImportError, which the
@@ -3128,6 +3279,7 @@ async def _execute_subagent_tool(
         child_session_id = child_data.get("session_id") or child_data.get("id")
         if not isinstance(child_session_id, str) or not child_session_id:
             return "Error: server did not return child session_id"
+        remember_session_host(child_session_id, _optional_string(child_data.get("host_id")))
         child_wrapper_label = _session_wrapper_label(child_data)
         created_child = True
 
@@ -3742,6 +3894,7 @@ async def _execute_session_create(
     publish_event: Callable[[str, _JsonObject], None] | None,
     agent_spec: AgentSpec | None = None,
     runner_workspace: Path | None = None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Create a child or an independent session (``sys_session_create``).
@@ -3770,7 +3923,8 @@ async def _execute_session_create(
 
     :param args: Parsed arguments; exactly one of ``agent_id`` /
         ``config_path`` required, ``title`` / ``message`` / ``model`` /
-        ``reasoning_effort`` optional in both modes.
+        ``reasoning_effort`` optional in both modes, ``workflow_id`` with
+        ``agent_id`` only.
     :param server_client: HTTP client pointed at the Omnigent server; ``None``
         returns an error string.
     :param conversation_id: The caller's session id — the forced parent;
@@ -3781,16 +3935,35 @@ async def _execute_session_create(
         os_env cwd that ``config_path`` is read from.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param effective_harness: The session's harness override, which decides
+        whether the caller is a claude-cloud session.
     :returns: JSON handle on success; a JSON error object otherwise.
     """
     if server_client is None:
         return json.dumps({"error": "sys_session_create requires server access"})
     if conversation_id is None:
         return json.dumps({"error": "sys_session_create requires a session id"})
+    from omnigent.runner import cloud_children
+
     agent_id = args.get("agent_id")
     config_path = args.get("config_path")
     has_agent_id = isinstance(agent_id, str) and bool(agent_id)
     has_config_path = isinstance(config_path, str) and bool(config_path)
+    cloud_caller: cloud_children.CloudCaller | None = None
+    if cloud_children.is_cloud_session(agent_spec, effective_harness):
+        if has_config_path:
+            return json.dumps(
+                {
+                    "error": "config_path reads the bridge host's disk, not this claude-cloud "
+                    "session's. Name a registered agent with agent_id: a claude-cloud agent "
+                    f"runs as a child; for any other, {cloud_children.NAME_A_HOST}; "
+                    "no session was created"
+                }
+            )
+        cloud_caller = await cloud_children.read_caller(server_client, conversation_id)
+        if not has_agent_id and cloud_caller.agent_id is not None:
+            # A cloud session's default child is another session of its own cloud agent.
+            agent_id, has_agent_id = cloud_caller.agent_id, True
     if has_agent_id == has_config_path:
         # Fail loud on both-or-neither: the two modes create different
         # agents, so silently preferring one would mislaunch.
@@ -3834,6 +4007,16 @@ async def _execute_session_create(
     project_error = _project_argument_error(args, placement)
     if project_error is not None:
         return project_error
+    if cloud_caller is not None:
+        refusal = await cloud_children.bridge_host_refusal(
+            server_client,
+            placement=placement,
+            agent_id=str(agent_id),
+            own_agent=cloud_caller.agent_id,
+            pinned=bool(args.get("environment_id")),
+        )
+        if refusal is not None:
+            return json.dumps({"error": refusal})
     message = args.get("message")
     profile_fields = ("sandbox_provider", "sandbox_profile_id", "sandbox_profile_revision")
     selection = {key: args[key] for key in profile_fields if args.get(key) is not None}
@@ -3844,8 +4027,17 @@ async def _execute_session_create(
     if selection.get("sandbox_profile_revision") and not selection.get("sandbox_profile_id"):
         return json.dumps({"error": "sandbox_profile_revision requires sandbox_profile_id"})
     if placement != "child" and message is not None:
-        if not isinstance(message, str) or not message.strip() or len(message) > 8000:
-            return json.dumps({"error": "Provide an initial message of 1–8000 characters"})
+        if (
+            not isinstance(message, str)
+            or not message.strip()
+            or len(message) > SESSION_MESSAGE_MAX_CHARS
+        ):
+            return json.dumps(
+                {
+                    "error": "Provide an initial message of "
+                    f"1–{SESSION_MESSAGE_MAX_CHARS} characters"
+                }
+            )
     permission_mode = args.get("permission_mode")
     if permission_mode is not None:
         if not isinstance(permission_mode, str) or not permission_mode.strip():
@@ -3853,6 +4045,13 @@ async def _execute_session_create(
         if has_config_path:
             # A new agent's own config sets its permission mode.
             return json.dumps({"error": "permission_mode requires agent_id"})
+    workflow_id = args.get("workflow_id")
+    if workflow_id is not None:
+        if not isinstance(workflow_id, str) or not workflow_id.strip():
+            return json.dumps({"error": "workflow_id must be a nonempty string"})
+        if has_config_path:
+            # The bundled create doesn't copy a workflow's plan into the journal.
+            return json.dumps({"error": "workflow_id requires agent_id"})
     if has_config_path:
         return await _session_create_from_config_path(
             str(config_path),
@@ -3871,6 +4070,12 @@ async def _execute_session_create(
         reasoning_effort=args.get("reasoning_effort"),
         permission_mode=permission_mode,
     )
+    if workflow_id is not None:
+        body["workflow_id"] = workflow_id
+    if cloud_caller is not None and placement == "child" and cloud_caller.workspace:
+        # The bridge starts the child from its workspace, whose pin selects the cloud
+        # environment; without one the runner would use its own launch directory.
+        body["workspace"] = cloud_caller.workspace
     headers: dict[str, str] = {}
     # A project named by environment_id places a same_host create on its pinned host.
     pinned = {"environment_id": args["environment_id"]} if args.get("environment_id") else {}
@@ -3905,28 +4110,49 @@ async def _execute_session_create(
     }
     create_requested = False
     requested_at = 0.0
+    host_id: str | None = None
     try:
         endpoint = "/v1/sessions" if placement == "child" else "/v1/sessions/orchestrated"
         if placement == "host":
             endpoint += "/host"
-        host_id = None
         info_data: _JsonObject = {}
+        # Independent first tasks are delivered after creation, so check the server's
+        # limit first rather than leave a session without its task.
+        long_first_task = (
+            placement in ("same_host", "host")
+            and isinstance(message, str)
+            and len(message) > LEGACY_SESSION_MESSAGE_MAX_CHARS
+        )
         if (
             placement in ("managed", "host")
+            or long_first_task
             or args.get("project_id") is not None
             or args.get("project_name") is not None
             or permission_mode is not None
+            or workflow_id is not None
         ):
             info = await server_client.get("/v1/info", timeout=30.0)
             info.raise_for_status()
             info_data = info.json()
+        if long_first_task:
+            server_max_chars = info_data.get("session_message_max_chars")
+            if not isinstance(server_max_chars, int) or isinstance(server_max_chars, bool):
+                server_max_chars = LEGACY_SESSION_MESSAGE_MAX_CHARS
+            if len(str(message)) > server_max_chars:
+                return json.dumps(
+                    {
+                        "error": "This server accepts initial messages of up to "
+                        f"{server_max_chars} characters; no session was created"
+                    }
+                )
         if (placement == "host" or args.get("project_id") is not None) and info_data.get(
             "scripted_sessions"
         ) is not True:
             return json.dumps(
                 {
                     "error": "Scripted session options are unavailable on this server; "
-                    "no session was created"
+                    "no session was created. The server enables them with the "
+                    "scripted_sessions release flag (OMNIGENT_FEATURES=scripted_sessions)"
                 }
             )
         if placement == "host":
@@ -3944,6 +4170,23 @@ async def _execute_session_create(
                     "no session was created. Omit permission_mode to use the agent's default."
                 }
             )
+        if workflow_id is not None:
+            features = info_data.get("features")
+            # With workflows off the server refuses the create as not found,
+            # which would read as a missing agent.
+            if not isinstance(features, dict) or features.get("workflows") is not True:
+                return json.dumps(
+                    {"error": "Workflows are disabled on this server; no session was created."}
+                )
+            # An older server ignores the field, so the session would start without the plan.
+            if info_data.get("session_create_workflow_id") is not True:
+                return json.dumps(
+                    {
+                        "error": "This Omnigent server can't start a session as a workflow "
+                        "run; no session was created. Omit workflow_id and ask the session "
+                        "to load the workflow itself."
+                    }
+                )
         if placement == "managed":
             if (
                 info_data.get("sibling_sessions") is True
@@ -4050,6 +4293,8 @@ async def _execute_session_create(
         if placement != "child":
             return json.dumps(unconfirmed_creation)
         return json.dumps({"error": "server did not return a child session id"})
+    # A managed create is addressed to host_id; the session stays there, so cache it now.
+    remember_session_host(data["id"], _optional_string(data.get("host_id")) or host_id)
     if placement != "child":
         handle: dict[str, object] = {
             "conversation_id": data["id"],
@@ -5242,7 +5487,9 @@ _SCHEDULED_TASK_UPDATE_FIELDS = (
     "state",
     "project_id",
 )
-_SCHEDULED_TASK_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_SCHEDULED_TASK_UUID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+# IDs a deployment allocates in another form, limited to characters safe in one path segment.
+_SCHEDULED_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # Optional fields an older server forbids, the ``/v1/info`` flag that admits
 # them, and how to retry without them.
 _SCHEDULED_TASK_GATED_FIELDS = (
@@ -5285,10 +5532,12 @@ async def _scheduled_task_session_fields_refusal(
 
 
 def _scheduled_task_url(task_id: object) -> str | None:
-    """Return a safe scheduled-task URL path for a canonical id."""
+    """Return a safe scheduled-task URL path for a task id, lowercasing a hex UUID."""
     if not isinstance(task_id, str) or not _SCHEDULED_TASK_ID_RE.fullmatch(task_id):
         return None
-    return f"/v1/scheduled-tasks/{task_id.lower()}"
+    if _SCHEDULED_TASK_UUID_RE.fullmatch(task_id):
+        task_id = task_id.lower()
+    return f"/v1/scheduled-tasks/{task_id}"
 
 
 async def _project_id_for_name(
@@ -5307,6 +5556,189 @@ async def _project_id_for_name(
 
     project_id, _created = await resolve_project_id(server_client, name, headers=headers)
     return project_id
+
+
+def _reminder_may_exist(tool_name: str, problem: str, *, details: str | None = None) -> str:
+    """An error for a create that may have been saved, so a retry doesn't duplicate it."""
+    error: dict[str, str] = {
+        "error": f"{tool_name}: {problem}. It may still have been created: check "
+        "sys_scheduled_task_list for a 'Reminder: ...' automation before setting it again."
+    }
+    if details is not None:
+        error["details"] = details
+    return json.dumps(error)
+
+
+_REMINDER_SESSION_PARAMS = {
+    "include_items": "false",
+    "include_usage": "false",
+    "include_liveness": "false",
+    "include_live_status": "false",
+}
+
+
+async def _reminder_schedule_mismatch(
+    server_client: httpx.AsyncClient, task: _JsonObject, when: datetime
+) -> str | None:
+    """
+    An error for a reminder the server scheduled at another time, or ``None``.
+
+    The server already refuses a mismatched ``first_run_at``; this guards against
+    one that ignored it. The wrong task is deleted, and its id is reported if the
+    delete fails, so a reminder never silently fires a year late.
+    """
+    raw_next = task.get("next_run_at")
+    try:
+        scheduled = datetime.fromisoformat(raw_next) if isinstance(raw_next, str) else None
+    except ValueError:
+        scheduled = None
+    if scheduled is not None and scheduled == when:
+        return None
+    task_id = task.get("id")
+    problem = (
+        f"sys_reminder_set: the server scheduled the reminder for {raw_next}, "
+        f"not {when.isoformat()}"
+    )
+    task_url = _scheduled_task_url(task_id)
+    if task_url is None:
+        return json.dumps({"error": f"{problem}; it returned no task id to delete"})
+    try:
+        deleted = await server_client.delete(task_url, timeout=30.0)
+        removed = deleted.status_code < 400
+    except Exception:  # noqa: BLE001
+        removed = False
+    if removed:
+        return json.dumps({"error": f"{problem}, so it was deleted; set it again"})
+    return json.dumps(
+        {
+            "error": f"{problem}, and deleting it failed; delete it with "
+            "sys_scheduled_task_delete",
+            "scheduled_task_id": task_id,
+        }
+    )
+
+
+async def _execute_reminder_set(
+    args: _JsonObject,
+    *,
+    server_client: httpx.AsyncClient,
+    conversation_id: str | None,
+) -> str:
+    """
+    Create a one-time scheduled task that sends a message into this session.
+
+    The task continues the calling session with the session's own agent, so the
+    reminder arrives as a new turn there. It needs a server whose scheduler counts
+    ``COUNT`` from creation, which ``/v1/info`` advertises as
+    ``scheduled_task_one_time``; elsewhere the call is refused before anything is
+    created.
+
+    :param args: Parsed ``sys_reminder_set`` arguments: ``message`` plus ``at`` or
+        ``delay_seconds``.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :param conversation_id: The calling session, e.g. ``"conv_abc123"``.
+    :returns: Tool output JSON with the new ``scheduled_task_id`` and fire time.
+    """
+    tool_name = "sys_reminder_set"
+    if conversation_id is None:
+        return json.dumps({"error": f"{tool_name} requires a session"})
+    message = args.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return json.dumps({"error": f"{tool_name}: message must be a non-empty string"})
+    when = resolve_reminder_time(args, datetime.now(UTC))
+    if isinstance(when, str):
+        return json.dumps({"error": f"{tool_name}: {when}"})
+    try:
+        info = await server_client.get("/v1/info", timeout=30.0)
+        if info.status_code >= 400 or info.json().get("scheduled_task_one_time") is not True:
+            return json.dumps(
+                {
+                    "error": f"{tool_name}: this Omnigent server does not support one-time "
+                    "reminders; use sys_timer_set if it is enabled, or a recurring "
+                    "sys_scheduled_task_create task"
+                }
+            )
+        # Only the agent id is needed, so skip the transcript, usage and live probes.
+        session = await server_client.get(
+            _session_url(conversation_id), params=_REMINDER_SESSION_PARAMS, timeout=30.0
+        )
+        if session.status_code >= 400:
+            return json.dumps(
+                {
+                    "error": f"{tool_name}: could not read this session "
+                    f"(server returned {session.status_code})",
+                    "details": session.text[:1000],
+                }
+            )
+        snapshot = _string_object_dict(session.json()) or {}
+        agent_id = snapshot.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return json.dumps({"error": f"{tool_name}: this session has no agent to remind"})
+        if snapshot.get("side_chat_parent_id"):
+            # A side chat runs on its source's runner, which a reminder can't wake
+            # once it has stopped, so the reminder could fail unseen.
+            return json.dumps(
+                {
+                    "error": f"{tool_name}: reminders can't be set from a side chat; "
+                    "set it in the session the side chat belongs to"
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    try:
+        resp = await server_client.post(
+            "/v1/scheduled-tasks",
+            json={
+                "name": reminder_name(message),
+                "prompt": reminder_prompt(message, when),
+                "rrule": reminder_rrule(when),
+                "timezone": "UTC",
+                "agent_id": agent_id,
+                # A continued session keeps its own permission mode.
+                "permission_mode": None,
+                "session_mode": "continue",
+                "session_id": conversation_id,
+                "kind": "reminder",
+                # The server refuses the task unless its first run is this minute,
+                # so a request that arrives late can't move to next year's match.
+                "first_run_at": int(when.timestamp()),
+            },
+            timeout=30.0,
+            headers={
+                ORCHESTRATION_SOURCE_HEADER: conversation_id,
+                "x-omnigent-automation-source": "agent",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        # The server may have saved the reminder before its response was lost.
+        return _reminder_may_exist(tool_name, f"the request to create the reminder failed ({exc})")
+    if resp.status_code >= 500:
+        # A gateway can answer 502 or 504 after the server saved the task.
+        return _reminder_may_exist(
+            tool_name, f"the server returned {resp.status_code}", details=resp.text[:1000]
+        )
+    if resp.status_code >= 400:
+        return json.dumps(
+            {"error": f"server returned {resp.status_code}", "details": resp.text[:1000]}
+        )
+    try:
+        task = _string_object_dict(resp.json()) or {}
+    except ValueError:
+        # Accepted, but the body can't be read: the reminder likely exists.
+        return _reminder_may_exist(tool_name, "the server's reply to the create was unreadable")
+    mismatch = await _reminder_schedule_mismatch(server_client, task, when)
+    if mismatch is not None:
+        return mismatch
+    return json.dumps(
+        {
+            "status": "scheduled",
+            "scheduled_task_id": task.get("id"),
+            "fire_at": when.isoformat(),
+            "next_run_at": task.get("next_run_at"),
+            "message": message,
+            "cancel_with": "sys_scheduled_task_delete",
+        }
+    )
 
 
 async def _execute_scheduled_task_tool(
@@ -5340,6 +5772,10 @@ async def _execute_scheduled_task_tool(
         return json.dumps({"error": f"{tool_name}: malformed JSON arguments"})
     if not isinstance(args, dict):
         return json.dumps({"error": f"{tool_name}: arguments must be an object"})
+    if tool_name == "sys_reminder_set":
+        return await _execute_reminder_set(
+            args, server_client=server_client, conversation_id=conversation_id
+        )
     if tool_name in ("sys_scheduled_task_create", "sys_scheduled_task_update"):
         action = "create" if tool_name == "sys_scheduled_task_create" else "update"
         error = scheduled_task_review_error(args, action=action)
@@ -5372,7 +5808,11 @@ async def _execute_scheduled_task_tool(
                     }
                 )
         if tool_name == "sys_scheduled_task_list":
-            resp = await server_client.get("/v1/scheduled-tasks", timeout=30.0)
+            # Includes reminders, which the list leaves out by default, so an agent
+            # can find one to cancel.
+            resp = await server_client.get(
+                "/v1/scheduled-tasks", params={"kind": "all"}, timeout=30.0
+            )
         elif tool_name == "sys_scheduled_task_create":
             payload = {k: args[k] for k in _SCHEDULED_TASK_CREATE_FIELDS if k in args}
             refusal = await _scheduled_task_session_fields_refusal(
@@ -5395,7 +5835,10 @@ async def _execute_scheduled_task_tool(
             task_url = _scheduled_task_url(task_id)
             if task_url is None:
                 return json.dumps(
-                    {"error": f"{tool_name} requires canonical 32-character hex scheduled_task_id"}
+                    {
+                        "error": f"{tool_name} requires a scheduled_task_id "
+                        "from sys_scheduled_task_list"
+                    }
                 )
             if tool_name == "sys_scheduled_task_delete":
                 resp = await server_client.delete(task_url, timeout=30.0)
@@ -5430,6 +5873,249 @@ async def _execute_scheduled_task_tool(
             {"error": f"server returned {resp.status_code}", "details": resp.text[:1000]}
         )
     return json.dumps(resp.json())
+
+
+# Item fields sys_user_inbox_list returns; the full body stays in the Inbox.
+_USER_INBOX_LIST_FIELDS = (
+    "id",
+    "created_at",
+    "kind",
+    "title",
+    "topic",
+    "links",
+    "status",
+    "resolution",
+    "resolution_action",
+    "feedback_text",
+    "expires_at",
+)
+_USER_INBOX_BODY_PREVIEW_CHARS = 300
+_USER_INBOX_LIST_PAGE = 100
+_USER_INBOX_LIST_MAX_PAGES = 3
+
+
+async def _execute_user_inbox_tool(
+    tool_name: str,
+    arguments: str,
+    *,
+    server_client: httpx.AsyncClient | None,
+    conversation_id: str | None,
+) -> str:
+    """
+    Runner-local handler for ``sys_user_inbox_post`` and ``sys_user_inbox_list``.
+
+    Proxies the server's ``/v1/inbox/items`` endpoints. Posts carry the
+    session as the orchestration source, which the server requires and
+    checks against this runner.
+
+    :param tool_name: ``"sys_user_inbox_post"`` or ``"sys_user_inbox_list"``.
+    :param arguments: JSON-encoded arguments string from the LLM.
+    :param server_client: HTTP client pointed at the Omnigent server; ``None``
+        returns an error string.
+    :param conversation_id: Session whose tool call is being dispatched.
+    :returns: Tool output JSON string.
+    """
+    from omnigent.tools.builtins.user_inbox import USER_INBOX_LIST_WINDOW_DAYS
+
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    try:
+        args: _JsonObject = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        return json.dumps({"error": f"{tool_name}: malformed JSON arguments"})
+    if not isinstance(args, dict):
+        return json.dumps({"error": f"{tool_name}: arguments must be an object"})
+
+    def _server_error(resp: httpx.Response) -> str:
+        if resp.status_code == 404:
+            return json.dumps(
+                {
+                    "error": f"{tool_name}: this server does not support Inbox items "
+                    "(the proactive_agent feature is off or the server is older)"
+                }
+            )
+        return json.dumps(
+            {"error": f"server returned {resp.status_code}", "details": resp.text[:500]}
+        )
+
+    try:
+        if tool_name == "sys_user_inbox_post":
+            if conversation_id is None:
+                return json.dumps({"error": f"{tool_name} requires a session"})
+            resp = await server_client.post(
+                "/v1/inbox/items",
+                json=args,
+                headers={ORCHESTRATION_SOURCE_HEADER: conversation_id},
+                timeout=30.0,
+            )
+            if resp.status_code >= 400:
+                return _server_error(resp)
+            return json.dumps(resp.json())
+        created_after = int(time.time()) - USER_INBOX_LIST_WINDOW_DAYS * 86_400
+        items: list[_JsonObject] = []
+        cursor: str | None = None
+        for _ in range(_USER_INBOX_LIST_MAX_PAGES):
+            params: dict[str, str | int] = {
+                "created_after": created_after,
+                "limit": _USER_INBOX_LIST_PAGE,
+            }
+            if cursor is not None:
+                params["after"] = cursor
+            resp = await server_client.get("/v1/inbox/items", params=params, timeout=30.0)
+            if resp.status_code >= 400:
+                return _server_error(resp)
+            page = resp.json()
+            for item in page.get("data", []):
+                summary = {field: item.get(field) for field in _USER_INBOX_LIST_FIELDS}
+                summary["body_preview"] = str(item.get("body_md") or "")[
+                    :_USER_INBOX_BODY_PREVIEW_CHARS
+                ]
+                summary["action_labels"] = [
+                    action.get("label") for action in item.get("actions") or []
+                ]
+                items.append(summary)
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+        return json.dumps(
+            {
+                "items": items,
+                "window_days": USER_INBOX_LIST_WINDOW_DAYS,
+                # More items exist than were read; the oldest are not listed.
+                "truncated": bool(cursor),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+
+
+# Servers (or tool calls) known to expose ``/v1/memory``, so a turn pays for the
+# ``/v1/info`` probe once per connection rather than once per tool call.
+_memory_capable_clients: weakref.WeakSet[httpx.AsyncClient] = weakref.WeakSet()
+_MEMORY_UNAVAILABLE = (
+    "long-term memory is not available on this server (it is disabled or too old); "
+    "continue without it"
+)
+
+
+async def _server_has_memory(server_client: httpx.AsyncClient) -> bool:
+    """
+    Whether the server advertises ``memory`` in ``/v1/info``.
+
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :returns: ``True`` when ``/v1/memory`` is mounted and enabled.
+    """
+    if server_client in _memory_capable_clients:
+        return True
+    info = await server_client.get("/v1/info", timeout=30.0)
+    if info.status_code >= 400 or info.json().get("memory") is not True:
+        return False
+    _memory_capable_clients.add(server_client)
+    return True
+
+
+async def _execute_memory_tool(
+    tool_name: str,
+    arguments: str,
+    *,
+    server_client: httpx.AsyncClient | None,
+    conversation_id: str | None = None,
+) -> str:
+    """
+    Runner-local handler for the ``memory_*`` family.
+
+    Proxies the Omnigent server's ``/v1/memory`` REST endpoints over
+    ``server_client``. The calling session rides in the orchestration-source
+    header so the server can check it is the owner's, private, and bound to this
+    runner; the owner of the memory is derived there, never from the arguments.
+
+    :param tool_name: One of the ``memory_*`` names.
+    :param arguments: JSON-encoded arguments string from the LLM.
+    :param server_client: HTTP client pointed at the Omnigent server; ``None``
+        returns an error string.
+    :param conversation_id: Session whose tool call is being dispatched.
+    :returns: Tool output JSON string.
+    """
+    if server_client is None:
+        return json.dumps({"error": f"{tool_name} requires server access"})
+    try:
+        args: _JsonObject = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        return json.dumps({"error": f"{tool_name}: malformed JSON arguments"})
+    if not isinstance(args, dict):
+        return json.dumps({"error": f"{tool_name}: arguments must be an object"})
+    headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id} if conversation_id else None
+    raw_path = args.get("path")
+    if tool_name in ("memory_get", "memory_write", "memory_delete") and not isinstance(
+        raw_path, str
+    ):
+        return json.dumps({"error": f"{tool_name} requires a string 'path'"})
+    path = raw_path if isinstance(raw_path, str) else ""
+    try:
+        if not await _server_has_memory(server_client):
+            return json.dumps({"error": _MEMORY_UNAVAILABLE})
+        if tool_name == "memory_search":
+            payload = {k: args[k] for k in ("query", "path_prefix", "limit") if k in args}
+            resp = await server_client.post(
+                "/v1/memory/search", json=payload, headers=headers, timeout=30.0
+            )
+        elif tool_name == "memory_get":
+            resp = await server_client.get(
+                "/v1/memory/entry", params={"path": path}, headers=headers, timeout=30.0
+            )
+        elif tool_name == "memory_list":
+            params: dict[str, str] = {}
+            for arg, param in (("path_prefix", "prefix"), ("page_token", "page_token")):
+                value = args.get(arg)
+                if isinstance(value, str):
+                    params[param] = value
+            resp = await server_client.get(
+                "/v1/memory/entries", params=params or None, headers=headers, timeout=30.0
+            )
+        elif tool_name == "memory_write":
+            payload = {k: args[k] for k in ("path", "content", "description") if k in args}
+            resp = await server_client.put(
+                "/v1/memory/entry", json=payload, headers=headers, timeout=30.0
+            )
+        elif tool_name == "memory_delete":
+            resp = await server_client.delete(
+                "/v1/memory/entry", params={"path": path}, headers=headers, timeout=30.0
+            )
+        else:  # pragma: no cover — routing guarantees a known name
+            return json.dumps({"error": f"unknown memory tool {tool_name!r}"})
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+
+    if resp.status_code >= 400:
+        return json.dumps(
+            {"error": f"server returned {resp.status_code}", "details": resp.text[:500]}
+        )
+    return json.dumps(_with_memory_dates(resp.json()))
+
+
+def _with_memory_dates(value: object) -> object:
+    """
+    Show a memory result's Unix timestamps as UTC dates, e.g. ``"2026-11-15"``.
+
+    A date tells the model how old a memory is; an epoch number does not.
+
+    :param value: A decoded ``/v1/memory`` response.
+    :returns: The same structure with ``created_at`` and ``updated_at`` as dates.
+    """
+    if isinstance(value, list):
+        return [_with_memory_dates(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    converted: dict[str, object] = {}
+    for key, item in value.items():
+        if key in ("created_at", "updated_at") and type(item) is int and item >= 0:
+            try:
+                converted[key] = datetime.fromtimestamp(item, UTC).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                converted[key] = item
+        else:
+            converted[key] = _with_memory_dates(item)
+    return converted
 
 
 @dataclass
@@ -5645,11 +6331,14 @@ async def _execute_session_query_tool(
                     )
                 }
             )
+        created_by_this_session = args.get("created_by_this_session") is True
         window = _discovery_list_window(
             args,
             tool_name,
             ("sessions",),
-            _session_list_filters(agent_name, include_archived, visibility, project),
+            _session_list_filters(
+                agent_name, include_archived, visibility, project, created_by_this_session
+            ),
         )
         if isinstance(window, str):
             return window
@@ -5661,6 +6350,7 @@ async def _execute_session_query_tool(
             include_archived=include_archived,
             visibility=visibility,
             project=project,
+            created_by_this_session=created_by_this_session,
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
@@ -5737,6 +6427,29 @@ async def _project_name_or_none(
     except Exception:
         _logger.debug("Project %s name read failed", project_id, exc_info=True)
         return None
+
+
+def _session_permission_mode(snap: _JsonObject) -> str | None:
+    """
+    Read the permission mode a session was created or launched with.
+
+    An ACP session carries it as a server-owned label; a native Claude terminal
+    session carries it in its launch args, read with the launch parser. ``None``
+    when the session runs on its agent's own default.
+
+    :param snap: The session snapshot from ``GET /v1/sessions/{id}``.
+    :returns: e.g. ``"auto"`` or ``"bypassPermissions"``, else ``None``.
+    """
+    from omnigent.acp_permission_mode import ACP_PERMISSION_MODE_LABEL_KEY
+    from omnigent.runner.native.orchestration import _claude_launch_permission_mode
+
+    labelled = (_string_mapping(snap.get("labels")) or {}).get(ACP_PERMISSION_MODE_LABEL_KEY)
+    if labelled:
+        return labelled
+    args = snap.get("terminal_launch_args")
+    if not isinstance(args, list):
+        return None
+    return _claude_launch_permission_mode([a for a in args if isinstance(a, str)])
 
 
 async def _session_get_info_via_rest(
@@ -5827,6 +6540,7 @@ async def _session_get_info_via_rest(
                 CREATED_BY_SESSION_LABEL_KEY
             ),
             "sub_agent_name": snap.get("sub_agent_name"),
+            "permission_mode": _session_permission_mode(snap),
             "reasoning_effort": snap.get("reasoning_effort"),
             # Effective model: a per-session override wins over the
             # agent spec's default; both may be None when unset.
@@ -5995,6 +6709,7 @@ async def _execute_agent_tool(
     agent_spec: AgentSpec | None,
     conversation_id: str | None,
     runner_workspace: Path | None,
+    effective_harness: str | None = None,
 ) -> str:
     """
     Runner-local handler for ``sys_agent_get`` / ``sys_agent_download``.
@@ -6024,6 +6739,8 @@ async def _execute_agent_tool(
         resolution, e.g. ``"conv_abc123"``.
     :param runner_workspace: The runner's workspace dir, authoritative
         for the os_env cwd when present.
+    :param effective_harness: The session's harness override, so a cloud caller is
+        recognized through it.
     :returns: Tool output JSON string.
     """
     if server_client is None:
@@ -6046,6 +6763,7 @@ async def _execute_agent_tool(
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
+            effective_harness=effective_harness,
         )
     session_id = args.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -6227,6 +6945,7 @@ async def _agent_list_fetch(
     after: str | None,
     limit: int,
     exhausted: bool = False,
+    scope: str | None = None,
 ) -> _DiscoveryPage:
     """
     Fetch one cursor page of a paginated list endpoint.
@@ -6241,6 +6960,7 @@ async def _agent_list_fetch(
     :param after: Server cursor from the previous page, if any.
     :param limit: Maximum number of source rows to fetch.
     :param exhausted: Skip a source whose cursor has reached its end.
+    :param scope: Optional ``scope`` query value, e.g. ``"user"`` for the caller's own agents.
     :returns: Rows and server continuation metadata.
     """
     if exhausted:
@@ -6249,6 +6969,8 @@ async def _agent_list_fetch(
         params: dict[str, str | int] = {"limit": limit, "order": "desc"}
         if path == "/v1/sessions":
             params["visibility"] = "all"
+        if scope is not None:
+            params["scope"] = scope
         if after is not None:
             params["after"] = after
         resp = await server_client.get(path, params=params, timeout=30.0)
@@ -6459,6 +7181,7 @@ async def _agent_list_via_rest(
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
+    effective_harness: str | None = None,
 ) -> str:
     """
     List agents across built-ins, session-bound, and local, with host readiness.
@@ -6494,69 +7217,150 @@ async def _agent_list_via_rest(
     :returns: The legacy complete JSON result while it fits, otherwise a
         bounded page with continuation metadata.
     """
-    source_limit = limit or _AGENT_LIST_PAGE_LIMIT
+    default_source_limit = limit or _AGENT_LIST_PAGE_LIMIT
 
     spec = _effective_runner_os_env_spec(agent_spec, conversation_id, runner_workspace)
     assert spec.cwd is not None
     configs_dir = Path(spec.cwd) / _AGENT_CONFIG_SUBDIR
-    builtins_page, sessions_page, local_configs, readiness, family = await asyncio.gather(
-        _agent_list_fetch(
-            "/v1/agents",
-            server_client,
-            after=cursor_state["builtins"][1],
-            limit=source_limit,
-            exhausted=cursor_state["builtins"][0] == _DISCOVERY_END,
-        ),
-        _agent_list_fetch(
-            "/v1/sessions",
-            server_client,
-            after=cursor_state["session_agents"][1],
-            limit=source_limit,
-            exhausted=cursor_state["session_agents"][0] == _DISCOVERY_END,
-        ),
+    # Started now so the first server fetch runs alongside these reads.
+    side_reads = asyncio.gather(
         asyncio.to_thread(_scan_local_agent_configs, configs_dir),
         _agent_list_host_readiness(server_client, conversation_id),
         _spawn_family(server_client, conversation_id),
+        # The caller's own installed agents, first page only so they never crowd the output budget.
+        _agent_list_fetch(
+            "/v1/agents",
+            server_client,
+            after=None,
+            limit=_USER_AGENTS_LIMIT,
+            scope="user",
+            exhausted=continued,
+        ),
     )
-    local_state, local_after = cursor_state["local_configs"]
-    if local_state == _DISCOVERY_END:
-        remaining_configs = []
-    elif local_after is not None:
-        remaining_configs = [
-            row for row in local_configs if str(row.get("path", "")) > local_after
-        ]
-    else:
-        remaining_configs = local_configs
-    listing = _project_agent_list(
-        builtins_page.rows,
-        sessions_page.rows,
-        remaining_configs[:source_limit],
-    )
-    listing["builtins"] = _in_spawn_family(listing["builtins"], family)
     from omnigent.harness_availability import harness_launch_availability
 
-    for row in listing["builtins"]:
-        available, reason = harness_launch_availability(
-            _optional_string(row.get("harness")), readiness
+    async def _fetch(
+        source_limit: int | None,
+    ) -> tuple[dict[str, list[_JsonObject]], dict[str, _DiscoveryPage]]:
+        server_limit = source_limit or default_source_limit
+        builtins_page, sessions_page = await asyncio.gather(
+            _agent_list_fetch(
+                "/v1/agents",
+                server_client,
+                after=cursor_state["builtins"][1],
+                limit=server_limit,
+                exhausted=cursor_state["builtins"][0] == _DISCOVERY_END,
+            ),
+            _agent_list_fetch(
+                "/v1/sessions",
+                server_client,
+                after=cursor_state["session_agents"][1],
+                limit=server_limit,
+                exhausted=cursor_state["session_agents"][0] == _DISCOVERY_END,
+            ),
         )
-        row["available_on_host"] = available
-        row["unavailable_reason"] = reason
-    return _bounded_discovery_result(
-        listing,
-        limit=limit,
-        cursor_state=cursor_state,
-        continued=continued,
-        tool_name="sys_agent_list",
-        filters={},
-        source_pages={
+        local_configs, readiness, family, user_agents = await side_reads
+        local_state, local_after = cursor_state["local_configs"]
+        if local_state == _DISCOVERY_END:
+            remaining_configs = []
+        elif local_after is not None:
+            remaining_configs = [
+                row for row in local_configs if str(row.get("path", "")) > local_after
+            ]
+        else:
+            remaining_configs = local_configs
+        listing = _project_agent_list(
+            builtins_page.rows,
+            sessions_page.rows,
+            remaining_configs[:default_source_limit],
+        )
+        listing["builtins"] = _in_spawn_family(listing["builtins"], family)
+        # Installed agents (e.g. a cloud agent) are launchable by agent_id too.
+        listing["user_agents"] = [
+            {**row, "description": _truncated_description(row["description"])}
+            for row in _project_agent_rows(user_agents.rows)
+        ]
+        for row in listing["builtins"]:
+            available, reason = harness_launch_availability(
+                _optional_string(row.get("harness")), readiness
+            )
+            row["available_on_host"] = available
+            row["unavailable_reason"] = reason
+        return listing, {
             "builtins": builtins_page,
             "session_agents": sessions_page,
             "local_configs": _DiscoveryPage(
                 listing["local_configs"],
                 len(listing["local_configs"]) < len(remaining_configs),
+                row_cursors=True,
             ),
-        },
+        }
+
+    result = await _fitted_discovery_result(
+        _fetch,
+        limit=limit,
+        cursor_state=cursor_state,
+        continued=continued,
+        tool_name="sys_agent_list",
+        filters={},
+        page_sections=("builtins", "session_agents", "local_configs"),
     )
+    from omnigent.runner import cloud_children
+
+    if (
+        continued
+        or not conversation_id
+        or agent_spec is None
+        or not cloud_children.is_cloud_session(agent_spec, effective_harness)
+    ):
+        return result
+    # A cloud session's own agent is the one its cloud children start from, though a
+    # user or session-bound agent is not among the server's agents. Its own field, so
+    # paging never trims it or puts a cursor on it.
+    own_agent = (await cloud_children.read_caller(server_client, conversation_id)).agent_id
+    parsed = json.loads(result)
+    if own_agent and isinstance(parsed, dict) and "error" not in parsed:
+        from omnigent.server.machine_access import spec_harness_id
+
+        parsed["caller_agent"] = [
+            {
+                "agent_id": own_agent,
+                "name": agent_spec.name,
+                "description": agent_spec.description,
+                "harness": spec_harness_id(agent_spec),
+            }
+        ]
+        return json.dumps(parsed)
+    return result
+
+
+_USER_AGENTS_LIMIT = 20
+_USER_AGENT_DESCRIPTION_CHARS = 200
+
+
+def _truncated_description(description: object) -> object:
+    """Shorten a description to :data:`_USER_AGENT_DESCRIPTION_CHARS` characters."""
+    if isinstance(description, str) and len(description) > _USER_AGENT_DESCRIPTION_CHARS:
+        return description[:_USER_AGENT_DESCRIPTION_CHARS]
+    return description
+
+
+def _project_agent_rows(rows: list[_JsonObject]) -> list[_JsonObject]:
+    """
+    Project ``GET /v1/agents`` rows to ``{agent_id, name, description, harness}``.
+
+    :param rows: ``data`` rows from an agents list endpoint.
+    :returns: The projected rows.
+    """
+    return [
+        {
+            "agent_id": a.get("id"),
+            "name": a.get("name"),
+            "description": a.get("description"),
+            "harness": a.get("harness"),
+        }
+        for a in rows
+    ]
 
 
 def _project_agent_list(
@@ -6578,15 +7382,7 @@ def _project_agent_list(
     :param local_configs: Entries from :func:`_scan_local_agent_configs`.
     :returns: ``{builtins, session_agents, local_configs}``.
     """
-    builtins: list[_JsonObject] = [
-        {
-            "agent_id": a.get("id"),
-            "name": a.get("name"),
-            "description": a.get("description"),
-            "harness": a.get("harness"),
-        }
-        for a in builtins_raw
-    ]
+    builtins = _project_agent_rows(builtins_raw)
     session_agents: list[_JsonObject] = [
         {
             "session_id": s.get("id"),
@@ -6608,6 +7404,7 @@ def _session_list_filters(
     include_archived: bool,
     visibility: str = _SESSION_LIST_DEFAULT_VISIBILITY,
     project: str | None = None,
+    created_by_this_session: bool = False,
 ) -> _JsonObject:
     """
     The ``sys_session_list`` filters a continuation cursor is bound to.
@@ -6619,6 +7416,7 @@ def _session_list_filters(
     :param agent_name: The caller's ``agent_name`` argument, e.g. ``"researcher"``.
     :param include_archived: Whether archived sessions are listed.
     :param visibility: Which sessions the global view covers, e.g. ``"mine"``.
+    :param created_by_this_session: Whether only the caller's workers are listed.
     :returns: The filter mapping, e.g. ``{"agent_name": None}``.
     """
     filters: _JsonObject = {
@@ -6630,6 +7428,8 @@ def _session_list_filters(
         filters["visibility"] = visibility
     if project is not None:
         filters["project"] = project
+    if created_by_this_session:
+        filters["created_by_this_session"] = True
     return filters
 
 
@@ -6641,6 +7441,7 @@ async def _session_list_via_rest(
     include_archived: bool = False,
     visibility: str = _SESSION_LIST_DEFAULT_VISIBILITY,
     project: str | None = None,
+    created_by_this_session: bool = False,
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
@@ -6665,6 +7466,8 @@ async def _session_list_via_rest(
     :param include_archived: Also list archived sessions in the global view.
     :param visibility: ``"mine"``, ``"shared"`` or ``"all"`` — the server's
         ownership filter for the global view.
+    :param created_by_this_session: List only sessions the caller started, and
+        skip the ``sub_agents`` view.
     :param limit: Optional maximum rows returned from the global sessions view;
         :data:`_SESSION_LIST_DEFAULT_LIMIT` when omitted.
     :param cursor_state: Opaque continuation position for the global sessions view.
@@ -6672,32 +7475,122 @@ async def _session_list_via_rest(
         :data:`_SESSION_LIST_DEFAULT_LIMIT` sessions exist, otherwise a bounded
         page with continuation metadata.
     """
-    sub_agents = await _collect_sub_agents(conversation_id, server_client)
-    sessions_page = (
-        _DiscoveryPage([], False)
-        if cursor_state["sessions"][0] == _DISCOVERY_END
-        else await _collect_global_sessions(
+    # Finding this session's workers doesn't need its named children.
+    sub_agents = (
+        []
+        if created_by_this_session
+        else await _collect_sub_agents(conversation_id, server_client)
+    )
+
+    async def _fetch(
+        source_limit: int | None,
+    ) -> tuple[dict[str, list[_JsonObject]], dict[str, _DiscoveryPage]]:
+        page_limit = source_limit or limit or _SESSION_LIST_DEFAULT_LIMIT
+        if cursor_state["sessions"][0] == _DISCOVERY_END:
+            sessions_page = _DiscoveryPage([], False)
+        elif created_by_this_session:
+            # Matches are filtered locally, so a trimmed page resumes from a row id.
+            sessions_page = replace(
+                await _collect_created_sessions(
+                    conversation_id,
+                    server_client,
+                    agent_name,
+                    include_archived=include_archived,
+                    visibility=visibility,
+                    project=project,
+                    after=cursor_state["sessions"][1],
+                    limit=page_limit,
+                ),
+                row_cursors=True,
+            )
+        else:
+            sessions_page = await _collect_global_sessions(
+                server_client,
+                agent_name,
+                include_archived=include_archived,
+                visibility=visibility,
+                project=project,
+                after=cursor_state["sessions"][1],
+                limit=page_limit,
+            )
+        sections = {
+            "sub_agents": cast(list[_JsonObject], sub_agents),
+            "sessions": sessions_page.rows,
+        }
+        return sections, {"sessions": sessions_page}
+
+    result = await _fitted_discovery_result(
+        _fetch,
+        limit=limit,
+        cursor_state=cursor_state,
+        continued=continued,
+        tool_name="sys_session_list",
+        filters=_session_list_filters(
+            agent_name, include_archived, visibility, project, created_by_this_session
+        ),
+        page_sections=("sessions",),
+        default_limit=_SESSION_LIST_DEFAULT_LIMIT,
+    )
+    return await _fill_returned_runner_online(result, server_client)
+
+
+async def _collect_created_sessions(
+    conversation_id: str,
+    server_client: httpx.AsyncClient,
+    agent_name: object,
+    *,
+    include_archived: bool,
+    visibility: str,
+    project: str | None,
+    after: str | None,
+    limit: int,
+) -> _DiscoveryPage:
+    """
+    The global session view narrowed to sessions *conversation_id* started.
+
+    Pages ``GET /v1/sessions`` in large source pages here, so a trigger manager
+    makes one call instead of following a cursor through every session it owns.
+    Stops after more than ``limit`` matches, at the end of the listing, or once
+    :data:`_CREATED_SESSIONS_SCAN_LIMIT` rows were scanned.
+
+    :param conversation_id: The caller; rows whose ``created_by_session_id`` is
+        this id are kept, e.g. ``"conv_manager"``.
+    :param server_client: HTTP client pointed at the Omnigent server.
+    :param agent_name: Optional agent-name filter, as for the global view.
+    :param include_archived: Also list archived sessions.
+    :param visibility: The server's ownership filter, e.g. ``"mine"``.
+    :param project: Optional project-name filter.
+    :param after: Server cursor to resume from, if any.
+    :param limit: Rows the caller asked for; one extra match proves more remain.
+    :returns: The matching rows and the source continuation state.
+    """
+    matches: list[_JsonObject] = []
+    scanned = 0
+    while True:
+        page = await _collect_global_sessions(
             server_client,
             agent_name,
             include_archived=include_archived,
             visibility=visibility,
             project=project,
-            after=cursor_state["sessions"][1],
-            limit=limit or _SESSION_LIST_DEFAULT_LIMIT,
+            after=after,
+            limit=_AGENT_LIST_PAGE_LIMIT,
         )
-    )
-    result = _bounded_discovery_result(
-        {"sub_agents": cast(list[_JsonObject], sub_agents), "sessions": sessions_page.rows},
-        limit=limit,
-        cursor_state=cursor_state,
-        continued=continued,
-        tool_name="sys_session_list",
-        filters=_session_list_filters(agent_name, include_archived, visibility, project),
-        source_pages={"sessions": sessions_page},
-        page_sections=("sessions",),
-        default_limit=_SESSION_LIST_DEFAULT_LIMIT,
-    )
-    return await _fill_returned_runner_online(result, server_client)
+        if page.failed:
+            # A failed read can't prove a worker is absent, so never report "none".
+            return _DiscoveryPage(matches, True, after, failed=not matches)
+        matches += [
+            row for row in page.rows if row.get("created_by_session_id") == conversation_id
+        ]
+        scanned += _AGENT_LIST_PAGE_LIMIT
+        if (
+            not page.has_more
+            or page.next_after is None
+            or len(matches) > limit
+            or scanned >= _CREATED_SESSIONS_SCAN_LIMIT
+        ):
+            return _DiscoveryPage(matches, page.has_more, page.next_after)
+        after = page.next_after
 
 
 async def _fill_returned_runner_online(result: str, server_client: httpx.AsyncClient) -> str:
@@ -7236,6 +8129,8 @@ async def _collect_global_sessions(
         ],
         page.has_more,
         page.next_after,
+        # The fallback filters rows locally; older servers page by row id.
+        row_cursors=scope_locally,
     )
 
 
@@ -7517,6 +8412,12 @@ async def _close_tree_scope_error(
                 f"{caller_conversation_id!r}"
             }
         )
+    # An independent session has no parent and its own root; its creator may close it.
+    target_creator = (_string_mapping(target_snap.get("labels")) or {}).get(
+        CREATED_BY_SESSION_LABEL_KEY
+    )
+    if target_creator == caller_conversation_id:
+        return None
     caller_root = caller_snap.json().get("root_conversation_id")
     target_root = target_snap.get("root_conversation_id")
     if caller_root is None or target_root != caller_root:
@@ -7689,6 +8590,8 @@ async def execute_tool(
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
     wake_on_async_result: AsyncResultWake | None = None,
+    call_id: str | None = None,
+    caller_user_id: str | None = None,
 ) -> str:
     """
     Execute a tool and return the output string.
@@ -7719,6 +8622,8 @@ async def execute_tool(
     :param wake_on_async_result: Callback a ``sys_call_async`` background
         task invokes after queueing its completed or failed result, so the
         runner can wake a session that is no longer in a turn.
+    :param call_id: The harness's tool call ID, when the caller has one; the
+        journal tools key their writes on it.
     :returns: Tool output string.
     """
     if not arguments.strip():
@@ -7831,6 +8736,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 publish_event=publish_event,
                 session_inbox=session_inbox,
+                effective_harness=effective_harness,
             )
         elif tool_name in _LIST_MODELS_TOOLS:
             output = await _execute_list_models_tool(agent_spec=agent_spec)
@@ -7863,6 +8769,7 @@ async def execute_tool(
                 publish_event=publish_event,
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
+                effective_harness=effective_harness,
             )
         elif tool_name in _UI_TOOLS:
             output = await _open_file_via_rest(args, conversation_id, server_client)
@@ -7971,6 +8878,7 @@ async def execute_tool(
                 args,
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
+                workflows_enabled=await server_workflows_enabled(server_client),
             )
         elif tool_name in _COMMENT_TOOLS:
             output = await _execute_comment_tool(
@@ -7987,6 +8895,7 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 conversation_id=conversation_id,
                 runner_workspace=runner_workspace,
+                effective_harness=effective_harness,
             )
         elif tool_name in _POLICY_TOOLS:
             output = await _execute_policy_tool(
@@ -7997,6 +8906,29 @@ async def execute_tool(
             )
         elif tool_name in _SCHEDULED_TASK_TOOLS:
             output = await _execute_scheduled_task_tool(
+                tool_name,
+                arguments,
+                server_client=server_client,
+                conversation_id=conversation_id,
+            )
+        elif tool_name in _JOURNAL_TOOLS:
+            output = await execute_journal_tool(
+                tool_name,
+                arguments,
+                server_client=server_client,
+                conversation_id=conversation_id,
+                call_id=call_id,
+                publish_event=publish_event,
+            )
+        elif tool_name in _USER_INBOX_TOOLS:
+            output = await _execute_user_inbox_tool(
+                tool_name,
+                arguments,
+                server_client=server_client,
+                conversation_id=conversation_id,
+            )
+        elif tool_name in _MEMORY_TOOLS and _memory_tool_on(agent_spec, tool_name):
+            output = await _execute_memory_tool(
                 tool_name,
                 arguments,
                 server_client=server_client,
@@ -8023,6 +8955,7 @@ async def execute_tool(
                     if local_tool_workdir is _UNSET_LOCAL_TOOL_WORKDIR
                     else cast(Path | None, local_tool_workdir)
                 ),
+                caller_user_id=caller_user_id,
             )
         elif _is_uc_function_tool(tool_name, agent_spec):
             output = await _execute_uc_function_tool(tool_name, args, agent_spec=agent_spec)
@@ -8130,6 +9063,7 @@ async def dispatch_tool_locally(
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
     wake_on_async_result: AsyncResultWake | None = None,
+    caller_user_id: str | None = None,
 ) -> str:
     """Execute a tool once and POST its result to the harness.
 
@@ -8183,6 +9117,8 @@ async def dispatch_tool_locally(
         publish_event=publish_event,
         effective_harness=effective_harness,
         wake_on_async_result=wake_on_async_result,
+        call_id=call_id,
+        caller_user_id=caller_user_id,
     )
 
     # A file-mutating tool just ran — nudge the web to refetch the
@@ -8422,12 +9358,16 @@ async def _execute_os_env_tool(
         ``GET …/changes`` endpoint can surface them. ``sys_os_shell``
         is not tracked — shell side-effects cannot be attributed to a
         session.
+    :param resource_registry: Owner of the session's reusable environment;
+        without it (or a session id) each call starts its own helper.
     :returns: Serialized tool result string.
     """
     from omnigent.inner.os_env import _DEFAULT_READ_LIMIT, create_os_environment
 
     os_env = None
     owns_environment = True
+    tool_lease: ToolEnvironmentLease | None = None
+    completed = False
     try:
         effective_spec = _effective_runner_os_env_spec(
             agent_spec, conversation_id, runner_workspace
@@ -8445,14 +9385,31 @@ async def _execute_os_env_tool(
             )
             owns_environment = False
         else:
-            additional_read_roots = (
-                [resource_registry.codex_skills_dir(conversation_id)]
-                if resource_registry is not None and conversation_id is not None
-                else []
-            )
-            os_env = create_os_environment(
-                effective_spec, additional_read_roots=additional_read_roots
-            )
+            if (
+                resource_registry is not None
+                and conversation_id is not None
+                and not effective_spec.fork
+                and (
+                    effective_spec.sandbox is None
+                    or effective_spec.sandbox.credential_proxy is None
+                )
+            ):
+                # Reuse the session's warm helper; a busy one leaves this call its own.
+                tool_lease = await resource_registry.lease_tool_environment(
+                    conversation_id, effective_spec
+                )
+            if tool_lease is not None:
+                os_env = tool_lease.environment
+                owns_environment = False
+            else:
+                additional_read_roots = (
+                    [resource_registry.codex_skills_dir(conversation_id)]
+                    if resource_registry is not None and conversation_id is not None
+                    else []
+                )
+                os_env = create_os_environment(
+                    effective_spec, additional_read_roots=additional_read_roots
+                )
         if os_env is None:
             return "Error: unable to create OSEnvironment"
 
@@ -8507,6 +9464,11 @@ async def _execute_os_env_tool(
             )
         else:
             return f"Error: {tool_name} not implemented"
+        # Shell descendants can outlive a successful command. Retire the whole
+        # tool helper until shell requests have their own complete lifetime boundary.
+        completed = tool_name != SysOsShellTool.name() and not (
+            isinstance(result, dict) and ("error" in result or result.get("timed_out"))
+        )
     except Exception as exc:
         _logger.exception(
             "runner OSEnvironment dispatch failed for %s",
@@ -8515,7 +9477,9 @@ async def _execute_os_env_tool(
         )
         return json_dumps_transport_safe({"error": str(exc)})
     finally:
-        if os_env is not None and owns_environment:
+        if tool_lease is not None:
+            await tool_lease.release(reusable=completed)
+        elif os_env is not None and owns_environment:
             await run_sync_cleanup(
                 os_env.close,
                 component="runner_os_env_tool",
@@ -10177,12 +11141,13 @@ def _execute_skill_tool(
     *,
     agent_spec: AgentSpec | None,
     runner_workspace: Path | None,
+    workflows_enabled: bool = False,
 ) -> str:
     """
     Runner-local handler for ``load_skill`` and ``read_skill_file``.
 
     Both tools are built from one registry — the agent spec's bundled
-    skills merged with host-scope discovery from the runner workspace —
+    skills merged with host-scope discovery and enabled framework fallbacks —
     so anything ``load_skill`` can load, ``read_skill_file`` can read.
 
     :param tool_name: ``"load_skill"`` or ``"read_skill_file"``.
@@ -10190,8 +11155,10 @@ def _execute_skill_tool(
     :param agent_spec: The session's AgentSpec.
     :param runner_workspace: The runner's workspace path for
         host-scope skill discovery.
+    :param workflows_enabled: Whether the server enables workflow skills.
     :returns: Tool output string.
     """
+    from omnigent.spec.skill_sources import framework_skills
     from omnigent.tools.builtins.load_skill import LoadSkillTool
     from omnigent.tools.builtins.read_skill_file import ReadSkillFileTool
 
@@ -10209,6 +11176,9 @@ def _execute_skill_tool(
         bundled_skills,
         agent_root=runner_workspace,
         skills_filter=skills_filter,
+        fallback_skills=(
+            framework_skills(agent_spec) if workflows_enabled and agent_spec is not None else []
+        ),
     )
     tool: Tool = load_tool if tool_name == "load_skill" else ReadSkillFileTool(load_tool.skills)
 
