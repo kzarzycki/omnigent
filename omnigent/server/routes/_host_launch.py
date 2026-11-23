@@ -314,6 +314,11 @@ def resolve_host_launch(
         if not allowed:
             raise HTTPException(status_code=404, detail="session not found")
 
+    orchestration_check = getattr(host_registry, "orchestration_host_check", None)
+    if orchestration_check is not None:
+        # Every direct runner launch passes here, so a marked host refuses its work agents.
+        orchestration_check(host, conv)
+
     if sandbox_profiles is not None:
         sandbox_profiles.require_session_host(
             session_id,
