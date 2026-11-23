@@ -49,6 +49,7 @@ from omnigent.host.frames import (
     CAP_HARNESS_LOGIN,
     CAP_LONG_SESSION_MESSAGES,
     CAP_REFRESH_HARNESSES,
+    CAP_TEXT_FILE_RANGES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_RESOURCES_INTERVAL_S,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -69,7 +70,11 @@ from omnigent.host.frames import (
     optional_str_bool_map,
     workspace_missing_message,
 )
-from omnigent.host.text_file import is_credential_path
+from omnigent.host.text_file import (
+    HostTextFileError,
+    is_credential_path,
+    validate_text_file_range,
+)
 from omnigent.onboarding.harness_install import (
     ui_credential_configurable_harnesses,
     ui_install_key,
@@ -1991,22 +1996,30 @@ def create_hosts_router(
         request: Request,
         host_id: str,
         path: str,
+        offset: int | None = Query(default=None),
+        limit: int | None = Query(default=None),
     ) -> dict[str, Any]:
         """
-        Read one small UTF-8 text file on a host, with no live session.
+        Read one UTF-8 text file on a host, whole or in byte ranges, with no live session.
 
         Owner-scoped like the directory listing and reaches the host over
         the same tunnel (``host.fs_request``, op ``read_text_file``). Takes
-        the listing's path rules: absolute or ``~``-prefixed.
+        the listing's path rules: absolute or ``~``-prefixed. With
+        ``offset`` or ``limit`` it returns one range of at most 64 KiB,
+        ended at a whole character; follow ``next_offset`` for the rest.
 
         :param request: FastAPI request (for auth).
         :param host_id: Host identifier.
         :param path: Absolute or tilde-prefixed file path.
+        :param offset: First byte of a range, e.g. a previous ``next_offset``.
+        :param limit: Most bytes in a range, cut down to 64 KiB.
         :returns: ``{"object": "file", "path": <absolute path>, "size":
-            <bytes>, "content": <text>}``.
+            <bytes>, "content": <text>}``; a range adds ``offset``,
+            ``length``, ``next_offset`` and ``mtime_ns``.
         :raises HTTPException: 404 (host or file missing), 403 (not owner or
-            credential path), 400 (directory, non-UTF-8, bad path), 413
-            (over 64 KiB), 503 (host offline), 504 (timeout), 502 (host I/O).
+            credential path), 400 (directory, non-UTF-8, bad path or range),
+            413 (over 64 KiB without a range), 409 (host predates ranges),
+            503 (host offline), 504 (timeout), 502 (host I/O).
         """
         user_id = require_user(request, auth_provider)
         host = await asyncio.to_thread(host_store.get_host, host_id)
@@ -2019,6 +2032,14 @@ def create_hosts_router(
         _require_host_directory_path(path)
         if is_credential_path(path):
             raise HTTPException(status_code=403, detail="credential files cannot be read")
+        ranged = offset is not None or limit is not None
+        if ranged:
+            try:
+                offset, limit = validate_text_file_range(offset, limit)
+            except HostTextFileError as exc:
+                raise HTTPException(
+                    status_code=exc.status, detail=f"{exc.code}: {exc.message}"
+                ) from exc
 
         conn = host_registry.get(host.host_id)
         if conn is None:
@@ -2026,6 +2047,12 @@ def create_hosts_router(
             if isinstance(absent, WrongReplicaError):
                 raise absent
             raise HTTPException(status_code=503, detail="host is offline")
+        if ranged and CAP_TEXT_FILE_RANGES not in conn.hello.capabilities:
+            # An older host would drop the range and answer from byte 0.
+            raise HTTPException(
+                status_code=409,
+                detail="host_upgrade_required: update this host to read files in parts",
+            )
 
         try:
             return await read_workspace_from_host(
@@ -2034,7 +2061,7 @@ def create_hosts_router(
                 op="read_text_file",
                 workspace=path,
                 session_id="",
-                params={},
+                params={"offset": offset, "limit": limit} if ranged else {},
             )
         except HostFsError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.message) from exc
