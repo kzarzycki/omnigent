@@ -6,9 +6,11 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
 - `--since` builds on an earlier run's record (run-affected-tests.sh writes it: the tested tree's
   `git ls-tree -r -z`, the selected targets, pytest's lastfailed and exit code). Of today's
   selection it prints the tests that failed then, the targets of the files changed between the two
-  trees, and the targets the earlier run didn't select; stderr says why each runs, and names as a
-  flake candidate each failed test nothing changed reselects. A record whose pytest didn't run to
-  its end (exit other than 0 or 1), or one it can't read, prints today's selection.
+  trees, and the targets the earlier run didn't select; stderr says why each runs. A failed test
+  nothing changed reselects is a flake candidate, and then today's whole selection prints: alone, a
+  test that fails only after other tests (left-over state) passes and would look like a flake. A
+  record whose pytest didn't run to its end (exit other than 0 or 1), or one it can't read, prints
+  today's selection.
 - A changed `test_*.py` runs. Another changed Python file runs every test file that names its
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
@@ -173,6 +175,15 @@ def since(
         f" {len(differ)} files differ since: {shown or 'none'}",
         file=sys.stderr,
     )
+    if candidates:
+        for t in candidates:
+            print(f"affected tests: flake candidate: {t}", file=sys.stderr)
+        print(
+            f"affected tests: nothing changed reselects {len(candidates)} failed test(s), so the"
+            " whole selection runs: alone, a test that fails only after other tests would pass",
+            file=sys.stderr,
+        )
+        return sorted(selection), candidates
     for t in sorted(picked):
         why = [
             reason
@@ -184,9 +195,7 @@ def since(
             if under(t, part)
         ]
         print(f"affected tests: {t}: {', '.join(why)}", file=sys.stderr)
-    for t in candidates:
-        print(f"affected tests: flake candidate: {t}", file=sys.stderr)
-    return sorted(picked), candidates
+    return sorted(picked), []
 
 
 if __name__ == "__main__":
