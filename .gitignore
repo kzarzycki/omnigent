@@ -50,6 +50,8 @@ omnigent/_build_info.py
 !.claude/apm-hooks.json
 !.claude/hooks/
 !.agents/
+!.agents/**/.claude-plugin/
+# .claude/skills/gatekeeper is a symlink because the pack's installed() lookup doesn't find APM's plugin layout.
 
 # Exception: track .oss-scanner/ (OSS Scanner config) despite the .*/ rule above.
 !.oss-scanner/

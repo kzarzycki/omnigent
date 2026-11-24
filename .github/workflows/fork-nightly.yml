@@ -56,7 +56,5 @@ jobs:
           if [ -z "$green" ] || ! git merge-base --is-ancestor "$green" "$red"; then
             green=$(git rev-list --first-parent -n 20 "$red" | tail -1)
           fi
-          # nightly.py looks for the gatekeeper skill beside it; APM deploys that package as a plugin
-          ln -sfn ../../.agents/plugins/gatekeeper/skills/gatekeeper .claude/skills/gatekeeper
           python3 .claude/skills/engineering-loop/scripts/nightly.py red --last-green "$green" --red "$red" \
             --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
