@@ -184,10 +184,18 @@ with tempfile.TemporaryDirectory() as tmp:
     # test that fails only after other tests passes
     out, flakes = since(earlier)
     assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
+    whole_line = (
+        "affected tests: nothing changed reselects 1 failed test(s), so the whole selection runs"
+    )
+    assert any(line.startswith(whole_line) for line in why), why
     # only the failed test's file changed: that file, and the node id runs with it
     commit({widget: "from omnigent.widgets import frob  # fixed\n"})
     out, flakes = since(earlier)
     assert lines(out) == [widget] and flakes == [], (out, flakes)
+    # two failed tests and a fix for one: the other is a candidate, so the whole selection runs
+    out, flakes = since(record(then, [other, widget], {failed: True, f"{other}::t": True}))
+    assert lines(out) == [other, widget] and flakes == [f"{other}::t"], (out, flakes)
+    assert f"affected tests: flake candidate: {other}::t" in why, why
     # a module and the failed test's file changed: what targets() picks for each, with reasons
     run("git", "reset", "-q", "--hard", then)
     commit({"omnigent/gadget.py": "g = 2\n", third: "import omnigent.thing  # c\n"})
