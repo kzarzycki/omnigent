@@ -61,6 +61,11 @@ class FakeGh:
                 # An older gh has no --json for auth status, but its plain status succeeds.
                 return (1, "", "unknown flag: --json") if "--json" in argv else (0, "", "")
             return 0, self.auth, ""
+        if argv[:2] == ["auth", "token"] and "--user" not in argv:
+            # The active account's token; the older gh here has no ``auth token``.
+            hosts = {} if self.auth == LEGACY_GH else json.loads(self.auth)["hosts"]
+            active = [a["login"] for a in hosts.get("github.com", []) if a.get("active")]
+            return (0, f"token-{active[0]}", "") if active else (1, "", "no oauth token")
         if argv[:2] == ["auth", "token"]:
             return 0, f"token-{argv[argv.index('--user') + 1]}", ""
         if argv[:2] == ["pr", "view"]:
