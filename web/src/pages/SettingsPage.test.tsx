@@ -70,6 +70,7 @@ const mocks = vi.hoisted(() => ({
   adminViewSupported: true as boolean | undefined,
   bootFallback: false,
   sessionTitleInstructions: false,
+  thinkingSummaries: false,
   nestedAgents: false,
   advisorAvailable: false,
   authenticatedFetch: vi.fn(),
@@ -109,11 +110,15 @@ vi.mock("@/lib/CapabilitiesContext", () => ({
           sibling_sessions: mocks.nestedAgents,
           enabled_connections: mocks.enabledConnections,
           session_title_instructions: mocks.sessionTitleInstructions,
+          thinking_summaries: mocks.thinkingSummaries,
           proactive_agent_available: mocks.advisorAvailable,
         },
 }));
 vi.mock("@/components/SessionTitleInstructionsControl", () => ({
   SessionTitleInstructionsControl: () => <div data-testid="mock-session-title-instructions" />,
+}));
+vi.mock("@/components/ThinkingSummariesControl", () => ({
+  ThinkingSummariesControl: () => <div data-testid="mock-thinking-summaries" />,
 }));
 vi.mock("@/shell/ImportSessionsPanel", () => ({
   ImportSessionsPanel: mocks.importSessionsPanel,
@@ -309,6 +314,7 @@ beforeEach(() => {
   mocks.adminViewSupported = true;
   mocks.bootFallback = false;
   mocks.sessionTitleInstructions = false;
+  mocks.thinkingSummaries = false;
   mocks.nestedAgents = false;
   mocks.advisorAvailable = false;
   mocks.authenticatedFetch.mockReset();
@@ -571,6 +577,17 @@ describe("SettingsPage", () => {
 
     expect(toggle).not.toBeChecked();
     expect(localStorage.getItem(BACKGROUND_SESSION_TITLES_STORAGE_KEY)).toBe("off");
+  });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])("shows thinking summaries only when the server stores them (%s)", async (supported, shown) => {
+    mocks.thinkingSummaries = supported;
+    renderPage("/settings/general");
+    const chat = await screen.findByTestId("settings-group-general-chat");
+
+    expect(within(chat).queryByTestId("mock-thinking-summaries") !== null).toBe(shown);
   });
 
   it("shows and persists the keep-thinking-expanded switch, off by default", async () => {
