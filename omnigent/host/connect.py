@@ -247,6 +247,7 @@ from omnigent.runner.identity import (
     RUNNER_PARENT_PID_ENV_VAR,
     RUNNER_SESSION_ENV_NAMES_ENV_VAR,
     RUNNER_SLICE_KEY_ENV_VAR,
+    RUNNER_THINKING_SUMMARIES_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_WORKSPACE_ENV_VAR,
     runner_sign_in_is_pending,
@@ -1023,6 +1024,7 @@ def _build_runner_env(
     host_id: str | None = None,
     harness: str | None = None,
     mcp_disabled_servers_active_harnesses: list[str] | None = None,
+    thinking_summaries: bool | None = None,
     interactive_shells: list[str] | None = None,
     host_owns_global_cleanup: bool = False,
     harness_tmp_parent: Path | None = None,
@@ -1057,6 +1059,8 @@ def _build_runner_env(
     :param harness: Canonical harness of the launching session, e.g.
         ``"claude-native"``; lets the runner start harness-specific prewarms
         at boot. ``None`` (unknown / older server) omits the stamp.
+    :param thinking_summaries: ``True`` stamps the runner so Claude and Codex
+        launch with thinking summaries; ``None`` or ``False`` leaves them as before.
     :param host_owns_global_cleanup: Whether an active host janitor owns the
         machine-global cleanup that standalone runners perform synchronously.
     :param harness_tmp_parent: Absolute harness socket root shared with the
@@ -1133,6 +1137,11 @@ def _build_runner_env(
         env[RUNNER_MCP_DISABLED_SERVERS_ACTIVE_HARNESSES_ENV_VAR] = json.dumps(
             mcp_disabled_servers_active_harnesses
         )
+    if thinking_summaries:
+        env[RUNNER_THINKING_SUMMARIES_ENV_VAR] = "1"
+    else:
+        # The host's own environment never decides it; only the launch frame does.
+        env.pop(RUNNER_THINKING_SUMMARIES_ENV_VAR, None)
     if interactive_shells is not None:
         env[RUNNER_INTERACTIVE_SHELLS_ENV_VAR] = json.dumps(interactive_shells)
     return env
@@ -2294,6 +2303,7 @@ class HostProcess:
             host_id=self._identity.host_id,
             harness=frame.harness,
             mcp_disabled_servers_active_harnesses=frame.mcp_disabled_servers_active_harnesses,
+            thinking_summaries=frame.thinking_summaries,
             interactive_shells=self._interactive_shells,
             host_owns_global_cleanup=self._maintenance_janitor is not None,
             harness_tmp_parent=self._harness_tmp_parent,

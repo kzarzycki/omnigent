@@ -12,6 +12,7 @@ from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.schemas import (
     SessionTitleInstructionsRequest,
     SessionTitleInstructionsResponse,
+    ThinkingSummariesSetting,
 )
 from omnigent.server.server_config import SESSION_TITLE_INSTRUCTIONS_MAX_CHARS
 from omnigent.stores.user_settings_store import UserSettingsStore
@@ -63,5 +64,23 @@ def create_user_settings_router(
         return SessionTitleInstructionsResponse(
             instructions=instructions, max_chars=SESSION_TITLE_INSTRUCTIONS_MAX_CHARS
         )
+
+    @router.get("/settings/thinking-summaries", response_model=ThinkingSummariesSetting)
+    async def get_thinking_summaries(request: Request) -> ThinkingSummariesSetting:
+        """Read whether the caller's sessions ask for thinking summaries."""
+        user_id = require_user(request, auth_provider)
+        enabled = await asyncio.to_thread(store.get_thinking_summaries, user_id=user_id)
+        return ThinkingSummariesSetting(enabled=enabled)
+
+    @router.put("/settings/thinking-summaries", response_model=ThinkingSummariesSetting)
+    async def save_thinking_summaries(
+        request: Request, body: ThinkingSummariesSetting
+    ) -> ThinkingSummariesSetting:
+        """Turn the caller's thinking summaries on or off."""
+        user_id = require_user(request, auth_provider)
+        enabled = await asyncio.to_thread(
+            store.save_thinking_summaries, body.enabled, user_id=user_id
+        )
+        return ThinkingSummariesSetting(enabled=enabled)
 
     return router
