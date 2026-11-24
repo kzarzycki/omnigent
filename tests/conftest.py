@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import warnings
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -388,6 +389,33 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Kill the Omnigent processes a test module leaves behind, and name the module.
+
+    Detached daemons, servers and zygotes hold ~150 MB each; across a whole-suite
+    run they pile up until the runner starves. Reaping per module keeps memory flat;
+    the warning lists what leaked so the module's tests can clean up after themselves.
+    """
+    from omnigent.testing.process_reaper import (
+        find_leaked_omnigent_processes,
+        reap_leaked_omnigent_processes,
+    )
+
+    before = frozenset(proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR))
+    yield
+    reaped, survivors = reap_leaked_omnigent_processes(
+        _TEST_OMNIGENT_DATA_DIR, exclude_pids=before
+    )
+    if reaped or survivors:
+        listing = "; ".join(cmd[:120] for cmd in [*reaped, *survivors])
+        warnings.warn(
+            f"{request.node.nodeid} leaked {len(reaped) + len(survivors)} process(es) "
+            f"({len(survivors)} survived SIGKILL): {listing}",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True)
