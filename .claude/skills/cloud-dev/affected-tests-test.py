@@ -55,6 +55,11 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "server" / "test_other.py").write_text(
         "import omnigent.gadget  # see README.md\n"
     )
+    (repo / "tests" / "client").mkdir()
+    (repo / "tests" / "client" / "test_uses.py").write_text(
+        "from tests.server.conftest import fixture  # not conftest.py's name alone\n"
+        "pytest_plugins = ['tests.e2e.conftest']\n"
+    )
     (repo / "omnigent" / "widgets" / "frob.py").write_text("x = 1\n")
     (repo / "omnigent" / "widgets" / "__init__.py").write_text("")
     (repo / "README.md").write_text("hi\n")
@@ -68,7 +73,17 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, {"omnigent/widgets/__init__.py": "# p\n"}) == [widget]
     assert select(repo, {"README.md": "more\n"}) == []
     assert select(repo, {"omnigent/unused.py": "y = 1\n"}) == []
-    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == ["tests"]
+    # a conftest selects its directory, which holds the tests that name a file too, and the
+    # test files elsewhere that import it
+    uses = "tests/client/test_uses.py"
+    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == [uses, "tests/server"]
+    both = {"tests/server/conftest.py": "# c\n", "omnigent/widgets/frob.py": "x = 5\n"}
+    assert select(repo, both) == [uses, "tests/server"]
+    assert select(repo, {"tests/conftest.py": "# c\n"}) == ["tests"]
+    assert select(repo, {"conftest.py": "# c\n"}) == ["tests"]
+    # a suite check-fast skips: only the tests outside it that load it
+    assert affected_tests.targets(["tests/e2e/conftest.py"]) == [uses]
+    assert affected_tests.targets(["tests/gone/conftest.py"]) == []  # a deleted directory
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]
     assert select(repo, {"tests/helpers/util.py": "z = 1\n"}) == ["tests"]
     # suites the default addopts ignore are never selected
@@ -197,10 +212,10 @@ with tempfile.TemporaryDirectory() as tmp:
     out, flakes = since(record(then, [widget], {failed: True}))
     assert lines(out) == [other, failed], out
     assert f"affected tests: {other}: selected now, not in that run" in why, why
-    # a test setup change reruns the whole selection, so no flake is named
+    # a test setup change reruns its whole directory and its importers, so no flake is named
     commit({"tests/server/conftest.py": "# c\n"})
     out, flakes = since(earlier)
-    assert lines(out) == ["tests"] and flakes == [], (out, flakes)
+    assert lines(out) == [uses, "tests/server"] and flakes == [], (out, flakes)
     # with the whole tree selected, a failed test still runs alone, unless its file is gone
     whole = record(head(), ["tests"], {failed: True, "tests/server/test_gone.py::t": True})
     out, flakes = since(whole)
