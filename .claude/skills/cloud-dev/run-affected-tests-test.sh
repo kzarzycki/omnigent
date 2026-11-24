@@ -126,6 +126,7 @@ real AFFECTED_TESTS_RECORD="$tmp/record"; rc=$?
 [ "$rc" = 70 ] || fail "a crashed worker exited $rc, not 70: $(tail -5 "$tmp/real.out")"
 [ $((SECONDS - start)) -lt 60 ] || fail "a crashed worker took $((SECONDS - start)) s to end the run"
 grep -q "worker 'gw[0-9]*' crashed while running 'test_crash.py::test_kill'" "$tmp/real.out" || fail "the crash names no worker and test"
-[ "$(wc -l < "$tmp/kills")" = 1 ] || fail "the killing test ran $(wc -l < "$tmp/kills") times: the worker was restarted"
+kills=$(wc -l < "$tmp/kills")  # BSD wc pads the count with spaces: compare it as a number
+[ "$kills" -eq 1 ] || fail "the killing test ran $kills times: the worker was restarted"
 [ "$(cat "$tmp/record/exit")" = 70 ] || fail "the record holds exit $(cat "$tmp/record/exit"), not 70"
 echo "cloud-dev run-affected-tests.sh: ok"
