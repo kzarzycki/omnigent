@@ -3,8 +3,9 @@ name: Gate
 # Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
 # the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
 # `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
-# is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: it runs the
-# tests that failed, those the difference touches and newly selected ones; a pass on that rerun is a flake.
+# is nightly (fork-nightly.yml). A PR's next gate run after a red one reruns through the pack's
+# `approvals.py rerun-tests`: the failed tests plus what the fix reaches, else the red run's whole selection,
+# where a pass is a flake.
 
 on:
   pull_request:
@@ -27,7 +28,7 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
-      actions: read  # find and download an earlier run's record
+      actions: read  # find and download the red run's failed tests
       issues: write  # comment on or open the `Flaky:` issues
     steps:
       - name: Check out repo
@@ -66,53 +67,37 @@ jobs:
           # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      # The newest record a gate run for this PR left (this run's earlier attempts included) whose pytest ran
-      # to its end. Finding none, or any failure here, leaves the output empty: the full selection runs.
-      - name: Find the PR's last complete gate record
+      # The PR's newest red gate run (this run's earlier attempts included): its head and failed tests are the
+      # inputs of `rerun-tests`. Finding none, or any failure here, leaves the output empty: the full selection runs.
+      - name: Find the PR's last red gate run
         id: earlier
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TITLE: ${{ github.event.pull_request.title }}
-          RECORDS: ${{ runner.temp }}/earlier-records
+          RED: ${{ runner.temp }}/red-run
         run: |
           # ponytail: the PR number comes from Mergify's draft title ("merge queue: checking #<n> on ...");
-          # another title finds nothing and the full selection runs. Upgrade path: key on the PR head
-          # commits the draft contains.
+          # another title finds nothing and the full selection runs.
           pr=$(printf '%s\n' "$TITLE" | sed -n 's/.*checking #\([0-9][0-9]*\).*/\1/p' | head -1)
           if [ -z "$pr" ]; then echo "No PR number in the title '$TITLE': the full selection runs."; exit 0; fi
-          created=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
-          { echo "$GITHUB_RUN_ID"
-            for status in failure success; do
-              gh api --paginate "repos/$GH_REPO/actions/workflows/gate.yml/runs?status=$status&created=%3E%3D$created&per_page=100" \
-                --jq ".workflow_runs[] | select(.display_title | test(\"checking #$pr([^0-9]|\$)\")) | .id" < /dev/null
-            done; } | awk '!seen[$0]++ && ++kept <= 10' > "$RUNNER_TEMP/runs"
-          while read -r run; do
-            gh api "repos/$GH_REPO/actions/runs/$run/artifacts?per_page=100" --jq \
-              '.artifacts[] | select((.name | startswith("gate-record-attempt-")) and (.expired | not))
-               | [.created_at, .workflow_run.id, .name, .workflow_run.head_sha] | @tsv' < /dev/null
-          done < "$RUNNER_TEMP/runs" | sort -r > "$RUNNER_TEMP/records"
-          while IFS=$'\t' read -r _ run name sha; do
-            dir="$RECORDS/$run-$name"
-            gh run download "$run" --name "$name" --dir "$dir" < /dev/null || continue
-            code=$(cat "$dir/exit" 2>/dev/null || true)
-            url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run/attempts/${name#gate-record-attempt-}"
-            if [ "$code" = 0 ] || [ "$code" = 1 ]; then
-              echo "Building on $url (head $sha): its pytest exited $code."
-              echo "Building on $url, whose pytest exited $code." >> "$GITHUB_STEP_SUMMARY"
-              { echo "record=$dir"; echo "run=$url"; echo "sha=$sha"; echo "pr=$pr"; } >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "Skipping $url: its pytest exited '${code:-no code}', so it didn't run to its end."
-          done < "$RUNNER_TEMP/records"
-          echo "No complete gate record for #$pr in the last 7 days: the full selection runs."
+          run= sha=
+          read -r run sha < <(gh run list --workflow gate.yml --status failure --limit 100 --json databaseId,displayTitle,headSha \
+            --jq ".[] | select(.displayTitle | test(\"checking #$pr([^0-9]|\$)\")) | [.databaseId, .headSha] | @tsv" < /dev/null | head -1) || true
+          if [ -z "$run" ]; then echo "No red gate run for #$pr: the full selection runs."; exit 0; fi
+          gh run download "$run" --pattern 'failed-tests-attempt-*' --dir "$RED" < /dev/null
+          failed=$(find "$RED" -name failed-tests.json | sort -V | tail -1)
+          if [ -z "$failed" ]; then echo "Red run $run left no failed tests: the full selection runs."; exit 0; fi
+          git fetch --no-tags origin "$sha" < /dev/null || { echo "Can't fetch the red head $sha: the full selection runs."; exit 0; }
+          url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+          echo "Rerunning after $url (head $sha)." >> "$GITHUB_STEP_SUMMARY"
+          { echo "failed=$failed"; echo "run=$url"; echo "sha=$sha"; echo "pr=$pr"; } >> "$GITHUB_OUTPUT"
 
       # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
       - name: Run the checks
         env:
-          # run-affected-tests.sh: build on the earlier record, and write this run's.
-          AFFECTED_TESTS_SINCE: ${{ steps.earlier.outputs.record }}
+          # run-affected-tests.sh writes this run's failed tests here, for the next run's rerun.
           AFFECTED_TESTS_RECORD: ${{ runner.temp }}/gate-record
           MISE_YES: "1"
           DRAFT_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -123,6 +108,8 @@ jobs:
           AFFECTED_TESTS_WALL_SECONDS: "13800"
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}
+          EARLIER_FAILED: ${{ steps.earlier.outputs.failed }}
+          EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
           # The skills' tests commit in scratch repos and need an identity.
           GIT_AUTHOR_NAME: gate
           GIT_AUTHOR_EMAIL: gate@example.invalid
@@ -139,30 +126,36 @@ jobs:
           done
           if [ "$GATE_BASE" = "$DRAFT_HEAD" ]; then GATE_BASE=$BASE_SHA; fi
           echo "GATE_BASE=$GATE_BASE"
-          GATE_BASE=$GATE_BASE mise run check-fast
+          set -o pipefail
+          # After a red run, the pack's rerun (its output kept for the flake step); else the full selection.
+          if [ -n "$EARLIER_FAILED" ]; then
+            GATE_BASE=$GATE_BASE python3 .agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py \
+              rerun-tests "$EARLIER_FAILED" --red "$EARLIER_SHA" --base "$GATE_BASE" 2>&1 | tee "$RUNNER_TEMP/rerun-tests.log"
+          else
+            GATE_BASE=$GATE_BASE mise run check-fast
+          fi
 
-      # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
-      # its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
+      # A flake: a failed test `rerun-tests` named a candidate that passed on the rerun. Each one gets a comment
+      # on its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
       # next run reruns it. Before the upload, which carries that record.
       - name: Record flakes on their Flaky issues
         if: always() && steps.earlier.outputs.run != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          EARLIER_RECORD: ${{ steps.earlier.outputs.record }}
           EARLIER_RUN: ${{ steps.earlier.outputs.run }}
           EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
           PR: ${{ steps.earlier.outputs.pr }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           THIS_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
-          bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/gate-record" "$EARLIER_RECORD"
+          bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/rerun-tests.log" "$RUNNER_TEMP/gate-record"
 
-      - name: Upload this run's record
+      - name: Upload this run's failed tests
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: gate-record-attempt-${{ github.run_attempt }}
+          name: failed-tests-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/gate-record/
           retention-days: 7
           if-no-files-found: ignore
