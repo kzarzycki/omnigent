@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import warnings
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -388,6 +389,43 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+
+
+# Opt-in suites whose session-scoped fixtures keep servers alive across modules;
+# a per-module reap would kill them, so the session-end reaper handles these.
+_SHARED_SERVER_SUITES = frozenset({"e2e", "e2e_ui", "e2e_live", "browser_ui", "integration"})
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Kill the Omnigent processes a test module leaves behind, and name the module.
+
+    Detached daemons, servers and zygotes hold ~150 MB each; across a whole-suite
+    run they pile up until the runner starves. Reaping per module keeps memory flat;
+    the warning lists what leaked so the module's tests can clean up after themselves.
+    """
+    from omnigent.testing.process_reaper import (
+        find_leaked_omnigent_processes,
+        reap_leaked_omnigent_processes,
+    )
+
+    relative_parts = request.path.relative_to(request.config.rootpath).parts
+    if len(relative_parts) > 1 and relative_parts[1] in _SHARED_SERVER_SUITES:
+        yield
+        return
+
+    before = frozenset(proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR))
+    yield
+    reaped, survivors = reap_leaked_omnigent_processes(
+        _TEST_OMNIGENT_DATA_DIR, exclude_pids=before
+    )
+    if reaped or survivors:
+        listing = "; ".join(cmd[:120] for cmd in [*reaped, *survivors])
+        warnings.warn(
+            f"{request.node.nodeid} leaked {len(reaped) + len(survivors)} process(es) "
+            f"({len(survivors)} survived SIGKILL): {listing}",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True)
