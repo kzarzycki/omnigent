@@ -1973,9 +1973,11 @@ def test_busy_pr_reads_latest_comments_without_losing_feed_on_failure(monkeypatc
     payload = github_resource._comments_payload(data)
     assert payload["timeline_events"] == []
     assert payload["timeline_partial"] is True
-    assert len(calls) == (1 if failure == "enterprise_auth" else 2)
     if failure == "enterprise_auth":
+        # gh has no login for the host, so the conversation query is not sent.
+        assert [argv[:2] for argv, _ in calls] == [["pr", "view"], ["auth", "token"]]
         return
+    assert len(calls) == 2
     assert calls[1][0][:4] == ["api", "--hostname", "github.com", "graphql"]
     assert "--cache" not in calls[1][0]
     assert "includeComments=true" in calls[1][0]

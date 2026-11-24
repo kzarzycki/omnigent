@@ -41,6 +41,7 @@ from omnigent.runner import pr_reports
 from omnigent.runner.git_providers import (
     PR_DIFF_OBJECT,
     AccountMergeFacet,
+    BatchTitlesFacet,
     CommitCompareFacet,
     CommitsFacet,
     PinnedRevisionFacet,
@@ -353,6 +354,10 @@ def _title_facets(root: str, entries: list[SessionPullRequest]) -> dict[str, Pul
     return facets
 
 
+# A title lookup's ``(url, title, timed_out)``.
+_TitleLookup = tuple[str, str | None, bool]
+
+
 def _session_prs_with_titles(
     root: str,
     info: dict[str, Any],
@@ -385,26 +390,49 @@ def _session_prs_with_titles(
     pending.sort(key=lambda entry: entry.title_checked_at)
     deadline = min(request_deadline, time.monotonic() + _PR_TITLE_LOOKUP_SECONDS)
 
-    def fetch_title(entry: SessionPullRequest) -> tuple[str, str | None, bool] | None:
+    def fetch_title(entry: SessionPullRequest) -> list[_TitleLookup]:
         if time.monotonic() >= deadline:
-            return None
+            return []
         try:
             title, timed_out = facets[entry.provider].pr_title(root, entry, deadline)
         except Exception:  # keep the existing cache when an optional lookup fails
             _logger.warning("Git provider %s failed in pr_title", entry.provider, exc_info=True)
-            return None
-        return entry.url, title, timed_out
+            return []
+        return [(entry.url, title, timed_out)]
+
+    def fetch_titles(
+        facet: BatchTitlesFacet, batch: list[SessionPullRequest]
+    ) -> list[_TitleLookup]:
+        try:
+            found = facet.pr_titles(root, batch, deadline)
+        except Exception:  # keep the existing cache when an optional lookup fails
+            provider = batch[0].provider
+            _logger.warning("Git provider %s failed in pr_titles", provider, exc_info=True)
+            return []
+        return [(entry.url, *found[entry.url]) for entry in batch if entry.url in found]
+
+    # A provider that reads many titles at once gets one lookup for all of its PRs.
+    batches: dict[str, list[SessionPullRequest]] = {}
+    lookups: list[Callable[[], list[_TitleLookup]]] = []
+    for entry in pending:
+        facet = facets[entry.provider]
+        if isinstance(facet, BatchTitlesFacet):
+            if entry.provider not in batches:
+                batches[entry.provider] = []
+                lookups.append(functools.partial(fetch_titles, facet, batches[entry.provider]))
+            batches[entry.provider].append(entry)
+        else:
+            lookups.append(functools.partial(fetch_title, entry))
 
     may_cache = time.monotonic() < request_deadline
-    if pending and time.monotonic() < deadline:
+    if lookups and time.monotonic() < deadline:
         # Each lookup runs in a copy of this context, so it sees a background read's flag.
-        contexts = [copy_context() for _ in pending]
-        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
-            for result in executor.map(
-                lambda context, entry: context.run(fetch_title, entry), contexts, pending
+        contexts = [copy_context() for _ in lookups]
+        with ThreadPoolExecutor(max_workers=min(4, len(lookups))) as executor:
+            for results in executor.map(
+                lambda context, lookup: context.run(lookup), contexts, lookups
             ):
-                if result is not None:
-                    url, title, timed_out = result
+                for url, title, timed_out in results:
                     titles[url] = title
                     if timed_out:
                         timed_out_urls.add(url)
