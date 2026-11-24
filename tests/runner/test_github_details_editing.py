@@ -157,9 +157,7 @@ def test_upload_attachment_posts_the_bytes_to_user_attachments(
 
 def test_enterprise_uploads_go_to_the_hosts_upload_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(github, "_pr_token", lambda _root, _reference: None)
-    monkeypatch.setattr(
-        github, "_list_accounts", lambda _root: (True, [{"host": "ghe.example.com"}])
-    )
+    monkeypatch.setattr(github, "_active_gh_token", lambda _root, _host: "enterprise-token")
     enterprise_asset = ASSET_URL.replace("github.com", "ghe.example.com")
     calls: list[GhCall] = []
     monkeypatch.setattr(
