@@ -245,6 +245,21 @@ class ReviewThreadsFacet(Protocol):
 
 
 @runtime_checkable
+class BatchTitlesFacet(Protocol):
+    """Optional lookup of many PRs' titles at once, in place of one ``pr_title`` per PR."""
+
+    def pr_titles(
+        self, root: str, references: Sequence[PullRequestRef], deadline: float
+    ) -> dict[str, tuple[str | None, bool]]:
+        """Look up the titles of ``references``, giving up at ``deadline``. Never raises.
+
+        :returns: ``{url: (title, timed_out)}`` as :meth:`PullRequestFacet.pr_title` answers
+            each. A PR left out was not looked up, and is asked for on a later poll.
+        """
+        ...
+
+
+@runtime_checkable
 class CommitsFacet(Protocol):
     """Optional commit history support, gated by :attr:`ProviderCapabilities.commit_history`."""
 
