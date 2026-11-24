@@ -3,7 +3,7 @@ name: Fork nightly
 # Fork only. Runs the full unit suite on the commit the run starts from (mine on a
 # schedule; dispatch it with --ref mine); a red run opens (or updates) a
 # "Nightly red since <sha>" issue through the engineering pack's nightly.py
-# (vendored in .claude/skills/cloud-dev/nightly/, see SYNC.md there).
+# (deployed under .claude/skills/engineering-loop/, pinned in apm.yml).
 
 on:
   schedule:
@@ -56,5 +56,7 @@ jobs:
           if [ -z "$green" ] || ! git merge-base --is-ancestor "$green" "$red"; then
             green=$(git rev-list --first-parent -n 20 "$red" | tail -1)
           fi
-          python3 .claude/skills/cloud-dev/nightly/nightly.py red --last-green "$green" --red "$red" \
+          # nightly.py looks for the gatekeeper skill beside it; APM deploys that package as a plugin
+          ln -sfn ../../.agents/plugins/gatekeeper/skills/gatekeeper .claude/skills/gatekeeper
+          python3 .claude/skills/engineering-loop/scripts/nightly.py red --last-green "$green" --red "$red" \
             --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

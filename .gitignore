@@ -45,6 +45,11 @@ omnigent/_build_info.py
 !.claude/
 .claude/*
 !.claude/skills/
+# APM-deployed loop pack (see apm.yml).
+!.claude/settings.json
+!.claude/apm-hooks.json
+!.claude/hooks/
+!.agents/
 
 # Exception: track .oss-scanner/ (OSS Scanner config) despite the .*/ rule above.
 !.oss-scanner/
@@ -108,3 +113,6 @@ recordings/
 
 # Agent loop reports and logs, never committed
 tmp/loop/
+
+# APM dependencies
+apm_modules/

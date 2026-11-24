@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/engineering/hooks/heavy_run_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "apm-p-a40fd310": {
+      "source": {
+        "source": "directory",
+        "path": "./.agents/plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "gatekeeper@apm-p-a40fd310": true,
+    "omnigent@apm-p-a40fd310": true
+  }
+}

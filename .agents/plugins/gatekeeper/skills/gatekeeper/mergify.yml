@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
+#
+# The Mergify merge queue `land` hands PRs to when the policy sets `land.queue: mergify` (gatekeeper's policy.md). The
+# pack ships this file as gatekeeper/skills/gatekeeper/mergify.yml; a repo copies it to `.mergify.yml` unchanged.
+#
+# `land` judges each PR (its proofs, the owner's go where high risk, the base's required checks green on its head),
+# then posts the `land` status on that head and adds `loop:queued`. Mergify takes a PR in only with both, tests each
+# batch as a draft PR on top of main in CI, retries a red batch once, splits a batch still red until it finds the PR
+# that breaks it and dequeues only that one, and squash-merges the rest on green. A push makes a head with no `land`
+# status, so the PR stops matching and leaves the queue. A PR Mergify drops gets `loop:dequeued`, which the next
+# `land` evicts back to draft. Mergify takes a PR it dropped back at the same head only on `@mergifyio queue`, not
+# through the `queue` action below, so the re-land after an eviction also comments that command, once.
+#
+# A cloud session's GitHub proxy refuses the status write: there `land` comments a `Queued for Mergify` record naming the
+# head, and the repo's `.github/workflows/land-status.yml` posts `land` on that head while it is still the PR's.
+#
+# No CI check is named here: Mergify reads the base's required checks from its rules (`branch_protection_injection_mode`,
+# default `queue`) and requires them on the PR to queue it and on the draft PR to merge it. So the file suits any repo
+# whose default branch is `main`, whose main requires its CI check and does not require `land` itself (`land` never
+# reaches the draft PR), and whose required check runs on Mergify's draft PRs: a `pull_request` trigger that filters
+# out neither drafts nor `mergify/merge-queue/*` head branches, else no batch ever merges.
+#
+# One test run per tree: the required check's job runs on every PR, and its test step runs only when the head branch
+# starts with `queue_branch_prefix`, as a step-level `if`, so on a PR head the job runs its cheap steps (lint, config
+# and repo checks) and still reports success. A job-level `if` would skip the job, and a skipped required check never
+# reports, so Mergify would never queue the PR.
+#
+# Gate in the queue only, the setup for a repo with a merge queue and free CI minutes: the one gate run that proves a
+# PR is the queue's, on the tree that will merge, and a PR head runs none of it. Three changes from the above:
+# - the gate's job gets a job-level `if: startsWith(github.head_ref, 'mergify/merge-queue/')`, so it runs only on
+#   Mergify's draft PRs and a PR head shows it skipped;
+# - the base's ruleset drops the gate from its required checks, since a skipped required check never reports and
+#   Mergify would never queue the PR;
+# - the queue rule's `merge_conditions` becomes `[check-success = <gate>]`, so the gate is still what merges a batch.
+# Its undo: add the gate back to the ruleset's required checks, drop the job-level `if`, and set `merge_conditions`
+# back to `[-conflict]` (see "Never in place" below).
+# Keep the step-level variant above in a repo that pays for CI minutes, or whose queue rejects PRs often: there a PR
+# head's run still catches what the queue would reject, before a queue run is spent on it. Either way a dequeue goes
+# back to the session that owns the PR: the supervisor reads Mergify's status comment on the PR and relays the failing
+# check, its job and the failing tests to that PR's lead, and counts how often the queue rejects.
+# This file is the step-level variant; the queue-only one is this file with that `merge_conditions` line.
+#
+# Never in place: every merge goes through a draft PR, where the tests run (#2157). Mergify's docs (configuration
+# file format, `allow_inplace_checks`, "deprecated: this value is computed automatically") say it checks a PR in
+# place, on its own branch and without a draft PR, when `max_parallel_checks` is 1, the mode is serial, `batch_size`
+# is 1, `max_checks_retries` is 0, `merge_method` is not `merge-batch` and "its queue rule's CI is single-step:
+# merge_conditions are empty or identical to queue_conditions"; and, whatever the other keys, when "the pull request
+# is first in the queue, its queue rule's CI is single-step ... and it is already up to date with its base branch",
+# which it then merges with no draft PR and no new CI run. That is how #2151 and #2134 merged on only the PR head's
+# `qualify`, where the test step does not run. `allow_inplace_checks` cannot be set (it is computed); the one key
+# that forbids it is `merge_conditions` that differ from `queue_conditions` (two-step CI: `queue_conditions` gate
+# entry, `merge_conditions` gate the final merge, evaluated on the draft PR). `-conflict` is that difference: true on
+# every draft PR the queue builds, so it adds no check, and no CI name, to the file.
+
+queue_rules:
+  - name: default
+    merge_method: squash
+    batch_size: 3
+    batch_max_wait_time: 5 minutes
+    # the branch every batch's draft PR is pushed from, the prefix the CI's test step matches: named here, not left to
+    # the default, so the two can't drift apart
+    queue_branch_prefix: mergify/merge-queue/
+    # one retry of a red batch, so a dequeue is the second red. A retry also disables in-place checks, but that is not
+    # what keeps a batch off the PR's own branch: an up-to-date first PR merges with no draft PR whatever this is set
+    # to, so `merge_conditions` below is what forces the draft PR
+    max_checks_retries: 1
+    # a red batch is split, each part tested on top of the ones before it, until the failing PR is found, however
+    # many rounds that takes; only it leaves the queue. A number would dequeue a part still holding several PRs once
+    # it ran out
+    batch_max_failure_resolution_attempts: null
+    # a batch whose checks never report leaves the queue instead of holding it
+    checks_timeout: 1 hour
+    queue_conditions:
+      - base = main
+      - -draft
+      - label = loop:queued
+      - -label = loop:hold
+      - check-success = land
+    # two-step CI, so the queue never checks a PR in place (Never in place, above): different from `queue_conditions`
+    merge_conditions:
+      - -conflict
+
+pull_request_rules:
+  - name: queue what land handed over
+    conditions:
+      - base = main
+      - -draft
+      - label = loop:queued
+      - -label = loop:hold
+      - check-success = land
+    actions:
+      queue:
+        name: default
+
+merge_queue:
+  dequeued_label: loop:dequeued
