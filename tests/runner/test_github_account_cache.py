@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,8 @@ class FakeGh:
 
     def __init__(self, config_dir: Path) -> None:
         self.calls: Counter[str] = Counter()
+        self.lock = threading.Lock()  # parallel title lookups count from several threads
+        self.auth_status_seconds = 0.0  # gh checks each token over the network
         self.tokens = {"alice": "alice-token-1"}
         self.valid_tokens: set[str | None] = {"alice-token-1"}
         self.unreachable = False  # PR and repo reads fail without an auth error
@@ -45,8 +50,10 @@ class FakeGh:
         self, argv: list[str], *, cwd: str, timeout: float | None, env: dict[str, str] | None
     ) -> tuple[int | None, str, str]:
         argv = argv[1:]  # drop "gh"
-        self.calls[" ".join(argv[:2])] += 1
+        with self.lock:
+            self.calls[" ".join(argv[:2])] += 1
         if argv[:2] == ["auth", "status"]:
+            time.sleep(self.auth_status_seconds)
             hosts: dict[str, list[dict[str, Any]]] = {}
             for account in self.accounts:
                 hosts.setdefault(account["host"], []).append(account)
@@ -188,3 +195,75 @@ def test_runners_with_different_gh_config_dirs_do_not_share_tokens(
     assert (
         git_github.cached_gh_token("github.com", "alice", lambda: "second-token") == "second-token"
     )
+
+
+class _Clock:
+    """``time`` as the module sees it, moved forward by ``advance``."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def time(self) -> float:
+        return time.time() + self.offset
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+
+def _render_titles(count: int) -> list[str | None]:
+    """Look up ``count`` PR titles in parallel, as rendering a message full of PR links does."""
+    refs = [
+        PullRequestRef.from_url(f"https://github.com/acme/widgets/pull/{n}")
+        for n in range(1, count + 1)
+    ]
+    deadline = github.time.monotonic() + 30  # the module's clock, which a test may move
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        answers = pool.map(lambda ref: github._pr_title_before("/work", ref, deadline), refs)
+        return [title for title, _ in answers]
+
+
+@pytest.fixture
+def no_preference(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
+    """Reads run as gh's active account, so each one consults the accounts list."""
+    monkeypatch.setattr(github._config, "github_account_preference", lambda _key: None)
+    return fake_gh
+
+
+def test_ten_minutes_of_renders_make_one_title_call_per_pr(
+    no_preference: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    no_preference.auth_status_seconds = 0.2  # long enough for every lookup to miss at once
+    clock = _Clock()
+    monkeypatch.setattr(github, "time", clock)
+    for _minute in range(10):
+        assert _render_titles(50) == ["fixture"] * 50
+        clock.offset += 60
+    assert no_preference.calls["pr view"] == 50
+    # One list per 5-minute window, however many lookups miss it at once.
+    assert no_preference.calls["auth status"] <= 2
+
+
+def test_titles_stay_cached_while_the_account_check_hits_the_rate_limit(
+    no_preference: FakeGh,
+) -> None:
+    # gh validates the token over the API, so an exhausted quota fails the check itself.
+    no_preference.accounts[0] |= {"state": "error", "error": "HTTP 403: API rate limit exceeded"}
+    assert _render_titles(5) == ["fixture"] * 5
+    assert _render_titles(5) == ["fixture"] * 5
+    assert no_preference.calls["pr view"] == 5
+
+
+def test_a_failed_account_check_still_leaves_the_read_unbound(no_preference: FakeGh) -> None:
+    no_preference.accounts[0] |= {"state": "error", "error": "HTTP 401: Bad credentials"}
+    ref = PullRequestRef.from_url(PR_URL)
+    assert github._pr_read("/work", ref) == (None, None)
+
+
+def test_title_lookups_wait_out_the_hosts_rate_limit(no_preference: FakeGh) -> None:
+    github._cache_put(github._RATE_LIMIT_KEY, time.time() + 600, 600, shared=True)
+    ref = PullRequestRef.from_url(PR_URL)
+    assert github._pr_title_before("/work", ref, time.monotonic() + 30) == (None, True)
+    assert no_preference.calls["pr view"] == 0

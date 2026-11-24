@@ -331,6 +331,10 @@ def _list_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
                         "active": bool(entry.get("active")),
                         "state": entry.get("state"),
                         "host": entry.get("host") or host,
+                        # Only whether the check hit the rate limit, never the message.
+                        "rate_limited": bool(
+                            _RATE_LIMIT_PATTERN.search(str(entry.get("error") or ""))
+                        ),
                     }
                 )
         return any(a.get("state") == "success" for a in accounts), accounts
@@ -1201,7 +1205,12 @@ _OPEN_PR_TTL_SECONDS = 60.0
 # Background refreshes of one wave share a read; the server refreshes a PR every 300 s.
 _BACKGROUND_PR_TTL_SECONDS = 120.0
 _FINISHED_PR_TTL_SECONDS = 6 * 3600.0
-_ACCOUNTS_TTL_SECONDS = 30.0
+# ``gh auth status`` checks every token over the network. A validated list is kept for
+# minutes: a login, logout or switch rewrites ``hosts.yml``, which drops the entry, and a
+# revoked token's first failing call drops it too (:func:`_forget_account_lookups`).
+_ACCOUNTS_TTL_SECONDS = 300.0
+# Listed accounts none of which validated (offline, rate limited) are asked again sooner.
+_UNVALIDATED_ACCOUNTS_TTL_SECONDS = 30.0
 # A failed read is remembered briefly so waiters on one lock don't each retry ``gh``.
 _FAILED_READ_TTL_SECONDS = 5.0
 
@@ -1257,9 +1266,14 @@ def _note_rate_limit(stderr: str, *, cwd: str, token: str | None) -> bool:
     return True
 
 
+def _rate_limited() -> bool:
+    """Whether the host's rate-limit stamp holds."""
+    return _cache_get(_RATE_LIMIT_KEY, shared=True)[0]
+
+
 def _background_reads_paused() -> bool:
     """Whether this is a background read while the host's rate-limit stamp holds."""
-    return _background_read.get() and _cache_get(_RATE_LIMIT_KEY, shared=True)[0]
+    return _background_read.get() and _rate_limited()
 
 
 def _accounts_key() -> tuple[str, ...]:
@@ -1283,19 +1297,32 @@ def _cached_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     config_dir = Path(gh_config_dir())
     key = _accounts_key()
     stat = _hosts_signature(config_dir)
-    hit, cached = _cache_get(key, shared=True)
-    if hit and isinstance(cached, dict) and cached.get("stat") == stat:
-        return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
-    authenticated, accounts = _list_accounts(root)
-    # A failed lookup (offline, timeout) is retried soon; only a real answer is kept long.
-    ttl = _ACCOUNTS_TTL_SECONDS if accounts or authenticated else _FAILED_READ_TTL_SECONDS
-    _cache_put(
-        key,
-        {"authenticated": authenticated, "accounts": accounts, "stat": stat},
-        ttl,
-        shared=True,
-    )
-    return authenticated, accounts
+
+    def lookup() -> tuple[bool, list[dict[str, Any]]] | None:
+        hit, cached = _cache_get(key, shared=True)
+        if hit and isinstance(cached, dict) and cached.get("stat") == stat:
+            return bool(cached.get("authenticated")), list(cached.get("accounts") or [])
+        return None
+
+    if (found := lookup()) is not None:
+        return found
+    # Parallel PR reads of one render all miss at once; one ``gh auth status`` serves them.
+    with _single_flight(key):
+        if (found := lookup()) is not None:
+            return found
+        authenticated, accounts = _list_accounts(root)
+        # A failed lookup (offline, timeout) is retried soon; only a validated one is kept long.
+        if authenticated:
+            ttl = _ACCOUNTS_TTL_SECONDS
+        else:
+            ttl = _UNVALIDATED_ACCOUNTS_TTL_SECONDS if accounts else _FAILED_READ_TTL_SECONDS
+        _cache_put(
+            key,
+            {"authenticated": authenticated, "accounts": accounts, "stat": stat},
+            ttl,
+            shared=True,
+        )
+        return authenticated, accounts
 
 
 def _hosts_signature(config_dir: Path) -> list[int]:
@@ -1354,9 +1381,13 @@ def _resolve_read(
     if ambient:
         return None, "env:" + hashlib.sha256(ambient.encode()).hexdigest()
     # gh reads as the active account even when its auth check failed; only a
-    # working active account names the identity.
+    # working active account names the identity. One whose check hit the rate limit
+    # still works: its token is fine, and treating it as unbound would leave every
+    # read uncached exactly while the quota is out.
     active = next((a for a in accounts() if a.get("host") == host and a.get("active")), None)
-    if active is None or active.get("state") != "success" or not active.get("login"):
+    if active is None or not active.get("login"):
+        return None, None
+    if active.get("state") != "success" and not active.get("rate_limited"):
         return None, None
     active_token = _gh_auth_token(root, str(active["login"]), host)
     if not active_token:
@@ -1650,8 +1681,10 @@ def _gh_installed() -> bool:
     return shutil.which("gh") is not None
 
 
-# A title rarely changes, so a lookup is remembered as long as the per-session copy is.
-_OPEN_PR_TITLE_TTL_SECONDS = 300.0
+# A title rarely changes, and a write to the PR drops its entry, so an open PR's title is
+# shared for an hour: each session's copy (``pr_resource._PR_TITLE_CACHE_SECONDS``)
+# refreshes from this entry instead of from GitHub.
+_OPEN_PR_TITLE_TTL_SECONDS = 3600.0
 
 
 def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1679,9 +1712,9 @@ def _pr_title_before(
 
     :param deadline: A ``time.monotonic()`` value.
     :returns: ``(title, timed_out)``; ``timed_out`` is true only when the
-        deadline ended the lookup, or a rate-limit pause skipped a background one.
+        deadline ended the lookup, or the host's rate-limit pause skipped it.
     """
-    if _background_reads_paused():
+    if _rate_limited():
         return None, True  # looked up again once the pause ends; the cached title stays
     with _gh_deadline_scope(deadline):
         token, identity = _pr_read(root, reference)

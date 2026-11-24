@@ -980,7 +980,8 @@ def test_one_refresh_wave_of_35_sessions_linking_3_prs_through_the_host(
     for index in range(35):
         monkeypatch.setattr(github.time, "time", lambda index=index: started + index)
         _host_refresh(tmp_path, f"session-{index}")
-    assert fake_gh.calls == {"auth status": 2, "auth token": 1, "pr list": 1}
+    # The 35-second wave fits in one accounts window.
+    assert fake_gh.calls == {"auth status": 1, "auth token": 1, "pr list": 1}
 
 
 def test_background_reads_pause_until_the_rate_limit_resets(
