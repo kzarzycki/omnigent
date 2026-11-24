@@ -43,14 +43,21 @@ set --
 [ -z "$since$record" ] || set -- -o "cache_dir=$work/cache"
 while IFS= read -r target; do set -- "$@" "$target"; done <<< "$run"
 # Per-test cap: the slowest passing test took 38 s on a loaded 4-CPU VM, so 90 s ends a hang early (pyproject's
-# 300 s stays the default). The wall clock ends a run no test cap can, above a whole-suite run (~2 h on CI's 2 workers).
+# 300 s stays the default). The wall clock ends a run no test cap can, above a whole-suite run (~200 min on CI's 2 workers).
+# --max-worker-restart=0: a dead xdist worker stops the session at once; a restarted worker under loadfile can idle forever.
 # macOS has no GNU timeout (coreutils' gtimeout stands in); without either the run has no wall clock.
 wall=$(command -v timeout || command -v gtimeout || true)
 [ -n "$wall" ] && wall="$wall --kill-after=60 ${AFFECTED_TESTS_WALL_SECONDS:-9000}"
 rc=0
 # shellcheck disable=SC2086 # $wall is empty or a command and its flags
 OMNIGENT_SKIP_WEB_UI=true $wall \
-  uv run --no-sync pytest -n auto --dist=loadfile --timeout="${AFFECTED_TESTS_TIMEOUT:-90}" "$@" || rc=$?
+  uv run --no-sync pytest -n "${AFFECTED_TESTS_WORKERS:-auto}" --dist=loadfile --max-worker-restart=0 \
+  --timeout="${AFFECTED_TESTS_TIMEOUT:-90}" "$@" | tee "$work/pytest.log" || rc=$?
+# A crash makes pytest exit 1 like a failed test, but the run is incomplete: exit 70 keeps it from reading as a full one.
+if [ "$rc" = 1 ] && grep -q 'xdist: worker .* crashed and worker restarting disabled' "$work/pytest.log"; then
+  echo "affected tests: an xdist worker crashed, so the run stopped early (see 'crashed while running' above); exit 70" >&2
+  rc=70
+fi
 lastfailed=$work/cache/v/cache/lastfailed
 if [ -n "$record" ]; then
   [ ! -s "$lastfailed" ] || cp "$lastfailed" "$record/lastfailed.json"
