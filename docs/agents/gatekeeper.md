@@ -20,6 +20,7 @@ loop:
 
 land:
   queue: mergify
+  wait: 4h30m
   merge_commit_heads:
     - "sync/*"
 ```
@@ -31,6 +32,8 @@ land:
 `land.merge_commit_heads`: an upstream-sync PR (head `sync/<upstream sha>`, a two-parent merge of upstream's `main` into `mine`) lands as a merge commit, so `mine` keeps upstream's parent and the next sync's merge base moves forward; a squash would drop that parent and make every later sync replay the same upstream commits. Every other PR lands as a squash, which the `default` and `sync` queue rules in `.mergify.yml` carry out. GitHub is the trust anchor: no signature is checked on `mine`, by `approvals.py`, `omnigent-update` or the sync (AGENTS.md, This fork: landing PRs into `mine`). Undo: delete the `land` section; a sync PR then can't land through `land` without losing its upstream parent.
 
 `land.queue: mergify`: `approvals.py land` takes no lock, runs no host gate and merges nothing: it posts the `land` status on the PR's head and adds `loop:queued`, and Mergify merges (below). A cloud session lands this way too. Undo: delete the line; `land` then merges through GitHub itself, pinned to the head the gates checked, and runs the gate on the host.
+
+`land.wait: 4h30m`: `land --wait` stops waiting after this long and exits 3. Mergify's `checks_timeout` is 4 hours 15 minutes (`.mergify.yml`), so the 2-hour default made `land --wait` stop while the queue was still testing; 15 minutes of margin lets it see the queue's verdict. Undo: delete the line; `land --wait` falls back to 2 hours.
 
 No `loop.ci` line (its default, `true`): CI is the proof, and it runs once per change, in the merge queue. `gate` (`.github/workflows/gate.yml`: `mise run check-fast`, the pre-commit hooks, the skills' tests and the tests the change touches) runs only on the draft PR Mergify opens to test the merge, and `.mergify.yml` merges only once it is green there (`merge_conditions`). The `mine` ruleset requires no status check, so `check merge` and `land` wait on no CI run and run no `local-ci` of their own: a PR's own head is never tested, since the queue tests the tree that actually merges. The full suite runs nightly (`fork-nightly.yml`). Undo, to test each PR head as well: add the `gate` required check back to the `mine` ruleset (`landing (gate via PR)`), drop the job's `if:` in `gate.yml`, and drop `merge_conditions` from both queue rules. To prove merges on the host instead, set `loop.ci: false`, which makes `approvals.py local-ci <pr>` the merge proof again.
 
