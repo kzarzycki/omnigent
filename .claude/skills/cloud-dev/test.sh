@@ -9,9 +9,11 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # Policy check: the deployed approvals.py's `check setup` reads docs/agents/gatekeeper.md as the loop steps do.
-approvals="$here/../../../.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py"
-policy_check() {  # policy_check <repo dir>: exit 0 when that repo's policy parses
-  (cd "$1" && uv run --no-sync python "$approvals" check setup)
+# The working tree's policy is read, since a repo with an origin/<base> ref would read that ref's copy instead.
+repo_root=$(cd "$here/../../.." && pwd)
+approvals="$repo_root/.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py"
+policy_check() {  # policy_check <repo dir>: exit 0 when that repo's working-tree policy parses
+  (cd "$1" && GATEKEEPER_POLICY_FROM_WORKING_TREE=1 uv run --no-sync --project "$repo_root" python "$approvals" check setup)
 }
 run() {  # run <bin dir>: setup.sh with only that dir on PATH, so installed tools can't count
   sed -e "s#/tmp/omnigent-dev-init.log#$tmp/init.log#" -e '/^export PATH=/d' \
@@ -92,16 +94,25 @@ bash "$here/gate-setup-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
 bash "$here/run-affected-tests-test.sh" || exit 1
 bash "$here/record-flakes-test.sh" || exit 1
-# the policy parses, and the same check fails on a copy whose `land.queue` is not one the pack knows
-policy_check "$here/../../.." >"$tmp/policy.log" 2>&1 || { cat "$tmp/policy.log"; exit 1; }
+# the policy parses, and the same check fails on a copy whose working-tree `land.queue` is not one the pack
+# knows while its origin/mine ref still holds the good policy (so it fails if the working-tree switch is dropped)
+policy_check "$repo_root" >"$tmp/policy.log" 2>&1 || { cat "$tmp/policy.log"; exit 1; }
 broken="$tmp/broken"; mkdir -p "$broken/docs/agents"; git -C "$broken" init -q
-cp "$here"/../../../docs/agents/*.md "$broken/docs/agents/"
-sed -i 's/^  queue: mergify/  queue: bogus/' "$broken/docs/agents/gatekeeper.md"
+cp "$repo_root"/docs/agents/*.md "$broken/docs/agents/"
+git -C "$broken" add -A
+git -C "$broken" -c user.name=test -c user.email=test@example.com commit -q -m policy
+git -C "$broken" update-ref refs/remotes/origin/mine HEAD
+git -C "$broken" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/mine
+perl -pi -e 's/^  queue: mergify/  queue: bogus/' "$broken/docs/agents/gatekeeper.md"
 if policy_check "$broken" >"$tmp/policy.log" 2>&1 || ! grep -q "land.queue" "$tmp/policy.log"; then
   echo "!! a broken policy block passed the policy check: $(cat "$tmp/policy.log")"; exit 1
 fi
 echo "gatekeeper policy: ok"
 # .mergify.yml is the pack's template rendered with this fork's values, and every queue keeps `loop:hold` out
 python3 "$here/render-mergify.py" --check || exit 1
-[ "$(grep -c -- '-label = loop:hold' "$here/../../../.mergify.yml")" = 4 ] || { echo "!! .mergify.yml: a queue or rule lacks -label = loop:hold"; exit 1; }
+mergify="$repo_root/.mergify.yml"
+count() { grep -c -F -- "$1" "$mergify"; }  # count <line text>: how often it appears in .mergify.yml
+[ "$(count '- -label = loop:hold')" = 4 ] || { echo "!! .mergify.yml: a queue or rule lacks -label = loop:hold"; exit 1; }
+[ "$(count '- -head ~= ^sync/')" = 2 ] && [ "$(count '- head ~= ^sync/')" = 2 ] \
+  || { echo "!! .mergify.yml: the default queue and rule must exclude sync/* heads, the sync ones select them"; exit 1; }
 echo "cloud-dev .mergify.yml: ok"
