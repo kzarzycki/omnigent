@@ -42,19 +42,27 @@ jobs:
       - name: Run the full suite
         env:
           OMNIGENT_SKIP_WEB_UI: "true"
-        run: uv run --no-sync pytest -n auto --dist=loadfile --timeout=90
-
-      - name: Open or update the red issue
-        if: ${{ failure() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+        # The sampler writes into this step's own log, which GitHub streams live,
+        # so its lines survive a runner that dies mid-step.
         run: |
-          red=$(git rev-parse HEAD)
-          # newest earlier green nightly's commit; none yet -> the oldest of the last 20 merges
-          green=$(gh run list --workflow fork-nightly.yml --branch mine --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
-          if [ -z "$green" ] || ! git merge-base --is-ancestor "$green" "$red"; then
-            green=$(git rev-list --first-parent -n 20 "$red" | tail -1)
-          fi
-          python3 .claude/skills/cloud-dev/nightly/nightly.py red --last-green "$green" --red "$red" \
-            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          (
+            prev=0
+            while true; do
+              mem=$(free -m | awk '/^Mem:/{printf "used=%s avail=%s ", $3, $7} /^Swap:/{printf "swap=%s", $3}')
+              top=$(ps -eo rss=,comm= | awk '{m[$2]+=$1; n[$2]++} END {for (c in m) printf "%d %s*%d\n", m[c]/1024, c, n[c]}' | sort -rn | head -5 | paste -sd, -)
+              oom=$(sudo dmesg | grep -ciE "oom-kill|killed process" || true)
+              echo; echo "MEM $(date -u +%T) omni=$(pgrep -fc omnigent || true) procs=$(ps -e --no-headers | wc -l) $mem oom=$oom top=[$top]"
+              if [ "$oom" -gt "$prev" ]; then sudo dmesg -T | grep -iE "oom-kill|killed process" | tail -n $((oom - prev)) | sed 's/^/OOM /'; prev=$oom; fi
+              sleep 60
+            done
+          ) &
+          sampler=$!
+          rc=0
+          timeout --kill-after=60 12600 uv run --no-sync pytest -n auto --dist=loadfile --timeout=90 --max-worker-restart=0 || rc=$?
+          kill "$sampler"
+          exit "$rc"
+
+      - name: Report memory and OOM kills
+        if: ${{ always() }}
+        run: |
+          sudo dmesg -T | grep -iE "out of memory|oom-kill|killed process" || echo "no OOM lines in dmesg"
