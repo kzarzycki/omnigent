@@ -3,7 +3,10 @@
 #
 # A built web-UI bundle may be committed at this path (vendored, minified
 # JS/CSS) — never lint or "fix" it.
-exclude: ^omnigent/server/static/web-ui/
+#
+# Files `apm install` deploys (see apm.yml) must stay byte-identical to the pinned
+# release, or `apm audit` reports drift. They are linted in the pack's repo.
+exclude: ^omnigent/server/static/web-ui/|^\.agents/plugins/|^\.claude/hooks/engineering/|^\.claude/skills/(agent-hygiene|ask-matt|audit-third-party-software|browsing|chief-of-staff|claude-handoff|code-review|codebase-design|context-extractor|demo|diagnosing-bugs|domain-modeling|engineering-loop|gh-quota|github-tracker|grill-with-docs|grilling|handoff|implement|implement-spec|improve-codebase-architecture|loop-me|orchestrating-agents|pr|prototype|research|retro|tdd|teach|to-spec|to-tickets|triage|wait-what|wayfinder|wizard)/
 # `pre-commit install` (run by `just ensure`) wires both stages: the hooks run on
 # each commit, and again on push over the commits being pushed, so a commit made
 # with --no-verify or before the hooks were installed still cannot leave the
