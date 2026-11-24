@@ -13,8 +13,10 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
   its file name.
-- Markdown selects nothing. No base to diff, or a change to the test setup (pyproject.toml,
-  uv.lock, a conftest, the shared test helpers and fixtures), selects `tests`: the
+- A conftest below `tests/` selects its own directory, since pytest applies it only there; one in
+  a suite check-fast doesn't run selects nothing.
+- Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
+  uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
 
 ponytail: a name match, adapted from agent-skills' tools/affected_tests.py without its coverage
@@ -77,9 +79,14 @@ def names(path: Path, text: str) -> bool:
 
 def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
     files = [f for f in files if f] if files is not None else None
-    if files is None or any(
-        f.startswith(EVERYTHING) or Path(f).name == "conftest.py" for f in files
-    ):
+
+    def shared(f: str) -> bool:
+        path = Path(f)
+        return f.startswith(EVERYTHING) or (
+            path.name == "conftest.py" and (path.parts[0] != "tests" or len(path.parts) < 3)
+        )
+
+    if files is None or any(shared(f) for f in files):
         return ["tests"]
     tests = {
         p: p.read_text(errors="ignore")
@@ -89,14 +96,18 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
     picked: set[str] = set()
     for f in files:
         path = Path(f)
-        if path.name.startswith("test_") and path.suffix == ".py":
+        if path.name == "conftest.py":
+            if path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
+                picked.add(str(path.parent))
+        elif path.name.startswith("test_") and path.suffix == ".py":
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
         elif path.suffix != ".md":
             picked.update(
                 str(t.relative_to(root)) for t, text in tests.items() if names(path, text)
             )
-    return sorted(picked)
+    # a file inside a selected directory already runs with it
+    return sorted(t for t in picked if not any(o != t and under(t, [o]) for o in picked))
 
 
 def listing(text: str) -> dict[str, str]:
