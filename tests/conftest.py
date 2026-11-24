@@ -391,6 +391,11 @@ def pytest_addoption(parser):
     )
 
 
+# Opt-in suites whose session-scoped fixtures keep servers alive across modules;
+# a per-module reap would kill them, so the session-end reaper handles these.
+_SHARED_SERVER_SUITES = frozenset({"e2e", "e2e_ui", "e2e_live", "browser_ui", "integration"})
+
+
 @pytest.fixture(autouse=True, scope="module")
 def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Kill the Omnigent processes a test module leaves behind, and name the module.
@@ -403,6 +408,11 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
         find_leaked_omnigent_processes,
         reap_leaked_omnigent_processes,
     )
+
+    relative_parts = request.path.relative_to(request.config.rootpath).parts
+    if len(relative_parts) > 1 and relative_parts[1] in _SHARED_SERVER_SUITES:
+        yield
+        return
 
     before = frozenset(proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR))
     yield
