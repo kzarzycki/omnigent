@@ -39,36 +39,30 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra all --group test
 
-      - name: Start the memory sampler
-        run: |
-          cat > "$RUNNER_TEMP/sample.sh" <<'SH'
-          while true; do
-            echo "=== $(date -u +%FT%TZ) procs=$(ps -e --no-headers | wc -l)"
-            free -m | sed -n 2,3p
-            echo "-- RSS MB by command"
-            ps -eo rss=,comm= | awk '{m[$2]+=$1; n[$2]++} END {for (c in m) printf "%8.0f %4d %s\n", m[c]/1024, n[c], c}' | sort -rn | head -12
-            echo "-- top processes"
-            ps -eo pid=,ppid=,rss=,etimes=,args= --sort=-rss | head -12 | cut -c1-200
-            sleep 30
-          done
-          SH
-          nohup bash "$RUNNER_TEMP/sample.sh" > "$RUNNER_TEMP/mem.log" 2>&1 &
-
       - name: Run the full suite
         env:
           OMNIGENT_SKIP_WEB_UI: "true"
-        run: timeout --kill-after=60 12600 uv run --no-sync pytest -n auto --dist=loadfile --timeout=90
+        # The sampler writes into this step's own log, which GitHub streams live,
+        # so its lines survive a runner that dies mid-step.
+        run: |
+          (
+            prev=0
+            while true; do
+              mem=$(free -m | awk '/^Mem:/{printf "used=%s avail=%s ", $3, $7} /^Swap:/{printf "swap=%s", $3}')
+              top=$(ps -eo rss=,comm= | awk '{m[$2]+=$1; n[$2]++} END {for (c in m) printf "%d %s*%d\n", m[c]/1024, c, n[c]}' | sort -rn | head -5 | paste -sd, -)
+              oom=$(sudo dmesg | grep -ciE "oom-kill|killed process" || true)
+              echo; echo "MEM $(date -u +%T) procs=$(ps -e --no-headers | wc -l) $mem oom=$oom top=[$top]"
+              if [ "$oom" -gt "$prev" ]; then sudo dmesg -T | grep -iE "oom-kill|killed process" | tail -n $((oom - prev)) | sed 's/^/OOM /'; prev=$oom; fi
+              sleep 60
+            done
+          ) &
+          sampler=$!
+          rc=0
+          timeout --kill-after=60 12600 uv run --no-sync pytest -n auto --dist=loadfile --timeout=90 || rc=$?
+          kill "$sampler"
+          exit "$rc"
 
       - name: Report memory and OOM kills
         if: ${{ always() }}
         run: |
           sudo dmesg -T | grep -iE "out of memory|oom-kill|killed process" || echo "no OOM lines in dmesg"
-          grep -E "^===|^Mem:|^Swap:" "$RUNNER_TEMP/mem.log" | paste - - - | awk 'NR % 10 == 1'
-          cp "$RUNNER_TEMP/mem.log" mem.log
-
-      - name: Upload the memory samples
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: mem-samples
-          path: mem.log
