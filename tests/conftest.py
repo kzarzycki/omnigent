@@ -414,7 +414,9 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
         yield
         return
 
-    before = frozenset(proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR))
+    before = frozenset(
+        proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR)
+    )
     yield
     reaped, survivors = reap_leaked_omnigent_processes(
         _TEST_OMNIGENT_DATA_DIR, exclude_pids=before
