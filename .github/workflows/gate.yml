@@ -3,8 +3,9 @@ name: Gate
 # Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
 # the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
 # `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
-# is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: it runs the
-# tests that failed, those the difference touches and newly selected ones; a pass on that rerun is a flake.
+# is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: when the
+# difference reselects every failed test, it runs those and what the difference touches or newly selects;
+# otherwise the whole selection, where a failed test nothing reselected and that passes is a flake.
 
 on:
   pull_request:
