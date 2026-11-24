@@ -13,8 +13,9 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
   its file name.
-- A conftest below `tests/` selects its own directory, since pytest applies it only there; one in
-  a suite check-fast doesn't run selects nothing.
+- A conftest below `tests/` selects its own directory, since pytest applies it only there (none
+  in a suite check-fast doesn't run), and the test files that import it by module or load it
+  through `pytest_plugins`.
 - Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
   uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
@@ -57,9 +58,9 @@ def changed(base: str | None) -> list[str] | None:
     return out.split("\n") if out is not None else None
 
 
-def names(path: Path, text: str) -> bool:
+def names(path: Path, text: str, by_file_name: bool = True) -> bool:
     """Whether a test's `text` names the file: its file name, or for Python its dotted module."""
-    if path.name in text:
+    if by_file_name and path.name in text:
         return True
     if path.suffix != ".py":
         return False
@@ -96,15 +97,18 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
     picked: set[str] = set()
     for f in files:
         path = Path(f)
-        if path.name == "conftest.py":
-            if path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
-                picked.add(str(path.parent))
-        elif path.name.startswith("test_") and path.suffix == ".py":
+        if path.name.startswith("test_") and path.suffix == ".py":
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
         elif path.suffix != ".md":
+            conftest = path.name == "conftest.py"
+            if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
+                picked.add(str(path.parent))
+            # a conftest by module only: many tests mention the file name `conftest.py`
             picked.update(
-                str(t.relative_to(root)) for t, text in tests.items() if names(path, text)
+                str(t.relative_to(root))
+                for t, text in tests.items()
+                if names(path, text, by_file_name=not conftest)
             )
     # a file inside a selected directory already runs with it
     return sorted(t for t in picked if not any(o != t and under(t, [o]) for o in picked))
