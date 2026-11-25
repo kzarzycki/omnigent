@@ -1689,9 +1689,16 @@ def test_account_generation_check_is_shared_across_a_burst_and_dropped_on_delete
     assert checked.count("alice") == 2
 
 
-def test_account_generation_acceptance_expires(setup_app):
+def test_account_generation_acceptance_expires(setup_app, monkeypatch):
     import time
+    import types
 
+    import omnigent.server.auth as auth_module
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(
+        auth_module, "time", types.SimpleNamespace(**{**vars(time), "monotonic": lambda: now[0]})
+    )
     _, alice, stores, _ = setup_app
     auth = stores["auth_provider"]
     auth._account_check_ttl = 0.05
@@ -1700,7 +1707,7 @@ def test_account_generation_acceptance_expires(setup_app):
     auth.set_account_check(lambda user, gen: checked.append(user) or validate(user, gen))
 
     assert alice.get("/auth/me").status_code == 200
-    time.sleep(0.1)
+    now[0] += 0.1
     assert alice.get("/auth/me").status_code == 200
     assert checked == ["alice", "alice"]
 

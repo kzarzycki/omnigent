@@ -26,7 +26,7 @@ import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from dev.benchmarks.omnigent import seed as seed_corpus  # noqa: E402
+from dev.benchmarks.omnigent import seed as seed_corpus
 
 _MEMBER = "member"
 _PASSWORD = "bench-password-123"
@@ -104,8 +104,16 @@ def run(
         omni = str(Path(sys.executable).with_name("omni"))
         log = (tmp / "server.log").open("wb")
         server = subprocess.Popen(
-            [omni, "server", "--port", str(port), "--database-uri", db_uri,
-             "--artifact-location", str(tmp / "artifacts")],
+            [
+                omni,
+                "server",
+                "--port",
+                str(port),
+                "--database-uri",
+                db_uri,
+                "--artifact-location",
+                str(tmp / "artifacts"),
+            ],
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -135,11 +143,13 @@ def run(
                     )
                     conn.commit()
                     conn.close()
-                    listing = member.get("/v1/sessions", params={"limit": 1}).json()
+                    listing = member.get(
+                        "/v1/sessions", params={"limit": 1, "visibility": "all"}
+                    ).json()
                     rows = listing.get("data") or listing.get("sessions") or []
                     session_id = rows[0]["id"]
                     routes = {
-                        "list_sessions": "/v1/sessions",
+                        "list_sessions": "/v1/sessions?visibility=all",
                         "get_session": f"/v1/sessions/{session_id}",
                         "get_items": f"/v1/sessions/{session_id}/items",
                     }
@@ -179,7 +189,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.profile_dir is not None:
         args.profile_dir.mkdir(parents=True, exist_ok=True)
-    results = run(args.sessions, args.items_per_session, args.requests, args.rate, args.profile_dir)
+    results = run(
+        args.sessions, args.items_per_session, args.requests, args.rate, args.profile_dir
+    )
     print(json.dumps({k: round(v, 5) for k, v in results.items()}, indent=2))
     return 0
 
