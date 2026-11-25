@@ -146,7 +146,7 @@ def import_names(package: str) -> set[str]:
 
 
 def imports_any(moved: set[str]) -> re.Pattern[str] | None:
-    """One pattern matching an import of a module a moved package provides; None for no packages."""
+    """One pattern matching an import of a module a moved package provides, else None."""
     modules = sorted({module for package in moved for module in import_names(package)})
     if not modules:
         return None
