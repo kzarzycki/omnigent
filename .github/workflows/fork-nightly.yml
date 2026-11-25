@@ -5,10 +5,24 @@ name: Fork nightly
 # "Nightly red since <sha>" issue through the engineering pack's nightly.py
 # (vendored in .claude/skills/cloud-dev/nightly/, see SYNC.md there).
 
-on:
+# The merge queue runs only a floor for a build input (docs/agents/gatekeeper.md, `select`), so a push to
+# `mine` that touches one runs the full suite here after the merge.
+on: # timeouts: nightly
   schedule:
     - cron: "17 3 * * *"
+  push:
+    branches: [mine]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - mise.toml
+      - .github/**
   workflow_dispatch:
+
+# An older run of a push is covered by the newer one.
+concurrency:
+  group: fork-nightly-${{ github.event_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
