@@ -33,6 +33,7 @@ nightly exists.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -122,6 +123,17 @@ def moved_packages(base: str | None) -> set[str]:
     return moved_between(before, git("show", "HEAD:uv.lock"))
 
 
+@functools.lru_cache(maxsize=1)
+def module_owners() -> dict[str, tuple[str, ...]]:
+    """Installed top-level module -> normalised distribution names providing it, read once."""
+    from importlib.metadata import packages_distributions
+
+    return {
+        module: tuple(re.sub(r"[-_.]+", "-", name).lower() for name in names)
+        for module, names in packages_distributions().items()
+    }
+
+
 def import_names(package: str) -> set[str]:
     """The module names a distribution provides: those the installed environment records for it
     (RECORD, so `opentelemetry-api` gives `opentelemetry`), a known alias, and its own name with
@@ -129,20 +141,17 @@ def import_names(package: str) -> set[str]:
     names = {package.replace("-", "_")}
     if package in IMPORT_NAMES:
         names.add(IMPORT_NAMES[package])
-    from importlib.metadata import packages_distributions
-
-    for module, distributions in packages_distributions().items():
-        if any(re.sub(r"[-_.]+", "-", d).lower() == package for d in distributions):
-            names.add(module)
+    names.update(module for module, owners in module_owners().items() if package in owners)
     return names
 
 
-def imports_package(text: str, package: str) -> bool:
-    """Whether a test's text imports a module the distribution provides."""
-    return any(
-        re.search(rf"^\s*(?:import|from)\s+{re.escape(module)}\b", text, re.MULTILINE)
-        for module in import_names(package)
-    )
+def imports_any(moved: set[str]) -> re.Pattern[str] | None:
+    """One pattern matching an import of a module a moved package provides; None for no packages."""
+    modules = sorted({module for package in moved for module in import_names(package)})
+    if not modules:
+        return None
+    alternation = "|".join(re.escape(module) for module in modules)
+    return re.compile(rf"^\s*(?:import|from)\s+(?:{alternation})\b", re.MULTILINE)
 
 
 def targets(
@@ -177,11 +186,9 @@ def targets(
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
         elif f in FLOOR_INPUTS and floor:
-            if f == "uv.lock":
+            if f == "uv.lock" and (pattern := imports_any(moved or set())):
                 picked.update(
-                    str(t.relative_to(root))
-                    for t, text in tests.items()
-                    if any(imports_package(text, package) for package in moved or ())
+                    str(t.relative_to(root)) for t, text in tests.items() if pattern.search(text)
                 )
         elif path.suffix != ".md":
             conftest = path.name == "conftest.py"
