@@ -4715,6 +4715,8 @@ class HostProcess:
                 ),
                 routable_models=[model.id for model in listing.models],
             )
+        if harness == "acp":
+            return self._acp_model_options(frame)
         if harness != "claude-native":
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
@@ -4733,6 +4735,38 @@ class HostProcess:
             request_id=frame.request_id,
             status="failed",
             error="the claude model probe failed — see the host log",
+        )
+
+    @staticmethod
+    def _acp_model_options(frame: HostModelOptionsFrame) -> HostModelOptionsResultFrame:
+        """Answer for an ``acp:<slug>`` harness from this host's ``acp.agents``.
+
+        The agent's configured ``model:`` is the row marked ``isDefault``; a bare
+        ``acp`` id uses the first configured agent, as the launch path does.
+        """
+        from omnigent.onboarding.acp_auth import acp_agents, resolve_acp_agent
+
+        slug = frame.harness.split(":", 1)[1] if frame.harness.startswith("acp:") else ""
+        try:
+            agents = acp_agents()
+            agent = resolve_acp_agent(slug) if slug else (agents[0] if agents else None)
+        except Exception:  # unreadable config is a failed lookup, never a crash
+            _logger.warning("ACP agent config unreadable", exc_info=True)
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="failed to read the ACP agent configuration",
+            )
+        if agent is None or not agent.model:
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="unsupported",
+                error=f"no configured model for harness {frame.harness!r}",
+            )
+        return HostModelOptionsResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            models=[{"id": agent.model, "model": agent.model, "isDefault": True}],
         )
 
     @staticmethod
