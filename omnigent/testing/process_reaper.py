@@ -99,7 +99,9 @@ def _is_pytest_process(argv: list[str]) -> bool:
     )
 
 
-def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]:
+def find_leaked_omnigent_processes(
+    data_dir: Path | str, *, exclude_pids: frozenset[int] = frozenset()
+) -> list[psutil.Process]:
     """Find live Omnigent processes attributable to *data_dir*.
 
     A process is attributed when its exec-time ``OMNIGENT_DATA_DIR`` equals
@@ -112,6 +114,7 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
     a leak.
 
     :param data_dir: The session's throwaway ``OMNIGENT_DATA_DIR``.
+    :param exclude_pids: Pids to skip, e.g. processes that predate a module.
     :returns: Matching processes, excluding the caller.
     """
     needle = str(data_dir).rstrip(os.sep)
@@ -121,7 +124,7 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
     me = os.getpid()
     leaked: list[psutil.Process] = []
     for pid in psutil.pids():
-        if pid == me:
+        if pid == me or pid in exclude_pids:
             continue
         try:
             proc = psutil.Process(pid)
@@ -142,7 +145,10 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
 
 
 def reap_leaked_omnigent_processes(
-    data_dir: Path | str, *, timeout: float = _REAP_TIMEOUT_S
+    data_dir: Path | str,
+    *,
+    timeout: float = _REAP_TIMEOUT_S,
+    exclude_pids: frozenset[int] = frozenset(),
 ) -> tuple[list[str], list[str]]:
     """Terminate every Omnigent process attributable to *data_dir*.
 
@@ -151,11 +157,12 @@ def reap_leaked_omnigent_processes(
 
     :param data_dir: The session's throwaway ``OMNIGENT_DATA_DIR``.
     :param timeout: Seconds to wait between TERM and KILL.
+    :param exclude_pids: Pids to leave alone (see :func:`find_leaked_omnigent_processes`).
     :returns: ``(reaped, survivors)`` command lines: processes confirmed
         gone, and any that outlived even SIGKILL (e.g. stuck in
         uninterruptible sleep) so a genuine non-reap stays visible.
     """
-    leaked = find_leaked_omnigent_processes(data_dir)
+    leaked = find_leaked_omnigent_processes(data_dir, exclude_pids=exclude_pids)
     if not leaked:
         return [], []
     cmdline_by_pid = {proc.pid: " ".join(_proc_argv(proc)) for proc in leaked}
