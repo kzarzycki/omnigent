@@ -39,6 +39,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
+import psutil
 import pytest
 
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
@@ -1936,12 +1937,19 @@ async def test_runner_subprocess_exits_when_spawning_parent_exits(
     )
     runner_pid = int(proc.stdout.strip().splitlines()[-1])
 
+    def _running() -> bool:
+        # An orphan nobody reaps (no init in a container) stays a zombie: it has exited.
+        try:
+            return psutil.Process(runner_pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+
     try:
         for _ in range(60):
-            if not _pid_alive(runner_pid):
+            if not _running():
                 break
             await asyncio.sleep(0.1)
-        assert not _pid_alive(runner_pid)
+        assert not _running()
     finally:
         if _pid_alive(runner_pid):
             with contextlib.suppress(ProcessLookupError):
