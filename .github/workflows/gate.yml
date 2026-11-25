@@ -26,7 +26,7 @@ jobs:
   tests:
     name: tests (shard ${{ matrix.shard }})
     # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
-    if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
+    if: startsWith(github.head_ref, 'claude/ready-gate-shards') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -202,7 +202,7 @@ jobs:
   # `if` skips it, like the shards, outside Mergify drafts.
   gate:
     needs: tests
-    if: always() && startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
+    if: always() && startsWith(github.head_ref, 'claude/ready-gate-shards') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
