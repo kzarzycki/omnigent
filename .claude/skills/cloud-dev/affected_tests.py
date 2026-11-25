@@ -129,11 +129,11 @@ def import_names(package: str) -> set[str]:
     if package in IMPORT_NAMES:
         names.add(IMPORT_NAMES[package])
     try:
-        from importlib.metadata import distribution
+        from importlib.metadata import PackageNotFoundError, distribution
 
         top = distribution(package).read_text("top_level.txt") or ""
         names.update(line.strip() for line in top.splitlines() if line.strip())
-    except Exception:  # not installed on this interpreter
+    except PackageNotFoundError:  # not installed on this interpreter
         pass
     return names
 
