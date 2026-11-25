@@ -1128,6 +1128,15 @@ def list_models_for_worker(
                 note="Configured ACP provider model shortlist; vendor CLI owns authentication.",
             )
     provider = resolve_model_provider(spec, harness)
+    if provider.kind == NONE_KIND and canonicalize_harness(harness) == "acp":
+        launch_model = _acp_launch_model(cast("AgentSpec", spec))
+        if launch_model:
+            return ModelListing(
+                source="static",
+                verified=False,
+                models=(ModelEntry(id=launch_model, family=model_family_token(launch_model)),),
+                note="Default model configured for this ACP agent.",
+            )
     if provider.kind == DATABRICKS_KIND:
         uc_key = ("uc", *_listing_cache_key(provider))
         with _listing_cache_lock:
