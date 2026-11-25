@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -301,9 +302,15 @@ def test_deeply_nested_json5_is_soft_error(tmp_path: Path) -> None:
     openclaw = tmp_path / "openclaw.json"
     openclaw.write_text("[" * 100 + "]" * 100, encoding="utf-8")
 
-    discovery = discover_openclaw_agents(
-        acpx_path=tmp_path / "missing.json", openclaw_path=openclaw
-    )
+    # A CEL policy built earlier on the worker raises the process-wide limit past this depth.
+    original_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        discovery = discover_openclaw_agents(
+            acpx_path=tmp_path / "missing.json", openclaw_path=openclaw
+        )
+    finally:
+        sys.setrecursionlimit(original_limit)
 
     assert discovery.agents == ()
     assert len(discovery.errors) == 1
