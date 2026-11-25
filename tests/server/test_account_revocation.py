@@ -63,6 +63,8 @@ def setup_app(tmp_path, monkeypatch, request):
 
     monkeypatch.setattr(app_module, "create_app", capture)
     monkeypatch.delenv("OMNIGENT_OIDC_ISSUER", raising=False)
+    # Existing tests assert one generation check per request; the cache has its own tests.
+    monkeypatch.setenv("OMNIGENT_ACCOUNT_CHECK_TTL_SECONDS", "0")
     yield_from = _build_accounts_app(tmp_path, monkeypatch, init_admin_password="admin-pw-12345")
     client = next(yield_from)
     try:
@@ -1662,3 +1664,76 @@ def test_account_deletion_before_legacy_startup_finishes(setup_app, monkeypatch,
     assert scheduler.is_started
     assert scheduler.job_count == 0
     assert tasks.list_runs(created.json()["id"])[0] == []
+
+
+def test_account_generation_check_is_shared_across_a_burst_and_dropped_on_delete(setup_app):
+    admin, alice, stores, _ = setup_app
+    auth = stores["auth_provider"]
+    auth._account_check_ttl = 30.0
+    checked = []
+    validate = stores["account_store"].accepts_generation
+
+    def record_check(user_id, generation):
+        checked.append(user_id)
+        return validate(user_id, generation)
+
+    auth.set_account_check(record_check)
+
+    for _ in range(5):
+        assert alice.get("/auth/me").status_code == 200
+    assert checked == ["alice"]
+
+    # Deleting the account clears the cached acceptance, so the next request re-checks and fails.
+    assert admin.delete("/auth/users/alice").status_code == 204
+    assert alice.get("/auth/me").status_code == 401
+    assert checked.count("alice") == 2
+
+
+def test_account_generation_acceptance_expires(setup_app):
+    import time
+
+    _, alice, stores, _ = setup_app
+    auth = stores["auth_provider"]
+    auth._account_check_ttl = 0.05
+    checked = []
+    validate = stores["account_store"].accepts_generation
+    auth.set_account_check(lambda user, gen: checked.append(user) or validate(user, gen))
+
+    assert alice.get("/auth/me").status_code == 200
+    time.sleep(0.1)
+    assert alice.get("/auth/me").status_code == 200
+    assert checked == ["alice", "alice"]
+
+
+def test_revoking_while_workers_cache_acceptances_does_not_race():
+    import threading
+
+    from omnigent.server.auth import UnifiedAuthProvider
+
+    auth = UnifiedAuthProvider(source="header", local_single_user=False)
+    auth._account_check_ttl = 30.0
+    auth.set_account_check(lambda *_: True)
+    stop = threading.Event()
+    errors = []
+
+    def fill():
+        index = 0
+        while not stop.is_set():
+            index += 1
+            auth._cookie_account_accepted(f"user{index % 500}", str(index))
+
+    def revoke():
+        try:
+            for index in range(2000):
+                auth.revoke_user_sessions(f"user{index % 500}")
+        except RuntimeError as exc:  # dictionary changed size during iteration
+            errors.append(exc)
+
+    workers = [threading.Thread(target=fill) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    revoke()
+    stop.set()
+    for worker in workers:
+        worker.join()
+    assert errors == []
