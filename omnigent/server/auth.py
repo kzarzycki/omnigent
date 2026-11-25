@@ -457,6 +457,21 @@ class _ConnectionIdentity:
     generation: str | None
 
 
+_ACCEPTED_GENERATIONS_MAX = 10_000
+_DEFAULT_ACCOUNT_CHECK_TTL_SECONDS = 5.0
+
+
+def _account_check_ttl_seconds() -> float:
+    """Seconds an accepted account generation is reused; ``0`` checks every request."""
+    raw = os.environ.get("OMNIGENT_ACCOUNT_CHECK_TTL_SECONDS")
+    if raw is None:
+        return _DEFAULT_ACCOUNT_CHECK_TTL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_ACCOUNT_CHECK_TTL_SECONDS
+
+
 class UnifiedAuthProvider(AuthProvider):
     """Unified authentication provider that supports header-based,
     OIDC, and accounts cookie-based identity extraction.
@@ -526,6 +541,11 @@ class UnifiedAuthProvider(AuthProvider):
         # Accounts JWTs validate generation and revocation on every request.
         # OIDC and machine principals retain their independent lifecycle.
         self._account_check: Callable[[str, str], bool] | None = None
+        # Recent accepted (user_id, generation) pairs → monotonic expiry, so a
+        # burst of requests shares one generation lookup. Only acceptances are
+        # cached; a revoke in this process clears them at once.
+        self._accepted_generations: dict[tuple[str, str], float] = {}
+        self._account_check_ttl = _account_check_ttl_seconds()
 
     def set_grant_revocation_check(self, check: Callable[[str], bool]) -> None:
         """Wire the device-grant revocation lookup.
@@ -538,6 +558,22 @@ class UnifiedAuthProvider(AuthProvider):
     def set_account_check(self, check: Callable[[str, str], bool]) -> None:
         """Wire uncached generation/revocation validation in accounts mode."""
         self._account_check = check
+
+    def _cookie_account_accepted(self, user_id: str, generation: str) -> bool:
+        """Validate a cookie's account generation, reusing a very recent acceptance."""
+        assert self._account_check is not None
+        key = (user_id, generation)
+        now = time.monotonic()
+        if self._accepted_generations.get(key, 0.0) > now:
+            return True
+        if not self._account_check(user_id, generation):
+            self._accepted_generations.pop(key, None)
+            return False
+        if self._account_check_ttl > 0:
+            if len(self._accepted_generations) > _ACCEPTED_GENERATIONS_MAX:
+                self._accepted_generations.clear()
+            self._accepted_generations[key] = now + self._account_check_ttl
+        return True
 
     def accepts_account_generation(self, user_id: str, generation: str | None) -> bool:
         return self._account_check is None or (
@@ -557,6 +593,8 @@ class UnifiedAuthProvider(AuthProvider):
         ]
         for key in stale:
             del self._cookie_cache[key]
+        for accepted in [key for key in self._accepted_generations if key[0] == user_id]:
+            self._accepted_generations.pop(accepted, None)
 
     @property
     def login_url(self) -> str | None:
@@ -724,7 +762,9 @@ class UnifiedAuthProvider(AuthProvider):
         # principals. Every user-backed credential carries the account generation.
         if self._account_check is not None and not (scope is not None and grant_id is None):
             generation = payload.get("account_generation")
-            if not isinstance(generation, str) or not self._account_check(user_id, generation):
+            if not isinstance(generation, str) or not self._cookie_account_accepted(
+                user_id, generation
+            ):
                 return None
             from omnigent.db.account_authority import bind_account_authority
 
