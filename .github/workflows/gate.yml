@@ -25,7 +25,7 @@ jobs:
     # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
     if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 240 # timeouts.run
     permissions:
       contents: read
       actions: read  # find and download an earlier run's record
@@ -120,8 +120,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DRAFT_TITLE: ${{ github.event.pull_request.title }}
           OMNIGENT_SKIP_WEB_UI: "true"
-          # The full suite (run on a uv.lock change) needs ~200 min on the 4-core runner; stays under the 240-min job timeout.
+          # The full suite (a nightly run) needs ~200 min on the 4-core runner; stays under the 240-min job timeout.
           AFFECTED_TESTS_WALL_SECONDS: "13800"
+          # The queue takes the floor for a build input; the nightly runs the full suite after the merge.
+          AFFECTED_TESTS_BUILD_INPUTS: floor
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}
           # The skills' tests commit in scratch repos and need an identity.

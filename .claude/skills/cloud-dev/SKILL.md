@@ -79,9 +79,9 @@ installed skill (`~/.claude/skills` has none, and any other copy on the host may
 and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
 `gatekeeper/skills/gatekeeper/scripts/approvals.py` under it.
 
-Checked in a VM against pack `engineering-v0.35.1` (`approvals.py check merge <pr>`, `record verdict --help`,
+Checked in a VM against pack `engineering-v0.35.10` (`approvals.py check merge <pr>`, `record verdict --help`,
 `record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
-the VM. Run them from the pack clone (Loop role files above; add `--branch engineering-v0.35.1` to pin it), as
+the VM. Run them from the pack clone (Loop role files above; add `--branch engineering-v0.35.10` to pin it), as
 `gatekeeper/skills/gatekeeper/scripts/approvals.py`.
 
 **Runs in the VM:** `check build`, `check merge`, `record verdict` and `land`. `land` merges nothing: it posts the

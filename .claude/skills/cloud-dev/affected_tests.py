@@ -18,6 +18,10 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
 - A conftest below `tests/` selects its own directory, since pytest applies it only there (none
   in a suite check-fast doesn't run), and the test files that import it by module or load it
   through `pytest_plugins`.
+- With AFFECTED_TESTS_BUILD_INPUTS=floor (the merge queue's gate; the nightly covers the rest after
+  the merge), pyproject.toml and uv.lock no longer select `tests`: like any other file they select
+  the tests that name them, a uv.lock change adds the tests that import a package whose version
+  moved, and the other changed files select as usual.
 - Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
   uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
@@ -30,6 +34,7 @@ nightly exists.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -80,11 +85,95 @@ def names(path: Path, text: str, by_file_name: bool = True) -> bool:
     )
 
 
-def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
+# the build inputs the queue's floor leaves to the nightly
+FLOOR_INPUTS = ("pyproject.toml", "uv.lock")
+
+
+# distributions whose import name differs from the distribution name, beyond what the installed
+# metadata says (the selector can run on an interpreter without the project's dependencies)
+IMPORT_NAMES = {
+    "pyyaml": "yaml",
+    "pillow": "PIL",
+    "python-dateutil": "dateutil",
+    "protobuf": "google",
+}
+
+
+def locked_versions(text: str | None) -> dict[str, str]:
+    """Package name -> version from a uv.lock's text; empty for none. The project's own packages
+    (an editable or virtual source) are left out: every test imports them."""
+    found: dict[str, str] = {}
+    for block in (text or "").split("[[package]]")[1:]:
+        name = re.search(r'^name = "([^"]+)"', block, re.MULTILINE)
+        version = re.search(r'^version = "([^"]+)"', block, re.MULTILINE)
+        own = re.search(r"^source = \{ (?:editable|virtual) =", block, re.MULTILINE)
+        if name and version and not own:
+            found[re.sub(r"[-_.]+", "-", name.group(1)).lower()] = version.group(1)
+    return found
+
+
+def moved_between(before: str | None, after: str | None) -> set[str]:
+    """Packages whose locked version differs between two uv.lock texts (added or removed count)."""
+    old, new = locked_versions(before), locked_versions(after)
+    return {name for name in old.keys() | new.keys() if old.get(name) != new.get(name)}
+
+
+def moved_packages(base: str | None) -> set[str]:
+    """Packages whose locked version differs between `base` and HEAD."""
+    before = git("show", f"{base}:uv.lock") if base else None
+    return moved_between(before, git("show", "HEAD:uv.lock"))
+
+
+@functools.lru_cache(maxsize=1)
+def module_owners() -> dict[str, tuple[str, ...]]:
+    """Installed top-level module -> normalised distribution names providing it, read once."""
+    from importlib.metadata import packages_distributions
+
+    return {
+        module: tuple(re.sub(r"[-_.]+", "-", name).lower() for name in names)
+        for module, names in packages_distributions().items()
+    }
+
+
+def import_names(package: str) -> set[str]:
+    """The module names a distribution provides: those the installed environment records for it
+    (RECORD, so `opentelemetry-api` gives `opentelemetry`), a known alias, and its own name with
+    `-` as `_` (all there is for a distribution not installed here, which no test can import)."""
+    names = {package.replace("-", "_")}
+    if package in IMPORT_NAMES:
+        names.add(IMPORT_NAMES[package])
+    names.update(module for module, owners in module_owners().items() if package in owners)
+    return names
+
+
+def imports_any(moved: set[str]) -> re.Pattern[str] | None:
+    """One pattern matching an import of a module a moved package provides, else None."""
+    modules = sorted({module for package in moved for module in import_names(package)})
+    if not modules:
+        return None
+    alternation = "|".join(re.escape(module) for module in modules)
+    # an import line naming one (also after a comma), or a string naming one (patch, importorskip)
+    return re.compile(
+        rf"^\s*(?:import|from)\b[^\n#]*\b(?:{alternation})\b"
+        rf"|[\"'](?:{alternation})(?:\.|[\"'])",
+        re.MULTILINE,
+    )
+
+
+def targets(
+    files: list[str] | None,
+    root: Path = Path("."),
+    floor: bool = False,
+    moved: set[str] | None = None,
+) -> list[str]:
+    """The test targets `files` touch; with `floor`, pyproject.toml and uv.lock select only through
+    the other files and the tests importing a package in `moved`."""
     files = [f for f in files if f] if files is not None else None
 
     def shared(f: str) -> bool:
         path = Path(f)
+        if floor and f in FLOOR_INPUTS:
+            return False
         return f.startswith(EVERYTHING) or (
             path.name == "conftest.py" and (path.parts[0] != "tests" or len(path.parts) < 3)
         )
@@ -103,6 +192,10 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
         elif path.suffix != ".md":
+            if f == "uv.lock" and floor and (pattern := imports_any(moved or set())):
+                picked.update(
+                    str(t.relative_to(root)) for t, text in tests.items() if pattern.search(text)
+                )
             conftest = path.name == "conftest.py"
             if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
                 picked.add(str(path.parent))
@@ -137,7 +230,7 @@ def within(found: list[str], selection: list[str]) -> list[str]:
 
 
 def since(
-    record: Path, selection: list[str], root: Path = Path(".")
+    record: Path, selection: list[str], root: Path = Path("."), floor: bool = False
 ) -> tuple[list[str], list[str]] | str:
     """What to run on HEAD after the run `record` describes, and its flake candidates; or why the
     record can't be used."""
@@ -160,7 +253,11 @@ def since(
         return "git ls-tree HEAD failed"
     now_tree = listing(now)
     differ = sorted(p for p in then.keys() | now_tree.keys() if then.get(p) != now_tree.get(p))
-    touched = within(targets(differ, root), selection)
+    moved = None
+    if floor and "uv.lock" in differ and "uv.lock" in then:
+        blob = then["uv.lock"].split()[-1]
+        moved = moved_between(git("cat-file", "-p", blob), git("show", "HEAD:uv.lock"))
+    touched = within(targets(differ, root, floor=floor, moved=moved), selection)
     new = [t for t in selection if not under(t, selected_then)]
     failed = within([t for t in lastfailed if (root / t.split("::", 1)[0]).exists()], selection)
     picked = set(touched) | set(new) | set(failed)
@@ -205,9 +302,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     base = args.base if args.base is not None else os.environ.get("GATE_BASE")
     base = base or (git("merge-base", "origin/mine", "HEAD") or "").strip() or None
-    selected = targets(changed(base))
+    floor = os.environ.get("AFFECTED_TESTS_BUILD_INPUTS") == "floor"
+    selected = targets(changed(base), floor=floor, moved=moved_packages(base) if floor else None)
     if args.since is not None:
-        rerun = since(args.since, selected)
+        rerun = since(args.since, selected, floor=floor)
         if isinstance(rerun, str):
             print(
                 f"affected tests: no usable record ({rerun}); running the full selection",
