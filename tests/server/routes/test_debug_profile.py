@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections import Counter
 from collections.abc import Iterator
@@ -47,10 +48,11 @@ def _busy_thread() -> Iterator[None]:
 
 
 def _busy_stack_count(report: str) -> tuple[int, int]:
-    """Return the busy loop's sample count and the highest count of any stack.
+    """Return the busy loop's sample count and the number of sampling rounds.
 
-    Idle threads are sampled every round too, so the busy loop ties with them at the
-    top rather than outranking them.
+    The busy thread is runnable every round, so it should be sampled in nearly all of
+    them. Comparing with the top stack instead breaks when other threads leaked by earlier
+    tests share one idle stack: their samples add up past the busy loop's.
     """
     counts = {}
     for line in report.split("\n\n", 1)[0].splitlines():
@@ -58,7 +60,9 @@ def _busy_stack_count(report: str) -> tuple[int, int]:
         counts[stack] = int(count)
     busy = [count for stack, count in counts.items() if stack.endswith(":_spin_until_stopped")]
     assert len(busy) == 1, report
-    return busy[0], max(counts.values())
+    rounds = re.search(r"over (\d+) rounds", report)
+    assert rounds, report
+    return busy[0], int(rounds.group(1))
 
 
 def _sampler_is_running() -> bool:
@@ -75,9 +79,9 @@ def test_busy_loop_is_the_top_stack_and_the_sampler_leaves_itself_out() -> None:
         report = sample_stacks(1.0)
 
     stacks, _, rest = report.partition("\n\n# samples per thread\n")
-    busy_count, top_count = _busy_stack_count(report)
+    busy_count, rounds = _busy_stack_count(report)
     assert busy_count > 20
-    assert busy_count >= 0.9 * top_count
+    assert busy_count >= 0.9 * rounds
     assert any(
         line.startswith("threading.py:_bootstrap;") and ":_spin_until_stopped " in line
         for line in stacks.splitlines()
@@ -98,8 +102,8 @@ async def test_admin_gets_collapsed_stacks_over_http(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    busy_count, top_count = _busy_stack_count(response.text)
-    assert busy_count >= 0.9 * top_count
+    busy_count, rounds = _busy_stack_count(response.text)
+    assert busy_count >= 0.9 * rounds
 
 
 @pytest.mark.asyncio
