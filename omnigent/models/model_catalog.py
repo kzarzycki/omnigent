@@ -767,7 +767,7 @@ def _legacy_claude_sdk_provider(spec: AgentSpec) -> ResolvedModelProvider:
     prefix = _databricks_prefix_provider(spec)
     if prefix is not None:
         return prefix
-    return ResolvedModelProvider(kind=NONE_KIND, detail="no model provider configured")
+    return ResolvedModelProvider(kind=NONE_KIND, detail=_NO_PROVIDER_DETAIL)
 
 
 def _legacy_openai_agents_provider(spec: AgentSpec) -> ResolvedModelProvider:
@@ -809,7 +809,7 @@ def _legacy_openai_agents_provider(spec: AgentSpec) -> ResolvedModelProvider:
     prefix = _databricks_prefix_provider(spec)
     if prefix is not None:
         return prefix
-    return ResolvedModelProvider(kind=NONE_KIND, detail="no model provider configured")
+    return ResolvedModelProvider(kind=NONE_KIND, detail=_NO_PROVIDER_DETAIL)
 
 
 def _legacy_profile_only_provider(
@@ -841,7 +841,10 @@ def _legacy_profile_only_provider(
                 "fields; configure a 'providers:' entry instead"
             ),
         )
-    return ResolvedModelProvider(kind=NONE_KIND, detail="no model provider configured")
+    return ResolvedModelProvider(kind=NONE_KIND, detail=_NO_PROVIDER_DETAIL)
+
+
+_NO_PROVIDER_DETAIL = "no model provider configured"
 
 
 def _legacy_acp_provider(spec: AgentSpec) -> ResolvedModelProvider:
@@ -863,7 +866,7 @@ def _legacy_acp_provider(spec: AgentSpec) -> ResolvedModelProvider:
                 "fields; configure a 'providers:' entry instead"
             ),
         )
-    return ResolvedModelProvider(kind=NONE_KIND, detail="no model provider configured")
+    return ResolvedModelProvider(kind=NONE_KIND, detail=_NO_PROVIDER_DETAIL)
 
 
 def _acp_launch_model(spec: AgentSpec) -> str | None:
@@ -1128,7 +1131,11 @@ def list_models_for_worker(
                 note="Configured ACP provider model shortlist; vendor CLI owns authentication.",
             )
     provider = resolve_model_provider(spec, harness)
-    if provider.kind == NONE_KIND and canonicalize_harness(harness) == "acp":
+    if (
+        provider.kind == NONE_KIND
+        and provider.detail == _NO_PROVIDER_DETAIL
+        and canonicalize_harness(harness) == "acp"
+    ):
         launch_model = _acp_launch_model(cast("AgentSpec", spec))
         if launch_model:
             return ModelListing(

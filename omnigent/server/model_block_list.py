@@ -254,7 +254,11 @@ async def refuse_blocked_start_defaults(
     if default_model is None and spec is not None and canonicalize_harness(harness) == "acp":
         from omnigent.models.model_catalog import _acp_launch_model
 
-        default_model = _acp_launch_model(spec)
+        try:
+            default_model = _acp_launch_model(spec)
+        except Exception:
+            # An unreadable default is an unknown one: refused below.
+            logger.debug("ACP default model unavailable", exc_info=True)
     if default_model is None and harness and host_registry is not None and host_id:
         default_model = await _host_default_model(host_registry, host_id, harness)
     if default_model is None:

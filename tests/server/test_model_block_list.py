@@ -205,3 +205,33 @@ async def test_an_acp_agents_configured_default_decides_the_start(
             await model_block_list.refuse_blocked_start_defaults(**start)
     else:
         await model_block_list.refuse_blocked_start_defaults(**start)
+
+
+async def test_an_unreadable_acp_default_is_refused_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure reading the ACP agent's default must not escape the guard."""
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    def _unreadable(_spec: Any) -> str:
+        raise RuntimeError("malformed config")
+
+    monkeypatch.setattr("omnigent.models.model_catalog._acp_launch_model", _unreadable)
+    monkeypatch.setattr(
+        model_block_list, "_current", parse_model_block_list({"blocked_models": ["fixture-model"]})
+    )
+    spec = AgentSpec(
+        spec_version=1,
+        name="acp-fixture",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "acp:fixture"}),
+    )
+    with pytest.raises(OmnigentError, match="Cannot tell whether the default model"):
+        await model_block_list.refuse_blocked_start_defaults(
+            host_registry=None,
+            host_id=None,
+            harness="acp",
+            spec=spec,
+            inference_snapshot=None,
+            model_override=None,
+            reasoning_effort=None,
+        )
