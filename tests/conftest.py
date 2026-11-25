@@ -28,12 +28,14 @@ os.environ["OMNIGENT_DATA_DIR"] = str(_TEST_OMNIGENT_DATA_DIR)
 # (an accounts-login test once left `server: http://localhost:8000` there).
 os.environ["OMNIGENT_CONFIG_HOME"] = str(_TEST_OMNIGENT_DATA_DIR / "config-home")
 # A suite started from inside an Omnigent session inherits its runner's
-# identity: tests would log into the live runner's log file and dial its tunnel.
+# identity: tests would log into the live runner's log file, dial its tunnel
+# and launch harnesses with its telemetry exporters.
 for _name in list(os.environ):
     if _name.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_TERMINAL_")) or _name in (
         "OMNIGENT_PROCESS_LOG_FILE",
         "OMNIGENT_HARNESS_TMP_PARENT",
         "OMNIGENT_USER_ID",
+        "OMNIGENT_HARNESS_TELEMETRY",
     ):
         del os.environ[_name]
 # Servers and runners booted by tests otherwise sweep the developer's live
