@@ -90,9 +90,13 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "e2e").mkdir()
     (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
     (repo / "tests" / "server" / "test_requests.py").write_text("import requests\n")
+    (repo / "tests" / "server" / "test_yaml.py").write_text("import yaml\n")
+    (repo / "tests" / "server" / "test_root.py").write_text("import omnigent.widgets\n")
     lock = (
         '[[package]]\nname = "requests"\nversion = "1.0"\n\n'
-        '[[package]]\nname = "other-lib"\nversion = "2.0"\n'
+        '[[package]]\nname = "other-lib"\nversion = "2.0"\n\n'
+        '[[package]]\nname = "pyyaml"\nversion = "6.0"\n\n'
+        '[[package]]\nname = "omnigent"\nversion = "0.1"\nsource = { editable = "." }\n'
     )
     (repo / "uv.lock").write_text(lock)
     run("git", "add", "-A")
@@ -112,6 +116,10 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         == []
     )
+    yaml_test = "tests/server/test_yaml.py"
+    assert select(repo, {"uv.lock": lock.replace("6.0", "6.1")}, **floor) == [yaml_test]  # alias
+    # the project's own editable package moving selects nothing: every test imports it
+    assert select(repo, {"uv.lock": lock.replace("0.1", "0.2")}, **floor) == []
     both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
     assert select(repo, both_inputs, **floor) == [requests_test, widget]
     assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == [
@@ -299,4 +307,18 @@ with tempfile.TemporaryDirectory() as tmp:
     for rec in [*unusable, malformed, empty_tree]:
         assert since(Path(rec), "newer") == (today("newer"), []), rec
         assert any(line.startswith("affected tests: no usable record") for line in why), (rec, why)
+    # floor mode and --since: a package that moved after the record's run reselects its importers
+    run("git", "checkout", "-q", "-B", "pr", "base")
+    then = head()
+    requests_test = "tests/server/test_requests.py"
+    floor_record = record(then, [requests_test, widget], {}, exit_code="0")
+    commit({"uv.lock": lock.replace("1.0", "1.1")})
+    out = subprocess.run(
+        [sys.executable, str(HERE / "affected_tests.py"), "--since", str(floor_record), "base"],
+        env={**os.environ, "AFFECTED_TESTS_BUILD_INPUTS": "floor"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert lines(out.stdout) == [requests_test], out
 print("affected-tests: ok")

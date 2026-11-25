@@ -87,29 +87,62 @@ def names(path: Path, text: str, by_file_name: bool = True) -> bool:
 FLOOR_INPUTS = ("pyproject.toml", "uv.lock")
 
 
+# distributions whose import name differs from the distribution name, beyond what the installed
+# metadata says (the selector can run on an interpreter without the project's dependencies)
+IMPORT_NAMES = {
+    "pyyaml": "yaml",
+    "pillow": "PIL",
+    "python-dateutil": "dateutil",
+    "protobuf": "google",
+}
+
+
 def locked_versions(text: str | None) -> dict[str, str]:
-    """Package name -> version from a uv.lock's text; empty for none."""
+    """Package name -> version from a uv.lock's text; empty for none. The project's own packages
+    (an editable or virtual source) are left out: every test imports them."""
     found: dict[str, str] = {}
     for block in (text or "").split("[[package]]")[1:]:
         name = re.search(r'^name = "([^"]+)"', block, re.MULTILINE)
         version = re.search(r'^version = "([^"]+)"', block, re.MULTILINE)
-        if name and version:
+        own = re.search(r"^source = \{ (?:editable|virtual) =", block, re.MULTILINE)
+        if name and version and not own:
             found[re.sub(r"[-_.]+", "-", name.group(1)).lower()] = version.group(1)
     return found
 
 
+def moved_between(before: str | None, after: str | None) -> set[str]:
+    """Packages whose locked version differs between two uv.lock texts (added or removed count)."""
+    old, new = locked_versions(before), locked_versions(after)
+    return {name for name in old.keys() | new.keys() if old.get(name) != new.get(name)}
+
+
 def moved_packages(base: str | None) -> set[str]:
-    """Packages whose locked version differs between `base` and HEAD (added or removed ones count)."""
-    before = locked_versions(git("show", f"{base}:uv.lock") if base else None)
-    after = locked_versions(git("show", "HEAD:uv.lock"))
-    return {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    """Packages whose locked version differs between `base` and HEAD."""
+    before = git("show", f"{base}:uv.lock") if base else None
+    return moved_between(before, git("show", "HEAD:uv.lock"))
+
+
+def import_names(package: str) -> set[str]:
+    """The module names a distribution provides: its installed top-level names when known, a known
+    alias, and its own name with `-` as `_`."""
+    names = {package.replace("-", "_")}
+    if package in IMPORT_NAMES:
+        names.add(IMPORT_NAMES[package])
+    try:
+        from importlib.metadata import distribution
+
+        top = distribution(package).read_text("top_level.txt") or ""
+        names.update(line.strip() for line in top.splitlines() if line.strip())
+    except Exception:  # not installed on this interpreter
+        pass
+    return names
 
 
 def imports_package(text: str, package: str) -> bool:
-    """Whether a test's text imports a distribution's top-level module (its name with `-` as `_`)."""
-    module = re.escape(package.replace("-", "_"))
-    return bool(
-        re.search(rf"^\s*(?:import|from)\s+{module}\b", text, re.MULTILINE | re.IGNORECASE)
+    """Whether a test's text imports a module the distribution provides."""
+    return any(
+        re.search(rf"^\s*(?:import|from)\s+{re.escape(module)}\b", text, re.MULTILINE)
+        for module in import_names(package)
     )
 
 
@@ -209,7 +242,11 @@ def since(
         return "git ls-tree HEAD failed"
     now_tree = listing(now)
     differ = sorted(p for p in then.keys() | now_tree.keys() if then.get(p) != now_tree.get(p))
-    touched = within(targets(differ, root, floor=floor), selection)
+    moved = None
+    if floor and "uv.lock" in differ and "uv.lock" in then:
+        blob = then["uv.lock"].split()[-1]
+        moved = moved_between(git("cat-file", "-p", blob), git("show", "HEAD:uv.lock"))
+    touched = within(targets(differ, root, floor=floor, moved=moved), selection)
     new = [t for t in selection if not under(t, selected_then)]
     failed = within([t for t in lastfailed if (root / t.split("::", 1)[0]).exists()], selection)
     picked = set(touched) | set(new) | set(failed)
