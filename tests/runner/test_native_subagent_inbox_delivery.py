@@ -45,8 +45,8 @@ CHILD_SESSION_ID = "conv_child_reviewer"
 def _clean_subagent_registry() -> Iterator[None]:
     """Snapshot and restore the process-wide sub-agent / inbox maps.
 
-    The sub-agent work registry and inbox queues live in module-level dicts on
-    ``omnigent.runner.app`` that otherwise leak across tests. Clear them before
+    The sub-agent work registry, inbox queues and session histories live in module-level
+    dicts on ``omnigent.runner.app`` that otherwise leak across tests. Clear them before
     the test and restore the originals after.
     """
     saved = (
@@ -60,6 +60,8 @@ def _clean_subagent_registry() -> Iterator[None]:
         dict(subagent_work._children_accepted_turns),
         {k: set(v) for k, v in subagent_work._pending_child_acceptances.items()},
     )
+    saved_histories = dict(runner_app._session_histories_ref)
+    runner_app._session_histories_ref.clear()
     subagent_work._subagent_work_by_child.clear()
     subagent_work._subagent_work_by_parent.clear()
     subagent_work._session_inboxes_ref.clear()
@@ -72,6 +74,8 @@ def _clean_subagent_registry() -> Iterator[None]:
     try:
         yield
     finally:
+        runner_app._session_histories_ref.clear()
+        runner_app._session_histories_ref.update(saved_histories)
         subagent_work._subagent_work_by_child.clear()
         subagent_work._subagent_work_by_child.update(saved[0])
         subagent_work._subagent_work_by_parent.clear()
