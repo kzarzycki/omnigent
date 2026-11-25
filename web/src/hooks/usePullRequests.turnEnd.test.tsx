@@ -44,6 +44,11 @@ function pullRequestInfoResponse(info: Record<string, unknown> = {}): Response {
   } as unknown as Response;
 }
 
+function PullRequestRow({ id, prUrl }: { id: string; prUrl: string }) {
+  usePullRequestInfo(id, { poll: "list", prUrl });
+  return null;
+}
+
 function Probe({
   id,
   batch = false,
@@ -172,4 +177,42 @@ describe("usePullRequestInfo turn-end invalidate", () => {
       expect(fetchMock).toHaveBeenCalledTimes(4);
     },
   );
+
+  it("fetches each PR once at turn end with one row per linked PR, skipping terminal PRs", async () => {
+    // N rows each register a turn-end invalidate; without dedupe this is N×N fetches.
+    const rowCount = 10;
+    const urls = Array.from(
+      { length: rowCount },
+      (_, i) => `https://github.com/org/repo/pull/${i}`,
+    );
+    const terminalUrls = new Set(urls.slice(0, 6));
+    fetchMock.mockImplementation(async (input: string) => {
+      const prUrl = decodeURIComponent(String(input).split("pr_url=")[1] ?? "");
+      return pullRequestInfoResponse(
+        prUrl ? { pr: { url: prUrl, state: terminalUrls.has(prUrl) ? "MERGED" : "OPEN" } } : {},
+      );
+    });
+    stubChatStore("conv_live", "running");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+    const tree = () => (
+      <QueryClientProvider client={qc}>
+        <Probe id="conv_live" />
+        {urls.map((url) => (
+          <PullRequestRow key={url} id="conv_live" prUrl={url} />
+        ))}
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(rowCount + 1));
+
+    fetchMock.mockClear();
+    stubChatStore("conv_live", "idle");
+    rerender(tree());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    // Base query + the open PRs only; never more than N+1.
+    expect(fetchMock.mock.calls.length).toBe(1 + (rowCount - terminalUrls.size));
+  });
 });
