@@ -1293,7 +1293,7 @@ async def test_recovered_child_continues_same_dispatch_before_delivering_result(
                 },
             )
         else:
-            for _ in range(100):
+            for _ in range(1000):  # 10 s: a loaded CI worker needs more than 1 s
                 if not inbox.empty():
                     break
                 await asyncio.sleep(0.01)

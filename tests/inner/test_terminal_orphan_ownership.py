@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 import omnigent.inner.terminal as terminal_mod
@@ -133,6 +134,14 @@ def test_sweep_only_kills_real_tmux_with_proven_dead_owner(
         subprocess.run([*base, "kill-server"], check=False, capture_output=True, timeout=10)
 
 
+def _running(pid: int) -> bool:
+    """Whether *pid* is alive; an orphan nobody reaps (no init in a container) is a zombie, not alive."""
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 def test_sweep_kills_relays_whose_instance_dir_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -186,9 +195,9 @@ def test_sweep_kills_relays_whose_instance_dir_is_gone(
 
         relays["gone"][0].wait(timeout=5)
         deadline = time.monotonic() + 5
-        while terminal_mod._process_alive(child_pids["gone"]) and time.monotonic() < deadline:
+        while _running(child_pids["gone"]) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not terminal_mod._process_alive(child_pids["gone"])
+        assert not _running(child_pids["gone"])
         assert relays["live"][0].poll() is None
         assert terminal_mod._process_alive(child_pids["live"])
     finally:
