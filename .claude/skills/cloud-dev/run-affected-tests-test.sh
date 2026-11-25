@@ -18,7 +18,7 @@ case "\$1" in
       echo "\${CANDIDATE:-tests/example_test.py::test_a}"
     else
       [ -z "\${FULL_FAILS:-}" ] || exit 3
-      [ -n "\${SELECTS_NOTHING:-}" ] || echo tests/example_test.py
+      if [ -n "\${WHOLE_SUITE:-}" ]; then echo tests; elif [ -z "\${SELECTS_NOTHING:-}" ]; then echo tests/example_test.py; fi
     fi ;;
   *) exec $(command -v python3) "\$@" ;;
 esac
@@ -39,7 +39,7 @@ fail() { echo "!! affected tests: $*"; exit 1; }
 # The gate runs this test with its own record and shard variables set; each case sets only its own.
 affected() {
   rm -f "$tmp/args"
-  env -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD -u AFFECTED_TESTS_SHARDS -u AFFECTED_TESTS_SHARD RECEIVED="$tmp/args" PATH="$tmp/bin:$PATH" "$@" \
+  env -u CI -u AFFECTED_TESTS_FULL -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD -u AFFECTED_TESTS_SHARDS -u AFFECTED_TESTS_SHARD RECEIVED="$tmp/args" PATH="$tmp/bin:$PATH" "$@" \
     bash "$here/run-affected-tests.sh" >"$tmp/out" 2>&1
 }
 
@@ -118,4 +118,16 @@ affected AFFECTED_TESTS_RECORD="$tmp/record" SELECTS_NOTHING=1; rc=$?
 [ "$rc" = 0 ] && [ "$(cat "$tmp/record/exit")" = 0 ] && [ ! -e "$tmp/args" ] || fail "an empty selection exited $rc or ran pytest"
 affected AFFECTED_TESTS_RECORD="$tmp/record" FULL_FAILS=1; rc=$?
 [ "$rc" != 0 ] && [ ! -e "$tmp/record/exit" ] || fail "a failed selector exited $rc and left exit $(cat "$tmp/record/exit")"
+# A whole-suite selection, unsharded and outside CI, is skipped (record: exit 0, nothing selected); a shard, CI
+# or AFFECTED_TESTS_FULL=1 runs it.
+line="affected tests: whole suite selected; the merge queue's sharded gate runs it"
+affected WHOLE_SUITE=1 AFFECTED_TESTS_RECORD="$tmp/record" PYTEST_EXIT=1; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$tmp/args" ] && [ "$(cat "$tmp/out")" = "$line" ] || fail "a whole-suite selection exited $rc or ran pytest: $(cat "$tmp/out")"
+[ "$(cat "$tmp/record/exit")" = 0 ] && [ ! -s "$tmp/record/selected" ] && [ "$(cat "$tmp/record/skipped")" = "$line" ] || fail "the skip's record is wrong"
+affected WHOLE_SUITE=1 AFFECTED_TESTS_FULL=1; rc=$?
+[ "$rc" = 0 ] && [ "$(tail -1 "$tmp/args")" = tests ] || fail "AFFECTED_TESTS_FULL=1 didn't run the suite"
+affected WHOLE_SUITE=1 CI=true; rc=$?
+[ "$rc" = 0 ] && [ "$(tail -1 "$tmp/args")" = tests ] || fail "a CI run skipped the suite"
+affected WHOLE_SUITE=1 AFFECTED_TESTS_SHARDS=4 AFFECTED_TESTS_SHARD=1; rc=$?
+[ "$rc" = 0 ] && [ "$(tail -1 "$tmp/args")" = tests ] || fail "a shard skipped the suite"
 echo "cloud-dev run-affected-tests.sh: ok"
