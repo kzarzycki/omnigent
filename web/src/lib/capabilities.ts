@@ -369,6 +369,11 @@ export interface ServerInfo {
    */
   session_title_instructions?: boolean;
   /**
+   * True when the server stores each user's thinking-summaries setting
+   * (``/v1/settings/thinking-summaries``); absent on older servers (off).
+   */
+  thinking_summaries?: boolean;
+  /**
    * Which uploads Claude Code and Codex sessions receive as files. Null on
    * older servers, whose policy is the default extension list.
    */
@@ -782,6 +787,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           session_journal: data.session_journal === true,
           workflows: data.workflows === true,
           session_title_instructions: data.session_title_instructions === true,
+          thinking_summaries: data.thinking_summaries === true,
           admin_view: data.admin_view === true,
           comment_anchor_metadata: data.comment_anchor_metadata === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),

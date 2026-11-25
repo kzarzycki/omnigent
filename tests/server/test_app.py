@@ -1647,6 +1647,48 @@ def test_ensure_default_acp_agents_configured_agent_beats_same_slug_builtin(
     assert load(dest).executor.config["harness"] == "acp:devin"
 
 
+def test_ensure_default_acp_agents_declares_configured_permission_mode(
+    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A configured agent's ``permission_mode`` becomes its spec's declared default.
+
+    **What breaks if this fails**: the operator sets ``permission_mode`` on the
+    entry, but the seeded spec declares none, so a session asking for that mode
+    is refused as looser than the agent's default.
+    """
+    import io
+    import tarfile
+
+    from omnigent.onboarding.acp_auth import AcpAgentEntry
+    from omnigent.spec import load
+
+    entries = [
+        AcpAgentEntry(
+            slug="cloud", name="Cloud", command="cloud-bridge", permission_mode="bypassPermissions"
+        ),
+        AcpAgentEntry(slug="goose", name="Goose", command="goose acp"),
+    ]
+    monkeypatch.setattr("omnigent.onboarding.acp_auth.acp_agents", lambda *a, **k: entries)
+    monkeypatch.setattr("omnigent._platform.resolve_cli_binary", lambda _b, **k: None)
+
+    server_app._ensure_default_acp_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    )
+
+    configs = {}
+    for name in ("cloud", "goose"):
+        seeded = seed_stores.agent_store.get_by_name(name)
+        assert seeded is not None
+        bundle = seed_stores.artifact_store.get(seeded.bundle_location)
+        assert bundle is not None
+        dest = tmp_path / name
+        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz") as tf:
+            tf.extractall(dest, filter="data")
+        configs[name] = load(dest).executor.config
+    assert configs["cloud"]["permission_mode"] == "bypassPermissions"
+    assert configs["goose"] == {"harness": "acp:goose"}, "no mode leaves the bundle unchanged"
+
+
 def test_ensure_default_acp_agents_seeds_no_slug_rows_without_acp_config(
     seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
 ) -> None:

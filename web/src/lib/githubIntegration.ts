@@ -113,6 +113,8 @@ export interface GithubLinkPreview {
    * once completed, else its status; `null` for a commit.
    */
   state: string | null;
+  /** An issue's GitHub status (e.g. "In progress"), when its repo has statuses. */
+  status?: { name: string; category: string };
   labels: PullRequestLabel[];
   /** Check-run counts for a PR's head or a commit; `null` when it has none. */
   checks: { passed: number; failed: number; pending: number } | null;
