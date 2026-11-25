@@ -19,31 +19,43 @@ const VISUALS: Record<string, { label: string; className: string }> = {
   FAILURE: { label: "Failure", className: RED },
 };
 
+// Colour for a GitHub issue status's category; any other category shows muted.
+const STATUS_CATEGORY_CLASS: Record<string, string> = {
+  active: GREEN,
+  completed: PURPLE,
+};
+
 /**
  * A rounded pill naming a PR's, issue's or run's state, e.g. "Merged".
  *
  * @param state - The provider's state, any case, e.g. `"OPEN"` or `"merged"`.
  * @param isDraft - Whether an open PR is a draft.
+ * @param status - An issue's GitHub status; its name replaces the state label and its
+ *   category sets the colour.
  * @param subject - What the state belongs to, for the accessible name.
  */
 export function PullRequestStatus({
   state,
   isDraft = false,
+  status,
   subject = "Pull request",
   className,
 }: {
   state: string;
   /** An open PR that is still a draft shows "Draft". */
   isDraft?: boolean;
+  status?: { name: string; category: string };
   subject?: string;
   className?: string;
 }) {
   const fallback = state.replaceAll("_", " ");
   const key = state.toUpperCase() === "OPEN" && isDraft ? "DRAFT" : state.toUpperCase();
-  const visual = VISUALS[key] ?? {
-    label: fallback.charAt(0).toUpperCase() + fallback.slice(1),
-    className: MUTED,
-  };
+  const visual = status
+    ? { label: status.name, className: STATUS_CATEGORY_CLASS[status.category] ?? MUTED }
+    : (VISUALS[key] ?? {
+        label: fallback.charAt(0).toUpperCase() + fallback.slice(1),
+        className: MUTED,
+      });
   return (
     <Badge
       aria-label={`${subject} status: ${visual.label}`}
