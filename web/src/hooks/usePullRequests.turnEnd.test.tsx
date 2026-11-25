@@ -210,7 +210,9 @@ describe("usePullRequestInfo turn-end invalidate", () => {
     rerender(tree());
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise<void>((resolve) => {
+        setTimeout(() => resolve(), 50);
+      });
     });
     // Base query + the open PRs only; never more than N+1.
     expect(fetchMock.mock.calls.length).toBe(1 + (rowCount - terminalUrls.size));
