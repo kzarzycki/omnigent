@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# the queue's gate sets it for the whole run; each case here chooses its own mode
+os.environ.pop("AFFECTED_TESTS_BUILD_INPUTS", None)
 sys.path.insert(0, str(HERE))
 import affected_tests  # noqa: E402
 
