@@ -219,11 +219,18 @@ def _run_exec(argv: list[str], *, close_liveness_after: float | None) -> subproc
 
 
 def _group_is_empty(pgid: int) -> bool:
+    """Whether no live process is left in the group (an unreaped zombie is not alive)."""
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return True
-    return False
+    for member in _liveness_exec._group_members(pgid):
+        try:
+            if psutil.Process(member).status() != psutil.STATUS_ZOMBIE:
+                return False
+        except psutil.NoSuchProcess:
+            continue
+    return True
 
 
 @posix_only

@@ -2,6 +2,8 @@
 # Run pytest on the tests the change touches (selector: affected_tests.py).
 # Shared by `mise run check-fast` and the fork CI so both run the same line.
 # AFFECTED_TESTS_SINCE: an earlier run's record to build on (affected_tests.py --since).
+# AFFECTED_TESTS_SHARDS / AFFECTED_TESTS_SHARD: run only this shard (0-based) of that many, a hash partition of the
+# selected tests by node id (pytest-shard), so a test lands in the same shard whatever else is selected.
 # AFFECTED_TESTS_RECORD: a directory this run writes its record into, whatever pytest's outcome:
 # tree (git ls-tree -r -z HEAD), selected, lastfailed.json, exit, and flakes (failed there, not
 # reselected, passed here).
@@ -41,6 +43,8 @@ echo "affected tests: $run"
 # One argument per line, so a node id with spaces stays whole; a fresh cache holds only this run's failures.
 set --
 [ -z "$since$record" ] || set -- -o "cache_dir=$work/cache"
+shards=${AFFECTED_TESTS_SHARDS:-1}
+[ "$shards" -le 1 ] || set -- "$@" --num-shards="$shards" --shard-id="${AFFECTED_TESTS_SHARD:?AFFECTED_TESTS_SHARDS needs AFFECTED_TESTS_SHARD}"
 while IFS= read -r target; do set -- "$@" "$target"; done <<< "$run"
 # Per-test cap: the slowest passing test took 38 s on a loaded 4-CPU VM, so 90 s ends a hang early (pyproject's
 # 300 s stays the default). The wall clock ends a run no test cap can, above a whole-suite run (~2 h on CI's 2 workers).
@@ -51,6 +55,8 @@ rc=0
 # shellcheck disable=SC2086 # $wall is empty or a command and its flags
 OMNIGENT_SKIP_WEB_UI=true $wall \
   uv run --no-sync pytest -n auto --dist=loadfile --timeout="${AFFECTED_TESTS_TIMEOUT:-90}" "$@" || rc=$?
+# A shard the selection puts no test in is a pass (pytest exits 5 when it collects nothing).
+[ "$shards" -le 1 ] || [ "$rc" != 5 ] || rc=0
 lastfailed=$work/cache/v/cache/lastfailed
 if [ -n "$record" ]; then
   [ ! -s "$lastfailed" ] || cp "$lastfailed" "$record/lastfailed.json"
