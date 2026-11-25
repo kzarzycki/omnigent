@@ -215,6 +215,19 @@ describe("markdown links to workspace files", () => {
     expect(screen.getByRole("link", { name: "app#42" })).toHaveAttribute("href", href);
   });
 
+  it("names the repo from the URL when the link text is a bare #N", () => {
+    const href = "https://github.com/acme/app/pull/42";
+    renderMarkdown(`[#42](${href})`);
+
+    expect(screen.getByRole("link", { name: "app#42" })).toHaveAttribute("href", href);
+  });
+
+  it("leaves link text that already reads <repo>#N unchanged", () => {
+    renderMarkdown("[app#42](https://github.com/acme/app/issues/42)");
+
+    expect(screen.getByRole("link", { name: "app#42" })).toBeTruthy();
+  });
+
   it("preserves formatting and surrounding prose in a descriptive PR link", () => {
     const href = "https://github.com/acme/app/pull/42";
     renderMarkdown(`See [**Fix** rendering on narrow screens](${href}) before merging.`);
