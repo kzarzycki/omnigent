@@ -1,0 +1,27 @@
+# Runs a free-model coding agent on one task and opens a draft PR with its change.
+# Started by hand: gh workflow run oss-agent-caller.yml -f task='<what to do>'
+# The reusable workflow is pinned to a commit; bump it on purpose.
+name: OSS agent caller
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What the agent should do
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  agent:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: kzarzycki/agent-skills/.github/workflows/oss-agent.yml@1cf901e14722ae6a9ae7a7bfbe767f16cd424ec2
+    with:
+      task: ${{ inputs.task }}
+      ref: mine
+      test_command: OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group test --group lint && uv run --no-sync ruff check .
+    secrets:
+      NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}

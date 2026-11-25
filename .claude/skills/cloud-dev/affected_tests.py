@@ -6,15 +6,20 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
 - `--since` builds on an earlier run's record (run-affected-tests.sh writes it: the tested tree's
   `git ls-tree -r -z`, the selected targets, pytest's lastfailed and exit code). Of today's
   selection it prints the tests that failed then, the targets of the files changed between the two
-  trees, and the targets the earlier run didn't select; stderr says why each runs, and names as a
-  flake candidate each failed test nothing changed reselects. A record whose pytest didn't run to
-  its end (exit other than 0 or 1), or one it can't read, prints today's selection.
+  trees, and the targets the earlier run didn't select; stderr says why each runs. A failed test
+  nothing changed reselects is a flake candidate, and then today's whole selection prints: alone, a
+  test that fails only after other tests (left-over state) passes and would look like a flake. A
+  record whose pytest didn't run to its end (exit other than 0 or 1), or one it can't read, prints
+  today's selection.
 - A changed `test_*.py` runs. Another changed Python file runs every test file that names its
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
   its file name.
-- Markdown selects nothing. No base to diff, or a change to the test setup (pyproject.toml,
-  uv.lock, a conftest, the shared test helpers and fixtures), selects `tests`: the
+- A conftest below `tests/` selects its own directory, since pytest applies it only there (none
+  in a suite check-fast doesn't run), and the test files that import it by module or load it
+  through `pytest_plugins`.
+- Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
+  uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
 
 ponytail: a name match, adapted from agent-skills' tools/affected_tests.py without its coverage
@@ -55,9 +60,9 @@ def changed(base: str | None) -> list[str] | None:
     return out.split("\n") if out is not None else None
 
 
-def names(path: Path, text: str) -> bool:
+def names(path: Path, text: str, by_file_name: bool = True) -> bool:
     """Whether a test's `text` names the file: its file name, or for Python its dotted module."""
-    if path.name in text:
+    if by_file_name and path.name in text:
         return True
     if path.suffix != ".py":
         return False
@@ -77,9 +82,14 @@ def names(path: Path, text: str) -> bool:
 
 def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
     files = [f for f in files if f] if files is not None else None
-    if files is None or any(
-        f.startswith(EVERYTHING) or Path(f).name == "conftest.py" for f in files
-    ):
+
+    def shared(f: str) -> bool:
+        path = Path(f)
+        return f.startswith(EVERYTHING) or (
+            path.name == "conftest.py" and (path.parts[0] != "tests" or len(path.parts) < 3)
+        )
+
+    if files is None or any(shared(f) for f in files):
         return ["tests"]
     tests = {
         p: p.read_text(errors="ignore")
@@ -93,10 +103,17 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
         elif path.suffix != ".md":
+            conftest = path.name == "conftest.py"
+            if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
+                picked.add(str(path.parent))
+            # a conftest by module only: many tests mention the file name `conftest.py`
             picked.update(
-                str(t.relative_to(root)) for t, text in tests.items() if names(path, text)
+                str(t.relative_to(root))
+                for t, text in tests.items()
+                if names(path, text, by_file_name=not conftest)
             )
-    return sorted(picked)
+    # a file inside a selected directory already runs with it
+    return sorted(t for t in picked if not any(o != t and under(t, [o]) for o in picked))
 
 
 def listing(text: str) -> dict[str, str]:
@@ -158,6 +175,15 @@ def since(
         f" {len(differ)} files differ since: {shown or 'none'}",
         file=sys.stderr,
     )
+    if candidates:
+        for t in candidates:
+            print(f"affected tests: flake candidate: {t}", file=sys.stderr)
+        print(
+            f"affected tests: nothing changed reselects {len(candidates)} failed test(s), so the"
+            " whole selection runs: alone, a test that fails only after other tests would pass",
+            file=sys.stderr,
+        )
+        return sorted(selection), candidates
     for t in sorted(picked):
         why = [
             reason
@@ -169,9 +195,7 @@ def since(
             if under(t, part)
         ]
         print(f"affected tests: {t}: {', '.join(why)}", file=sys.stderr)
-    for t in candidates:
-        print(f"affected tests: flake candidate: {t}", file=sys.stderr)
-    return sorted(picked), candidates
+    return sorted(picked), []
 
 
 if __name__ == "__main__":

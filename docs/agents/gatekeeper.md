@@ -20,6 +20,7 @@ loop:
 
 land:
   queue: mergify
+  wait: 4h30m
   merge_commit_heads:
     - "sync/*"
 ```
@@ -32,8 +33,10 @@ land:
 
 `land.queue: mergify`: `approvals.py land` takes no lock, runs no host gate and merges nothing: it posts the `land` status on the PR's head and adds `loop:queued`, and Mergify merges (below). A cloud session lands this way too. Undo: delete the line; `land` then merges through GitHub itself, pinned to the head the gates checked, and runs the gate on the host.
 
+`land.wait: 4h30m`: `land --wait` stops waiting after this long and exits 3. Mergify's `checks_timeout` is 4 hours 15 minutes (`.mergify.yml`), so the 2-hour default made `land --wait` stop while the queue was still testing; 15 minutes of margin lets it see the queue's verdict. Undo: delete the line; `land --wait` falls back to 2 hours.
+
 No `loop.ci` line (its default, `true`): CI is the proof, and it runs once per change, in the merge queue. `gate` (`.github/workflows/gate.yml`: `mise run check-fast`, the pre-commit hooks, the skills' tests and the tests the change touches) runs only on the draft PR Mergify opens to test the merge, and `.mergify.yml` merges only once it is green there (`merge_conditions`). The `mine` ruleset requires no status check, so `check merge` and `land` wait on no CI run and run no `local-ci` of their own: a PR's own head is never tested, since the queue tests the tree that actually merges. The full suite runs nightly (`fork-nightly.yml`). Undo, to test each PR head as well: add the `gate` required check back to the `mine` ruleset (`landing (gate via PR)`), drop the job's `if:` in `gate.yml`, and drop `merge_conditions` from both queue rules. To prove merges on the host instead, set `loop.ci: false`, which makes `approvals.py local-ci <pr>` the merge proof again.
 
 ## Queueing a PR (Mergify)
 
-Mergify executes the merge; our tooling decides. After `approvals.py check merge <pr>` passes (the proofs, the verifier and the go; no CI run), `land` posts the `land` commit status on the PR's head and adds `loop:queued`. `.mergify.yml` takes a PR in only with both: it tests it on a draft PR on top of `mine`, where `gate` runs on the merged tree, and merges it only once `gate` is green there: a squash, or a merge commit for a `sync/*` head. A red `gate` drops the PR from the queue. A push drops `land`, so the PR leaves the queue until `land` posts it again. A PR Mergify drops gets `loop:dequeued`, and the next `land` sends it back to draft. `@mergifyio queue` stays restricted to write access.
+Mergify executes the merge; our tooling decides. After `approvals.py check merge <pr>` passes (the proofs, the verifier and the go; no CI run), `land` posts the `land` commit status on the PR's head and adds `loop:queued`. `.mergify.yml` takes a PR in only with both: it tests it on a draft PR on top of `mine`, where `gate` runs on the merged tree, and merges it only once `gate` is green there: a squash, or a merge commit for a `sync/*` head. A red `gate` drops the PR from the queue. A push drops `land`, so the PR leaves the queue until `land` posts it again. A PR Mergify drops gets `loop:dequeued`, and the next `land` sends it back to draft. `loop:dequeued` is no hold, since Mergify removes it about a minute later; a hold is the `loop:hold` label plus a PR comment saying who holds it and why. Mergify won't queue a held PR and `land` refuses it; the holder removes the label before landing. A coordinator claiming a PR from other leads uses the same hold. `@mergifyio queue` stays restricted to write access.

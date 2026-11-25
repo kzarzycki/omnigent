@@ -55,6 +55,11 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "server" / "test_other.py").write_text(
         "import omnigent.gadget  # see README.md\n"
     )
+    (repo / "tests" / "client").mkdir()
+    (repo / "tests" / "client" / "test_uses.py").write_text(
+        "from tests.server.conftest import fixture  # not conftest.py's name alone\n"
+        "pytest_plugins = ['tests.e2e.conftest']\n"
+    )
     (repo / "omnigent" / "widgets" / "frob.py").write_text("x = 1\n")
     (repo / "omnigent" / "widgets" / "__init__.py").write_text("")
     (repo / "README.md").write_text("hi\n")
@@ -68,7 +73,17 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, {"omnigent/widgets/__init__.py": "# p\n"}) == [widget]
     assert select(repo, {"README.md": "more\n"}) == []
     assert select(repo, {"omnigent/unused.py": "y = 1\n"}) == []
-    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == ["tests"]
+    # a conftest selects its directory, which holds the tests that name a file too, and the
+    # test files elsewhere that import it
+    uses = "tests/client/test_uses.py"
+    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == [uses, "tests/server"]
+    both = {"tests/server/conftest.py": "# c\n", "omnigent/widgets/frob.py": "x = 5\n"}
+    assert select(repo, both) == [uses, "tests/server"]
+    assert select(repo, {"tests/conftest.py": "# c\n"}) == ["tests"]
+    assert select(repo, {"conftest.py": "# c\n"}) == ["tests"]
+    # a suite check-fast skips: only the tests outside it that load it
+    assert affected_tests.targets(["tests/e2e/conftest.py"]) == [uses]
+    assert affected_tests.targets(["tests/gone/conftest.py"]) == []  # a deleted directory
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]
     assert select(repo, {"tests/helpers/util.py": "z = 1\n"}) == ["tests"]
     # suites the default addopts ignore are never selected
@@ -165,25 +180,39 @@ with tempfile.TemporaryDirectory() as tmp:
     then = head()
     assert lines(today()) == [other, widget]
     earlier = record(then, [other, widget], {failed: True})
-    # same tree, one failed node id: exactly that node id, a flake candidate
+    # same tree, one failed node id: a flake candidate, so the whole selection runs, since alone a
+    # test that fails only after other tests passes
     out, flakes = since(earlier)
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
-    assert f"affected tests: {failed}: failed in that run" in why, why
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
+    whole_line = (
+        "affected tests: nothing changed reselects 1 failed test(s), so the whole selection runs"
+    )
+    assert any(line.startswith(whole_line) for line in why), why
     # only the failed test's file changed: that file, and the node id runs with it
     commit({widget: "from omnigent.widgets import frob  # fixed\n"})
     out, flakes = since(earlier)
     assert lines(out) == [widget] and flakes == [], (out, flakes)
-    # a module changed: the failed test plus what targets() picks for that module
+    # two failed tests and a fix for one: the other is a candidate, so the whole selection runs
+    out, flakes = since(record(then, [other, widget], {failed: True, f"{other}::t": True}))
+    assert lines(out) == [other, widget] and flakes == [f"{other}::t"], (out, flakes)
+    assert f"affected tests: flake candidate: {other}::t" in why, why
+    # a module and the failed test's file changed: what targets() picks for each, with reasons
+    run("git", "reset", "-q", "--hard", then)
+    commit({"omnigent/gadget.py": "g = 2\n", third: "import omnigent.thing  # c\n"})
+    out, flakes = since(record(then, [other, widget, third], {f"{third}::t": True}))
+    assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
+    assert lines(out) == [other, third] and flakes == [], (out, flakes)
+    assert f"affected tests: {other}: names a file that differs" in why, why
+    assert f"affected tests: {third}: names a file that differs" in why, why
+    # a change that doesn't reselect the failed test: the whole selection runs
     run("git", "reset", "-q", "--hard", then)
     commit({"omnigent/gadget.py": "g = 2\n"})
     out, flakes = since(earlier)
-    assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
-    assert lines(out) == [other, failed] and flakes == [failed], (out, flakes)
-    assert f"affected tests: {other}: names a file that differs" in why, why
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
     # a file added or deleted since counts as changed
     run("git", "reset", "-q", "--hard", then)
-    out, _ = since(record(before_gadget, [other, widget], {failed: True}))
-    assert lines(out) == [other, failed], out
+    out, _ = since(record(before_gadget, [other, widget], {}, "0"))
+    assert lines(out) == [other], out
     run("git", "rm", "-q", "omnigent/widgets/frob.py")
     commit({})
     out, flakes = since(earlier)
@@ -194,31 +223,33 @@ with tempfile.TemporaryDirectory() as tmp:
     assert lines(out) == [widget] and flakes == [], (out, flakes)
     # a selected test file the earlier run didn't select runs
     run("git", "reset", "-q", "--hard", then)
-    out, flakes = since(record(then, [widget], {failed: True}))
-    assert lines(out) == [other, failed], out
+    out, flakes = since(record(then, [widget], {}, "0"))
+    assert lines(out) == [other], out
     assert f"affected tests: {other}: selected now, not in that run" in why, why
-    # a test setup change reruns the whole selection, so no flake is named
+    # a test setup change reruns its whole directory and its importers, so no flake is named
     commit({"tests/server/conftest.py": "# c\n"})
     out, flakes = since(earlier)
-    assert lines(out) == ["tests"] and flakes == [], (out, flakes)
-    # with the whole tree selected, a failed test still runs alone, unless its file is gone
+    assert lines(out) == [uses, "tests/server"] and flakes == [], (out, flakes)
+    # a whole-tree record: a flake candidate runs today's selection; a failed file that's gone
+    # doesn't count
     whole = record(head(), ["tests"], {failed: True, "tests/server/test_gone.py::t": True})
     out, flakes = since(whole)
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    assert lines(out) == [uses, "tests/server"] and flakes == [failed], (out, flakes)
     # a failed test gone from the tree, or outside today's selection, doesn't run
     run("git", "reset", "-q", "--hard", then)
     out, _ = since(
         record(then, [other, widget], {"tests/server/test_gone.py::t": True, third: True})
     )
     assert lines(out) == [], out
-    # requeued onto a newer base: what the base moved doesn't run, the failed test does
+    # requeued onto a newer base: what the base moved isn't a change, so the failed test is a flake
+    # candidate and the whole selection runs
     run("git", "checkout", "-q", "-B", "newer", "base")
     commit({"omnigent/thing.py": "t = 2\n"})
     run("git", "checkout", "-q", "pr")
     run("git", "rebase", "-q", "newer")
     assert lines(today("newer")) == [other, widget]
     out, flakes = since(earlier, "newer")
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
     # the base moved a test setup file: every selected test reruns, and no flake is named
     run("git", "checkout", "-q", "-B", "newest", "newer")
     commit({"tests/server/conftest.py": "# c\n"})

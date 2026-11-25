@@ -25,6 +25,7 @@ async def test_responses_sdk_receives_text_before_completion(
         async with AsyncOpenAI(
             base_url=f"{mock_http_url}/v1", api_key="mock", http_client=http
         ) as client:
+            started = time.monotonic()
             result = Runner.run_streamed(
                 Agent(name="stream-test", model=OpenAIResponsesModel("mock-model", client)),
                 input="Write an answer.",
@@ -60,4 +61,6 @@ async def test_responses_sdk_receives_text_before_completion(
             assert result.final_output == text
             assert sequence_numbers == list(range(len(sequence_numbers)))
             if chunk_delay:
-                assert arrivals[-1] - arrivals[0] >= chunk_delay * (len(arrivals) - 1) * 0.8
+                # Measured from the request: a slow client can bunch the arrivals, never shorten
+                # the server's delays between chunks.
+                assert arrivals[-1] - started >= chunk_delay * (len(arrivals) - 1) * 0.8
