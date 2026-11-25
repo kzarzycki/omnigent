@@ -39,6 +39,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 // same way as the workspace filesystem hooks — reusing their helpers.
 
 import {
+  type Query,
   queryOptions,
   skipToken,
   useMutation,
@@ -561,6 +562,13 @@ function usePullRequestQueryContext(rawConversationId: string | undefined) {
   return { conversationId, enabled: !!conversationId && serveable !== false, retry };
 }
 
+/** Turn-end filter: a merged or closed PR's per-PR query has nothing left to refresh. */
+function isNotTerminalPullRequestQuery(query: Query): boolean {
+  const isPerPullRequestQuery = query.queryKey.length > 2;
+  const state = (query.state.data as PullRequestInfo | undefined)?.pr?.state?.toUpperCase();
+  return !(isPerPullRequestQuery && (state === "MERGED" || state === "CLOSED"));
+}
+
 function pullRequestInfoQueryOptions(
   { conversationId, enabled, retry }: ReturnType<typeof usePullRequestQueryContext>,
   options?: { poll?: boolean | "list" | "linked"; prUrl?: string },
@@ -609,11 +617,13 @@ export function usePullRequestInfo(
   options?: { poll?: boolean | "list" | "linked"; prUrl?: string },
 ) {
   const context = usePullRequestQueryContext(rawConversationId);
-  // Prefix invalidation also refreshes usePullRequestInfos queries for this session.
+  // Only the session's base query registers the turn-end invalidate; its prefix
+  // match also refreshes the per-PR queries, so per-PR rows must not repeat it.
   useTrailingInvalidate(
     context.conversationId,
     useSessionActive(context.conversationId),
     "github-info",
+    { enabled: !options?.prUrl, predicate: isNotTerminalPullRequestQuery },
   );
   return useQuery(pullRequestInfoQueryOptions(context, options));
 }
