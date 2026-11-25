@@ -3366,7 +3366,7 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
         if issue.get("pull_request"):
             return _rest_pull_preview(get, repo_path, ref)
         closed_as = "not_planned" if issue.get("state_reason") == "not_planned" else ""
-        preview = {
+        preview: dict[str, Any] = {
             "kind": "issue",
             "title": str(issue.get("title") or ""),
             "state": closed_as or str(issue.get("state") or ""),

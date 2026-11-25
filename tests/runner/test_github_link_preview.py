@@ -170,7 +170,9 @@ def test_issue_status_is_included_only_when_github_returns_one(
         monkeypatch,
         api=dict(
             [
-                _api("/repos/acme/app/issues/4", {"title": "A", "state": "open", "status": status}),
+                _api(
+                    "/repos/acme/app/issues/4", {"title": "A", "state": "open", "status": status}
+                ),
                 _api("/repos/acme/app/issues/5", {"title": "B", "state": "open"}),
             ]
         ),
