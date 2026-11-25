@@ -31,6 +31,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -545,6 +546,8 @@ class UnifiedAuthProvider(AuthProvider):
         # burst of requests shares one generation lookup. Only acceptances are
         # cached; a revoke in this process clears them at once.
         self._accepted_generations: dict[tuple[str, str], float] = {}
+        # Workers insert while the event loop revokes; every access holds this.
+        self._accepted_lock = threading.Lock()
         self._account_check_ttl = _account_check_ttl_seconds()
 
     def set_grant_revocation_check(self, check: Callable[[str], bool]) -> None:
@@ -564,15 +567,18 @@ class UnifiedAuthProvider(AuthProvider):
         assert self._account_check is not None
         key = (user_id, generation)
         now = time.monotonic()
-        if self._accepted_generations.get(key, 0.0) > now:
-            return True
+        with self._accepted_lock:
+            if self._accepted_generations.get(key, 0.0) > now:
+                return True
         if not self._account_check(user_id, generation):
-            self._accepted_generations.pop(key, None)
+            with self._accepted_lock:
+                self._accepted_generations.pop(key, None)
             return False
         if self._account_check_ttl > 0:
-            if len(self._accepted_generations) > _ACCEPTED_GENERATIONS_MAX:
-                self._accepted_generations.clear()
-            self._accepted_generations[key] = now + self._account_check_ttl
+            with self._accepted_lock:
+                if len(self._accepted_generations) > _ACCEPTED_GENERATIONS_MAX:
+                    self._accepted_generations.clear()
+                self._accepted_generations[key] = now + self._account_check_ttl
         return True
 
     def accepts_account_generation(self, user_id: str, generation: str | None) -> bool:
@@ -593,8 +599,9 @@ class UnifiedAuthProvider(AuthProvider):
         ]
         for key in stale:
             del self._cookie_cache[key]
-        for accepted in [key for key in self._accepted_generations if key[0] == user_id]:
-            self._accepted_generations.pop(accepted, None)
+        with self._accepted_lock:
+            for accepted in [key for key in self._accepted_generations if key[0] == user_id]:
+                self._accepted_generations.pop(accepted, None)
 
     @property
     def login_url(self) -> str | None:

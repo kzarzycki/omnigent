@@ -1703,3 +1703,37 @@ def test_account_generation_acceptance_expires(setup_app):
     time.sleep(0.1)
     assert alice.get("/auth/me").status_code == 200
     assert checked == ["alice", "alice"]
+
+
+def test_revoking_while_workers_cache_acceptances_does_not_race():
+    import threading
+
+    from omnigent.server.auth import UnifiedAuthProvider
+
+    auth = UnifiedAuthProvider(source="header", local_single_user=False)
+    auth._account_check_ttl = 30.0
+    auth.set_account_check(lambda *_: True)
+    stop = threading.Event()
+    errors = []
+
+    def fill():
+        index = 0
+        while not stop.is_set():
+            index += 1
+            auth._cookie_account_accepted(f"user{index % 500}", str(index))
+
+    def revoke():
+        try:
+            for index in range(2000):
+                auth.revoke_user_sessions(f"user{index % 500}")
+        except RuntimeError as exc:  # dictionary changed size during iteration
+            errors.append(exc)
+
+    workers = [threading.Thread(target=fill) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    revoke()
+    stop.set()
+    for worker in workers:
+        worker.join()
+    assert errors == []
