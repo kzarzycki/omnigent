@@ -178,20 +178,24 @@ describe("usePullRequestInfo turn-end invalidate", () => {
     },
   );
 
-  it("fetches each PR once at turn end with one row per linked PR, skipping terminal PRs", async () => {
+  it("fetches each open PR once at turn end, joining in-flight fetches and skipping merged/closed PRs", async () => {
     // N rows each register a turn-end invalidate; without dedupe this is N×N fetches.
     const rowCount = 10;
     const urls = Array.from(
       { length: rowCount },
       (_, i) => `https://github.com/org/repo/pull/${i}`,
     );
-    const terminalUrls = new Set(urls.slice(0, 6));
-    fetchMock.mockImplementation(async (input: string) => {
+    const stateByUrl = new Map(
+      urls.map((url, i) => [url, i < 3 ? "MERGED" : i < 6 ? "CLOSED" : "OPEN"]),
+    );
+    const openCount = urls.filter((url) => stateByUrl.get(url) === "OPEN").length;
+    const respond = (input: string) => {
       const prUrl = decodeURIComponent(String(input).split("pr_url=")[1] ?? "");
       return pullRequestInfoResponse(
-        prUrl ? { pr: { url: prUrl, state: terminalUrls.has(prUrl) ? "MERGED" : "OPEN" } } : {},
+        prUrl ? { pr: { url: prUrl, state: stateByUrl.get(prUrl) } } : {},
       );
-    });
+    };
+    fetchMock.mockImplementation(async (input: string) => respond(input));
     stubChatStore("conv_live", "running");
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
     const tree = () => (
@@ -204,17 +208,33 @@ describe("usePullRequestInfo turn-end invalidate", () => {
     );
     const { rerender } = render(tree());
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(rowCount + 1));
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
 
+    // Slow fetches: each stays in flight until released.
     fetchMock.mockClear();
+    const release: Array<() => void> = [];
+    fetchMock.mockImplementation(
+      (input: string) =>
+        new Promise<Response>((resolve) => {
+          release.push(() => resolve(respond(input)));
+        }),
+    );
     stubChatStore("conv_live", "idle");
     rerender(tree());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    await act(async () => {
-      await new Promise<void>((resolve) => {
-        setTimeout(() => resolve(), 50);
-      });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1 + openCount));
+
+    // A second turn end while those fetches are in flight joins them, not restarts them.
+    stubChatStore("conv_live", "running");
+    rerender(tree());
+    stubChatStore("conv_live", "idle");
+    rerender(tree());
+    await waitFor(() => expect(qc.isFetching()).toBe(1 + openCount));
+    expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
+
+    act(() => {
+      release.forEach((resolveFetch) => resolveFetch());
     });
-    // Base query + the open PRs only; never more than N+1.
-    expect(fetchMock.mock.calls.length).toBe(1 + (rowCount - terminalUrls.size));
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
   });
 });
