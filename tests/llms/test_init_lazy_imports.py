@@ -17,6 +17,24 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Iterator
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_imported_modules() -> Iterator[None]:
+    """Put back the modules a test purged, so later tests keep patching the live ones."""
+    saved = dict(sys.modules)
+    yield
+    for name in [name for name in sys.modules if name not in saved]:
+        del sys.modules[name]
+    for name, module in saved.items():
+        sys.modules[name] = module
+        parent_name, _, child = name.rpartition(".")
+        parent = saved.get(parent_name)
+        if parent is not None and getattr(parent, child, module) is not module:
+            setattr(parent, child, module)
 
 
 def _purge(prefix: str) -> None:
