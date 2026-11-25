@@ -212,7 +212,7 @@ describe("usePullRequestInfo turn-end invalidate", () => {
 
     // Slow fetches: each stays in flight until released.
     fetchMock.mockClear();
-    const release: Array<() => void> = [];
+    const release: (() => void)[] = [];
     fetchMock.mockImplementation(
       (input: string) =>
         new Promise<Response>((resolve) => {
