@@ -1752,6 +1752,9 @@ def child_sink(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, objec
     monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
     monkeypatch.setattr(_zygote.os, "_exit", _raise_child_exited)
     runner_logger = logging.getLogger("omnigent.runner._entry")
+    # An earlier test on the worker may have disabled or raised the level of this logger.
+    monkeypatch.setattr(runner_logger, "disabled", False)
+    monkeypatch.setattr(runner_logger, "level", logging.INFO)
     dl.attach_debug_log_sink([runner_logger], source="runner", level=logging.INFO, send=_slow_send)
     sink = dl._active_sink
     assert sink is not None
