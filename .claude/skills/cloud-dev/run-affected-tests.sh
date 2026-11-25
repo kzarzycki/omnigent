@@ -7,6 +7,8 @@
 # AFFECTED_TESTS_RECORD: a directory this run writes its record into, whatever pytest's outcome:
 # tree (git ls-tree -r -z HEAD), selected, lastfailed.json, exit, and flakes (failed there, not
 # reselected, passed here).
+# A whole-suite selection (`tests`) in an unsharded run outside CI is skipped: the merge queue's sharded gate runs
+# it (about 18 min, against hours on one worker). AFFECTED_TESTS_FULL=1 forces the local run.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 selector=.claude/skills/cloud-dev/affected_tests.py
@@ -34,6 +36,14 @@ if [ -n "$record" ]; then
   printf '{}\n' > "$record/lastfailed.json"
   : > "$record/flakes"
 fi
+shards=${AFFECTED_TESTS_SHARDS:-1}
+if [ "$targets" = tests ] && [ "$shards" -le 1 ] && [ -z "${CI:-}" ] && [ "${AFFECTED_TESTS_FULL:-}" != 1 ]; then
+  skipped="affected tests: whole suite selected; the merge queue's sharded gate runs it"
+  echo "$skipped"
+  # selected stays empty, so a later --since run treats the suite as not yet run
+  [ -z "$record" ] || { : > "$record/selected"; echo "$skipped" > "$record/skipped"; echo 0 > "$record/exit"; }
+  exit 0
+fi
 if [ -z "$run" ]; then
   echo "affected tests: none touched"
   [ -z "$record" ] || echo 0 > "$record/exit"
@@ -43,7 +53,6 @@ echo "affected tests: $run"
 # One argument per line, so a node id with spaces stays whole; a fresh cache holds only this run's failures.
 set --
 [ -z "$since$record" ] || set -- -o "cache_dir=$work/cache"
-shards=${AFFECTED_TESTS_SHARDS:-1}
 [ "$shards" -le 1 ] || set -- "$@" --num-shards="$shards" --shard-id="${AFFECTED_TESTS_SHARD:?AFFECTED_TESTS_SHARDS needs AFFECTED_TESTS_SHARD}"
 while IFS= read -r target; do set -- "$@" "$target"; done <<< "$run"
 # Per-test cap: the slowest passing test took 38 s on a loaded 4-CPU VM, so 90 s ends a hang early (pyproject's
