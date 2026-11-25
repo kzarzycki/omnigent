@@ -90,7 +90,10 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "e2e").mkdir()
     (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
     (repo / "tests" / "server" / "test_requests.py").write_text("import requests\n")
-    lock = '[[package]]\nname = "requests"\nversion = "1.0"\n\n[[package]]\nname = "other-lib"\nversion = "2.0"\n'
+    lock = (
+        '[[package]]\nname = "requests"\nversion = "1.0"\n\n'
+        '[[package]]\nname = "other-lib"\nversion = "2.0"\n'
+    )
     (repo / "uv.lock").write_text(lock)
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", "e2e")
