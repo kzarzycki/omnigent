@@ -966,6 +966,3 @@ def _restore_package_logger_state() -> Generator[None, None, None]:
     debug_logging = sys.modules.get("omnigent.debug_logging")
     if debug_logging is not None:
         debug_logging.set_current_runner_id(None)
-
-
-# proof: force the full suite
