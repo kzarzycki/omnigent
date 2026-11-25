@@ -74,7 +74,7 @@ def _admin_headers(db_uri: str) -> dict[str, str]:
     return {"X-Forwarded-Email": _ADMIN}
 
 
-def test_busy_loop_is_the_top_stack_and_the_sampler_leaves_itself_out() -> None:
+def test_busy_loop_is_sampled_every_round_and_the_sampler_leaves_itself_out() -> None:
     with _busy_thread():
         report = sample_stacks(1.0)
 

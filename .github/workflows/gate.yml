@@ -32,7 +32,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # SHARDS below is this list's length.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     permissions:
       contents: read
@@ -128,7 +127,8 @@ jobs:
       # check:all; the others install the same environment and run only their slice of the tests.
       - name: Run the checks
         env:
-          AFFECTED_TESTS_SHARDS: "8"
+          # The matrix's own size, so a shard dropped from the list is never silently skipped.
+          AFFECTED_TESTS_SHARDS: ${{ strategy.job-total }}
           AFFECTED_TESTS_SHARD: ${{ matrix.shard }}
           # run-affected-tests.sh: build on the earlier record, and write this run's.
           AFFECTED_TESTS_SINCE: ${{ steps.earlier.outputs.record }}
