@@ -29,7 +29,7 @@ POLICY = {
     "spec": {"auto": [{"paths": GLOBS}]},
     "delegate": "all",
     "land": {"queue": "mergify", "merge_commit_heads": ["sync/*"]},
-    "timeouts": {"run": "4h"},
+    "timeouts": {"run": "2h"},
     "select": {
         "build_inputs": [
             "pyproject.toml",

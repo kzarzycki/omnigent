@@ -24,7 +24,7 @@ land:
     - "sync/*"
 
 timeouts:
-  run: 4h
+  run: 2h
 
 select:
   build_inputs:
@@ -43,7 +43,7 @@ select:
 
 `land.queue: mergify`: `approvals.py land` takes no lock, runs no host gate and merges nothing: it posts the `land` status on the PR's head and adds `loop:queued`, and Mergify merges (below). A cloud session lands this way too. Undo: delete the line; `land` then merges through GitHub itself, pinned to the head the gates checked, and runs the gate on the host.
 
-`timeouts.run: 4h`: one selection run, the queue's check included, gets 4 hours: a whole-suite run takes about 200 minutes plus setup. Every other limit follows it: Mergify's `checks_timeout` (`.mergify.yml`), the `gate` job's `timeout-minutes` (`gate.yml`, marked `# timeouts.run`) and `land --wait`, which waits the queue's timeout plus one more run (8 hours). `gatekeeper.py timeouts --check` names each one out of step. Undo: delete the `timeouts` section; the limits fall back to 1 hour, which the full suite exceeds.
+`timeouts.run: 2h`: one selection run, the queue's check included, gets 2 hours: the gate's 8 shard jobs each take about 25 minutes on a whole-suite run. Every other limit follows it: Mergify's `checks_timeout` (`.mergify.yml`), the `gate` job's `timeout-minutes` (`gate.yml`, marked `# timeouts.run`) and `land --wait`, which waits the queue's timeout plus one more run (4 hours). `gatekeeper.py timeouts --check` names each one out of step. Undo: delete the `timeouts` section; the limits fall back to 1 hour, which the full suite exceeds.
 
 `select.build_inputs` with `build_inputs_in_queue: floor`: in the merge queue a build input (the dependency files, the toolchain pin and `.github/**`) selects the other changed files' tests plus, for `uv.lock`, the tests importing a package whose version moved, instead of the whole ~200 minute suite; a change to the shared test setup still selects the whole suite there, since it reaches every test (`gate.yml` sets `AFFECTED_TESTS_BUILD_INPUTS=floor`, which `.claude/skills/cloud-dev/affected_tests.py` reads). The full suite then runs after the merge: `fork-nightly.yml` (marked `# timeouts: nightly`) also runs on a push to `mine` that touches a build input. Undo: delete the `select` section and `AFFECTED_TESTS_BUILD_INPUTS` in `gate.yml`; a build input then runs the whole suite in the queue again.
 
