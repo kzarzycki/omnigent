@@ -135,7 +135,7 @@ def test_sweep_only_kills_real_tmux_with_proven_dead_owner(
 
 
 def _running(pid: int) -> bool:
-    """Whether *pid* is alive; an orphan nobody reaps (no init in a container) is a zombie, not alive."""
+    """Whether *pid* is alive; an orphan nobody reaps (no container init) is a zombie."""
     try:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
