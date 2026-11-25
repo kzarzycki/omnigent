@@ -20,9 +20,19 @@ loop:
 
 land:
   queue: mergify
-  wait: 4h30m
   merge_commit_heads:
     - "sync/*"
+
+timeouts:
+  run: 4h
+
+select:
+  build_inputs:
+    - pyproject.toml
+    - uv.lock
+    - mise.toml
+    - .github/**
+  build_inputs_in_queue: floor
 ```
 
 `spec.auto` `paths`: the owner's standing decision of 2026-11-12 approves, without asking, specs for fork tooling whose risk is not high; product behaviour (chat, server, runner, bridge, web) and anything `risk:high` still go to the owner. The lead labels such an issue `spec:paths`, and `check build` and `check merge` approve it only while every path the PR touches, a moved file's old name included, matches a glob here. The globs name the gate (`mise.toml`), the loop facts and agent docs (`docs/agents/loop.md`, `AGENTS.md` and its `CLAUDE.md` link) and the fork-only skills; the skills upstream ships under `.claude/skills/` and the claude-cloud bridge in `integrations/` stay outside. `docs/agents/gatekeeper.md` stays outside too, so a change to this policy always goes to the owner: a PR the globs approve could otherwise widen them. Globs are fnmatch, where `*` also matches `/`. Undo: delete the `spec` section.
@@ -33,7 +43,9 @@ land:
 
 `land.queue: mergify`: `approvals.py land` takes no lock, runs no host gate and merges nothing: it posts the `land` status on the PR's head and adds `loop:queued`, and Mergify merges (below). A cloud session lands this way too. Undo: delete the line; `land` then merges through GitHub itself, pinned to the head the gates checked, and runs the gate on the host.
 
-`land.wait: 4h30m`: `land --wait` stops waiting after this long and exits 3. Mergify's `checks_timeout` is 4 hours 15 minutes (`.mergify.yml`), so the 2-hour default made `land --wait` stop while the queue was still testing; 15 minutes of margin lets it see the queue's verdict. Undo: delete the line; `land --wait` falls back to 2 hours.
+`timeouts.run: 4h`: one selection run, the queue's check included, gets 4 hours: a whole-suite run takes about 200 minutes plus setup. Every other limit follows it: Mergify's `checks_timeout` (`.mergify.yml`), the `gate` job's `timeout-minutes` (`gate.yml`, marked `# timeouts.run`) and `land --wait`, which waits the queue's timeout plus one more run (8 hours). `gatekeeper.py timeouts --check` names each one out of step. Undo: delete the `timeouts` section; the limits fall back to 1 hour, which the full suite exceeds.
+
+`select.build_inputs` with `build_inputs_in_queue: floor`: in the merge queue a build input (the dependency files, the toolchain pin and `.github/**`) selects the other changed files' tests plus, for `uv.lock`, the tests importing a package whose version moved, instead of the whole ~200 minute suite; a change to the shared test setup still selects the whole suite there, since it reaches every test (`gate.yml` sets `AFFECTED_TESTS_BUILD_INPUTS=floor`, which `.claude/skills/cloud-dev/affected_tests.py` reads). The full suite then runs after the merge: `fork-nightly.yml` (marked `# timeouts: nightly`) also runs on a push to `mine` that touches a build input. Undo: delete the `select` section and `AFFECTED_TESTS_BUILD_INPUTS` in `gate.yml`; a build input then runs the whole suite in the queue again.
 
 No `loop.ci` line (its default, `true`): CI is the proof, and it runs once per change, in the merge queue. `gate` (`.github/workflows/gate.yml`: `mise run check-fast`, the pre-commit hooks, the skills' tests and the tests the change touches) runs only on the draft PR Mergify opens to test the merge, and `.mergify.yml` merges only once it is green there (`merge_conditions`). The `mine` ruleset requires no status check, so `check merge` and `land` wait on no CI run and run no `local-ci` of their own: a PR's own head is never tested, since the queue tests the tree that actually merges. The full suite runs nightly (`fork-nightly.yml`). Undo, to test each PR head as well: add the `gate` required check back to the `mine` ruleset (`landing (gate via PR)`), drop the job's `if:` in `gate.yml`, and drop `merge_conditions` from both queue rules. To prove merges on the host instead, set `loop.ci: false`, which makes `approvals.py local-ci <pr>` the merge proof again.
 

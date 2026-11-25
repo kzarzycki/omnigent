@@ -40,6 +40,9 @@ def select(
     return out.stdout.split()
 
 
+assert {"yaml", "pyyaml"} <= affected_tests.import_names("pyyaml") | {"pyyaml"}
+assert "some_lib" in affected_tests.import_names("some-lib")  # not installed: its own name
+
 with tempfile.TemporaryDirectory() as tmp:
     repo = Path(tmp) / "repo"  # records stay outside it
     repo.mkdir()
@@ -89,10 +92,61 @@ with tempfile.TemporaryDirectory() as tmp:
     # suites the default addopts ignore are never selected
     (repo / "tests" / "e2e").mkdir()
     (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
+    (repo / "tests" / "server" / "test_requests.py").write_text("import requests\n")
+    (repo / "tests" / "server" / "test_yaml.py").write_text("import yaml\n")
+    (repo / "tests" / "server" / "test_root.py").write_text("import omnigent.widgets\n")
+    lock = (
+        '[[package]]\nname = "requests"\nversion = "1.0"\n\n'
+        '[[package]]\nname = "other-lib"\nversion = "2.0"\n\n'
+        '[[package]]\nname = "pyyaml"\nversion = "6.0"\n\n'
+        '[[package]]\nname = "omnigent"\nversion = "0.1"\nsource = { editable = "." }\n'
+    )
+    (repo / "uv.lock").write_text(lock)
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", "e2e")
     run("git", "tag", "-f", "base")
     assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
+    # the queue's floor: a build input alone selects nothing the tests don't name
+    floor = {"AFFECTED_TESTS_BUILD_INPUTS": "floor"}
+    requests_test = "tests/server/test_requests.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == []
+    # a test that reads the file by name still runs
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_lock_format.py").write_text('read("pyproject.toml")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "lock test")
+    run("git", "tag", "-f", "base")
+    lock_test = "tests/server/test_lock_format.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == [lock_test]
+    # an import after a comma, and a patched dotted name, name the package too
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_comma.py").write_text("import os, requests\n")
+    (repo / "tests" / "server" / "test_patch.py").write_text('patch("requests.get")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "comma")
+    run("git", "tag", "-f", "base")
+    assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]  # outside the queue: unchanged
+    requests_importers = sorted(
+        [requests_test, "tests/server/test_comma.py", "tests/server/test_patch.py"]
+    )
+    got = select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor)
+    assert got == requests_importers, got
+    assert select(repo, {"uv.lock": lock.replace("2.0", "2.1")}, **floor) == []
+    assert (
+        select(
+            repo, {"uv.lock": lock + '\n[[package]]\nname = "Gizmos"\nversion = "3"\n'}, **floor
+        )
+        == []
+    )
+    yaml_test = "tests/server/test_yaml.py"
+    assert select(repo, {"uv.lock": lock.replace("6.0", "6.1")}, **floor) == [yaml_test]  # alias
+    # the project's own editable package moving selects nothing: every test imports it
+    assert select(repo, {"uv.lock": lock.replace("0.1", "0.2")}, **floor) == []
+    both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
+    assert select(repo, both_inputs, **floor) == sorted([*requests_importers, widget])
+    assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == [
+        "tests"
+    ]  # shared test setup stays whole
     # no argument: GATE_BASE, else the merge base with origin/mine, else everything
     change = {"omnigent/widgets/frob.py": "x = 4\n"}
     assert select(repo, change, (), GATE_BASE="base") == [widget]
@@ -275,4 +329,18 @@ with tempfile.TemporaryDirectory() as tmp:
     for rec in [*unusable, malformed, empty_tree]:
         assert since(Path(rec), "newer") == (today("newer"), []), rec
         assert any(line.startswith("affected tests: no usable record") for line in why), (rec, why)
+    # floor mode and --since: a package that moved after the record's run reselects its importers
+    run("git", "checkout", "-q", "-B", "pr", "base")
+    then = head()
+    requests_test = "tests/server/test_requests.py"
+    floor_record = record(then, [requests_test, widget], {}, exit_code="0")
+    commit({"uv.lock": lock.replace("1.0", "1.1")})
+    out = subprocess.run(
+        [sys.executable, str(HERE / "affected_tests.py"), "--since", str(floor_record), "base"],
+        env={**os.environ, "AFFECTED_TESTS_BUILD_INPUTS": "floor"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert lines(out.stdout) == requests_importers, out
 print("affected-tests: ok")
