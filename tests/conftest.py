@@ -939,7 +939,8 @@ def _restore_package_logger_state() -> Generator[None, None, None]:
 
     ``setup_cli_logging`` sets ``omnigent.propagate = False``; left behind on an xdist
     worker it hides every later ``omnigent.*`` record from ``caplog``. A runner id set
-    by one test would otherwise show up in later tests' log rows.
+    by one test would otherwise show up in later tests' log rows, and a tracing switch
+    left on makes later adapter turns build trace contexts.
     """
     names = ("omnigent", "omnigent_ui_sdk")
     saved = [
@@ -947,7 +948,11 @@ def _restore_package_logger_state() -> Generator[None, None, None]:
         for n in names
     ]
     handlers = {logger: list(logger.handlers) for logger, _, _ in saved}
+    tracing_enabled = getattr(sys.modules.get("omnigent.inner.tracing"), "_tracing_enabled", False)
     yield
+    tracing = sys.modules.get("omnigent.inner.tracing")
+    if tracing is not None:
+        tracing._tracing_enabled = tracing_enabled
     for logger, propagate, level in saved:
         logger.propagate = propagate
         logger.setLevel(level)
