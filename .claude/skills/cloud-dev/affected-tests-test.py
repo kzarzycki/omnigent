@@ -89,10 +89,24 @@ with tempfile.TemporaryDirectory() as tmp:
     # suites the default addopts ignore are never selected
     (repo / "tests" / "e2e").mkdir()
     (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
+    (repo / "tests" / "server" / "test_requests.py").write_text("import requests\n")
+    lock = '[[package]]\nname = "requests"\nversion = "1.0"\n\n[[package]]\nname = "other-lib"\nversion = "2.0"\n'
+    (repo / "uv.lock").write_text(lock)
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", "e2e")
     run("git", "tag", "-f", "base")
     assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
+    # the queue's floor: a build input alone selects nothing the tests don't name
+    floor = {"AFFECTED_TESTS_BUILD_INPUTS": "floor"}
+    requests_test = "tests/server/test_requests.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == []
+    assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]  # outside the queue: unchanged
+    assert select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor) == [requests_test]
+    assert select(repo, {"uv.lock": lock.replace("2.0", "2.1")}, **floor) == []
+    assert select(repo, {"uv.lock": lock + '\n[[package]]\nname = "Widgets"\nversion = "3"\n'}, **floor) == []
+    both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
+    assert select(repo, both_inputs, **floor) == [requests_test, widget]
+    assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == ["tests"]  # shared test setup stays whole
     # no argument: GATE_BASE, else the merge base with origin/mine, else everything
     change = {"omnigent/widgets/frob.py": "x = 4\n"}
     assert select(repo, change, (), GATE_BASE="base") == [widget]

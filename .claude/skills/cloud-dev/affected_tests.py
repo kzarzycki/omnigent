@@ -18,6 +18,9 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
 - A conftest below `tests/` selects its own directory, since pytest applies it only there (none
   in a suite check-fast doesn't run), and the test files that import it by module or load it
   through `pytest_plugins`.
+- With AFFECTED_TESTS_BUILD_INPUTS=floor (the merge queue's gate; the nightly covers the rest after
+  the merge), pyproject.toml and uv.lock no longer select `tests`: the other changed files select
+  as usual, and a uv.lock change adds the tests that import a package whose version moved.
 - Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
   uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
@@ -80,11 +83,48 @@ def names(path: Path, text: str, by_file_name: bool = True) -> bool:
     )
 
 
-def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
+# the build inputs the queue's floor leaves to the nightly
+FLOOR_INPUTS = ("pyproject.toml", "uv.lock")
+
+
+def locked_versions(text: str | None) -> dict[str, str]:
+    """Package name -> version from a uv.lock's text; empty for none."""
+    found: dict[str, str] = {}
+    for block in (text or "").split("[[package]]")[1:]:
+        name = re.search(r'^name = "([^"]+)"', block, re.MULTILINE)
+        version = re.search(r'^version = "([^"]+)"', block, re.MULTILINE)
+        if name and version:
+            found[re.sub(r"[-_.]+", "-", name.group(1)).lower()] = version.group(1)
+    return found
+
+
+def moved_packages(base: str | None) -> set[str]:
+    """Packages whose locked version differs between `base` and HEAD (added or removed ones count)."""
+    before = locked_versions(git("show", f"{base}:uv.lock") if base else None)
+    after = locked_versions(git("show", "HEAD:uv.lock"))
+    return {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+
+
+def imports_package(text: str, package: str) -> bool:
+    """Whether a test's text imports a distribution's top-level module (its name with `-` as `_`)."""
+    module = re.escape(package.replace("-", "_"))
+    return bool(re.search(rf"^\s*(?:import|from)\s+{module}\b", text, re.MULTILINE | re.IGNORECASE))
+
+
+def targets(
+    files: list[str] | None,
+    root: Path = Path("."),
+    floor: bool = False,
+    moved: set[str] | None = None,
+) -> list[str]:
+    """The test targets `files` touch; with `floor`, pyproject.toml and uv.lock select only through
+    the other files and the tests importing a package in `moved`."""
     files = [f for f in files if f] if files is not None else None
 
     def shared(f: str) -> bool:
         path = Path(f)
+        if floor and f in FLOOR_INPUTS:
+            return False
         return f.startswith(EVERYTHING) or (
             path.name == "conftest.py" and (path.parts[0] != "tests" or len(path.parts) < 3)
         )
@@ -102,6 +142,13 @@ def targets(files: list[str] | None, root: Path = Path(".")) -> list[str]:
         if path.name.startswith("test_") and path.suffix == ".py":
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
+        elif f in FLOOR_INPUTS and floor:
+            if f == "uv.lock":
+                picked.update(
+                    str(t.relative_to(root))
+                    for t, text in tests.items()
+                    if any(imports_package(text, package) for package in moved or ())
+                )
         elif path.suffix != ".md":
             conftest = path.name == "conftest.py"
             if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
@@ -137,7 +184,7 @@ def within(found: list[str], selection: list[str]) -> list[str]:
 
 
 def since(
-    record: Path, selection: list[str], root: Path = Path(".")
+    record: Path, selection: list[str], root: Path = Path("."), floor: bool = False
 ) -> tuple[list[str], list[str]] | str:
     """What to run on HEAD after the run `record` describes, and its flake candidates; or why the
     record can't be used."""
@@ -160,7 +207,7 @@ def since(
         return "git ls-tree HEAD failed"
     now_tree = listing(now)
     differ = sorted(p for p in then.keys() | now_tree.keys() if then.get(p) != now_tree.get(p))
-    touched = within(targets(differ, root), selection)
+    touched = within(targets(differ, root, floor=floor), selection)
     new = [t for t in selection if not under(t, selected_then)]
     failed = within([t for t in lastfailed if (root / t.split("::", 1)[0]).exists()], selection)
     picked = set(touched) | set(new) | set(failed)
@@ -205,9 +252,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     base = args.base if args.base is not None else os.environ.get("GATE_BASE")
     base = base or (git("merge-base", "origin/mine", "HEAD") or "").strip() or None
-    selected = targets(changed(base))
+    floor = os.environ.get("AFFECTED_TESTS_BUILD_INPUTS") == "floor"
+    selected = targets(changed(base), floor=floor, moved=moved_packages(base) if floor else None)
     if args.since is not None:
-        rerun = since(args.since, selected)
+        rerun = since(args.since, selected, floor=floor)
         if isinstance(rerun, str):
             print(
                 f"affected tests: no usable record ({rerun}); running the full selection",

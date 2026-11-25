@@ -7,8 +7,8 @@
 # tree that merges. A push leaves a head with no `land` status, so the PR drops out. A PR with `loop:hold` is never
 # queued, and one already queued is dropped. A PR Mergify drops gets `loop:dequeued`, which the next `land` evicts
 # back to draft. `merge_conditions` differ from `queue_conditions`, so Mergify always tests on a draft and never in
-# place, where `gate` would not run. `checks_timeout` sits above `gate`'s 240-minute job timeout (`gate.yml`), since a
-# whole-suite selection takes about 200 minutes plus setup, so the job's own timeout or its result always comes first.
+# place, where `gate` would not run. `checks_timeout` follows `timeouts.run` (docs/agents/gatekeeper.md), as does `gate`'s job timeout (`gate.yml`): a
+# whole-suite selection takes about 200 minutes plus setup.
 
 queue_rules:
   - name: default
@@ -17,7 +17,7 @@ queue_rules:
     batch_size: 5
     batch_max_wait_time: 5 minutes
     max_checks_retries: 1
-    checks_timeout: 4 hours 15 minutes
+    checks_timeout: 4 hours
     queue_conditions:
       - base = mine
       - -draft
@@ -32,7 +32,7 @@ queue_rules:
     merge_method: merge
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 4 hours 15 minutes
+    checks_timeout: 4 hours
     queue_conditions:
       - base = mine
       - -draft
