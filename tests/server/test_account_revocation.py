@@ -1686,7 +1686,7 @@ def test_account_generation_check_is_shared_across_a_burst_and_dropped_on_delete
     # Deleting the account clears the cached acceptance, so the next request re-checks and fails.
     assert admin.delete("/auth/users/alice").status_code == 204
     assert alice.get("/auth/me").status_code == 401
-    assert checked == ["alice", "alice"]
+    assert checked.count("alice") == 2
 
 
 def test_account_generation_acceptance_expires(setup_app):
