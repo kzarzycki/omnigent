@@ -110,12 +110,31 @@ with tempfile.TemporaryDirectory() as tmp:
     floor = {"AFFECTED_TESTS_BUILD_INPUTS": "floor"}
     requests_test = "tests/server/test_requests.py"
     assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == []
+    # a test that reads the file by name still runs
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_lock_format.py").write_text('read("pyproject.toml")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "lock test")
+    run("git", "tag", "-f", "base")
+    lock_test = "tests/server/test_lock_format.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == [lock_test]
+    # an import after a comma, and a patched dotted name, name the package too
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_comma.py").write_text("import os, requests\n")
+    (repo / "tests" / "server" / "test_patch.py").write_text('patch("requests.get")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "comma")
+    run("git", "tag", "-f", "base")
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]  # outside the queue: unchanged
-    assert select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor) == [requests_test]
+    requests_importers = sorted(
+        [requests_test, "tests/server/test_comma.py", "tests/server/test_patch.py"]
+    )
+    got = select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor)
+    assert got == requests_importers, got
     assert select(repo, {"uv.lock": lock.replace("2.0", "2.1")}, **floor) == []
     assert (
         select(
-            repo, {"uv.lock": lock + '\n[[package]]\nname = "Widgets"\nversion = "3"\n'}, **floor
+            repo, {"uv.lock": lock + '\n[[package]]\nname = "Gizmos"\nversion = "3"\n'}, **floor
         )
         == []
     )
@@ -124,7 +143,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # the project's own editable package moving selects nothing: every test imports it
     assert select(repo, {"uv.lock": lock.replace("0.1", "0.2")}, **floor) == []
     both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
-    assert select(repo, both_inputs, **floor) == [requests_test, widget]
+    assert select(repo, both_inputs, **floor) == sorted([*requests_importers, widget])
     assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == [
         "tests"
     ]  # shared test setup stays whole
@@ -323,5 +342,5 @@ with tempfile.TemporaryDirectory() as tmp:
         text=True,
         check=True,
     )
-    assert lines(out.stdout) == [requests_test], out
+    assert lines(out.stdout) == requests_importers, out
 print("affected-tests: ok")

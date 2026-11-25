@@ -19,8 +19,9 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
   in a suite check-fast doesn't run), and the test files that import it by module or load it
   through `pytest_plugins`.
 - With AFFECTED_TESTS_BUILD_INPUTS=floor (the merge queue's gate; the nightly covers the rest after
-  the merge), pyproject.toml and uv.lock no longer select `tests`: the other changed files select
-  as usual, and a uv.lock change adds the tests that import a package whose version moved.
+  the merge), pyproject.toml and uv.lock no longer select `tests`: like any other file they select
+  the tests that name them, a uv.lock change adds the tests that import a package whose version
+  moved, and the other changed files select as usual.
 - Markdown selects nothing. No base to diff, or a change to the shared test setup (pyproject.toml,
   uv.lock, `tests/conftest.py`, the shared test helpers and fixtures), selects `tests`: the
   diff cannot say what that touches.
@@ -151,7 +152,12 @@ def imports_any(moved: set[str]) -> re.Pattern[str] | None:
     if not modules:
         return None
     alternation = "|".join(re.escape(module) for module in modules)
-    return re.compile(rf"^\s*(?:import|from)\s+(?:{alternation})\b", re.MULTILINE)
+    # an import line naming one (also after a comma), or a string naming one (patch, importorskip)
+    return re.compile(
+        rf"^\s*(?:import|from)\b[^\n#]*\b(?:{alternation})\b"
+        rf"|[\"'](?:{alternation})(?:\.|[\"'])",
+        re.MULTILINE,
+    )
 
 
 def targets(
@@ -185,12 +191,11 @@ def targets(
         if path.name.startswith("test_") and path.suffix == ".py":
             if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
                 picked.add(f)
-        elif f in FLOOR_INPUTS and floor:
-            if f == "uv.lock" and (pattern := imports_any(moved or set())):
+        elif path.suffix != ".md":
+            if f == "uv.lock" and floor and (pattern := imports_any(moved or set())):
                 picked.update(
                     str(t.relative_to(root)) for t, text in tests.items() if pattern.search(text)
                 )
-        elif path.suffix != ".md":
             conftest = path.name == "conftest.py"
             if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
                 picked.add(str(path.parent))
