@@ -40,6 +40,9 @@ def select(
     return out.stdout.split()
 
 
+assert {"yaml", "pyyaml"} <= affected_tests.import_names("pyyaml") | {"pyyaml"}
+assert "some_lib" in affected_tests.import_names("some-lib")  # not installed: its own name
+
 with tempfile.TemporaryDirectory() as tmp:
     repo = Path(tmp) / "repo"  # records stay outside it
     repo.mkdir()

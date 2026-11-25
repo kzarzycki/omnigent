@@ -123,18 +123,17 @@ def moved_packages(base: str | None) -> set[str]:
 
 
 def import_names(package: str) -> set[str]:
-    """The module names a distribution provides: its installed top-level names when known, a known
-    alias, and its own name with `-` as `_`."""
+    """The module names a distribution provides: those the installed environment records for it
+    (RECORD, so `opentelemetry-api` gives `opentelemetry`), a known alias, and its own name with
+    `-` as `_` (all there is for a distribution not installed here, which no test can import)."""
     names = {package.replace("-", "_")}
     if package in IMPORT_NAMES:
         names.add(IMPORT_NAMES[package])
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution
+    from importlib.metadata import packages_distributions
 
-        top = distribution(package).read_text("top_level.txt") or ""
-        names.update(line.strip() for line in top.splitlines() if line.strip())
-    except PackageNotFoundError:  # not installed on this interpreter
-        pass
+    for module, distributions in packages_distributions().items():
+        if any(re.sub(r"[-_.]+", "-", d).lower() == package for d in distributions):
+            names.add(module)
     return names
 
 

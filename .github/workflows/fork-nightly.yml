@@ -16,14 +16,13 @@ on: # timeouts: nightly
       - pyproject.toml
       - uv.lock
       - mise.toml
-      - tests/conftest.py
-      - tests/_helpers/**
-      - tests/helpers/**
-      - tests/_fixtures/**
-      - tests/fixtures/**
-      - tests/data/**
       - .github/**
   workflow_dispatch:
+
+# An older run of a push is covered by the newer one.
+concurrency:
+  group: fork-nightly-${{ github.event_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
