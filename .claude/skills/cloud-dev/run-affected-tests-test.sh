@@ -51,6 +51,18 @@ cmp -s "$tmp/expected" "$tmp/args" || fail "arguments without a record changed: 
 affected HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 [ "$rc" = 124 ] || fail "a hung run exited $rc, not 124"
 
+# A shard runs its slice of the selection, and one holding no selected test passes (pytest's exit 5).
+affected AFFECTED_TESTS_SHARDS=4 AFFECTED_TESTS_SHARD=2; rc=$?
+[ "$rc" = 0 ] || fail "a shard exited $rc"
+printf '%s\n' run --no-sync pytest -n auto --dist=loadfile --timeout=90 --num-shards=4 --shard-id=2 tests/example_test.py > "$tmp/expected"
+cmp -s "$tmp/expected" "$tmp/args" || fail "shard arguments: $(cat "$tmp/args")"
+affected AFFECTED_TESTS_SHARDS=4 AFFECTED_TESTS_SHARD=2 PYTEST_EXIT=5; rc=$?
+[ "$rc" = 0 ] || fail "an empty shard exited $rc, not 0"
+affected PYTEST_EXIT=5; rc=$?
+[ "$rc" = 5 ] || fail "an unsharded run that collected nothing exited $rc, not 5"
+affected AFFECTED_TESTS_SHARDS=4 PYTEST_EXIT=0; rc=$?
+[ "$rc" != 0 ] || fail "shards without a shard number ran"
+
 # record <outcome> <expected exit> <expected lastfailed>: the record holds the tree, the selection and pytest's result.
 record() {
   [ "$(cat "$tmp/record/exit")" = "$2" ] || fail "$1: record exit $(cat "$tmp/record/exit"), not $2"
