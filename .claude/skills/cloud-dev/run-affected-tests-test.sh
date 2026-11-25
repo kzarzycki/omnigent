@@ -36,10 +36,10 @@ exit "${PYTEST_EXIT:-0}"
 EOF
 chmod +x "$tmp/bin/python3" "$tmp/bin/uv"
 fail() { echo "!! affected tests: $*"; exit 1; }
-# The gate runs this test with its own record variables set; each case sets only its own.
+# The gate runs this test with its own record and shard variables set; each case sets only its own.
 affected() {
   rm -f "$tmp/args"
-  env -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD RECEIVED="$tmp/args" PATH="$tmp/bin:$PATH" "$@" \
+  env -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD -u AFFECTED_TESTS_SHARDS -u AFFECTED_TESTS_SHARD RECEIVED="$tmp/args" PATH="$tmp/bin:$PATH" "$@" \
     bash "$here/run-affected-tests.sh" >"$tmp/out" 2>&1
 }
 
