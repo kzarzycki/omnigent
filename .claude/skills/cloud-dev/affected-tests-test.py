@@ -103,10 +103,17 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]  # outside the queue: unchanged
     assert select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor) == [requests_test]
     assert select(repo, {"uv.lock": lock.replace("2.0", "2.1")}, **floor) == []
-    assert select(repo, {"uv.lock": lock + '\n[[package]]\nname = "Widgets"\nversion = "3"\n'}, **floor) == []
+    assert (
+        select(
+            repo, {"uv.lock": lock + '\n[[package]]\nname = "Widgets"\nversion = "3"\n'}, **floor
+        )
+        == []
+    )
     both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
     assert select(repo, both_inputs, **floor) == [requests_test, widget]
-    assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == ["tests"]  # shared test setup stays whole
+    assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == [
+        "tests"
+    ]  # shared test setup stays whole
     # no argument: GATE_BASE, else the merge base with origin/mine, else everything
     change = {"omnigent/widgets/frob.py": "x = 4\n"}
     assert select(repo, change, (), GATE_BASE="base") == [widget]

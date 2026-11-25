@@ -108,7 +108,9 @@ def moved_packages(base: str | None) -> set[str]:
 def imports_package(text: str, package: str) -> bool:
     """Whether a test's text imports a distribution's top-level module (its name with `-` as `_`)."""
     module = re.escape(package.replace("-", "_"))
-    return bool(re.search(rf"^\s*(?:import|from)\s+{module}\b", text, re.MULTILINE | re.IGNORECASE))
+    return bool(
+        re.search(rf"^\s*(?:import|from)\s+{module}\b", text, re.MULTILINE | re.IGNORECASE)
+    )
 
 
 def targets(
