@@ -188,6 +188,38 @@ def test_issue_status_is_included_only_when_github_returns_one(
     assert "status" not in without and without["state"] == "open"
 
 
+def test_issue_status_badge_inputs_from_recorded_rest_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # REST shape recorded for an issue with a status (Done) and one from a repo without statuses.
+    with_status = {
+        "title": "Recorded issue",
+        "state": "closed",
+        "state_reason": "completed",
+        "status": {"id": 5, "name": "Done", "category": "completed"},
+        "labels": [],
+    }
+    without_status = {"title": "Plain issue", "state": "closed", "state_reason": "completed"}
+    _install(
+        monkeypatch,
+        api=dict(
+            [
+                _api("/repos/acme/app/issues/8", with_status),
+                _api("/repos/acme/app/issues/9", without_status),
+            ]
+        ),
+    )
+    _forbid_public_reads(monkeypatch)
+
+    done = github.github_link_preview("/workspace", "acme", "app", "issue", "8")
+    plain = github.github_link_preview("/workspace", "acme", "app", "issue", "9")
+
+    assert done is not None and plain is not None
+    # The web badge renders `status.name` coloured by category, else the state's label.
+    assert (done["state"], done["status"]) == ("closed", {"name": "Done", "category": "completed"})
+    assert (plain["state"], "status" in plain) == ("closed", False)
+
+
 def test_issue_commit_and_run_read_through_gh_api(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _install(
         monkeypatch,
