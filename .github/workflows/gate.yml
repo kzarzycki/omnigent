@@ -6,6 +6,8 @@ name: Gate
 # is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: when the
 # difference reselects every failed test, it runs those and what the difference touches or newly selects;
 # otherwise the whole selection, where a failed test nothing reselected and that passes is a flake.
+# The selection runs as parallel shard jobs (a hash partition of the tests by node id, one record each), so a
+# whole-suite run takes about an eighth of the time and memory per runner; `gate` passes only if every shard did.
 
 on:
   pull_request:
@@ -21,11 +23,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
+  tests:
+    name: tests (shard ${{ matrix.shard }})
     # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
     if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     permissions:
       contents: read
       actions: read  # find and download an earlier run's record
@@ -76,6 +83,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TITLE: ${{ github.event.pull_request.title }}
+          SHARD: ${{ matrix.shard }}
           RECORDS: ${{ runner.temp }}/earlier-records
         run: |
           # ponytail: the PR number comes from Mergify's draft title ("merge queue: checking #<n> on ...");
@@ -91,14 +99,14 @@ jobs:
             done; } | awk '!seen[$0]++ && ++kept <= 10' > "$RUNNER_TEMP/runs"
           while read -r run; do
             gh api "repos/$GH_REPO/actions/runs/$run/artifacts?per_page=100" --jq \
-              '.artifacts[] | select((.name | startswith("gate-record-attempt-")) and (.expired | not))
+              '.artifacts[] | select((.name | startswith("gate-record-shard-'"$SHARD"'-attempt-")) and (.expired | not))
                | [.created_at, .workflow_run.id, .name, .workflow_run.head_sha] | @tsv' < /dev/null
           done < "$RUNNER_TEMP/runs" | sort -r > "$RUNNER_TEMP/records"
           while IFS=$'\t' read -r _ run name sha; do
             dir="$RECORDS/$run-$name"
             gh run download "$run" --name "$name" --dir "$dir" < /dev/null || continue
             code=$(cat "$dir/exit" 2>/dev/null || true)
-            url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run/attempts/${name#gate-record-attempt-}"
+            url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run/attempts/${name#gate-record-shard-$SHARD-attempt-}"
             if [ "$code" = 0 ] || [ "$code" = 1 ]; then
               echo "Building on $url (head $sha): its pytest exited $code."
               echo "Building on $url, whose pytest exited $code." >> "$GITHUB_STEP_SUMMARY"
@@ -109,9 +117,19 @@ jobs:
           done < "$RUNNER_TEMP/records"
           echo "No complete gate record for #$pr in the last 7 days: the full selection runs."
 
-      # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
+      # Peak memory of this shard's runner, for the job summary.
+      - name: Sample memory
+        run: |
+          echo "SHARD_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          setsid nohup bash -c 'while :; do awk "/^MemTotal/{t=\$2} /^MemAvailable/{a=\$2} END{print int((t-a)/1024)}" /proc/meminfo; sleep 5; done' > "$RUNNER_TEMP/memory-used-mb" 2>&1 < /dev/null &
+
+      # check-fast (mise.toml): check:all, then pytest on the tests the change touches. Shard 0 alone runs
+      # check:all; the others install the same environment and run only their slice of the tests.
       - name: Run the checks
         env:
+          # The matrix's own size, so a shard dropped from the list is never silently skipped.
+          AFFECTED_TESTS_SHARDS: ${{ strategy.job-total }}
+          AFFECTED_TESTS_SHARD: ${{ matrix.shard }}
           # run-affected-tests.sh: build on the earlier record, and write this run's.
           AFFECTED_TESTS_SINCE: ${{ steps.earlier.outputs.record }}
           AFFECTED_TESTS_RECORD: ${{ runner.temp }}/gate-record
@@ -120,8 +138,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DRAFT_TITLE: ${{ github.event.pull_request.title }}
           OMNIGENT_SKIP_WEB_UI: "true"
-          # The full suite (run on a uv.lock change) needs ~200 min on the 4-core runner; stays under the 240-min job timeout.
-          AFFECTED_TESTS_WALL_SECONDS: "13800"
+          # One eighth of the full suite (~200 min unsharded) is ~25 min on the 4-core runner; stays under the 120-min job timeout.
+          AFFECTED_TESTS_WALL_SECONDS: "6000"
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}
           # The skills' tests commit in scratch repos and need an identity.
@@ -140,7 +158,12 @@ jobs:
           done
           if [ "$GATE_BASE" = "$DRAFT_HEAD" ]; then GATE_BASE=$BASE_SHA; fi
           echo "GATE_BASE=$GATE_BASE"
-          GATE_BASE=$GATE_BASE mise run check-fast
+          if [ "$AFFECTED_TESTS_SHARD" = 0 ]; then
+            GATE_BASE=$GATE_BASE mise run check-fast
+          else
+            mise run check:setup
+            GATE_BASE=$GATE_BASE bash .claude/skills/cloud-dev/run-affected-tests.sh
+          fi
 
       # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
       # its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
@@ -159,11 +182,33 @@ jobs:
         run: |
           bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/gate-record" "$EARLIER_RECORD"
 
+      - name: Report this shard's wall time and peak memory
+        if: always()
+        run: |
+          peak=$(sort -n "$RUNNER_TEMP/memory-used-mb" | tail -1)
+          echo "shard ${{ matrix.shard }}: tests step wall $(( $(date +%s) - SHARD_STARTED )) s, peak memory used ${peak:-?} MB of $(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo) MB" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload this run's record
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: gate-record-attempt-${{ github.run_attempt }}
+          name: gate-record-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/gate-record/
           retention-days: 7
           if-no-files-found: ignore
+
+  # The one check the ruleset and Mergify require: green only if every shard passed. `always()` keeps it
+  # running when a shard failed or was cancelled (a skipped required check would count as passed); the
+  # `if` skips it, like the shards, outside Mergify drafts.
+  gate:
+    needs: tests
+    if: always() && startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every shard passed
+        env:
+          SHARDS_RESULT: ${{ needs.tests.result }}
+        run: |
+          echo "tests shards: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = success ]

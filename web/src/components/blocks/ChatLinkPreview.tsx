@@ -99,7 +99,13 @@ function GithubPreviewCard({ preview }: { preview: GithubLinkPreview }) {
   return (
     <div className="space-y-1.5" data-testid="github-link-preview">
       <p className="font-medium leading-snug break-words">{preview.title}</p>
-      {preview.state && <PullRequestStatus state={preview.state} subject={SUBJECT[preview.kind]} />}
+      {preview.state && (
+        <PullRequestStatus
+          state={preview.state}
+          status={preview.status}
+          subject={SUBJECT[preview.kind]}
+        />
+      )}
       {preview.labels.length > 0 && (
         <ul aria-label="Labels" className="flex flex-wrap gap-1">
           {preview.labels.map((label) => (
@@ -144,7 +150,11 @@ export function ChatLinkPreview({
 
   // The label's own state: a GitHub link's, or the session's.
   const label = preview?.state ? (
-    <PullRequestStatus state={preview.state} subject={SUBJECT[preview.kind]} />
+    <PullRequestStatus
+      state={preview.state}
+      status={preview.status}
+      subject={SUBJECT[preview.kind]}
+    />
   ) : session ? (
     <PullRequestStatus state={session.status} subject="Session" />
   ) : null;

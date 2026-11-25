@@ -282,6 +282,16 @@ const GITHUB_LINK_ICONS: Record<GithubLinkRef["kind"], LucideIcon> = {
   run: CirclePlayIcon,
 };
 
+// Link text that is only a ref (`#42` or `app#42`): the label is rebuilt from the URL so it
+// always names the repo. Any other text stays as written.
+function isBareIssueRef(children: React.ReactNode, github: GithubLinkRef): boolean {
+  return (
+    (github.kind === "issue" || github.kind === "pull") &&
+    typeof children === "string" &&
+    /^[A-Za-z0-9._-]*#[0-9]+$/.test(children)
+  );
+}
+
 function GithubLinkLabel({
   kind,
   children,
@@ -401,7 +411,7 @@ function WorkspaceFileLink({
     const github = parseGithubLink(rebased);
     const bare = typeof href === "string" && children === href;
     const label = github
-      ? bare
+      ? bare || isBareIssueRef(children, github)
         ? githubLinkLabel(github)
         : children
       : bare && /^https?:\/\//.test(href)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shutil
 import sys
@@ -970,3 +971,38 @@ def lowered_idle_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(terminal_module, "_IDLE_POLL_INTERVAL_SECONDS", 0.1)
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_SUBSTRINGS", [])
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_THRESHOLD_SECONDS", 0.4)
+
+
+@pytest.fixture(autouse=True)
+def _restore_package_logger_state() -> Generator[None, None, None]:
+    """Undo a test's changes to the package loggers and the runner id log context.
+
+    ``setup_cli_logging`` sets ``omnigent.propagate = False``; left behind on an xdist
+    worker it hides every later ``omnigent.*`` record from ``caplog``. A runner id set
+    by one test would otherwise show up in later tests' log rows, and a tracing switch
+    left on makes later adapter turns build trace contexts.
+    """
+    names = ("omnigent", "omnigent_ui_sdk")
+    saved = [
+        (logging.getLogger(n), logging.getLogger(n).propagate, logging.getLogger(n).level)
+        for n in names
+    ]
+    handlers = {logger: list(logger.handlers) for logger, _, _ in saved}
+    tracing_enabled = getattr(sys.modules.get("omnigent.inner.tracing"), "_tracing_enabled", False)
+    runner_id_env = os.environ.get("OMNIGENT_RUNNER_ID")
+    yield
+    # The runner entrypoint writes its id straight into the environment.
+    if runner_id_env is None:
+        os.environ.pop("OMNIGENT_RUNNER_ID", None)
+    else:
+        os.environ["OMNIGENT_RUNNER_ID"] = runner_id_env
+    tracing = sys.modules.get("omnigent.inner.tracing")
+    if tracing is not None:
+        tracing._tracing_enabled = tracing_enabled
+    for logger, propagate, level in saved:
+        logger.propagate = propagate
+        logger.setLevel(level)
+        logger.handlers[:] = handlers[logger]
+    debug_logging = sys.modules.get("omnigent.debug_logging")
+    if debug_logging is not None:
+        debug_logging.set_current_runner_id(None)

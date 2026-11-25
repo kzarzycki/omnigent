@@ -524,19 +524,14 @@ async def test_hook_accepts_sync_callable() -> None:
 
 def _load_repl_module() -> Any:
     """
-    Reload ``omnigent.repl._repl`` so these tests see the
-    edited source. Multiple tests in this file touch the
-    module; a stale import cache would silently test the old
-    API.
+    Return ``omnigent.repl._repl``. Never reload it: a reload rebinds
+    ``_ApprovalVerdict`` and breaks enum identity for every other test
+    in the same worker that imported the old class.
 
-    :returns: The freshly-reloaded ``omnigent.repl._repl``
-        module.
+    :returns: The ``omnigent.repl._repl`` module.
     """
-    import importlib
-
     import omnigent.repl._repl as repl_mod
 
-    importlib.reload(repl_mod)
     return repl_mod
 
 
