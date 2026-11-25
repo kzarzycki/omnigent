@@ -238,3 +238,20 @@ def test_reap_escalates_to_kill(data_dir: Path) -> None:
 def test_reap_with_no_leaks_returns_empty(data_dir: Path) -> None:
     """No attributed processes → no-op, empty report."""
     assert reap_leaked_omnigent_processes(data_dir, timeout=1) == ([], [])
+
+
+def test_reap_skips_excluded_pids(data_dir: Path) -> None:
+    """Processes that predate a module (exclude_pids) survive; newer ones are reaped."""
+    old = _spawn(_SLEEP_CHILD, "omnigent-old", f"sqlite:///{data_dir}/chat.db")
+    new = _spawn(_SLEEP_CHILD, "omnigent-new", f"sqlite:///{data_dir}/chat.db")
+    try:
+        reaped, survivors = reap_leaked_omnigent_processes(
+            data_dir, timeout=5, exclude_pids=frozenset({old.pid})
+        )
+        assert survivors == []
+        assert len(reaped) == 1
+        assert "omnigent-new" in reaped[0]
+        assert old.poll() is None
+    finally:
+        _kill_quietly(old)
+        _kill_quietly(new)
