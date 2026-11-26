@@ -40,6 +40,7 @@ TEXT_EXTENSIONS = {".json", ".toml", ".yaml", ".yml", ".sh"}
 SOURCE_EXTENSIONS = {".py", *TEXT_EXTENSIONS}
 GENERATED_PATHS = {Path("openapi.json")}
 SKIP_PARTS = {
+    ".agents",  # plugins `apm install` deploys, kept identical to the pinned release
     ".git",
     ".mypy_cache",
     ".pytest_cache",
