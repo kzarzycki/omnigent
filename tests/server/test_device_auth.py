@@ -1013,3 +1013,54 @@ def test_app_skips_device_grant_for_github_oidc_without_crashing(
     # why the skip matters — then confirm the gate keeps it unreached.
     with pytest.raises(RuntimeError, match="GitHub OAuth"):
         create_device_auth_router(provider, None)  # type: ignore[arg-type]
+
+
+def test_login_grant_dies_at_absolute_lifetime_while_access_token_is_unexpired(
+    disabled_app: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cause of the unattended-login failure: past the grant's absolute
+    lifetime the next refresh request purges the grant row, so a still
+    unexpired access token answers 401 and the refresh grant answers 400.
+
+    The refresh response must report how long the grant lives, so a client
+    can warn before this happens.
+    """
+    import os
+    import sqlite3
+
+    from omnigent.server.routes.device_auth import (
+        _GRANT_MAX_LIFETIME_SECONDS,
+        issue_login_grant,
+    )
+
+    store = DeviceGrantStore(f"sqlite:///{tmp_path}/test.db")
+    secret = bytes.fromhex(os.environ["OMNIGENT_ACCOUNTS_COOKIE_SECRET"])
+    refresh = issue_login_grant(store, user_id="admin", cookie_secret=secret)
+    form = {"grant_type": "refresh_token", "refresh_token": refresh}
+
+    first = disabled_app.post("/oauth/token", data=form)
+    assert first.status_code == 200, first.text
+    # The client is told when the grant stops renewing.
+    remaining = first.json()["refresh_expires_in"]
+    assert _GRANT_MAX_LIFETIME_SECONDS - 60 <= remaining <= _GRANT_MAX_LIFETIME_SECONDS
+    access = first.json()["access_token"]
+    auth = {"Authorization": f"Bearer {access}"}
+    disabled_app.cookies.clear()
+    assert disabled_app.get("/v1/hosts", headers=auth).status_code == 200
+
+    # Age the login by the grant lifetime; the access token keeps ~1 h.
+    with sqlite3.connect(tmp_path / "test.db") as conn:
+        conn.execute(
+            "UPDATE device_grants SET approved_at = approved_at - ?",
+            (_GRANT_MAX_LIFETIME_SECONDS + 1,),
+        )
+    expiry = jwt.decode(access, options={"verify_signature": False})["exp"]
+    assert expiry > __import__("time").time() + 3000
+
+    # The grant's own refresh is refused with HTTP 400. Until some refresh
+    # runs the purge the old access token still works; after it, 401.
+    monkeypatch.setattr("omnigent.server.routes.device_auth._PURGE_MIN_INTERVAL_SECONDS", 0)
+    refused = disabled_app.post("/oauth/token", data=form)
+    assert refused.status_code == 400
+    assert refused.json()["error"] in {"invalid_grant", "expired_token"}
+    assert disabled_app.get("/v1/hosts", headers=auth).status_code == 401
