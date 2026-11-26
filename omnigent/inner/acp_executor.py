@@ -2155,7 +2155,14 @@ class AcpExecutor(Executor):
                     error_msg = response["error"].get("message", "Unknown ACP error")
                     if "Session not found" in error_msg:
                         self._reset_session_state()
-                    yield ExecutorError(message=error_msg, retryable=True)
+                    # An agent may report what the failed turn spent in ``error.data.usage``.
+                    error_data = response["error"].get("data")
+                    failed_usage = (
+                        self._usage_with_active_model(error_data)
+                        if isinstance(error_data, dict)
+                        else None
+                    )
+                    yield ExecutorError(message=error_msg, retryable=True, usage=failed_usage)
                     return
                 result = response.get("result", {}) if isinstance(response, dict) else {}
                 usage = self._usage_with_active_model(result) if isinstance(result, dict) else None
