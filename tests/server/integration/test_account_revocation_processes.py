@@ -32,6 +32,8 @@ def test_delete_revokes_cookie_and_refresh_on_another_server(tmp_path: Path) -> 
             "OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME": "admin",
             "OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD": "admin-pw-12345",
             "OMNIGENT_ACCOUNTS_AUTO_OPEN": "0",
+            # Revocation must show on the other server at once, not after the cache TTL.
+            "OMNIGENT_ACCOUNT_CHECK_TTL_SECONDS": "0",
             "OMNIGENT_ADMIN_CREDENTIALS_PATH": str(tmp_path / "admin-creds"),
             "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
             "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
