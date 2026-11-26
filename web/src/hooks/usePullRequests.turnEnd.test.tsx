@@ -44,6 +44,11 @@ function pullRequestInfoResponse(info: Record<string, unknown> = {}): Response {
   } as unknown as Response;
 }
 
+function PullRequestRow({ id, prUrl }: { id: string; prUrl: string }) {
+  usePullRequestInfo(id, { poll: "list", prUrl });
+  return null;
+}
+
 function Probe({
   id,
   batch = false,
@@ -172,4 +177,64 @@ describe("usePullRequestInfo turn-end invalidate", () => {
       expect(fetchMock).toHaveBeenCalledTimes(4);
     },
   );
+
+  it("fetches each open PR once at turn end, joining in-flight fetches and skipping merged/closed PRs", async () => {
+    // N rows each register a turn-end invalidate; without dedupe this is N×N fetches.
+    const rowCount = 10;
+    const urls = Array.from(
+      { length: rowCount },
+      (_, i) => `https://github.com/org/repo/pull/${i}`,
+    );
+    const stateByUrl = new Map(
+      urls.map((url, i) => [url, i < 3 ? "MERGED" : i < 6 ? "CLOSED" : "OPEN"]),
+    );
+    const openCount = urls.filter((url) => stateByUrl.get(url) === "OPEN").length;
+    const respond = (input: string) => {
+      const prUrl = decodeURIComponent(String(input).split("pr_url=")[1] ?? "");
+      return pullRequestInfoResponse(
+        prUrl ? { pr: { url: prUrl, state: stateByUrl.get(prUrl) } } : {},
+      );
+    };
+    fetchMock.mockImplementation(async (input: string) => respond(input));
+    stubChatStore("conv_live", "running");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+    const tree = () => (
+      <QueryClientProvider client={qc}>
+        <Probe id="conv_live" />
+        {urls.map((url) => (
+          <PullRequestRow key={url} id="conv_live" prUrl={url} />
+        ))}
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(rowCount + 1));
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+
+    // Slow fetches: each stays in flight until released.
+    fetchMock.mockClear();
+    const release: (() => void)[] = [];
+    fetchMock.mockImplementation(
+      (input: string) =>
+        new Promise<Response>((resolve) => {
+          release.push(() => resolve(respond(input)));
+        }),
+    );
+    stubChatStore("conv_live", "idle");
+    rerender(tree());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1 + openCount));
+
+    // A second turn end while those fetches are in flight joins them, not restarts them.
+    stubChatStore("conv_live", "running");
+    rerender(tree());
+    stubChatStore("conv_live", "idle");
+    rerender(tree());
+    await waitFor(() => expect(qc.isFetching()).toBe(1 + openCount));
+    expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
+
+    act(() => {
+      release.forEach((resolveFetch) => resolveFetch());
+    });
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
+  });
 });

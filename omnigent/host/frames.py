@@ -480,6 +480,9 @@ class HostLaunchRunnerFrame:
     :param session_env_handoff_id: Opaque ID of the launching CLI's local
         forwarded-environment handoff, e.g. ``"3qA0x_7Kp2..."``. ``None`` when
         no CLI handed values to this launch, as for a server-driven restart.
+    :param thinking_summaries: ``True`` when the session owner asks Claude and
+        Codex for thinking summaries. ``None`` (off, or an older server) omits
+        the field and launches as before.
     """
 
     request_id: str
@@ -493,6 +496,7 @@ class HostLaunchRunnerFrame:
     mcp_disabled_servers_active_harnesses: list[str] | None = None
     harness_telemetry: dict[str, Any] | None = None
     session_env_handoff_id: str | None = None
+    thinking_summaries: bool | None = None
 
 
 @dataclass
@@ -1965,6 +1969,8 @@ def encode_host_frame(frame: HostFrame) -> str:
             payload["superseded_runner_ids"] = list(frame.superseded_runner_ids)
         if frame.harness_telemetry is not None:
             payload["harness_telemetry"] = frame.harness_telemetry
+        if frame.thinking_summaries is not None:
+            payload["thinking_summaries"] = frame.thinking_summaries
         return _encode_payload(payload)
     if isinstance(frame, HostLaunchRunnerResultFrame):
         return _encode_payload(
@@ -3229,6 +3235,9 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
         ),
         harness_telemetry=harness_telemetry,
         session_env_handoff_id=_optional_nullable_str(msg, "session_env_handoff_id"),
+        thinking_summaries=(
+            _optional_bool(msg, "thinking_summaries") if "thinking_summaries" in msg else None
+        ),
     )
 
 

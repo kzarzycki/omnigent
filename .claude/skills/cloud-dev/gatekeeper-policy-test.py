@@ -29,6 +29,16 @@ POLICY = {
     "spec": {"auto": [{"paths": GLOBS}]},
     "delegate": "all",
     "land": {"queue": "mergify", "merge_commit_heads": ["sync/*"]},
+    "timeouts": {"run": "2h"},
+    "select": {
+        "build_inputs": [
+            "pyproject.toml",
+            "uv.lock",
+            "mise.toml",
+            ".github/**",
+        ],
+        "build_inputs_in_queue": "floor",
+    },
 }
 INSIDE = [
     "mise.toml",

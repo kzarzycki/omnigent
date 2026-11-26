@@ -120,7 +120,10 @@ name (`Bash`, `Write`; the built-in policies already match them), then shows an
 approval card unless the session runs in `bypassPermissions`: set it per session
 with `permission_mode` on the session create request (`POST /v1/sessions`), or
 for every session with `permission_mode: bypassPermissions` in the agent spec's
-`executor.config`. Policy runs first in both, so a policy deny still denies.
+`executor.config`. The `acp.agents` entry takes the same `permission_mode` line
+and writes it into the picker agent's spec, so a session that names no mode
+starts in it, and a request for a stricter mode still tightens it. Policy runs
+first in all of these, so a policy deny still denies.
 A card left unanswered for 30 minutes denies the call. Tools the CLI treats as
 read-only, such as `Read` and `Grep`, never ask.
 

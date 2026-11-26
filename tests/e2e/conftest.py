@@ -1974,3 +1974,8 @@ def resume_test_server(
                 proc.kill()
                 proc.wait(timeout=5)
         log_handle.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_config() -> None:
+    """Keep the suite-owned config home: session-scoped servers inherited it."""

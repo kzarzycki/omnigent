@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_aliases import canonicalize_harness
 
 if TYPE_CHECKING:
     from omnigent.server.host_registry import HostRegistry
@@ -250,8 +251,19 @@ async def refuse_blocked_start_defaults(
 
         binding = binding_for_harness(inference_snapshot["runtime_config"], harness)
         default_model = binding.default_model if binding is not None else None
+    if default_model is None and spec is not None and canonicalize_harness(harness) == "acp":
+        from omnigent.models.model_catalog import _acp_launch_model
+
+        try:
+            default_model = _acp_launch_model(spec)
+        except Exception:
+            # An unreadable default is an unknown one: refused below.
+            logger.debug("ACP default model unavailable", exc_info=True)
     if default_model is None and harness and host_registry is not None and host_id:
-        default_model = await _host_default_model(host_registry, host_id, harness)
+        # Keep the ``acp:<slug>`` id so the host finds the agent's config.
+        spec_harness = str(spec.executor.config.get("harness") or "") if spec else ""
+        host_harness = spec_harness if spec_harness.startswith("acp:") else harness
+        default_model = await _host_default_model(host_registry, host_id, host_harness)
     if default_model is None:
         # An unknown default might be a blocked one, so the start names its model.
         raise OmnigentError(

@@ -654,6 +654,65 @@ async def test_handle_model_options_claude_probe_failure_is_failed(
     _cleanup_host(host)
 
 
+@pytest.mark.parametrize(("blocked", "refused"), [("fixture-model", True), ("other-model", False)])
+async def test_split_deploy_start_checks_the_hosts_acp_default_model(
+    monkeypatch: pytest.MonkeyPatch, blocked: str, refused: bool
+) -> None:
+    """The server has no ``acp.agents``; the host's configured model decides the start."""
+    from omnigent.errors import OmnigentError
+    from omnigent.server import model_block_list
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    host = _make_host_process()
+    host_config: dict[str, object] = {
+        "acp": {
+            "agents": [{"name": "Fixture", "command": "fixture-acp", "model": "fixture-model"}]
+        }
+    }
+    monkeypatch.setattr("omnigent.onboarding.acp_auth.load_config", lambda: host_config)
+    # The server process reads its own (empty) config.
+    monkeypatch.setattr("omnigent.models.model_catalog._acp_launch_model", lambda _spec: None)
+
+    async def _ask_host(**kwargs: Any) -> dict[str, Any]:
+        frame = HostModelOptionsFrame(request_id="req_acp", harness=kwargs["harness"])
+        result = await host._handle_model_options(frame)
+        return {"status": result.status, "models": result.models}
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._host_model_options.request_host_model_options", _ask_host
+    )
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list({"blocked_models": [blocked]}),
+    )
+
+    class _Registry:
+        def get(self, _host_id: str) -> object:
+            return object()
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="acp-fixture",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "acp:fixture"}),
+    )
+    start = model_block_list.refuse_blocked_start_defaults(
+        host_registry=_Registry(),
+        host_id="host_fixture",
+        harness="acp",
+        spec=spec,
+        inference_snapshot=None,
+        model_override=None,
+        reasoning_effort=None,
+    )
+    if refused:
+        with pytest.raises(OmnigentError, match="'fixture-model' is blocked"):
+            await start
+    else:
+        await start
+    _cleanup_host(host)
+
+
 async def test_handle_model_options_uses_host_pi_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3583,6 +3642,8 @@ async def test_fast_capability_discovery_is_included_in_hello(
         host._capabilities_initialized = True
 
     monkeypatch.setattr(host, "_initialize_capabilities", _discover)
+    # The resources loop's frame would race the cancel on a busy machine.
+    monkeypatch.setattr("omnigent.host.connect.sample_host_resources", lambda: None)
     tunnel = _BlockingTunnel()
     serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
     try:
@@ -13820,6 +13881,46 @@ async def test_host_reports_mcp_storage_failure_without_overwriting(tmp_path, mo
     assert result.error_code == "io"
     assert result.error == "Cannot update disabled MCP servers: io"
     assert path.read_text() == stored
+
+
+@pytest.mark.parametrize(("thinking_summaries", "expected"), [(None, False), (True, True)])
+async def test_thinking_summaries_launch_frame_to_runner_environment(thinking_summaries, expected):
+    from omnigent.runner.identity import (
+        RUNNER_THINKING_SUMMARIES_ENV_VAR,
+        runner_thinking_summaries,
+    )
+
+    frame = decode_host_frame(
+        encode_host_frame(
+            HostLaunchRunnerFrame(
+                "launch", "binding", "/repo", thinking_summaries=thinking_summaries
+            )
+        )
+    )
+    env = _build_runner_env(
+        # The host's own environment never turns it on.
+        {RUNNER_THINKING_SUMMARIES_ENV_VAR: "1"},
+        server_url="http://localhost",
+        runner_id="runner",
+        binding_token="binding",
+        workspace="/repo",
+        parent_pid=1,
+        thinking_summaries=frame.thinking_summaries,
+        session_env={RUNNER_THINKING_SUMMARIES_ENV_VAR: "1"},
+    )
+    assert runner_thinking_summaries(env) is expected
+    assert (RUNNER_THINKING_SUMMARIES_ENV_VAR in env) is expected
+
+
+@pytest.mark.parametrize("raw", ["0", "true", ""])
+async def test_runner_thinking_summaries_reads_only_the_host_stamp(raw):
+    from omnigent.runner.identity import (
+        RUNNER_THINKING_SUMMARIES_ENV_VAR,
+        runner_thinking_summaries,
+    )
+
+    assert runner_thinking_summaries({}) is False
+    assert runner_thinking_summaries({RUNNER_THINKING_SUMMARIES_ENV_VAR: raw}) is False
 
 
 @pytest.mark.parametrize("activation", [None, [], ["claude"], ["codex"], ["claude", "codex"]])
