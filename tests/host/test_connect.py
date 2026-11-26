@@ -12986,6 +12986,8 @@ async def test_github_pr_update_reports_lock_contention_on_host(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(github_resource, "_pr_json", lambda *_a, **_kw: {"number": 42})
     monkeypatch.setattr(github_resource, "_reference_info", lambda *_a: {"pr": {"number": 42}})
+    # The listing's titles must not reach a real gh.
+    monkeypatch.setattr(github_resource, "_pr_titles_before", lambda *_a: {})
     url = "https://github.com/example/one/pull/42"
     registry = SessionPrRegistry("session")
     registry.record(
