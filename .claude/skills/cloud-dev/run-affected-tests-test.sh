@@ -99,6 +99,13 @@ grep -q "worker 'gw[0-9]*' crashed while running 'test_crash.py::test_kill'" "$t
 kills=$(wc -l < "$tmp/kills")  # BSD wc pads the count with spaces: compare it as a number
 [ "$kills" -eq 1 ] || fail "the killing test ran $kills times: the worker was restarted"
 [ -f "$tmp/record/failed-tests.json" ] || fail "a crashed run left no record: $(tail -5 "$tmp/real.out")"
+# A worker killed at import (during collection) makes pytest exit 5, which the empty-shard rule would pass: still 70.
+mkdir "$tmp/suite_import"
+printf '#!/bin/bash\ncase "$1" in *affected_tests.py) echo "%s" ;; *) exec %s "$@" ;; esac\n' "$tmp/suite_import" "$(command -v python3)" > "$tmp/realbin/python3"
+printf 'import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\ndef test_x():\n    pass\n' > "$tmp/suite_import/test_import_crash.py"
+printf 'def test_other():\n    pass\n' > "$tmp/suite_import/test_other.py"
+real AFFECTED_TESTS_SHARDS=8 AFFECTED_TESTS_SHARD=0; rc=$?
+[ "$rc" = 70 ] || fail "a worker crash at import in a shard exited $rc, not 70: $(tail -5 "$tmp/real.out")"
 # A whole-suite selection, unsharded and outside CI, is skipped (record: nothing failed); a shard, CI
 # or AFFECTED_TESTS_FULL=1 runs it.
 line="affected tests: whole suite selected; the merge queue's sharded gate runs it"

@@ -45,8 +45,9 @@ rc=0
 OMNIGENT_SKIP_WEB_UI=true $wall \
   uv run --no-sync pytest -n "${AFFECTED_TESTS_WORKERS:-auto}" --dist=loadfile --max-worker-restart=0 \
   --timeout="${AFFECTED_TESTS_TIMEOUT:-90}" "$@" | tee "$work/pytest.log" || rc=$?
-# A crash makes pytest exit 1 like a failed test, but the run is incomplete: exit 70 keeps it from reading as a full one.
-if [ "$rc" = 1 ] && grep -q 'xdist: worker .* crashed and worker restarting disabled' "$work/pytest.log"; then
+# A crash makes pytest exit 1 like a failed test (5 when it hits during collection), but the run is incomplete:
+# exit 70 keeps it from reading as a full one. This runs before the empty-shard rule below.
+if [ "$rc" != 0 ] && grep -q 'worker .* crashed and worker restarting disabled' "$work/pytest.log"; then
   echo "affected tests: an xdist worker crashed, so the run stopped early (see 'crashed while running' above); exit 70" >&2
   rc=70
 fi
