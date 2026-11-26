@@ -898,6 +898,15 @@ _TOKEN_FIELDS = (
 )
 
 
+# USD per token at the cheapest Claude rates (Haiku): a floor for what a turn cost.
+_FLOOR_RATES = {
+    "input_tokens": 1e-6,
+    "output_tokens": 5e-6,
+    "cache_read_input_tokens": 1e-7,
+    "cache_creation_input_tokens": 1.25e-6,
+}
+
+
 class UsageTracker:
     """Turn the cloud stream's usage into one ACP ``usage`` object per turn.
 
@@ -915,20 +924,26 @@ class UsageTracker:
         self.turn: dict | None = None
         # Tokens the turn in progress has spent so far, from its assistant messages: the
         # stream carries cost only on the final ``result``, so a turn that dies before it
-        # can report these tokens (priced by Omnigent) and nothing else.
-        self.partial: dict[str, int] = {}
-        self._partial_ids: set[str] = set()
+        # can report these tokens and a floor for their cost. A message streamed more than
+        # once keeps its last usage; one already reported (or covered by a result) is skipped,
+        # as is a replay of it by a later turn.
+        self._by_id: dict[str, dict] = {}
+        self._anonymous: list[dict] = []
+        self._counted: set[str] = set()
 
     def begin_turn(self) -> None:
         """Forget what an earlier turn spent so far; a new turn starts from nothing."""
-        self.partial, self._partial_ids = {}, set()
+        self._by_id, self._anonymous = {}, []
 
     def note(self, payload: dict) -> None:
         kind = payload.get("type")
         if kind == "system" and payload.get("subtype") == "init" and payload.get("model"):
             self.model = str(payload["model"])
-        elif kind == "assistant" and not payload.get("parent_tool_use_id"):
+        elif kind == "assistant":
             usage = (payload.get("message") or {}).get("usage") or {}
+            self._note_partial(payload.get("message") or {}, usage)
+            if payload.get("parent_tool_use_id"):
+                return  # a helper's window is not the session's
             fill = sum(
                 usage.get(key) or 0
                 for key in (
@@ -940,38 +955,55 @@ class UsageTracker:
             )
             if fill > 0:
                 self.context_tokens = fill
-            self._note_partial(payload.get("message") or {}, usage)
         elif kind == "result" and not payload.get("parent_tool_use_id"):
             self._note_result(payload)
 
     def _note_partial(self, message: dict, usage: dict) -> None:
-        """Add one assistant message's tokens to the turn's running spend, once per message."""
+        """Record one assistant message's usage in the turn's running spend."""
         message_id = message.get("id")
         if isinstance(message_id, str) and message_id:
-            if message_id in self._partial_ids:
-                return
-            self._partial_ids.add(message_id)
-        for key, _ in _TOKEN_FIELDS:
-            if isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool):
-                self.partial[key] = self.partial.get(key, 0) + usage[key]
+            if message_id not in self._counted:
+                self._by_id[message_id] = usage  # the last snapshot of a message wins
+        else:
+            self._anonymous.append(usage)
+
+    def _partial_totals(self) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for usage in (*self._by_id.values(), *self._anonymous):
+            for key, _ in _TOKEN_FIELDS:
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    totals[key] = totals.get(key, 0) + value
+        return totals
+
+    def _close_partial(self) -> None:
+        self._counted.update(self._by_id)
+        self._by_id, self._anonymous = {}, []
 
     def take_partial(self) -> dict | None:
-        """The tokens a turn spent before it failed, once; ``None`` when none were seen.
+        """What a turn spent before it failed, once; ``None`` when no tokens were seen.
 
         The turn's final ``result`` never came, so the cloud's cumulative counters have not
-        grown to include these. They join the baseline now, so the next result's growth
-        leaves them out and a later turn does not count them again. Cost is not known
-        here: Omnigent prices the tokens, and the next result's cost growth still holds
-        this turn's real cost, a small overlap with that estimate.
+        grown to include these tokens: they join the baseline now, and the next result's
+        growth leaves them out. Cost is reported as a floor, the tokens at the cheapest
+        Claude rates, so Omnigent books it as given rather than pricing the tokens again.
+        The next result's cost growth holds this turn's real cost, so the floor is kept
+        in ``seen["booked_estimate"]`` and taken off it there: the two add up to the real
+        cost, counted once.
         """
-        partial, self.partial, self._partial_ids = self.partial, {}, set()
+        partial = self._partial_totals()
+        self._close_partial()
         if not partial:
             return None
         out: dict = {}
+        floor = 0.0
         for key, acp_key in _TOKEN_FIELDS:
             if key in partial:
                 out[acp_key] = partial[key]
                 self.seen[key] = self.seen.get(key, 0) + partial[key]
+                floor += partial[key] * _FLOOR_RATES[key]
+        out["costUsd"] = round(floor, 6)
+        self.seen["booked_estimate"] = self.seen.get("booked_estimate", 0) + out["costUsd"]
         out["totalTokens"] = out.get("inputTokens", 0) + out.get("outputTokens", 0)
         if self.context_tokens is not None:
             out["contextTokens"] = self.context_tokens
@@ -980,7 +1012,7 @@ class UsageTracker:
         return out
 
     def _note_result(self, payload: dict) -> None:
-        self.partial, self._partial_ids = {}, set()  # the result's growth covers them
+        self._close_partial()  # the result's growth covers them
         usage = payload.get("usage")
         by_model = payload.get("modelUsage")
         if isinstance(by_model, dict) and by_model:
@@ -1007,7 +1039,10 @@ class UsageTracker:
             if key in totals:
                 out[acp_key] = _growth(totals[key], self.seen.get(key))
         if "cost" in totals:
-            out["costUsd"] = round(_growth(totals["cost"], self.seen.get("cost")), 6)
+            growth = _growth(totals["cost"], self.seen.get("cost"))
+            # Less what a failed turn's report already booked of it.
+            out["costUsd"] = round(max(0.0, growth - self.seen.get("booked_estimate", 0)), 6)
+            self.seen["booked_estimate"] = 0
         self.seen.update(totals)
         if "inputTokens" in out or "outputTokens" in out:
             out["totalTokens"] = out.get("inputTokens", 0) + out.get("outputTokens", 0)

@@ -247,6 +247,7 @@ _SPENT = {
     "cache_read_input_tokens": 4000,
     "cache_creation_input_tokens": 500,
     "context_tokens": 4510,
+    "cost_usd": 0.001135,
     "model": _MODEL,
 }
 
@@ -348,3 +349,87 @@ async def test_a_failed_turn_s_usage_reaches_the_session_record(tmp_path: Path) 
         _accumulate_session_usage({"usage": errors[0].usage}, "conv_x", store)
     delta = store.increment_session_usage.call_args.args[1]
     assert delta["by_model"][_MODEL]["output_tokens"] == 20
+
+
+def _assistant(message_id: str | None, out: int, parent: str | None = None) -> dict:
+    message: dict = {"usage": {"input_tokens": 1, "output_tokens": out}}
+    if message_id:
+        message["id"] = message_id
+    payload: dict = {"type": "assistant", "message": message}
+    if parent:
+        payload["parent_tool_use_id"] = parent
+    return payload
+
+
+def test_a_streamed_message_counts_once_at_its_last_figure(bridge: ModuleType) -> None:
+    """Two events of one message id keep the later, grown one; a helper's message counts too."""
+    tracker = bridge.UsageTracker()
+    tracker.begin_turn()
+    for payload in (
+        _assistant("m1", 5),
+        _assistant("m1", 9),
+        _assistant("m2", 4, parent="toolu_1"),
+    ):
+        tracker.note(payload)
+    partial = tracker.take_partial()
+    assert partial is not None
+    assert (partial["inputTokens"], partial["outputTokens"]) == (2, 13)
+
+
+def test_a_replayed_turn_is_not_counted_again(bridge: ModuleType) -> None:
+    """A later turn that replays an earlier turn's events reports only what is new."""
+    tracker = bridge.UsageTracker()
+    tracker.begin_turn()
+    tracker.note(_assistant("m1", 5))
+    first = tracker.take_partial()
+    assert first is not None and first["outputTokens"] == 5
+    tracker.begin_turn()
+    tracker.note(_assistant("m1", 5))  # replayed from the backlog
+    tracker.note(_assistant("m2", 7))
+    second = tracker.take_partial()
+    assert second is not None and second["outputTokens"] == 7
+
+
+def test_a_failed_turn_then_a_good_one_cost_the_real_total_once(bridge: ModuleType) -> None:
+    """Booked as the server books it, the session's cost is the cloud's cumulative cost."""
+    from unittest.mock import MagicMock, patch
+
+    from omnigent.server.routes._sessions.orchestration import _accumulate_session_usage
+    from omnigent.stores.conversation_store import apply_session_usage_delta
+
+    record: dict = {}
+    store = MagicMock()
+    store.get_conversation.return_value = None
+
+    def increment(_session_id: str, delta: dict) -> dict:
+        apply_session_usage_delta(record, delta)
+        return record
+
+    store.increment_session_usage.side_effect = increment
+
+    def book(wire: dict) -> None:
+        usage = AcpExecutor._usage_from_result({"usage": wire})
+        assert usage is not None
+        _accumulate_session_usage({"usage": usage}, "conv_x", store)
+
+    tracker = bridge.UsageTracker()
+    tracker.note(_TURN_STREAM[0])
+    tracker.begin_turn()
+    tracker.note(_assistant("m1", 20))  # the turn dies here: 0.4 USD was spent, never reported
+    failed = tracker.take_partial()
+    assert failed is not None and 0 < failed["costUsd"] < 0.4
+    tracker.begin_turn()
+    tracker.note(
+        {
+            "type": "result",
+            "total_cost_usd": 1.0,  # cumulative: the failed turn's 0.4 and this turn's 0.6
+            "usage": {"input_tokens": 11, "output_tokens": 120},
+        }
+    )
+    final = tracker.take()
+    assert final is not None
+    with patch("omnigent.llms.context_window.fetch_model_pricing", return_value=None):
+        book(failed)
+        book(final)
+    assert record["total_cost_usd"] == pytest.approx(1.0)
+    assert (record["input_tokens"], record["output_tokens"]) == (11, 120)
