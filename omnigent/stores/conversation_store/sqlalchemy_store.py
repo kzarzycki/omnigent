@@ -2108,13 +2108,29 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param usage: The complete usage dict to persist, e.g.
             ``{"input_tokens": 1500, "output_tokens": 350,
             "total_tokens": 1850}``. May carry a nested ``"by_model"``
-            sub-dict (per-model token/cost buckets), hence ``Any``.
+            sub-dict (per-model token/cost buckets), hence ``Any``. Child
+            runs recorded by :meth:`record_child_usage` are not the caller's to
+            replace: the stored ``"child_usage"`` is always kept (read under the
+            same row lock) and any ``"child_usage"`` in *usage* is ignored, so a
+            snapshot taken before a child post, stale copy included, cannot
+            erase or revert it.
         """
         import json
 
-        encoded_usage = json.dumps(usage)
-
         def write(session: Session) -> None:
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            merged = {key: value for key, value in usage.items() if key != "child_usage"}
+            if meta is not None and meta.session_usage:
+                stored = json.loads(meta.session_usage)
+                if isinstance(stored, dict) and stored.get("child_usage"):
+                    merged["child_usage"] = stored["child_usage"]
+            encoded_usage = json.dumps(merged)
             session.execute(
                 update(SqlConversationMetadata)
                 .where(
@@ -2637,6 +2653,53 @@ class SqlAlchemyConversationStore(ConversationStore):
             "increment_session_usage",
             write,
         )
+
+    def record_child_usage(
+        self,
+        conversation_id: str,
+        key: str,
+        entry: dict[str, Any],
+        *,
+        max_entries: int,
+    ) -> bool | None:
+        """
+        Record one child run's usage at ``session_usage["child_usage"][key]``.
+
+        Same locking as :meth:`increment_session_usage`; see
+        :meth:`ConversationStore.record_child_usage`.
+        """
+        import json
+
+        def write(session: Session) -> bool | None:
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            if meta is None:
+                return None
+            current: dict[str, Any] = dict(json.loads(meta.session_usage or "{}"))
+            children = current.get("child_usage")
+            if not isinstance(children, dict):
+                children = {}
+            existed = key in children
+            if not existed and len(children) >= max_entries:
+                return None
+            children[key] = entry
+            current["child_usage"] = children
+            session.execute(
+                update(SqlConversationMetadata)
+                .where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                )
+                .values(session_usage=json.dumps(current))
+            )
+            return existed
+
+        return run_write_transaction(self._session_immediate, "record_child_usage", write)
 
     def add_daily_cost(self, user_id: str, day_utc: str, delta_usd: float) -> None:
         """

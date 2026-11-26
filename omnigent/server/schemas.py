@@ -4209,6 +4209,93 @@ class SideChatList(BaseModel):
     has_more: bool = False
 
 
+class ChildUsage(BaseModel):
+    """
+    One child CLI run's usage, recorded under its parent session.
+
+    A child run is a CLI (e.g. ``codex``, ``agy``) the session's agent started in
+    its own VM, which Omnigent cannot see otherwise. It is reported by
+    ``POST /v1/sessions/{session_id}/child-usage`` and listed under the parent
+    in ``GET /v1/usage``; it is never part of the parent's own ``cost_usd`` or
+    ``models`` rows.
+
+    :param key: The run's idempotency key, e.g. ``"verify-1"``.
+    :param harness: The CLI, e.g. ``"codex"``.
+    :param model: The model it ran, or ``None`` when unknown.
+    :param input_tokens: Input tokens when reported, else ``None``.
+    :param output_tokens: Output tokens when reported, else ``None``.
+    :param total_tokens: Total tokens (input + output when both were
+        reported without a total), or ``None`` when no count was.
+    :param cost_usd: The CLI's own cost, or the server's catalog price; ``None``
+        when neither exists (unpriced, not free).
+    :param session_id: The session that holds the entry; set on a report's
+        child rows, which may come from a sub-agent session of the listed one.
+    """
+
+    key: str
+    harness: str
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    session_id: str | None = None
+
+
+class ChildUsageRequest(BaseModel):
+    """
+    Body of ``POST /v1/sessions/{session_id}/child-usage``.
+
+    At least one token count or ``cost_usd`` is required.
+
+    :param key: Idempotency key for the child run (1-64 chars of
+        ``[A-Za-z0-9._:-]``); a repeated key replaces its entry.
+    :param harness: The CLI, e.g. ``"codex"``.
+    :param model: The model it ran; needed to price tokens server-side.
+    :param input_tokens: Input tokens, when known.
+    :param output_tokens: Output tokens, when known.
+    :param total_tokens: Total tokens, when that is all the CLI prints.
+    :param cost_usd: Cost the CLI printed, when it did; used as given.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    harness: str = Field(min_length=1, max_length=64, pattern=r"\S")
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    input_tokens: int | None = Field(default=None, ge=0, le=10**12)
+    output_tokens: int | None = Field(default=None, ge=0, le=10**12)
+    total_tokens: int | None = Field(default=None, ge=0, le=10**12)
+    cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False, le=10**9)
+
+    @model_validator(mode="after")
+    def _has_usage(self) -> ChildUsageRequest:
+        if all(
+            value is None
+            for value in (self.input_tokens, self.output_tokens, self.total_tokens, self.cost_usd)
+        ):
+            raise ValueError(
+                "one of input_tokens, output_tokens, total_tokens, cost_usd is required"
+            )
+        return self
+
+
+class ChildUsageResponse(BaseModel):
+    """
+    Response of ``POST /v1/sessions/{session_id}/child-usage``.
+
+    :param session_id: The parent session the entry was recorded under.
+    :param child: The stored entry.
+    :param replaced: ``True`` when the key was already recorded and its entry
+        was replaced, so the run still counts once.
+    """
+
+    object: Literal["child_usage"] = "child_usage"
+    session_id: str
+    child: ChildUsage
+    replaced: bool = False
+
+
 class SessionUsage(BaseModel):
     """
     One session's rolled-up LLM spend for the ``GET /v1/usage`` report.
@@ -4250,6 +4337,7 @@ class SessionUsage(BaseModel):
     other_harnesses: list[str] | None = None
     llm_model: str | None = None
     agent_name: str | None = None
+    child_usage: list[ChildUsage] = Field(default_factory=list)
 
 
 class DailyCost(BaseModel):
