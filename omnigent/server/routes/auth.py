@@ -60,6 +60,7 @@ from omnigent.server.oidc_access import OidcAdmissionPolicy, resolve_allowed_dom
 from omnigent.server.routes._oauth import NO_STORE_HEADERS, oauth_error
 from omnigent.server.routes.device_auth import (
     _generate_user_code,
+    grant_max_lifetime_seconds,
     issue_login_grant,
 )
 from omnigent.stores.permission_store import PermissionStore
@@ -1069,6 +1070,7 @@ def create_auth_router(
         # extra key, new CLIs against old servers see it absent.
         if refresh_token is not None:
             content["refresh_token"] = refresh_token
+            content["refresh_expires_in"] = grant_max_lifetime_seconds()
         return JSONResponse(status_code=200, content=content, headers=NO_STORE_HEADERS)
 
     # ── Native sign-in ──────────────────────────────────────────────────────
@@ -1128,6 +1130,7 @@ def create_auth_router(
                     user_id=pending.user_id,
                     cookie_secret=config.cookie_secret,
                 )
+                content["refresh_expires_in"] = grant_max_lifetime_seconds()
             except Exception:
                 _logger.exception("native sign-in: refresh grant issuance failed")
         return JSONResponse(status_code=200, content=content, headers=NO_STORE_HEADERS)
