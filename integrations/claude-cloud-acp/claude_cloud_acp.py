@@ -913,6 +913,15 @@ class UsageTracker:
         self.seen: dict[str, float] = {}
         self.loaded = False  # ``seen`` holds the baseline a previous bridge saved
         self.turn: dict | None = None
+        # Tokens the turn in progress has spent so far, from its assistant messages: the
+        # stream carries cost only on the final ``result``, so a turn that dies before it
+        # can report these tokens (priced by Omnigent) and nothing else.
+        self.partial: dict[str, int] = {}
+        self._partial_ids: set[str] = set()
+
+    def begin_turn(self) -> None:
+        """Forget what an earlier turn spent so far; a new turn starts from nothing."""
+        self.partial, self._partial_ids = {}, set()
 
     def note(self, payload: dict) -> None:
         kind = payload.get("type")
@@ -931,10 +940,47 @@ class UsageTracker:
             )
             if fill > 0:
                 self.context_tokens = fill
+            self._note_partial(payload.get("message") or {}, usage)
         elif kind == "result" and not payload.get("parent_tool_use_id"):
             self._note_result(payload)
 
+    def _note_partial(self, message: dict, usage: dict) -> None:
+        """Add one assistant message's tokens to the turn's running spend, once per message."""
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id:
+            if message_id in self._partial_ids:
+                return
+            self._partial_ids.add(message_id)
+        for key, _ in _TOKEN_FIELDS:
+            if isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool):
+                self.partial[key] = self.partial.get(key, 0) + usage[key]
+
+    def take_partial(self) -> dict | None:
+        """The tokens a turn spent before it failed, once; ``None`` when none were seen.
+
+        The turn's final ``result`` never came, so the cloud's cumulative counters have not
+        grown to include these. They join the baseline now, so the next result's growth
+        leaves them out and a later turn does not count them again. Cost is not known
+        here: Omnigent prices the tokens, and the next result's cost growth still holds
+        this turn's real cost, a small overlap with that estimate.
+        """
+        partial, self.partial, self._partial_ids = self.partial, {}, set()
+        if not partial:
+            return None
+        out: dict = {}
+        for key, acp_key in _TOKEN_FIELDS:
+            if key in partial:
+                out[acp_key] = partial[key]
+                self.seen[key] = self.seen.get(key, 0) + partial[key]
+        out["totalTokens"] = out.get("inputTokens", 0) + out.get("outputTokens", 0)
+        if self.context_tokens is not None:
+            out["contextTokens"] = self.context_tokens
+        if self.model:
+            out["model"] = self.model
+        return out
+
     def _note_result(self, payload: dict) -> None:
+        self.partial, self._partial_ids = {}, set()  # the result's growth covers them
         usage = payload.get("usage")
         by_model = payload.get("modelUsage")
         if isinstance(by_model, dict) and by_model:
@@ -1342,6 +1388,7 @@ def run_turn(acp_id: str, text: str) -> str:
         s.usage.load(s.cloud_id)
     s.cancelled.clear()
     s.interrupted = False
+    s.usage.begin_turn()
     s.running = True
     turn_done = threading.Event()
     beat = threading.Thread(
@@ -1649,7 +1696,11 @@ def handle_prompt(msg: dict) -> None:
         stop = run_turn(params["sessionId"], prompt_text(params.get("prompt") or []))
         result: dict = {"stopReason": stop}
         tracker = session_for(params["sessionId"]).usage
-        if (usage := tracker.take()) is not None:
+        # A cancelled turn whose final result never came still reports what it spent.
+        usage = tracker.take()
+        if usage is None and stop == "cancelled":
+            usage = tracker.take_partial()
+        if usage is not None:
             result["usage"] = usage
             cloud_id = session_for(params["sessionId"]).cloud_id
             if cloud_id:
@@ -1663,7 +1714,15 @@ def handle_prompt(msg: dict) -> None:
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
         message = str(exc) or repr(exc)  # never a bare error: Omnigent shows only this
-        send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": message}})
+        error: dict = {"code": -32000, "message": message}
+        # What the failed turn spent still counts: its tokens go with the error.
+        session = SESSIONS.get(params.get("sessionId"))
+        if session is not None and (partial := session.usage.take_partial()) is not None:
+            error["data"] = {"usage": partial}
+            if session.cloud_id:
+                with contextlib.suppress(OSError):
+                    remember(f"usage:{session.cloud_id}", json.dumps(session.usage.seen))
+        send({"jsonrpc": "2.0", "id": msg["id"], "error": error})
         return
     # Only after the response: a bridge that dies before it leaves the turn
     # unseen, so a retry of its message mirrors it again and is not sent twice.
