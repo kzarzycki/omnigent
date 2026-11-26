@@ -28,7 +28,7 @@ import hmac
 import secrets
 from typing import cast
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -583,8 +583,33 @@ class DeviceGrantStore:
                 return True
             return decode_device_grant_status(row.status) == "revoked"
 
+    def touch_login_grant(self, grant_id: str, now_epoch_seconds: int) -> None:
+        """Record a renewal of a login grant, restarting its idle clock.
+
+        Login grants never poll, so ``last_polled_at`` doubles as the time
+        of their last successful refresh.
+        """
+
+        def write(session: Session) -> None:
+            session.execute(
+                update(SqlDeviceGrant)
+                .where(
+                    SqlDeviceGrant.workspace_id == current_workspace_id(),
+                    SqlDeviceGrant.id == grant_id,
+                )
+                .values(last_polled_at=now_epoch_seconds)
+            )
+
+        run_write_transaction(self._session_immediate, "touch_login_grant_renewal", write)
+
     def purge_expired(
-        self, now_epoch_seconds: int, *, max_lifetime_seconds: int | None = None
+        self,
+        now_epoch_seconds: int,
+        *,
+        max_lifetime_seconds: int | None = None,
+        login_client_id: str | None = None,
+        login_idle_seconds: int | None = None,
+        login_cap_seconds: int | None = None,
     ) -> int:
         """Delete grants that can no longer yield a usable token.
 
@@ -613,18 +638,48 @@ class DeviceGrantStore:
         ]
         if max_lifetime_seconds is not None:
             cutoff = now_epoch_seconds - max_lifetime_seconds
-            conds.append(
-                and_(
-                    SqlDeviceGrant.status.in_(
-                        [
-                            encode_device_grant_status("redeemed"),
-                            encode_device_grant_status("revoked"),
-                        ]
-                    ),
-                    SqlDeviceGrant.approved_at.isnot(None),
-                    SqlDeviceGrant.approved_at <= cutoff,
-                )
+            settled = SqlDeviceGrant.status.in_(
+                [
+                    encode_device_grant_status("redeemed"),
+                    encode_device_grant_status("revoked"),
+                ]
             )
+            sliding = login_client_id is not None and login_idle_seconds is not None
+            fixed_lifetime = and_(
+                settled,
+                SqlDeviceGrant.approved_at.isnot(None),
+                SqlDeviceGrant.approved_at <= cutoff,
+            )
+            if not sliding:
+                conds.append(fixed_lifetime)
+            else:
+                # Sliding login grants die after idle days (or the optional
+                # cap from login); every other grant keeps the fixed lifetime.
+                idle_dead = func.coalesce(
+                    SqlDeviceGrant.last_polled_at, SqlDeviceGrant.approved_at
+                ) <= now_epoch_seconds - cast(int, login_idle_seconds)
+                dead = [idle_dead]
+                if login_cap_seconds is not None:
+                    dead.append(
+                        SqlDeviceGrant.approved_at <= now_epoch_seconds - login_cap_seconds
+                    )
+                conds.append(
+                    and_(
+                        fixed_lifetime,
+                        or_(
+                            SqlDeviceGrant.client_id.is_(None),
+                            SqlDeviceGrant.client_id != login_client_id,
+                        ),
+                    )
+                )
+                conds.append(
+                    and_(
+                        settled,
+                        SqlDeviceGrant.approved_at.isnot(None),
+                        SqlDeviceGrant.client_id == login_client_id,
+                        or_(*dead),
+                    )
+                )
 
         def write(session: Session) -> int:
             result = cast(
