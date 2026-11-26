@@ -49,7 +49,12 @@ def http_error(code: int, body: dict | None = None) -> urllib.error.HTTPError:
 
 def test_idle_session_resumes_the_same_cloud_session(monkeypatch):
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(bridge, "_send", lambda s, text: (sent.append((s.cloud_id, text)), (1, False))[1])
+
+    def record(session, text):
+        sent.append((session.cloud_id, text))
+        return 1, False
+
+    monkeypatch.setattr(bridge, "_send", record)
     session = idle_session()
     assert bridge.run_turn("acp-a", REPLAY) == "end_turn"
     assert session.cloud_id == CLOUD_ID and sent == [(CLOUD_ID, "continue")]
