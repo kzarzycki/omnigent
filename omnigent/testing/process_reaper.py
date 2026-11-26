@@ -99,7 +99,25 @@ def _is_pytest_process(argv: list[str]) -> bool:
     )
 
 
-def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]:
+def _in_callers_session(pid: int) -> bool:
+    """Whether *pid* shares the caller's POSIX session (a plain child, not a detached spawn).
+
+    :param pid: The process to inspect.
+    :returns: ``True`` when it is in the caller's session; ``False`` when it
+        is detached or its session cannot be read.
+    """
+    try:
+        return os.getsid(pid) == os.getsid(0)
+    except (OSError, AttributeError):
+        return False
+
+
+def find_leaked_omnigent_processes(
+    data_dir: Path | str,
+    *,
+    exclude_pids: frozenset[int] = frozenset(),
+    detached_only: bool = False,
+) -> list[psutil.Process]:
     """Find live Omnigent processes attributable to *data_dir*.
 
     A process is attributed when its exec-time ``OMNIGENT_DATA_DIR`` equals
@@ -112,6 +130,10 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
     a leak.
 
     :param data_dir: The session's throwaway ``OMNIGENT_DATA_DIR``.
+    :param exclude_pids: Pids to skip, e.g. processes that predate a module.
+    :param detached_only: Skip processes in the caller's own session, so only
+        ``start_new_session=True`` spawns match; a plain child of a test
+        worker is left to the session-end sweep.
     :returns: Matching processes, excluding the caller.
     """
     needle = str(data_dir).rstrip(os.sep)
@@ -121,7 +143,7 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
     me = os.getpid()
     leaked: list[psutil.Process] = []
     for pid in psutil.pids():
-        if pid == me:
+        if pid == me or pid in exclude_pids or (detached_only and _in_callers_session(pid)):
             continue
         try:
             proc = psutil.Process(pid)
@@ -142,7 +164,11 @@ def find_leaked_omnigent_processes(data_dir: Path | str) -> list[psutil.Process]
 
 
 def reap_leaked_omnigent_processes(
-    data_dir: Path | str, *, timeout: float = _REAP_TIMEOUT_S
+    data_dir: Path | str,
+    *,
+    timeout: float = _REAP_TIMEOUT_S,
+    exclude_pids: frozenset[int] = frozenset(),
+    detached_only: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Terminate every Omnigent process attributable to *data_dir*.
 
@@ -151,11 +177,15 @@ def reap_leaked_omnigent_processes(
 
     :param data_dir: The session's throwaway ``OMNIGENT_DATA_DIR``.
     :param timeout: Seconds to wait between TERM and KILL.
+    :param exclude_pids: Pids to leave alone (see :func:`find_leaked_omnigent_processes`).
+    :param detached_only: Reap only processes outside the caller's session.
     :returns: ``(reaped, survivors)`` command lines: processes confirmed
         gone, and any that outlived even SIGKILL (e.g. stuck in
         uninterruptible sleep) so a genuine non-reap stays visible.
     """
-    leaked = find_leaked_omnigent_processes(data_dir)
+    leaked = find_leaked_omnigent_processes(
+        data_dir, exclude_pids=exclude_pids, detached_only=detached_only
+    )
     if not leaked:
         return [], []
     cmdline_by_pid = {proc.pid: " ".join(_proc_argv(proc)) for proc in leaked}
