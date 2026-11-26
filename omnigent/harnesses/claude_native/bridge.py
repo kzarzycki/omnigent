@@ -96,7 +96,6 @@ from omnigent.harnesses.diagnostics import (
 from omnigent.harnesses.kiro_native import bridge as kiro_bridge
 from omnigent.harnesses.launch_args import (
     args_before_separator,
-    has_flag_before_separator,
     insert_before_separator,
 )
 from omnigent.host.identity_env import in_managed_sandbox
@@ -3484,7 +3483,8 @@ def _args_request_bypass_permissions(args: tuple[str, ...]) -> bool:
     :param args: Claude CLI args, e.g. ``("--dangerously-skip-permissions",)``.
     :returns: ``True`` when this launch requests bypass mode.
     """
-    return has_flag_before_separator(args, "--dangerously-skip-permissions") or (
+    # The switch takes no value, so `--dangerously-skip-permissions=false` is not it.
+    return "--dangerously-skip-permissions" in args_before_separator(args) or (
         _arg_value(args, "--permission-mode") == "bypassPermissions"
     )
 

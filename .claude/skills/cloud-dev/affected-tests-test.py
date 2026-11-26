@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# the queue's gate sets it for the whole run; each case here chooses its own mode
+os.environ.pop("AFFECTED_TESTS_BUILD_INPUTS", None)
 sys.path.insert(0, str(HERE))
 import affected_tests  # noqa: E402
 
@@ -40,6 +42,9 @@ def select(
     return out.stdout.split()
 
 
+assert {"yaml", "pyyaml"} <= affected_tests.import_names("pyyaml") | {"pyyaml"}
+assert "some_lib" in affected_tests.import_names("some-lib")  # not installed: its own name
+
 with tempfile.TemporaryDirectory() as tmp:
     repo = Path(tmp) / "repo"  # records stay outside it
     repo.mkdir()
@@ -55,6 +60,11 @@ with tempfile.TemporaryDirectory() as tmp:
     (repo / "tests" / "server" / "test_other.py").write_text(
         "import omnigent.gadget  # see README.md\n"
     )
+    (repo / "tests" / "client").mkdir()
+    (repo / "tests" / "client" / "test_uses.py").write_text(
+        "from tests.server.conftest import fixture  # not conftest.py's name alone\n"
+        "pytest_plugins = ['tests.e2e.conftest']\n"
+    )
     (repo / "omnigent" / "widgets" / "frob.py").write_text("x = 1\n")
     (repo / "omnigent" / "widgets" / "__init__.py").write_text("")
     (repo / "README.md").write_text("hi\n")
@@ -68,16 +78,77 @@ with tempfile.TemporaryDirectory() as tmp:
     assert select(repo, {"omnigent/widgets/__init__.py": "# p\n"}) == [widget]
     assert select(repo, {"README.md": "more\n"}) == []
     assert select(repo, {"omnigent/unused.py": "y = 1\n"}) == []
-    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == ["tests"]
+    # a conftest selects its directory, which holds the tests that name a file too, and the
+    # test files elsewhere that import it
+    uses = "tests/client/test_uses.py"
+    assert select(repo, {"tests/server/conftest.py": "# c\n"}) == [uses, "tests/server"]
+    both = {"tests/server/conftest.py": "# c\n", "omnigent/widgets/frob.py": "x = 5\n"}
+    assert select(repo, both) == [uses, "tests/server"]
+    assert select(repo, {"tests/conftest.py": "# c\n"}) == ["tests"]
+    assert select(repo, {"conftest.py": "# c\n"}) == ["tests"]
+    # a suite check-fast skips: only the tests outside it that load it
+    assert affected_tests.targets(["tests/e2e/conftest.py"]) == [uses]
+    assert affected_tests.targets(["tests/gone/conftest.py"]) == []  # a deleted directory
     assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]
     assert select(repo, {"tests/helpers/util.py": "z = 1\n"}) == ["tests"]
     # suites the default addopts ignore are never selected
     (repo / "tests" / "e2e").mkdir()
     (repo / "tests" / "e2e" / "test_live.py").write_text("import omnigent.widgets.frob\n")
+    (repo / "tests" / "server" / "test_requests.py").write_text("import requests\n")
+    (repo / "tests" / "server" / "test_yaml.py").write_text("import yaml\n")
+    (repo / "tests" / "server" / "test_root.py").write_text("import omnigent.widgets\n")
+    lock = (
+        '[[package]]\nname = "requests"\nversion = "1.0"\n\n'
+        '[[package]]\nname = "other-lib"\nversion = "2.0"\n\n'
+        '[[package]]\nname = "pyyaml"\nversion = "6.0"\n\n'
+        '[[package]]\nname = "omnigent"\nversion = "0.1"\nsource = { editable = "." }\n'
+    )
+    (repo / "uv.lock").write_text(lock)
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", "e2e")
     run("git", "tag", "-f", "base")
     assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
+    # the queue's floor: a build input alone selects nothing the tests don't name
+    floor = {"AFFECTED_TESTS_BUILD_INPUTS": "floor"}
+    requests_test = "tests/server/test_requests.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == []
+    # a test that reads the file by name still runs
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_lock_format.py").write_text('read("pyproject.toml")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "lock test")
+    run("git", "tag", "-f", "base")
+    lock_test = "tests/server/test_lock_format.py"
+    assert select(repo, {"pyproject.toml": "[x]\n"}, **floor) == [lock_test]
+    # an import after a comma, and a patched dotted name, name the package too
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "server" / "test_comma.py").write_text("import os, requests\n")
+    (repo / "tests" / "server" / "test_patch.py").write_text('patch("requests.get")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "comma")
+    run("git", "tag", "-f", "base")
+    assert select(repo, {"pyproject.toml": "[x]\n"}) == ["tests"]  # outside the queue: unchanged
+    requests_importers = sorted(
+        [requests_test, "tests/server/test_comma.py", "tests/server/test_patch.py"]
+    )
+    got = select(repo, {"uv.lock": lock.replace("1.0", "1.1")}, **floor)
+    assert got == requests_importers, got
+    assert select(repo, {"uv.lock": lock.replace("2.0", "2.1")}, **floor) == []
+    assert (
+        select(
+            repo, {"uv.lock": lock + '\n[[package]]\nname = "Gizmos"\nversion = "3"\n'}, **floor
+        )
+        == []
+    )
+    yaml_test = "tests/server/test_yaml.py"
+    assert select(repo, {"uv.lock": lock.replace("6.0", "6.1")}, **floor) == [yaml_test]  # alias
+    # the project's own editable package moving selects nothing: every test imports it
+    assert select(repo, {"uv.lock": lock.replace("0.1", "0.2")}, **floor) == []
+    both_inputs = {"uv.lock": lock.replace("1.0", "1.1"), "omnigent/widgets/frob.py": "x = 6\n"}
+    assert select(repo, both_inputs, **floor) == sorted([*requests_importers, widget])
+    assert select(repo, {"tests/helpers/util.py": "z = 2\n"}, **floor) == [
+        "tests"
+    ]  # shared test setup stays whole
     # no argument: GATE_BASE, else the merge base with origin/mine, else everything
     change = {"omnigent/widgets/frob.py": "x = 4\n"}
     assert select(repo, change, (), GATE_BASE="base") == [widget]
@@ -165,25 +236,39 @@ with tempfile.TemporaryDirectory() as tmp:
     then = head()
     assert lines(today()) == [other, widget]
     earlier = record(then, [other, widget], {failed: True})
-    # same tree, one failed node id: exactly that node id, a flake candidate
+    # same tree, one failed node id: a flake candidate, so the whole selection runs, since alone a
+    # test that fails only after other tests passes
     out, flakes = since(earlier)
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
-    assert f"affected tests: {failed}: failed in that run" in why, why
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
+    whole_line = (
+        "affected tests: nothing changed reselects 1 failed test(s), so the whole selection runs"
+    )
+    assert any(line.startswith(whole_line) for line in why), why
     # only the failed test's file changed: that file, and the node id runs with it
     commit({widget: "from omnigent.widgets import frob  # fixed\n"})
     out, flakes = since(earlier)
     assert lines(out) == [widget] and flakes == [], (out, flakes)
-    # a module changed: the failed test plus what targets() picks for that module
+    # two failed tests and a fix for one: the other is a candidate, so the whole selection runs
+    out, flakes = since(record(then, [other, widget], {failed: True, f"{other}::t": True}))
+    assert lines(out) == [other, widget] and flakes == [f"{other}::t"], (out, flakes)
+    assert f"affected tests: flake candidate: {other}::t" in why, why
+    # a module and the failed test's file changed: what targets() picks for each, with reasons
+    run("git", "reset", "-q", "--hard", then)
+    commit({"omnigent/gadget.py": "g = 2\n", third: "import omnigent.thing  # c\n"})
+    out, flakes = since(record(then, [other, widget, third], {f"{third}::t": True}))
+    assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
+    assert lines(out) == [other, third] and flakes == [], (out, flakes)
+    assert f"affected tests: {other}: names a file that differs" in why, why
+    assert f"affected tests: {third}: names a file that differs" in why, why
+    # a change that doesn't reselect the failed test: the whole selection runs
     run("git", "reset", "-q", "--hard", then)
     commit({"omnigent/gadget.py": "g = 2\n"})
     out, flakes = since(earlier)
-    assert affected_tests.targets(["omnigent/gadget.py"]) == [other]
-    assert lines(out) == [other, failed] and flakes == [failed], (out, flakes)
-    assert f"affected tests: {other}: names a file that differs" in why, why
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
     # a file added or deleted since counts as changed
     run("git", "reset", "-q", "--hard", then)
-    out, _ = since(record(before_gadget, [other, widget], {failed: True}))
-    assert lines(out) == [other, failed], out
+    out, _ = since(record(before_gadget, [other, widget], {}, "0"))
+    assert lines(out) == [other], out
     run("git", "rm", "-q", "omnigent/widgets/frob.py")
     commit({})
     out, flakes = since(earlier)
@@ -194,31 +279,33 @@ with tempfile.TemporaryDirectory() as tmp:
     assert lines(out) == [widget] and flakes == [], (out, flakes)
     # a selected test file the earlier run didn't select runs
     run("git", "reset", "-q", "--hard", then)
-    out, flakes = since(record(then, [widget], {failed: True}))
-    assert lines(out) == [other, failed], out
+    out, flakes = since(record(then, [widget], {}, "0"))
+    assert lines(out) == [other], out
     assert f"affected tests: {other}: selected now, not in that run" in why, why
-    # a test setup change reruns the whole selection, so no flake is named
+    # a test setup change reruns its whole directory and its importers, so no flake is named
     commit({"tests/server/conftest.py": "# c\n"})
     out, flakes = since(earlier)
-    assert lines(out) == ["tests"] and flakes == [], (out, flakes)
-    # with the whole tree selected, a failed test still runs alone, unless its file is gone
+    assert lines(out) == [uses, "tests/server"] and flakes == [], (out, flakes)
+    # a whole-tree record: a flake candidate runs today's selection; a failed file that's gone
+    # doesn't count
     whole = record(head(), ["tests"], {failed: True, "tests/server/test_gone.py::t": True})
     out, flakes = since(whole)
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    assert lines(out) == [uses, "tests/server"] and flakes == [failed], (out, flakes)
     # a failed test gone from the tree, or outside today's selection, doesn't run
     run("git", "reset", "-q", "--hard", then)
     out, _ = since(
         record(then, [other, widget], {"tests/server/test_gone.py::t": True, third: True})
     )
     assert lines(out) == [], out
-    # requeued onto a newer base: what the base moved doesn't run, the failed test does
+    # requeued onto a newer base: what the base moved isn't a change, so the failed test is a flake
+    # candidate and the whole selection runs
     run("git", "checkout", "-q", "-B", "newer", "base")
     commit({"omnigent/thing.py": "t = 2\n"})
     run("git", "checkout", "-q", "pr")
     run("git", "rebase", "-q", "newer")
     assert lines(today("newer")) == [other, widget]
     out, flakes = since(earlier, "newer")
-    assert lines(out) == [failed] and flakes == [failed], (out, flakes)
+    assert lines(out) == [other, widget] and flakes == [failed], (out, flakes)
     # the base moved a test setup file: every selected test reruns, and no flake is named
     run("git", "checkout", "-q", "-B", "newest", "newer")
     commit({"tests/server/conftest.py": "# c\n"})
@@ -244,4 +331,18 @@ with tempfile.TemporaryDirectory() as tmp:
     for rec in [*unusable, malformed, empty_tree]:
         assert since(Path(rec), "newer") == (today("newer"), []), rec
         assert any(line.startswith("affected tests: no usable record") for line in why), (rec, why)
+    # floor mode and --since: a package that moved after the record's run reselects its importers
+    run("git", "checkout", "-q", "-B", "pr", "base")
+    then = head()
+    requests_test = "tests/server/test_requests.py"
+    floor_record = record(then, [requests_test, widget], {}, exit_code="0")
+    commit({"uv.lock": lock.replace("1.0", "1.1")})
+    out = subprocess.run(
+        [sys.executable, str(HERE / "affected_tests.py"), "--since", str(floor_record), "base"],
+        env={**os.environ, "AFFECTED_TESTS_BUILD_INPUTS": "floor"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert lines(out.stdout) == requests_importers, out
 print("affected-tests: ok")
