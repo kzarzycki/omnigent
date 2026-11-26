@@ -37,6 +37,24 @@ from omnigent.runtime.filesystem_registry import GitFilesystemRegistry
 from tests.runner.helpers import NullServerClient
 
 
+@pytest.fixture(autouse=True)
+def _close_created_os_environments(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close every OS environment (and its helper process) a test creates."""
+    created: list[Any] = []
+    create_os_environment_untracked = create_os_environment
+
+    def create_and_track(*args: Any, **kwargs: Any) -> Any:
+        os_env = create_os_environment_untracked(*args, **kwargs)
+        created.append(os_env)
+        return os_env
+
+    monkeypatch.setattr(sys.modules[__name__], "create_os_environment", create_and_track)
+    yield
+    for os_env in created:
+        if os_env is not None:
+            os_env.close()
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a workspace with test files."""
