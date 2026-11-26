@@ -2,7 +2,7 @@ name: Gate
 
 # Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
 # the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
-# `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
+# `gate` check is green there; a PR's own head runs only the `lint` job, so a change is tested once. The full suite
 # is nightly (fork-nightly.yml). A PR's next gate run after a red one reruns through the pack's
 # `approvals.py rerun-tests`: the failed tests plus what the fix reaches, else the red run's whole selection,
 # where a pass is a flake.
@@ -23,6 +23,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    # Hotfix: a general lint-on-push check in the shared pack will replace this job.
+    # Every PR push except Mergify drafts (their shards lint too) and `closed`; the hooks only, no tests.
+    if: "!startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: ./.github/actions/setup-uv
+        with:
+          enable-cache: true
+
+      - name: Set up Node and pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install mise
+        env:
+          MISE_VERSION: v2026.11.10
+        run: |
+          curl -fsSL https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      # The hooks check:all runs, on the files the PR changes since `mine`.
+      - name: Run the lint hooks
+        env:
+          MISE_YES: "1"
+          OMNIGENT_SKIP_WEB_UI: "true"
+        run: |
+          mise run check:setup
+          pre-commit run --from-ref "$(git merge-base origin/mine HEAD)" --to-ref HEAD
+
   tests:
     name: tests (shard ${{ matrix.shard }})
     # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
