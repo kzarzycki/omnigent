@@ -4403,6 +4403,7 @@ def build_codex_native_server(
     reconcile_process_registry: bool = True,
     terminal_launch_args: Sequence[str] = (),
     active_harnesses: Collection[str] | None = None,
+    thinking_summaries: bool = False,
 ) -> CodexNativeAppServer:
     """
     Build a configured native Codex app-server process wrapper.
@@ -4463,6 +4464,8 @@ def build_codex_native_server(
     :param terminal_launch_args: Original CLI options used to select the Codex
         config-file profile (distinct from the Databricks routing profile)
         and the ``--add-dir`` roots the app-server owns.
+    :param thinking_summaries: Ask the model for detailed reasoning summaries
+        (:func:`codex_reasoning_summary_overrides`).
     :returns: Configured app-server process wrapper.
     :raises ImportError: If no Codex CLI is available.
     :raises OSError: If Databricks routing was requested but no
@@ -4514,6 +4517,8 @@ def build_codex_native_server(
             if item
         )
     config_overrides.extend(codex_model_window_overrides(terminal_launch_args))
+    if thinking_summaries:
+        config_overrides.extend(codex_reasoning_summary_overrides(terminal_launch_args))
     if bypass_sandbox:
         # Mirror the --remote TUI's --dangerously-bypass-approvals-and-sandbox
         # on the app-server threads: never prompt for approval, and run
@@ -5473,6 +5478,30 @@ def codex_model_window_overrides(terminal_launch_args: Sequence[str] | None) -> 
         else:
             windows.pop(key, None)
     return [f"{key}={value}" for key, value in windows.items()]
+
+
+_CODEX_REASONING_SUMMARY_KEY = "model_reasoning_summary"
+
+
+def codex_reasoning_summary_overrides(terminal_launch_args: Sequence[str] | None) -> list[str]:
+    """Return the app-server overrides that ask for detailed reasoning summaries.
+
+    The launch args' own ``model_reasoning_summary`` follows the default, so the
+    user's value wins (Codex applies ``-c`` overrides in order).
+
+    :param terminal_launch_args: Persisted Codex launch arguments, e.g.
+        ``["-c", 'model_reasoning_summary="concise"']``.
+    :returns: ``-c`` assignment strings, e.g. ``['model_reasoning_summary="detailed"']``.
+    """
+    overrides = [f'{_CODEX_REASONING_SUMMARY_KEY}="detailed"']
+    user_values = [
+        raw_value
+        for key, raw_value in _codex_config_assignments(terminal_launch_args)
+        if key == _CODEX_REASONING_SUMMARY_KEY
+    ]
+    if user_values:
+        overrides.append(f"{_CODEX_REASONING_SUMMARY_KEY}={user_values[-1]}")
+    return overrides
 
 
 def codex_mcp_tool_approval_overrides(

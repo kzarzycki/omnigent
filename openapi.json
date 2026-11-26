@@ -6653,6 +6653,20 @@
             "default": null,
             "title": "Agent Id"
           },
+          "cloud_environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cloud Environment Id"
+          },
           "cost_control_mode_override": {
             "anyOf": [
               {
@@ -6664,6 +6678,20 @@
             ],
             "default": null,
             "title": "Cost Control Mode Override"
+          },
+          "created_by_session_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By Session Id"
           },
           "environment_id": {
             "anyOf": [
@@ -8471,6 +8499,11 @@
           "smart_routing_sources": {
             "$ref": "#/components/schemas/SmartRoutingSourcesInfo"
           },
+          "thinking_summaries": {
+            "default": false,
+            "title": "Thinking Summaries",
+            "type": "boolean"
+          },
           "workflows": {
             "default": false,
             "title": "Workflows",
@@ -9453,6 +9486,20 @@
             "title": "Agent Id",
             "type": "string"
           },
+          "cloud_environment_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cloud Environment Id"
+          },
           "cost_control_mode_override": {
             "anyOf": [
               {
@@ -9464,6 +9511,20 @@
             ],
             "default": null,
             "title": "Cost Control Mode Override"
+          },
+          "created_by_session_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By Session Id"
           },
           "environment_id": {
             "anyOf": [
@@ -15579,6 +15640,21 @@
         "title": "TerminalCommandData",
         "type": "object"
       },
+      "ThinkingSummariesSetting": {
+        "additionalProperties": false,
+        "description": "Whether sessions the caller starts ask Claude and Codex for thinking summaries.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "ThinkingSummariesSetting",
+        "type": "object"
+      },
       "ToolOutputDeltaEvent": {
         "description": "Incremental output from an in-progress function call.",
         "properties": {
@@ -18504,6 +18580,96 @@
           }
         },
         "summary": "Create Host Directory",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
+    "/v1/hosts/{host_id}/files/{path}": {
+      "get": {
+        "description": "Read one UTF-8 text file on a host, whole or in byte ranges, with no live session.\n\nOwner-scoped like the directory listing and reaches the host over\nthe same tunnel (`host.fs_request`, op `read_text_file`). Takes\nthe listing's path rules: absolute or `~`-prefixed. With\n`offset` or `limit` it returns one range of at most 64 KiB,\nended at a whole character; follow `next_offset` for the rest.\n\n**Returns:** `{\"object\": \"file\", \"path\": <absolute path>, \"size\": <bytes>, \"content\": <text>}`; a range adds `offset`, `length`, `next_offset` and `mtime_ns`.\n\n**Raises**\n\n- `HTTPException` \u2014 404 (host or file missing), 403 (not owner or credential path), 400 (directory, non-UTF-8, bad path or range), 413 (over 64 KiB without a range), 409 (host predates ranges), 503 (host offline), 504 (timeout), 502 (host I/O).",
+        "operationId": "read_host_file_v1_hosts__host_id__files__path__get",
+        "parameters": [
+          {
+            "description": "Host identifier.",
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Absolute or tilde-prefixed file path.",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "description": "First byte of a range, e.g. a previous `next_offset`.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Offset"
+            }
+          },
+          {
+            "description": "Most bytes in a range, cut down to 64 KiB.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Host File V1 Hosts  Host Id  Files  Path  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Host File",
         "tags": [
           "hosts"
         ]
@@ -29010,6 +29176,68 @@
           }
         },
         "summary": "Save Session Title Instructions",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/v1/settings/thinking-summaries": {
+      "get": {
+        "description": "Read whether the caller's sessions ask for thinking summaries.",
+        "operationId": "get_thinking_summaries_v1_settings_thinking_summaries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThinkingSummariesSetting"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Thinking Summaries",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Turn the caller's thinking summaries on or off.",
+        "operationId": "save_thinking_summaries_v1_settings_thinking_summaries_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThinkingSummariesSetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThinkingSummariesSetting"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Thinking Summaries",
         "tags": [
           "settings"
         ]

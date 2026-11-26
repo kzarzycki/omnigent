@@ -66,6 +66,9 @@ RECONNECT_MAX_S = 30
 # A turn waits as long as its cloud session shows life; this long without any, while
 # the session can be reached, fails it.
 STALL_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_STALL_TIMEOUT_S", "1800"))
+# A cloud session this bridge just created that has shown no model output this long
+# after its first prompt is not starting (setup stuck, sandbox never came up).
+FIRST_TURN_TIMEOUT_S = float(os.environ.get("CLAUDE_CLOUD_FIRST_TURN_TIMEOUT_S", "600"))
 # One poll of a waiting turn counts this much at most: a longer step is this host
 # asleep, not the cloud session quiet.
 STALL_STEP_S = 2.0
@@ -368,6 +371,17 @@ NO_ATTRIBUTION_SETTINGS = json.dumps(
 )
 
 
+def launch_settings() -> str:
+    """The ``--settings`` JSON: attribution off, and the session's cloud environment if set.
+
+    ``CLAUDE_CLOUD_ENVIRONMENT_ID`` is the Omnigent session's ``cloud_environment_id``.
+    """
+    settings = json.loads(NO_ATTRIBUTION_SETTINGS)
+    if environment_id := os.environ.get("CLAUDE_CLOUD_ENVIRONMENT_ID", "").strip():
+        settings["remote"] = {"defaultEnvironmentId": environment_id}
+    return json.dumps(settings)
+
+
 def create_cloud_session(
     text: str, cwd: str, model: str | None = None, effort: str | None = None
 ) -> str:
@@ -390,7 +404,7 @@ def create_cloud_session(
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     proc = subprocess.Popen(
-        [CLAUDE_CLI, "--cloud", text, "--settings", NO_ATTRIBUTION_SETTINGS]
+        [CLAUDE_CLI, "--cloud", text, "--settings", launch_settings()]
         + (["--model", model] if model else [])
         + (["--effort", effort or EFFORT] if effort or EFFORT else []),
         cwd=cwd,
@@ -955,6 +969,14 @@ def _growth(total: float, before: float | None) -> float:
 # ── ACP server ─────────────────────────────────────────────
 
 
+class SessionStalled(RuntimeError):
+    """No life for too long; *started* is whether the cloud session ever produced output."""
+
+    def __init__(self, message: str, started: bool) -> None:
+        super().__init__(message)
+        self.started = started
+
+
 class Session:
     def __init__(self, cwd: str, acp_id: str = "") -> None:
         self.cwd = cwd
@@ -992,6 +1014,14 @@ class Session:
         # This bridge's last turn was mirrored to its end, so the cloud session is idle.
         self.caught_up = False
         self.lock = threading.RLock()  # re-entered by the SIGTERM handler
+        # The cloud session was created by this bridge for the turn that is running.
+        self.created_here = False
+        # The cloud session has sent model output (not only setup logs).
+        self.progressed = False
+        # The cloud session's last setup log line, for an error about a start that stalls.
+        self.setup_note = ""
+        # State-file key of the first prompt the cloud session was recorded under.
+        self.first_key: str | None = None
 
     def follow(self, after: int, settled: frozenset[str] = frozenset()) -> None:
         """Read the cloud session's stream from *after* for the rest of the bridge's life.
@@ -1047,6 +1077,8 @@ class Session:
         """
         quiet, last = 0.0, time.monotonic()
         while True:
+            first_turn = self.created_here and not self.progressed
+            limit = min(FIRST_TURN_TIMEOUT_S, STALL_TIMEOUT_S) if first_turn else STALL_TIMEOUT_S
             try:
                 event = self.events.get(timeout=1)
             except queue.Empty:
@@ -1054,16 +1086,32 @@ class Session:
                 quiet, last = quiet + min(now - last, STALL_STEP_S), now
                 if self.answering or self.offline:
                     quiet = 0.0
-                elif quiet > STALL_TIMEOUT_S:
+                elif quiet > limit:
                     why = f" (the stream fails: {self.stream_error})" if self.stream_error else ""
-                    raise RuntimeError(
+                    if first_turn:
+                        setup = (
+                            f"; last setup output: {self.setup_note}" if self.setup_note else ""
+                        )
+                        raise SessionStalled(
+                            f"cloud session https://claude.ai/code/{self.cloud_id} sent no "
+                            f"output for {limit:.0f}s after its first prompt{why}{setup}; "
+                            "the next message starts a new cloud session",
+                            started=False,
+                        ) from None
+                    raise SessionStalled(
                         f"cloud session https://claude.ai/code/{self.cloud_id} made no progress "
-                        f"for {STALL_TIMEOUT_S:.0f}s{why}; it is left as it is, and the next "
-                        "message continues it"
+                        f"for {limit:.0f}s{why}; it is left as it is, and the next "
+                        "message continues it",
+                        started=self.progressed,
                     ) from None
                 yield None
                 continue
             quiet, last = 0.0, time.monotonic()
+            payload = (event or {}).get("payload") or {}
+            if payload.get("type") == "assistant":
+                self.progressed = True
+            elif payload.get("type") == "env_manager_log":
+                self.setup_note = str((payload.get("data") or {}).get("content") or "")[-300:]
             yield event
 
     def cancel(self) -> None:
@@ -1125,6 +1173,14 @@ def session_for(acp_id: str) -> Session:
         SESSIONS[acp_id] = Session(os.getcwd(), acp_id)
         SESSIONS[acp_id].cloud_id = cloud_id
     return SESSIONS[acp_id]
+
+
+def forget_unstarted(s: Session) -> None:
+    """Drop the records that would send the next start of this prompt to *s*'s cloud session."""
+    for key in (s.acp_id, s.first_key):
+        # Only a record that still names this cloud session: another one may own the key.
+        if key and recall().get(key) == s.cloud_id:
+            remember(key, None)
 
 
 def prompt_text(blocks: list[dict]) -> str:
@@ -1275,6 +1331,11 @@ def run_turn(acp_id: str, text: str) -> str:
         return stop
     except Exception as exc:
         s.caught_up = False  # the cloud turn may still run; the next turn looks first
+        if isinstance(exc, SessionStalled) and not exc.started:
+            # Never started: another start of the same prompt must not adopt it.
+            forget_unstarted(s)
+            fresh = SESSIONS[acp_id] = Session(s.cwd, acp_id)
+            fresh.mcp, fresh.model, fresh.effort = s.mcp, s.model, s.effort
         # Omnigent drops a failed turn's output, marker included, so the error names it.
         if s.cloud_id and s.cloud_id not in str(exc):
             raise RuntimeError(
@@ -1283,6 +1344,7 @@ def run_turn(acp_id: str, text: str) -> str:
         raise
     finally:
         # Joined before the prompt's response goes out, so no update follows it.
+        s.created_here = False  # only the turn that created the cloud session is a first turn
         turn_done.set()
         beat.join()
         s.running = False
@@ -1308,6 +1370,7 @@ def _create(acp_id: str, s: Session, cli_prompt: str, first: str) -> None:
     s.cloud_id = create_cloud_session(cli_prompt, s.cwd, s.model, s.effort)
     s.started_model = s.model or ""
     s.started_effort = s.effort or ""
+    s.created_here, s.first_key = True, first_prompt_key(s.cwd, first)
     # Recorded first: nothing after it may lose the link to a session that exists.
     remember(first_prompt_key(s.cwd, first), s.cloud_id)
     log(f"created {s.cloud_id}")
@@ -1329,6 +1392,8 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
             s.follow(after)
             return _continued(acp_id, s, _mirror(acp_id, s, after))
         log(f"re-attaching to {s.cloud_id}")
+        if first := replayed_first_prompt(prompt):
+            s.first_key = first_prompt_key(s.cwd, first)
     if not s.marked:
         # A new bridge, or one whose announcing turn failed and Omnigent dropped it.
         announce(acp_id, s)
@@ -2059,6 +2124,17 @@ def self_check() -> None:
         assert create_cloud_session("hi", str(not_repo), model) == "session_01ArgsArgsArgs"
         assert (not_repo / "args").read_text().strip() == no_attribution + flags
     globals()["EFFORT"] = ""
+    # The session's cloud environment reaches the launch settings; unset it adds nothing.
+    assert "remote" not in json.loads(launch_settings())
+    os.environ["CLAUDE_CLOUD_ENVIRONMENT_ID"] = "env_01SelfCheckSelfCheck"
+    try:
+        assert json.loads(launch_settings())["remote"] == {
+            "defaultEnvironmentId": "env_01SelfCheckSelfCheck"
+        }
+        assert create_cloud_session("hi", str(not_repo))
+        assert "defaultEnvironmentId" in (not_repo / "args").read_text()
+    finally:
+        del os.environ["CLAUDE_CLOUD_ENVIRONMENT_ID"]
     # A per-session pick wins over the bridge-wide default.
     assert create_cloud_session("hi", str(not_repo), None, "max")
     assert (not_repo / "args").read_text().strip() == f"{no_attribution} --effort max"
@@ -2420,6 +2496,7 @@ def self_check() -> None:
     )
     stalled = SESSIONS["acp-stalled"] = Session("/repo", "acp-stalled")
     stalled.reader = threading.current_thread()
+    stalled.events.put({"sequence_num": "1", "payload": {"type": "assistant", "message": {}}})
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             run_turn("acp-stalled", prompt_text([{"type": "text", "text": "the brief\nstep 2 "}]))

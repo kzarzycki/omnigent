@@ -3,11 +3,17 @@ name: Gate
 # Fork only. The one proof per change: `mise run check-fast` (the hooks, the skills' tests and the tests
 # the change touches) on Mergify's draft PR, the tree it merges. `.mergify.yml` merges only once this
 # `gate` check is green there; a PR's own head runs nothing, so a change is tested once. The full suite
-# is nightly (fork-nightly.yml).
+# is nightly (fork-nightly.yml). A PR's next gate run builds on its last complete one's record: when the
+# difference reselects every failed test, it runs those and what the difference touches or newly selects;
+# otherwise the whole selection, where a failed test nothing reselected and that passes is a flake.
+# The selection runs as parallel shard jobs (a hash partition of the tests by node id, one record each), so a
+# whole-suite run takes about an eighth of the time and memory per runner; `gate` passes only if every shard did.
 
 on:
   pull_request:
     branches: [mine]
+    # `closed` joins the PR's concurrency group, so a closed draft's run is cancelled, not left running.
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -17,11 +23,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
-    # Mergify's draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
-    if: startsWith(github.head_ref, 'mergify/merge-queue/')
+  tests:
+    name: tests (shard ${{ matrix.shard }})
+    # Open Mergify draft PRs only (head `mergify/merge-queue/<id>`); undo: drop this line.
+    if: startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 120 # timeouts.run
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    permissions:
+      contents: read
+      actions: read  # find and download an earlier run's record
+      issues: write  # comment on or open the `Flaky:` issues
     steps:
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -59,13 +74,74 @@ jobs:
           # check:setup builds the venv; its tools (pre-commit) run bare in the tasks.
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      # check-fast (mise.toml): check:all, then pytest on the tests the change touches.
+      # The newest record a gate run for this PR left (this run's earlier attempts included) whose pytest ran
+      # to its end. Finding none, or any failure here, leaves the output empty: the full selection runs.
+      - name: Find the PR's last complete gate record
+        id: earlier
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: ${{ github.event.pull_request.title }}
+          SHARD: ${{ matrix.shard }}
+          RECORDS: ${{ runner.temp }}/earlier-records
+        run: |
+          # ponytail: the PR number comes from Mergify's draft title ("merge queue: checking #<n> on ...");
+          # another title finds nothing and the full selection runs. Upgrade path: key on the PR head
+          # commits the draft contains.
+          pr=$(printf '%s\n' "$TITLE" | sed -n 's/.*checking #\([0-9][0-9]*\).*/\1/p' | head -1)
+          if [ -z "$pr" ]; then echo "No PR number in the title '$TITLE': the full selection runs."; exit 0; fi
+          created=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          { echo "$GITHUB_RUN_ID"
+            for status in failure success; do
+              gh api --paginate "repos/$GH_REPO/actions/workflows/gate.yml/runs?status=$status&created=%3E%3D$created&per_page=100" \
+                --jq ".workflow_runs[] | select(.display_title | test(\"checking #$pr([^0-9]|\$)\")) | .id" < /dev/null
+            done; } | awk '!seen[$0]++ && ++kept <= 10' > "$RUNNER_TEMP/runs"
+          while read -r run; do
+            gh api "repos/$GH_REPO/actions/runs/$run/artifacts?per_page=100" --jq \
+              '.artifacts[] | select((.name | startswith("gate-record-shard-'"$SHARD"'-attempt-")) and (.expired | not))
+               | [.created_at, .workflow_run.id, .name, .workflow_run.head_sha] | @tsv' < /dev/null
+          done < "$RUNNER_TEMP/runs" | sort -r > "$RUNNER_TEMP/records"
+          while IFS=$'\t' read -r _ run name sha; do
+            dir="$RECORDS/$run-$name"
+            gh run download "$run" --name "$name" --dir "$dir" < /dev/null || continue
+            code=$(cat "$dir/exit" 2>/dev/null || true)
+            url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run/attempts/${name#gate-record-shard-$SHARD-attempt-}"
+            if [ "$code" = 0 ] || [ "$code" = 1 ]; then
+              echo "Building on $url (head $sha): its pytest exited $code."
+              echo "Building on $url, whose pytest exited $code." >> "$GITHUB_STEP_SUMMARY"
+              { echo "record=$dir"; echo "run=$url"; echo "sha=$sha"; echo "pr=$pr"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Skipping $url: its pytest exited '${code:-no code}', so it didn't run to its end."
+          done < "$RUNNER_TEMP/records"
+          echo "No complete gate record for #$pr in the last 7 days: the full selection runs."
+
+      # Peak memory of this shard's runner, for the job summary.
+      - name: Sample memory
+        run: |
+          echo "SHARD_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          setsid nohup bash -c 'while :; do awk "/^MemTotal/{t=\$2} /^MemAvailable/{a=\$2} END{print int((t-a)/1024)}" /proc/meminfo; sleep 5; done' > "$RUNNER_TEMP/memory-used-mb" 2>&1 < /dev/null &
+
+      # check-fast (mise.toml): check:all, then pytest on the tests the change touches. Shard 0 alone runs
+      # check:all; the others install the same environment and run only their slice of the tests.
       - name: Run the checks
         env:
+          # The matrix's own size, so a shard dropped from the list is never silently skipped.
+          AFFECTED_TESTS_SHARDS: ${{ strategy.job-total }}
+          AFFECTED_TESTS_SHARD: ${{ matrix.shard }}
+          # run-affected-tests.sh: build on the earlier record, and write this run's.
+          AFFECTED_TESTS_SINCE: ${{ steps.earlier.outputs.record }}
+          AFFECTED_TESTS_RECORD: ${{ runner.temp }}/gate-record
           MISE_YES: "1"
-          # Mergify's draft PR diffs against the base branch tip.
-          GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          DRAFT_HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DRAFT_TITLE: ${{ github.event.pull_request.title }}
           OMNIGENT_SKIP_WEB_UI: "true"
+          # One eighth of the full suite (~200 min unsharded) is ~25 min on the 4-core runner; stays under the 120-min job timeout.
+          AFFECTED_TESTS_WALL_SECONDS: "6000"
+          # The queue takes the floor for a build input; the nightly runs the full suite after the merge.
+          AFFECTED_TESTS_BUILD_INPUTS: floor
           # fork-sync/test.sh asks `gh` for the repo; the runner's gh has no login.
           GH_TOKEN: ${{ github.token }}
           # The skills' tests commit in scratch repos and need an identity.
@@ -73,5 +149,68 @@ jobs:
           GIT_AUTHOR_EMAIL: gate@example.invalid
           GIT_COMMITTER_NAME: gate
           GIT_COMMITTER_EMAIL: gate@example.invalid
+        # A draft stacks one "Merge of PR <n>" per PR of its batch (the numbers before " on " in its title)
+        # on the PRs queued ahead. Diff from below the batch, so it selects every batch PR's tests and none
+        # of the PRs ahead, which run theirs on their own drafts. Anything else diffs from `mine`.
         run: |
-          mise run check-fast
+          batch=$(printf '%s\n' "${DRAFT_TITLE%% on *}" | grep -oE '#[0-9]+' | tr -d '#' || true)
+          GATE_BASE=$DRAFT_HEAD
+          while pr=$(git log -1 --format=%s "$GATE_BASE" | sed -nE 's/^Merge of PR ([0-9]+)$/\1/p') && [ -n "$pr" ] && grep -qx "$pr" <<<"$batch"; do
+            GATE_BASE=$(git rev-parse "$GATE_BASE^1")
+          done
+          if [ "$GATE_BASE" = "$DRAFT_HEAD" ]; then GATE_BASE=$BASE_SHA; fi
+          echo "GATE_BASE=$GATE_BASE"
+          if [ "$AFFECTED_TESTS_SHARD" = 0 ]; then
+            GATE_BASE=$GATE_BASE mise run check-fast
+          else
+            mise run check:setup
+            GATE_BASE=$GATE_BASE bash .claude/skills/cloud-dev/run-affected-tests.sh
+          fi
+
+      # A flake: failed in the earlier run, reselected by nothing, passed here. Each one gets a comment on
+      # its open `Flaky: <node id>` issue, or a new issue; one whose call fails is recorded as failed, so the
+      # next run reruns it. Before the upload, which carries that record.
+      - name: Record flakes on their Flaky issues
+        if: always() && steps.earlier.outputs.run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EARLIER_RECORD: ${{ steps.earlier.outputs.record }}
+          EARLIER_RUN: ${{ steps.earlier.outputs.run }}
+          EARLIER_SHA: ${{ steps.earlier.outputs.sha }}
+          PR: ${{ steps.earlier.outputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          THIS_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          bash .claude/skills/cloud-dev/record-flakes.sh "$RUNNER_TEMP/gate-record" "$EARLIER_RECORD"
+
+      - name: Report this shard's wall time and peak memory
+        if: always()
+        run: |
+          peak=$(sort -n "$RUNNER_TEMP/memory-used-mb" | tail -1)
+          echo "shard ${{ matrix.shard }}: tests step wall $(( $(date +%s) - SHARD_STARTED )) s, peak memory used ${peak:-?} MB of $(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo) MB" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload this run's record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: gate-record-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gate-record/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The one check the ruleset and Mergify require: green only if every shard passed. `always()` keeps it
+  # running when a shard failed or was cancelled (a skipped required check would count as passed); the
+  # `if` skips it, like the shards, outside Mergify drafts.
+  gate:
+    needs: tests
+    if: always() && startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.action != 'closed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every shard passed
+        env:
+          SHARDS_RESULT: ${{ needs.tests.result }}
+        run: |
+          echo "tests shards: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = success ]

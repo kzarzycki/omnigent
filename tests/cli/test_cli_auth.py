@@ -1177,12 +1177,13 @@ def test_refresh_rejects_unusable_response_fields(token_dir, monkeypatch) -> Non
     assert entry["expires_at"] < time.time() + 4000
 
 
-def _purge_tui_sdk_modules() -> None:
+def _purge_tui_sdk_modules(monkeypatch) -> None:
     """Drop loaded ``omnigent_ui_sdk`` modules so the no-import assertions
-    below hold regardless of what earlier tests imported."""
+    below hold regardless of what earlier tests imported. The test's end
+    restores them, so later tests on the worker keep one module identity."""
     for mod_name in list(sys.modules):
         if mod_name == "omnigent_ui_sdk" or mod_name.startswith("omnigent_ui_sdk."):
-            sys.modules.pop(mod_name, None)
+            monkeypatch.delitem(sys.modules, mod_name)
 
 
 def test_token_file_path_honors_data_dir_without_tui_sdk(tmp_path, monkeypatch) -> None:
@@ -1196,7 +1197,7 @@ def test_token_file_path_honors_data_dir_without_tui_sdk(tmp_path, monkeypatch) 
     from omnigent.cli_auth import _token_file_path
 
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    _purge_tui_sdk_modules()
+    _purge_tui_sdk_modules(monkeypatch)
 
     assert _token_file_path() == tmp_path / "auth_tokens.json"
     assert "omnigent_ui_sdk.terminal" not in sys.modules, (
@@ -1210,7 +1211,7 @@ def test_token_file_path_defaults_to_home_state_dir(tmp_path, monkeypatch) -> No
 
     monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _purge_tui_sdk_modules()
+    _purge_tui_sdk_modules(monkeypatch)
 
     assert _token_file_path() == tmp_path / ".omnigent" / "auth_tokens.json"
     assert "omnigent_ui_sdk.terminal" not in sys.modules, (

@@ -3366,13 +3366,21 @@ def _rest_preview(get: Any, repo_path: str, kind: str, ref: str) -> dict[str, An
         if issue.get("pull_request"):
             return _rest_pull_preview(get, repo_path, ref)
         closed_as = "not_planned" if issue.get("state_reason") == "not_planned" else ""
-        return {
+        preview: dict[str, Any] = {
             "kind": "issue",
             "title": str(issue.get("title") or ""),
             "state": closed_as or str(issue.get("state") or ""),
             "labels": _shape_labels(issue.get("labels")),
             "checks": None,
         }
+        status = issue.get("status")
+        if isinstance(status, dict) and status.get("name"):
+            # GitHub's issue status (Backlog, In progress, ...); absent on repos without statuses.
+            preview["status"] = {
+                "name": str(status["name"]),
+                "category": str(status.get("category") or ""),
+            }
+        return preview
     if kind == "pull":
         return _rest_pull_preview(get, repo_path, ref)
     if kind == "commit":
