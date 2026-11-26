@@ -22,6 +22,7 @@ See ``designs/OIDC_AUTH.md`` §CLI Login Flow.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -192,6 +193,7 @@ def store_token(
     user_id: str,
     expires_at: float,
     refresh_token: str | None = None,
+    refresh_expires_at: float | None = None,
 ) -> None:
     """Persist a session token for a server.
 
@@ -205,6 +207,9 @@ def store_token(
         server handed one out. Lets :func:`refresh_stored_token` renew
         the access token past expiry without a human re-running
         ``omnigent login``.
+    :param refresh_expires_at: Unix timestamp when the refresh grant stops
+        renewing (its absolute lifetime), when the server reported it.
+        Lets :func:`login_renewal_status` warn before the login lapses.
     """
     entry: dict[str, str | float] = {
         "token": token,
@@ -213,6 +218,8 @@ def store_token(
     }
     if refresh_token is not None:
         entry["refresh_token"] = refresh_token
+    if refresh_expires_at is not None:
+        entry["refresh_expires_at"] = refresh_expires_at
     existing_org_id = load_databricks_org_id(server_url)
     if existing_org_id is not None:
         entry["org_id"] = existing_org_id
@@ -431,7 +438,13 @@ def _token_file_lock() -> Iterator[None]:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def refresh_stored_token(server_url: str, *, timeout: float = 10.0) -> str | None:
+def refresh_stored_token(
+    server_url: str,
+    *,
+    timeout: float = 10.0,
+    force: bool = False,
+    report: dict[str, str] | None = None,
+) -> str | None:
     """Renew the stored access token from its login-issued refresh grant.
 
     POSTs ``grant_type=refresh_token`` to the server's ``/oauth/token``,
@@ -447,6 +460,11 @@ def refresh_stored_token(server_url: str, *, timeout: float = 10.0) -> str | Non
 
     :param server_url: The server URL, e.g. ``"http://localhost:6767"``.
     :param timeout: HTTP timeout in seconds.
+    :param force: Renew even when the stored token is far from expiry
+        (used by :func:`login_renewal_status` to prove the grant is alive).
+    :param report: Optional dict that receives ``reason`` when no token is
+        returned (``no_refresh_token``, ``network_error``, ``refused_http_<n>``,
+        ``malformed_response``, ``state_dir_unusable``).
     :returns: A valid access token, or ``None``.
     """
     normalized = _normalize_server_url(server_url)
@@ -456,11 +474,15 @@ def refresh_stored_token(server_url: str, *, timeout: float = 10.0) -> str | Non
     # credential sources (e.g. the Databricks SDK fallback).
     pre = _load_entry(server_url)
     if pre is None or not isinstance(pre.get("refresh_token"), str) or not pre["refresh_token"]:
+        if report is not None:
+            report["reason"] = "no_refresh_token"
         return None
     try:
         with _token_file_lock():
-            return _refresh_locked(server_url, normalized, timeout)
+            return _refresh_locked(server_url, normalized, timeout, force=force, report=report)
     except OSError as exc:
+        if report is not None:
+            report["reason"] = "state_dir_unusable"
         # Cannot lock/persist (read-only or full state dir) — a refresh we
         # could not store is worse than none, so decline and let the caller
         # fall through to its other credential sources.
@@ -468,8 +490,16 @@ def refresh_stored_token(server_url: str, *, timeout: float = 10.0) -> str | Non
         return None
 
 
-def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | None:
+def _refresh_locked(
+    server_url: str,
+    normalized: str,
+    timeout: float,
+    *,
+    force: bool = False,
+    report: dict[str, str] | None = None,
+) -> str | None:
     """Perform the refresh exchange; caller holds the token-file lock."""
+    report = report if report is not None else {}
     # Log only the sanitized URL — the raw one may embed credentials, and the
     # refresh token is never logged.
     safe = _safe_log_url(normalized)
@@ -482,7 +512,8 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
     expires_at = entry.get("expires_at", 0)
     token = entry.get("token")
     if (
-        isinstance(token, str)
+        not force
+        and isinstance(token, str)
         and isinstance(expires_at, (int, float))
         and expires_at - time.time() > REFRESH_MIN_REMAINING_SECONDS
     ):
@@ -504,7 +535,9 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
         )
     except httpx.HTTPError as exc:
         _logger.warning("Token refresh against %s failed: %s", safe, exc)
+        report["reason"] = "network_error"
         return None
+    report["reason"] = f"refused_http_{resp.status_code}"
     if resp.status_code == 404:
         # No ``/oauth/token`` route: a local/header-mode dev server or an
         # older build that never issues refreshable sessions. Re-login
@@ -536,6 +569,7 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
             safe,
         )
         return None
+    report["reason"] = "malformed_response"
     try:
         payload = resp.json()
     except ValueError:
@@ -556,6 +590,13 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
         # one we already hold (login grants deliberately do not rotate).
         new_refresh = refresh_token
     expires_in = _coerce_expires_in(payload.get("expires_in"))
+    # Older servers omit the grant lifetime; keep what the login recorded.
+    refresh_expires_in = payload.get("refresh_expires_in")
+    if isinstance(refresh_expires_in, (int, float)) and math.isfinite(refresh_expires_in):
+        refresh_expires_at: float | None = time.time() + max(0.0, float(refresh_expires_in))
+    else:
+        previous = entry.get("refresh_expires_at")
+        refresh_expires_at = previous if isinstance(previous, (int, float)) else None
 
     user_id = entry.get("user_id")
     store_token(
@@ -564,12 +605,96 @@ def _refresh_locked(server_url: str, normalized: str, timeout: float) -> str | N
         user_id=user_id if isinstance(user_id, str) else "",
         expires_at=time.time() + expires_in,
         refresh_token=new_refresh,
+        refresh_expires_at=refresh_expires_at,
     )
+    report.pop("reason", None)
     # A fresh token means any earlier expiry warning is stale; allow
     # a new one if this credential ever lapses again.
     _warned_expired_servers.discard(normalized)
     _logger.info("Refreshed login session for %s", safe)
     return access_token
+
+
+@dataclasses.dataclass(frozen=True)
+class LoginRenewal:
+    """Whether a stored login can keep renewing, and for how long.
+
+    :ivar state: ``"ok"``, ``"expiring"`` (renews, but the grant ends within
+        the warning window), or ``"cannot_renew"``.
+    :ivar reason: Short machine-readable cause, e.g. ``"no_refresh_token"``.
+    :ivar access_expires_in: Seconds until the stored access token lapses
+        (negative once expired), or ``None`` with no token.
+    :ivar refresh_expires_in: Seconds until the refresh grant stops renewing,
+        or ``None`` when unknown (login predates the field).
+    """
+
+    state: str
+    reason: str
+    access_expires_in: float | None
+    refresh_expires_in: float | None
+
+    @property
+    def ok(self) -> bool:
+        """True when nothing needs attention."""
+        return self.state == "ok"
+
+
+DEFAULT_RENEWAL_WARN_SECONDS = 72 * 3600.0
+
+
+def login_renewal_status(
+    server_url: str,
+    *,
+    live: bool = False,
+    warn_seconds: float = DEFAULT_RENEWAL_WARN_SECONDS,
+    timeout: float = 10.0,
+) -> LoginRenewal:
+    """Answer "can this stored login renew, and how long until it expires?".
+
+    The stored refresh grant has an absolute server-side lifetime; past it the
+    access token stops working even before its own expiry. Without *live*
+    this reads only the stored entry. With *live* it also forces one renewal,
+    which proves the grant is still accepted (and stores the fresh token).
+
+    :param server_url: The server URL.
+    :param live: Force a refresh exchange to prove the grant is alive.
+    :param warn_seconds: Report ``expiring`` when the grant ends sooner.
+    :param timeout: HTTP timeout for the live exchange.
+    :returns: The :class:`LoginRenewal` verdict. Never contains a credential.
+    """
+
+    def verdict(state: str, reason: str) -> LoginRenewal:
+        now = time.time()
+        entry = _load_entry(server_url) or {}
+        access_at = entry.get("expires_at")
+        refresh_at = entry.get("refresh_expires_at")
+        return LoginRenewal(
+            state=state,
+            reason=reason,
+            access_expires_in=access_at - now if isinstance(access_at, (int, float)) else None,
+            refresh_expires_in=(
+                refresh_at - now if isinstance(refresh_at, (int, float)) else None
+            ),
+        )
+
+    now = time.time()
+    entry = _load_entry(server_url)
+    if entry is None or not isinstance(entry.get("token"), str):
+        return verdict("cannot_renew", "no_login")
+    if not isinstance(entry.get("refresh_token"), str) or not entry["refresh_token"]:
+        return verdict("cannot_renew", "no_refresh_token")
+    refresh_at = entry.get("refresh_expires_at")
+    if isinstance(refresh_at, (int, float)) and refresh_at <= now:
+        return verdict("cannot_renew", "grant_expired")
+    if live:
+        report: dict[str, str] = {}
+        if refresh_stored_token(server_url, timeout=timeout, force=True, report=report) is None:
+            return verdict("cannot_renew", report.get("reason", "refresh_failed"))
+        now = time.time()
+        refresh_at = (_load_entry(server_url) or {}).get("refresh_expires_at")
+    if isinstance(refresh_at, (int, float)) and refresh_at - now < warn_seconds:
+        return verdict("expiring", "grant_ends_soon")
+    return verdict("ok", "renewable")
 
 
 def _coerce_expires_in(raw: object) -> float:

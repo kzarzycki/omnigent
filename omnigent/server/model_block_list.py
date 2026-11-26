@@ -260,7 +260,10 @@ async def refuse_blocked_start_defaults(
             # An unreadable default is an unknown one: refused below.
             logger.debug("ACP default model unavailable", exc_info=True)
     if default_model is None and harness and host_registry is not None and host_id:
-        default_model = await _host_default_model(host_registry, host_id, harness)
+        # Keep the ``acp:<slug>`` id so the host finds the agent's config.
+        spec_harness = str(spec.executor.config.get("harness") or "") if spec else ""
+        host_harness = spec_harness if spec_harness.startswith("acp:") else harness
+        default_model = await _host_default_model(host_registry, host_id, host_harness)
     if default_model is None:
         # An unknown default might be a blocked one, so the start names its model.
         raise OmnigentError(

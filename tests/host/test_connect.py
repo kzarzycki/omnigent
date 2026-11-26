@@ -654,6 +654,65 @@ async def test_handle_model_options_claude_probe_failure_is_failed(
     _cleanup_host(host)
 
 
+@pytest.mark.parametrize(("blocked", "refused"), [("fixture-model", True), ("other-model", False)])
+async def test_split_deploy_start_checks_the_hosts_acp_default_model(
+    monkeypatch: pytest.MonkeyPatch, blocked: str, refused: bool
+) -> None:
+    """The server has no ``acp.agents``; the host's configured model decides the start."""
+    from omnigent.errors import OmnigentError
+    from omnigent.server import model_block_list
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    host = _make_host_process()
+    host_config: dict[str, object] = {
+        "acp": {
+            "agents": [{"name": "Fixture", "command": "fixture-acp", "model": "fixture-model"}]
+        }
+    }
+    monkeypatch.setattr("omnigent.onboarding.acp_auth.load_config", lambda: host_config)
+    # The server process reads its own (empty) config.
+    monkeypatch.setattr("omnigent.models.model_catalog._acp_launch_model", lambda _spec: None)
+
+    async def _ask_host(**kwargs: Any) -> dict[str, Any]:
+        frame = HostModelOptionsFrame(request_id="req_acp", harness=kwargs["harness"])
+        result = await host._handle_model_options(frame)
+        return {"status": result.status, "models": result.models}
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._host_model_options.request_host_model_options", _ask_host
+    )
+    monkeypatch.setattr(
+        model_block_list,
+        "_current",
+        model_block_list.parse_model_block_list({"blocked_models": [blocked]}),
+    )
+
+    class _Registry:
+        def get(self, _host_id: str) -> object:
+            return object()
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="acp-fixture",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "acp:fixture"}),
+    )
+    start = model_block_list.refuse_blocked_start_defaults(
+        host_registry=_Registry(),
+        host_id="host_fixture",
+        harness="acp",
+        spec=spec,
+        inference_snapshot=None,
+        model_override=None,
+        reasoning_effort=None,
+    )
+    if refused:
+        with pytest.raises(OmnigentError, match="'fixture-model' is blocked"):
+            await start
+    else:
+        await start
+    _cleanup_host(host)
+
+
 async def test_handle_model_options_uses_host_pi_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11806,8 +11865,13 @@ def test_post_connect_auth_rejection_escalates_without_going_fatal(
     network hint to a re-auth prompt that names ``omnigent login`` — so a
     permanently-rejected credential surfaces instead of looping silently.
     """
-    from omnigent.host.connect import _AUTH_REJECT_ESCALATE_ATTEMPTS
+    from omnigent.host.connect import (
+        _AUTH_REJECT_ALERT_ATTEMPTS,
+        _AUTH_REJECT_ESCALATE_ATTEMPTS,
+        _auth_rejected_state_path,
+    )
 
+    _auth_rejected_state_path().unlink(missing_ok=True)
     host = _make_host_process()
     host._ever_connected = True
 
@@ -11817,11 +11881,24 @@ def test_post_connect_auth_rejection_escalates_without_going_fatal(
     assert "network dropped" in first
     assert "omnigent login" not in first
 
-    # Streak climbs toward — but not to — the escalation threshold: stays quiet
+    # Below the alert threshold the host stays quiet and publishes nothing,
     # so a brief VPN outage never raises a false re-auth alarm.
-    for _ in range(2, _AUTH_REJECT_ESCALATE_ATTEMPTS):
+    for _ in range(2, _AUTH_REJECT_ALERT_ATTEMPTS):
         assert host._classify_http_status(403) is None
     assert "omnigent login" not in capsys.readouterr().err
+    assert not _auth_rejected_state_path().exists()
+
+    # A few rejections in a row: one clear error naming the fix, and a state
+    # file a supervisor can read. Still retryable.
+    assert host._classify_http_status(403) is None
+    alert = capsys.readouterr().err
+    assert "omnigent login http://localhost:8000" in alert
+    state = json.loads(_auth_rejected_state_path().read_text())
+    assert state["streak"] == _AUTH_REJECT_ALERT_ATTEMPTS
+    assert "omnigent login" in state["fix"]
+    for _ in range(_AUTH_REJECT_ALERT_ATTEMPTS + 1, _AUTH_REJECT_ESCALATE_ATTEMPTS):
+        assert host._classify_http_status(403) is None
+    capsys.readouterr()
 
     # Crossing the threshold escalates — names the real remedy — and is STILL
     # retryable (no fatal error, so a recoverable daemon is never killed).
