@@ -2637,6 +2637,53 @@ class SqlAlchemyConversationStore(ConversationStore):
             write,
         )
 
+    def record_child_usage(
+        self,
+        conversation_id: str,
+        key: str,
+        entry: dict[str, Any],
+        *,
+        max_entries: int,
+    ) -> bool | None:
+        """
+        Record one child run's usage at ``session_usage["child_usage"][key]``.
+
+        Same locking as :meth:`increment_session_usage`; see
+        :meth:`ConversationStore.record_child_usage`.
+        """
+        import json
+
+        def write(session: Session) -> bool | None:
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            if meta is None:
+                return None
+            current: dict[str, Any] = dict(json.loads(meta.session_usage or "{}"))
+            children = current.get("child_usage")
+            if not isinstance(children, dict):
+                children = {}
+            existed = key in children
+            if not existed and len(children) >= max_entries:
+                return None
+            children[key] = entry
+            current["child_usage"] = children
+            session.execute(
+                update(SqlConversationMetadata)
+                .where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                )
+                .values(session_usage=json.dumps(current))
+            )
+            return existed
+
+        return run_write_transaction(self._session_immediate, "record_child_usage", write)
+
     def add_daily_cost(self, user_id: str, day_utc: str, delta_usd: float) -> None:
         """
         Atomically add *delta_usd* to a user's spend for one UTC day.
