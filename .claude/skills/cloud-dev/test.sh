@@ -8,32 +8,13 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-# gatekeeper.md as approvals.py reads it. pick_approvals prints the script to run: APPROVALS_PY as given,
-# else the pinned pack's gatekeeper approvals.py (OMNIGENT_ENGINEERING_PACK, so the gate moves only when the pin
-# does; a pin without the file fails, never skips), else the copy apm.yml deploys.
-pick_approvals() {
-  [ -n "${APPROVALS_PY:-}" ] && { echo "$APPROVALS_PY"; return; }
-  local pack; pack=$("$here/fork-env.sh" OMNIGENT_ENGINEERING_PACK 2>/dev/null)
-  if [ -n "$pack" ]; then
-    [ -f "$pack/gatekeeper/skills/gatekeeper/scripts/approvals.py" ] || { echo "OMNIGENT_ENGINEERING_PACK has no approvals.py: $pack/gatekeeper/skills/gatekeeper/scripts/approvals.py" >&2; return 1; }
-    echo "$pack/gatekeeper/skills/gatekeeper/scripts/approvals.py"; return
-  fi
-  echo "$here/../../../.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py"
+# Policy check: the deployed approvals.py's `check setup` reads docs/agents/gatekeeper.md as the loop steps do.
+# The working tree's policy is read, since a repo with an origin/<base> ref would read that ref's copy instead.
+repo_root=$(cd "$here/../../.." && pwd)
+approvals="$repo_root/.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py"
+policy_check() {  # policy_check <repo dir>: exit 0 when that repo's working-tree policy parses
+  (cd "$1" && GATEKEEPER_POLICY_FROM_WORKING_TREE=1 uv run --no-sync --project "$repo_root" python "$approvals" check setup)
 }
-# run_policy: the gate's policy step (POLICY_CMD swaps the policy test, for the check below). It runs "${policy_cmd[@]}" on the picked approvals.py, and fails when the
-# pick fails (a stale pin) or the policy test does; with no approvals.py it logs a skip.
-if [ -n "${POLICY_CMD:-}" ]; then read -ra policy_cmd <<<"$POLICY_CMD"
-else policy_cmd=(uv run --no-sync python "$here/gatekeeper-policy-test.py"); fi
-run_policy() {
-  local approvals; approvals=$(pick_approvals) || return 1
-  if [ -f "$approvals" ]; then
-    "${policy_cmd[@]}" "$approvals" >"$tmp/policy.log" 2>&1 || { cat "$tmp/policy.log"; return 1; }
-    tail -1 "$tmp/policy.log"
-  else
-    echo "gatekeeper policy: skipped, no approvals.py (run apm install or set APPROVALS_PY)"
-  fi
-}
-if [ -z "${POLICY_ONLY:-}" ]; then
 run() {  # run <bin dir>: setup.sh with only that dir on PATH, so installed tools can't count
   sed -e "s#/tmp/omnigent-dev-init.log#$tmp/init.log#" -e '/^export PATH=/d' \
     -e "s#/home/user#$tmp/user#g" -e 's#^warm_up_seconds=.*#warm_up_seconds=1#' "$here/setup.sh" > "$tmp/setup.sh"
@@ -113,39 +94,25 @@ bash "$here/gate-setup-test.sh" || exit 1
 python3 "$here/affected-tests-test.py" || exit 1
 bash "$here/run-affected-tests-test.sh" || exit 1
 bash "$here/record-flakes-test.sh" || exit 1
-# the approvals.py the policy test receives through the gate's own last line (POLICY_ONLY=1 skips the rest of
-# this script): the pin, the deployed copy when no pin, an override over both, a stale pin exits nonzero
-printf 'echo "$1" > "$RECEIVED"\n' > "$tmp/stub.sh"
-got() {  # got <env assignments>: this script's policy step with a stub policy test; prints what the stub received
-  rm -f "$tmp/received"
-  env -u APPROVALS_PY -u OMNIGENT_ENGINEERING_PACK OMNIGENT_FORK_OVERLAY=/dev/null \
-    POLICY_ONLY=1 POLICY_CMD="bash $tmp/stub.sh" RECEIVED="$tmp/received" "$@" bash "$here/test.sh" 2>&1 \
-    || { echo "exit $?"; return 0; }
-  cat "$tmp/received" 2>/dev/null
-}
-mkdir -p "$tmp/pin/gatekeeper/skills/gatekeeper/scripts"
-pinned="$tmp/pin/gatekeeper/skills/gatekeeper/scripts/approvals.py"
-touch "$pinned" "$tmp/override.py"
-[ "$(got OMNIGENT_ENGINEERING_PACK="$tmp/pin")" = "$pinned" ] \
-  && [ "$(got APPROVALS_PY="$tmp/override.py" OMNIGENT_ENGINEERING_PACK="$tmp/pin")" = "$tmp/override.py" ] \
-  && [ "$(got OMNIGENT_ENGINEERING_PACK="$tmp/none")" = \
-       "OMNIGENT_ENGINEERING_PACK has no approvals.py: $tmp/none/gatekeeper/skills/gatekeeper/scripts/approvals.py
-exit 1" ] \
-  && [ "$(got)" = "$here/../../../.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py" ] \
-  && [ -f "$(got)" ] \
-  || { echo "!! approvals.py selection through the gate's policy step"; exit 1; }
-# the default command keeps a script path with a space as one argument: a fake uv records its arguments
-spaced="$tmp/work tree/.claude/skills/cloud-dev"; mkdir -p "$spaced" "$tmp/fakebin"
-cp "$here/test.sh" "$here/fork-env.sh" "$spaced/"
-printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "$RECEIVED"\n' > "$tmp/fakebin/uv"; chmod +x "$tmp/fakebin/uv"
-rm -f "$tmp/received"
-env -u OMNIGENT_ENGINEERING_PACK OMNIGENT_FORK_OVERLAY=/dev/null POLICY_ONLY=1 \
-  APPROVALS_PY="$tmp/override.py" PATH="$tmp/fakebin:$PATH" RECEIVED="$tmp/received" bash "$spaced/test.sh" >/dev/null 2>&1
-[ "$(cat "$tmp/received" 2>/dev/null)" = "run
---no-sync
-python
-$spaced/gatekeeper-policy-test.py
-$tmp/override.py" ] || { echo "!! default policy command splits a path with a space"; exit 1; }
-echo "cloud-dev approvals.py selection: ok"
+# the policy parses, and the same check fails on a copy whose working-tree `land.queue` is not one the pack
+# knows while its origin/mine ref still holds the good policy (so it fails if the working-tree switch is dropped)
+policy_check "$repo_root" >"$tmp/policy.log" 2>&1 || { cat "$tmp/policy.log"; exit 1; }
+broken="$tmp/broken"; mkdir -p "$broken/docs/agents"; git -C "$broken" init -q
+cp "$repo_root"/docs/agents/*.md "$broken/docs/agents/"
+git -C "$broken" add -A
+git -C "$broken" -c user.name=test -c user.email=test@example.com commit -q -m policy
+git -C "$broken" update-ref refs/remotes/origin/mine HEAD
+git -C "$broken" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/mine
+perl -pi -e 's/^  queue: mergify/  queue: bogus/' "$broken/docs/agents/gatekeeper.md"
+if policy_check "$broken" >"$tmp/policy.log" 2>&1 || ! grep -q "land.queue" "$tmp/policy.log"; then
+  echo "!! a broken policy block passed the policy check: $(cat "$tmp/policy.log")"; exit 1
 fi
-run_policy || exit 1
+echo "gatekeeper policy: ok"
+# .mergify.yml is the pack's template rendered with this fork's values, and every queue keeps `loop:hold` out
+python3 "$here/render-mergify.py" --check || exit 1
+mergify="$repo_root/.mergify.yml"
+count() { grep -c -F -- "$1" "$mergify"; }  # count <line text>: how often it appears in .mergify.yml
+[ "$(count '- -label = loop:hold')" = 4 ] || { echo "!! .mergify.yml: a queue or rule lacks -label = loop:hold"; exit 1; }
+[ "$(count '- -head ~= ^sync/')" = 2 ] && [ "$(count '- head ~= ^sync/')" = 2 ] \
+  || { echo "!! .mergify.yml: the default queue and rule must exclude sync/* heads, the sync ones select them"; exit 1; }
+echo "cloud-dev .mergify.yml: ok"

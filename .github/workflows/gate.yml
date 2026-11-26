@@ -150,7 +150,7 @@ jobs:
           # After a red run, the pack's rerun (its output kept for the flake step); else the full selection.
           if [ -n "$EARLIER_FAILED" ]; then
             mise run check:setup
-            GATE_BASE=$GATE_BASE python3 .agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py \
+            GATE_BASE=$GATE_BASE uv run .agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py \
               rerun-tests "$EARLIER_FAILED" --red "$EARLIER_SHA" --base "$GATE_BASE" 2>&1 | tee "$RUNNER_TEMP/rerun-tests.log"
           elif [ "$AFFECTED_TESTS_SHARD" = 0 ]; then
             GATE_BASE=$GATE_BASE mise run check-fast
