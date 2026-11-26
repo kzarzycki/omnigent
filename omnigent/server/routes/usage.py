@@ -537,6 +537,7 @@ def create_usage_router(
                 required=True,
             )
         )
+        assert source_id is not None  # required=True never skips verification
         if source_id != normalize_uuid(session_id):
             raise OmnigentError(
                 "Child usage posts are only accepted for the calling session",
