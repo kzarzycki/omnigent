@@ -120,7 +120,7 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "tag", "-f", "base")
     pack_change = {
         ".agents/plugins/demo/tests/conftest.py": "# c\n",
-        ".pre-commit-config.yaml": "exclude: x\n",
+        ".pre-commit-config.yaml": "exclude: x\nrepos: []\n",
     }
     assert select(repo, pack_change) == ["tests/dev/test_lint_surface.py"]
     # the queue's floor: a build input alone selects nothing the tests don't name
