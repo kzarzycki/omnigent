@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -13,18 +14,28 @@ from fastapi import APIRouter, Query, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Agent, Conversation
-from omnigent.errors import restart_on_stale_cursor
+from omnigent.errors import ErrorCode, OmnigentError, restart_on_stale_cursor
 from omnigent.runtime.policies.builder import (
+    _subtree_conversation_ids,
     _sum_subtree_usage,
     load_session_usage_and_tree,
 )
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.routes._agent_origin import require_agent_origin
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._sessions import helpers as _session_helpers
 from omnigent.server.routes._sessions.helpers import _resolve_harness_impl
-from omnigent.server.schemas import DailyCost, SessionUsage, UsageReport
-from omnigent.stores import ConversationStore
+from omnigent.server.schemas import (
+    ChildUsage,
+    ChildUsageRequest,
+    ChildUsageResponse,
+    DailyCost,
+    SessionUsage,
+    UsageReport,
+)
+from omnigent.stores import ConversationStore, PermissionStore
+from omnigent.util.uuid import normalize_uuid
 
 # The daily rollup floor for an "all-time" sum: earlier than any real row, so
 # ``sum_daily_cost`` with this lower bound totals every recorded day.
@@ -90,6 +101,68 @@ def _day_offset(day_utc: str, *, days: int) -> str:
     """Return the UTC day *days* before *day_utc*, as ``"YYYY-MM-DD"``."""
     base = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=UTC)
     return (base - timedelta(days=days)).date().isoformat()
+
+
+# Distinct child runs kept per session. A run's entry is ~250 bytes of JSON, so this
+# keeps the ``session_usage`` column far below its size limit.
+MAX_CHILD_USAGE_PER_SESSION = 100
+
+
+def _child_usage_entries(
+    tree: list[Conversation],
+    conversation_id: str,
+) -> list[ChildUsage]:
+    """
+    List the child runs recorded under a session and its sub-agent sessions.
+
+    :param tree: The spawn tree already loaded for the report.
+    :param conversation_id: The listed session; its subtree is read.
+    :returns: Entries ordered by session then key; malformed ones are skipped.
+    """
+    subtree_ids = _subtree_conversation_ids(tree, conversation_id)
+    entries: list[ChildUsage] = []
+    for member in sorted(tree, key=lambda conv: conv.id):
+        children = member.session_usage.get("child_usage")
+        if member.id not in subtree_ids or not isinstance(children, dict):
+            continue
+        for key in sorted(children):
+            entry = children[key]
+            if not isinstance(entry, dict):
+                continue
+            try:
+                entries.append(ChildUsage(**{**entry, "key": key, "session_id": member.id}))
+            except ValueError:
+                continue
+    return entries
+
+
+def _price_child_run(body: ChildUsageRequest) -> float | None:
+    """
+    Price a child run: the CLI's own cost, else the catalog price of its tokens.
+
+    :param body: The validated report.
+    :returns: USD, or ``None`` when the CLI gave no cost and no price is known
+        for the model (or its input / output split is missing).
+    """
+    if body.cost_usd is not None:
+        return body.cost_usd
+    if not body.model or body.input_tokens is None or body.output_tokens is None:
+        return None
+    from omnigent.llms.context_window import (
+        compute_llm_cost,
+        fetch_model_pricing_with_provider,
+    )
+    from omnigent.onboarding.provider_config import load_config
+
+    pricing = fetch_model_pricing_with_provider(
+        body.model, provider_config=load_config(), harness=body.harness
+    )
+    if pricing is None:
+        return None
+    cost = compute_llm_cost(
+        {"input_tokens": body.input_tokens, "output_tokens": body.output_tokens}, pricing
+    )
+    return cost if math.isfinite(cost) and cost >= 0 else None
 
 
 _TOKEN_BUCKET_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
@@ -329,6 +402,7 @@ def _build_usage_report(
                             else None
                         ),
                         agent_name=conv.sub_agent_name if include_page_details else None,
+                        child_usage=_child_usage_entries(tree, conv.id),
                     )
                 )
         if not page.has_more:
@@ -356,6 +430,7 @@ def create_usage_router(
     *,
     auth_provider: AuthProvider | None = None,
     feature_flags: FeatureFlags | None = None,
+    permission_store: PermissionStore | None = None,
 ) -> APIRouter:
     """
     Create the per-user usage-report router.
@@ -368,6 +443,8 @@ def create_usage_router(
         auth (single-user / local mode).
     :param feature_flags: Immutable deployment release-feature snapshot.
         When omitted, resolves ``OMNIGENT_FEATURES`` at router construction.
+    :param permission_store: Permission store the child-usage route checks
+        the calling session's owner against; ``None`` when auth is off.
     :returns: The configured router (mounted under ``/v1``).
     """
     flags = feature_flags or resolve_feature_flags()
@@ -399,5 +476,102 @@ def create_usage_router(
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
             days=days,
         )
+
+    @router.post("/sessions/{session_id}/child-usage", response_model=ChildUsageResponse)
+    async def post_child_usage(
+        session_id: str, request: Request, body: ChildUsageRequest
+    ) -> ChildUsageResponse:
+        """
+        Record a child CLI run's usage under its parent session.
+
+        A cloud session's agent can run a CLI (``codex``, ``agy``) as a child
+        process whose tokens Omnigent never sees. The session's own runner
+        reports them here; ``GET /v1/usage`` lists each under the parent as a
+        ``child_usage`` entry, apart from the parent's own ``cost_usd`` and
+        ``models`` rows. A child run is not added to the user's daily-cost
+        rollup either.
+
+        **Path.** ``POST /v1/sessions/{session_id}/child-usage``: the parent
+        session's id (bare hex, as in the session's own routes).
+
+        **Auth.** The session's own runner credentials, as for the Inbox post:
+        the ``X-Omnigent-Orchestration-Source`` header must name ``{session_id}``, and
+        the runner tunnel token must be the one that session is bound to. A
+        session can therefore post only for itself; another session's id, a
+        missing or wrong token or a header naming a different session is 403.
+        With auth on, the caller must also own the session.
+
+        **Body** (JSON; unknown fields are 422):
+
+        - ``key`` (required): idempotency key for the child run, 1-64 chars of
+          ``[A-Za-z0-9._:-]``. A repeated key replaces its entry, so a retried
+          post counts once; use a new key for each run.
+        - ``harness`` (required): the CLI, e.g. ``"codex"``.
+        - ``model``: the model it ran.
+        - ``input_tokens``, ``output_tokens``: when known; ``total_tokens``: when
+          that is all the CLI prints. At least one of the three counts or
+          ``cost_usd`` is required.
+        - ``cost_usd``: the cost the CLI printed, used as given. Otherwise,
+          when ``model`` and both input and output counts are given, the server
+          prices them with the same catalog / provider pricing as session
+          turns. With no price the entry's ``cost_usd`` is ``null`` (unpriced,
+          not free).
+
+        **Response** (200): ``{"object": "child_usage", "session_id": "<id>",
+        "child": {key, harness, model, input_tokens, output_tokens,
+        total_tokens, cost_usd}, "replaced": <bool>}``. ``total_tokens`` is
+        input + output when both were sent without a total, else as sent
+        (``null`` when absent). 404 for an unknown session;
+        409 when the session already holds
+        :data:`MAX_CHILD_USAGE_PER_SESSION` other runs.
+        """
+        owner = require_user(request, auth_provider)
+        local_owner = owner if owner is not None else RESERVED_USER_LOCAL
+        source_id = await asyncio.to_thread(
+            lambda: require_agent_origin(
+                request,
+                action="Child usage posts",
+                owner=local_owner,
+                auth_provider=auth_provider,
+                conversation_store=conversation_store,
+                permission_store=permission_store,
+                required=True,
+            )
+        )
+        assert source_id is not None  # required=True never skips verification
+        if source_id != normalize_uuid(session_id):
+            raise OmnigentError(
+                "Child usage posts are only accepted for the calling session",
+                code=ErrorCode.FORBIDDEN,
+            )
+        cost = await asyncio.to_thread(_price_child_run, body)
+        total = body.total_tokens
+        if total is None and body.input_tokens is not None and body.output_tokens is not None:
+            total = body.input_tokens + body.output_tokens
+        child = ChildUsage(
+            key=body.key,
+            harness=body.harness,
+            model=body.model,
+            input_tokens=body.input_tokens,
+            output_tokens=body.output_tokens,
+            total_tokens=total,
+            cost_usd=cost,
+        )
+        replaced = await asyncio.to_thread(
+            lambda: conversation_store.record_child_usage(
+                source_id,
+                body.key,
+                child.model_dump(exclude={"key", "session_id"}),
+                max_entries=MAX_CHILD_USAGE_PER_SESSION,
+            )
+        )
+        if replaced is None:
+            if await asyncio.to_thread(conversation_store.get_conversation, source_id) is None:
+                raise OmnigentError("session not found", code=ErrorCode.NOT_FOUND)
+            raise OmnigentError(
+                f"a session records at most {MAX_CHILD_USAGE_PER_SESSION} child runs",
+                code=ErrorCode.CONFLICT,
+            )
+        return ChildUsageResponse(session_id=source_id, child=child, replaced=replaced)
 
     return router

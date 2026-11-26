@@ -1791,6 +1791,34 @@ class ConversationStore(ABC):
         """
         ...
 
+    def record_child_usage(
+        self,
+        conversation_id: str,
+        key: str,
+        entry: dict[str, Any],
+        *,
+        max_entries: int,
+    ) -> bool | None:
+        """
+        Record one child CLI run's usage under a session, once per *key*.
+
+        Stores *entry* at ``session_usage["child_usage"][key]``, apart from the
+        session's own counters and ``by_model`` rows (it is never summed into
+        them). A repeated *key* replaces its entry, so one run counts once
+        however often it is posted. The read-modify-write runs in one
+        transaction, like :meth:`increment_session_usage`.
+
+        :param conversation_id: The parent session, e.g. ``"conv_abc123"``.
+        :param key: The child run's idempotency key, e.g. ``"run-7"``.
+        :param entry: The JSON-serializable usage entry to store.
+        :param max_entries: Most distinct keys kept per session; a new key past
+            it is refused.
+        :returns: ``True`` when *key* already had an entry (now replaced),
+            ``False`` when it is new, ``None`` when the session is missing or
+            holds *max_entries* other keys.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def add_daily_cost(self, user_id: str, day_utc: str, delta_usd: float) -> None:
         """
