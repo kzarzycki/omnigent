@@ -1,0 +1,1 @@
+A file, not a folder: Python cannot create its bytecode cache here, so importing a script leaves no .pyc in an installed skill, which apm would count as drift (#428).
