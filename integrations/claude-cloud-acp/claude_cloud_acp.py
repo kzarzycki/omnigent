@@ -273,6 +273,29 @@ def send_message(session_id: str, text: str) -> tuple[int, bool]:
     )
 
 
+def describe_api_error(exc: BaseException, doing: str) -> str:
+    """Name why a sessions-API call failed: the status and the API's own message, or the network.
+
+    Never empty: Omnigent shows only the message, so a bare one hides the cause.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = ""
+        with contextlib.suppress(Exception):
+            body = json.loads(exc.read() or b"{}")
+            err = body.get("error", body) if isinstance(body, dict) else {}
+            detail = str(err.get("message") or "") if isinstance(err, dict) else str(err)
+        cause = {
+            401: "the claude.ai login expired; log in again",
+            403: "the claude.ai login may not use this cloud session",
+            404: "the cloud session no longer exists (expired or deleted)",
+            409: "the cloud session cannot take messages (archived, and unarchiving failed)",
+        }.get(exc.code, "the API refused the request")
+        return f"{doing}: HTTP {exc.code}, {cause}" + (f": {detail}" if detail else "")
+    if unreachable(exc):
+        return f"{doing}: cloud API unreachable ({exc}); the session may still be running"
+    return f"{doing}: {exc or repr(exc)}"
+
+
 def interrupt(session_id: str) -> None:
     post_event(
         session_id,
@@ -1397,7 +1420,11 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
     if not s.marked:
         # A new bridge, or one whose announcing turn failed and Omnigent dropped it.
         announce(acp_id, s)
-    if not s.caught_up and (behind := backlog(s, text, prompt)):
+    try:
+        behind = None if s.caught_up else backlog(s, text, prompt)
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(describe_api_error(exc, "could not reach the cloud session")) from exc
+    if behind:
         # Attach before sending: the cloud session did not stop when its bridge did,
         # nor when this bridge's last turn failed.
         after, same, settled, start = behind
@@ -1416,7 +1443,10 @@ def _mirror_turn(acp_id: str, s: Session, text: str) -> str:
             return stop
     check_model(acp_id, s)
     check_effort(s)
-    after, unarchived = _send(s, text)
+    try:
+        after, unarchived = _send(s, text)
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(describe_api_error(exc, "could not resume the cloud session")) from exc
     if unarchived:
         thought(acp_id, "[cloud] unarchived the session; files from before the archive are gone\n")
     s.follow(after)
@@ -1632,7 +1662,8 @@ def handle_prompt(msg: dict) -> None:
         send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
     except Exception as exc:  # noqa: BLE001 — every failure goes back to the client
         log(f"turn failed: {exc}")
-        send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(exc)}})
+        message = str(exc) or repr(exc)  # never a bare error: Omnigent shows only this
+        send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": message}})
         return
     # Only after the response: a bridge that dies before it leaves the turn
     # unseen, so a retry of its message mirrors it again and is not sent twice.
