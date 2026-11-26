@@ -59,6 +59,8 @@ warm_up &
 { $sudo apt-get update -qq && $sudo apt-get install -y -qq bubblewrap openssh-client >/dev/null; } \
   || echo "apt-get failed" >> "$log"
 uv tool install -q pre-commit || echo "uv tool install pre-commit failed" >> "$log"
+# the git hooks (.pre-commit-config.yaml's pre-commit and pre-push types), so a cloud session's commits run them
+[ -n "$repo" ] && { (cd "$repo" && pre-commit install >/dev/null 2>&1) || echo "pre-commit install failed" >> "$log"; }
 # from npm: the mise.run installer left no mise in the cloud image
 command -v mise >/dev/null || npm install -g -s @jdxcode/mise || echo "npm install mise failed" >> "$log"
 # gh-quota's logging shim ahead of the image's gh, so every session logs its gh calls by caller: the pack's two
