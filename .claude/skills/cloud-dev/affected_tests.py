@@ -174,8 +174,11 @@ def targets(
         path = Path(f)
         if floor and f in FLOOR_INPUTS:
             return False
+        # a deployed pack's conftest applies only to the pack's tests, which run in its own repo
         return f.startswith(EVERYTHING) or (
-            path.name == "conftest.py" and (path.parts[0] != "tests" or len(path.parts) < 3)
+            path.name == "conftest.py"
+            and path.parts[0] != ".agents"
+            and (path.parts[0] != "tests" or len(path.parts) < 3)
         )
 
     if files is None or any(shared(f) for f in files):
@@ -203,7 +206,12 @@ def targets(
                     str(t.relative_to(root)) for t, text in tests.items() if pattern.search(text)
                 )
             conftest = path.name == "conftest.py"
-            if conftest and path.parts[1] not in NOT_RUN and (root / path).parent.is_dir():
+            if (
+                conftest
+                and path.parts[0] != ".agents"
+                and path.parts[1] not in NOT_RUN
+                and (root / path).parent.is_dir()
+            ):
                 picked.add(str(path.parent))
             # a conftest by module only: many tests mention the file name `conftest.py`
             picked.update(
