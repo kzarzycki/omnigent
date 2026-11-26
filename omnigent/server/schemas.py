@@ -4293,6 +4293,92 @@ class UsageReport(BaseModel):
     sessions: list[SessionUsage] = Field(default_factory=list)
 
 
+class TelemetryModelUsage(BaseModel):
+    """Tokens and cost one model accounts for across the report's sessions."""
+
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cost_usd: float | None = None
+    sessions: int = 0
+
+
+class TelemetrySessionUsage(BaseModel):
+    """One session's own recorded usage (not its subtree's)."""
+
+    cost_usd: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    by_model: dict[str, TelemetryModelUsage] = Field(default_factory=dict)
+
+
+class TelemetrySession(BaseModel):
+    """One session (root or sub-agent) in a tree the window touched."""
+
+    id: str
+    parent_id: str | None = None
+    root_id: str
+    title: str | None = None
+    created_at: int
+    updated_at: int
+    archived: bool = False
+    agent: str | None = None
+    harness: str | None = None
+    host: str | None = None
+    workspace: str | None = None
+    live_status: str | None = None
+    sub_agent_name: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    items: int = 0
+    turns: int = 0
+    compactions: int = 0
+    inherited_items: int = 0
+    tool_calls: dict[str, int] = Field(default_factory=dict)
+    usage: TelemetrySessionUsage = Field(default_factory=TelemetrySessionUsage)
+    subscribes_to: list[str] = Field(default_factory=list)
+
+
+class TelemetryScheduledTask(BaseModel):
+    """One scheduled task and its runs scheduled inside the window."""
+
+    id: str
+    name: str
+    state: str
+    workspace: str | None = None
+    runs: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    last_error: str | None = None
+
+
+class TelemetrySidebar(BaseModel):
+    """Unarchived top-level sessions, and how many scheduled runs created."""
+
+    unarchived: int = 0
+    from_scheduled_tasks: int = 0
+
+
+class UsageTelemetry(BaseModel):
+    """
+    What the ``omnigent-telemetry`` report reads, aggregated in the server.
+
+    ``GET /v1/usage/telemetry`` — see the route's docstring for the shape.
+    """
+
+    object: Literal["usage_telemetry"] = "usage_telemetry"
+    since: int
+    until: int
+    daily_cost: list[DailyCost] = Field(default_factory=list)
+    models: list[TelemetryModelUsage] = Field(default_factory=list)
+    sessions: list[TelemetrySession] = Field(default_factory=list)
+    scheduled_tasks: list[TelemetryScheduledTask] = Field(default_factory=list)
+    sidebar: TelemetrySidebar = Field(default_factory=TelemetrySidebar)
+    truncated: list[str] = Field(default_factory=list)
+
+
 # ── Permissions ────────────────────────────────────────────────────
 
 

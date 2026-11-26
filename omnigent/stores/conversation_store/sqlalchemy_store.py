@@ -140,6 +140,7 @@ from omnigent.stores.conversation_store import (
     ProfileHostBinding,
     SessionActivity,
     SessionConnectivity,
+    SessionItemStats,
     SessionSubscription,
     SessionTodosUpdate,
     SpawnTreeUsage,
@@ -7862,6 +7863,85 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._session("has_session_subscription") as session:
             key = (current_workspace_id(), subscriber_id, target_id)
             return session.get(SqlSessionSubscription, key) is not None
+
+    def get_session_item_stats(
+        self, conversation_ids: Sequence[str]
+    ) -> dict[str, SessionItemStats]:
+        """Aggregate each session's items. See base class."""
+        stats: dict[str, SessionItemStats] = {}
+        message, call, native, compaction = (
+            encode_item_type(name)
+            for name in ("message", "function_call", "native_tool", "compaction")
+        )
+        for chunk in batched(conversation_ids, 200):
+            ids = list(chunk)
+            counts: dict[str, dict[int, int]] = {cid: {} for cid in ids}
+            tools: dict[str, dict[str, int]] = {cid: {} for cid in ids}
+            with self._conv_session("get_session_item_stats") as session:
+                where = (
+                    SqlConversationItem.workspace_id == current_workspace_id(),
+                    SqlConversationItem.conversation_id.in_(ids),
+                )
+                for cid, kind, count in session.execute(
+                    select(
+                        SqlConversationItem.conversation_id,
+                        SqlConversationItem.type,
+                        func.count(),
+                    )
+                    .where(*where)
+                    .group_by(SqlConversationItem.conversation_id, SqlConversationItem.type)
+                ):
+                    counts[cid][kind] = count
+                inherited: dict[str, int] = {}
+                for cid, count in session.execute(
+                    select(SqlConversationItem.conversation_id, func.count())
+                    .join(
+                        SqlConversation,
+                        and_(
+                            SqlConversation.workspace_id == SqlConversationItem.workspace_id,
+                            SqlConversation.id == SqlConversationItem.conversation_id,
+                        ),
+                    )
+                    .where(*where, SqlConversationItem.created_at < SqlConversation.created_at)
+                    .group_by(SqlConversationItem.conversation_id)
+                ):
+                    inherited[cid] = count
+                # Only the types whose JSON carries what is counted are read.
+                turns: dict[str, int] = {}
+                for cid, kind, data in session.execute(
+                    select(
+                        SqlConversationItem.conversation_id,
+                        SqlConversationItem.type,
+                        SqlConversationItem.data,
+                    )
+                    .where(*where, SqlConversationItem.type.in_([message, call, native]))
+                    .execution_options(yield_per=500)
+                ):
+                    try:
+                        body = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(body, dict):
+                        continue
+                    if kind == message:
+                        if body.get("role") == "user":
+                            turns[cid] = turns.get(cid, 0) + 1
+                        continue
+                    inner = body.get("item")
+                    name = body.get("name") or (
+                        inner.get("type") if isinstance(inner, dict) else None
+                    )
+                    if isinstance(name, str) and name:
+                        tools[cid][name] = tools[cid].get(name, 0) + 1
+            for cid in ids:
+                stats[cid] = SessionItemStats(
+                    items=sum(counts[cid].values()),
+                    turns=turns.get(cid, 0),
+                    compactions=counts[cid].get(compaction, 0),
+                    inherited_items=inherited.get(cid, 0),
+                    tool_calls=tools[cid],
+                )
+        return stats
 
     def list_session_subscriptions(
         self, subscriber_id: str, *, after: str | None = None, limit: int = 100
