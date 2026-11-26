@@ -1,0 +1,10 @@
+name: omnigent
+version: 0.1.0
+description: Loop pack install for the omnigent fork.
+targets:
+- claude
+dependencies:
+  apm:
+  - git: kzarzycki/agent-skills/engineering
+    ref: engineering-v0.35.10
+  mcp: []
