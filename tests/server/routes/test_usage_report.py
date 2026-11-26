@@ -33,9 +33,9 @@ def test_session_cost_priced() -> None:
 
 
 def test_session_cost_unpriced_or_malformed() -> None:
-    # Absent key (unpriced) and malformed values both read as 0.0.
-    assert _session_cost({}) == 0.0
-    assert _session_cost({"total_cost_usd": "oops"}) == 0.0
+    # Absent key (unpriced) and malformed values both read as None, not $0.
+    assert _session_cost({}) is None
+    assert _session_cost({"total_cost_usd": "oops"}) is None
 
 
 def test_session_models_faithful_no_collapse() -> None:
@@ -54,15 +54,15 @@ def test_session_models_faithful_no_collapse() -> None:
     }
 
 
-def test_session_models_omits_unpriced_and_malformed() -> None:
+def test_session_models_unpriced_is_null_malformed_omitted() -> None:
     usage = {
         "by_model": {
             "claude-opus-4-8": {"total_cost_usd": 1.0},
-            "unpriced-model": {"input_tokens": 100},  # no cost key -> omitted
+            "unpriced-model": {"input_tokens": 100},  # tokens, no cost key -> None
             "bad-model": {"total_cost_usd": "nan-ish"},  # malformed -> omitted
         }
     }
-    assert _session_models(usage) == {"claude-opus-4-8": 1.0}
+    assert _session_models(usage) == {"claude-opus-4-8": 1.0, "unpriced-model": None}
 
 
 @pytest.mark.parametrize("value", [None, {}, "not-a-dict", 5])
@@ -238,14 +238,14 @@ def test_build_usage_report_unpriced_session(
         "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch",
         lambda: now,
     )
-    # A session with no recorded usage: cost falls back to 0.0, no models.
+    # A session with no recorded usage: cost is unknown (None), no models.
     conv = store.create_conversation(title="bare", agent_id=_AGENT_ID)
 
     monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: now)
     report = _build_usage_report(store, None)
 
     bare = next(s for s in report.sessions if s.id == conv.id)
-    assert bare.cost_usd == 0.0
+    assert bare.cost_usd is None
     assert bare.models == {}
 
 

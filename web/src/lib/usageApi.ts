@@ -12,8 +12,8 @@ interface SessionUsageWire {
   created_at: number;
   updated_at: number;
   title: string | null;
-  cost_usd: number;
-  models: Record<string, number>;
+  cost_usd: number | null;
+  models: Record<string, number | null>;
   harness: string | null;
   other_harnesses: string[] | null;
   llm_model: string | null;
@@ -75,8 +75,9 @@ export async function fetchUsageReport(): Promise<UsageReport> {
       createdAt: s.created_at,
       updatedAt: s.updated_at,
       title: s.title,
-      costUsd: s.cost_usd,
-      models: s.models ?? {},
+      // Unpriced (null) reads as 0 in this view; the API keeps the distinction.
+      costUsd: s.cost_usd ?? 0,
+      models: Object.fromEntries(Object.entries(s.models ?? {}).map(([k, v]) => [k, v ?? 0])),
       harness: s.harness ?? null,
       otherHarnesses: s.other_harnesses ?? null,
       llmModel: s.llm_model ?? null,

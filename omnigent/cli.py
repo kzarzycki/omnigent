@@ -7609,9 +7609,19 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
     tbl.add_column("Cost", justify="right", no_wrap=True)
     for s in shown:
         sid = escape(str(s.get("id", "")))
-        total = f"[bold]{money(s.get('cost_usd', 0.0))}[/bold]"
-        # Dominant model first, so the biggest spend leads (cost desc).
-        models = sorted((s.get("models") or {}).items(), key=lambda kv: kv[1], reverse=True)
+        # `null` cost means no price is known for the model, which is not $0.
+        session_cost = s.get("cost_usd")
+        total = (
+            f"[bold]{money(session_cost)}[/bold]"
+            if session_cost is not None
+            else "[omni.muted]—[/omni.muted]"
+        )
+        # Dominant model first, so the biggest spend leads (cost desc); unpriced last.
+        models = sorted(
+            (s.get("models") or {}).items(),
+            key=lambda kv: -1.0 if kv[1] is None else kv[1],
+            reverse=True,
+        )
         if len(models) <= 1:
             model_cell = escape(str(models[0][0])) if models else "[omni.muted]—[/omni.muted]"
             tbl.add_row(sid, model_cell, total)
@@ -7621,7 +7631,7 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
                 tbl.add_row(
                     "",
                     escape(str(name)),
-                    f"[omni.muted]{money(float(cost))}[/omni.muted]",
+                    f"[omni.muted]{money(float(cost)) if cost is not None else '—'}[/omni.muted]",
                 )
     ui.console.print(tbl)
 
