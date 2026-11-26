@@ -10,7 +10,7 @@ agent, so the load is on Anthropic's machines rather than the owner's. The sessi
 (cloud machine) does the spec, the code, the tests and the PR. A few steps can't run
 there and go through a host helper on the landing host. Two roles: a **bridge host** is any
 host that bridges cloud sessions (a lead may be bridged on any of them); the **landing host**
-is the one with `gh`, the agent-skills checkout, signing and the report paths. They can be
+is the one with `gh`, signing and the report paths. They can be
 the same machine. The owner's
 machine-specific values (host names, the environment's ID) stay out of this repo:
 `fork-env.sh <NAME>` next to this file prints one, from the environment or the local
@@ -68,21 +68,21 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
     launch it with `executable_path="/opt/pw-browsers/chromium"`.
 - **Workers** run as your native sub-agents in the VM, so they share your checkout and
   branch. A cloud child session would clone the host workspace's branch instead.
-- **Loop role files.** The engineering loop's skill isn't installed in the VM. Read it from
-  a clone: `git clone -q --depth 1 https://github.com/kzarzycki/agent-skills /tmp/agent-skills`,
-  then `/tmp/agent-skills/engineering/skills/engineering-loop/`.
+- **Loop role files.** `apm.yml` pins the engineering pack and the checkout carries what
+  `apm install` deployed: read the role files in `.claude/skills/engineering-loop/` and run the
+  scripts from there and from `.agents/plugins/gatekeeper/skills/gatekeeper/scripts/`. Bump the
+  pin with `uvx --from apm-cli apm install` after editing the tag in `apm.yml`.
 
 ## On the host
 
-The engineering loop's scripts on the landing host are in its agent-skills checkout, not an
-installed skill (`~/.claude/skills` has none, and any other copy on the host may be stale
-and unable to sign a land). `fork-env.sh OMNIGENT_AGENT_SKILLS` prints that checkout; `approvals.py` is
-`gatekeeper/skills/gatekeeper/scripts/approvals.py` under it.
+The engineering loop's scripts on the landing host are the ones deployed in the checkout the
+helper works in (`.claude/skills/engineering-loop/scripts/`; `approvals.py` is
+`.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py`), at the tag `apm.yml` pins.
 
 Checked in a VM against pack `engineering-v0.35.10` (`approvals.py check merge <pr>`, `record verdict --help`,
 `record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
-the VM. Run them from the pack clone (Loop role files above; add `--branch engineering-v0.35.10` to pin it), as
-`gatekeeper/skills/gatekeeper/scripts/approvals.py`.
+the VM. Run them from the deployed copy (Loop role files above), as
+`.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py`.
 
 **Runs in the VM:** `check build`, `check merge`, `record verdict` and `land`. `land` merges nothing: it posts the
 `land` status on the gated head and adds `loop:queued`, and Mergify merges (a squash, or a merge commit for a `sync/*`
