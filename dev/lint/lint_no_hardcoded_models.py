@@ -13,6 +13,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 MODEL_ID_RE = re.compile(
     r"""
     \b(?:
@@ -51,6 +53,7 @@ SKIP_PARTS = {
     "node_modules",
     "tests",
 }
+PRECOMMIT_CONFIG = Path(".pre-commit-config.yaml")
 OWNED_FALLBACK_PATH = Path("omnigent/models/model_fallbacks.py")
 FALLBACK_METADATA_FIELDS = frozenset({"owner", "provenance", "discovery_gap"})
 
@@ -224,9 +227,16 @@ def scan(path: Path) -> list[Hit]:
     return []
 
 
+def _precommit_global_exclude() -> re.Pattern[str] | None:
+    """Pre-commit's top-level exclude: vendored and pack-deployed files no hook lints."""
+    pattern = yaml.safe_load(PRECOMMIT_CONFIG.read_text()).get("exclude")
+    return re.compile(pattern) if pattern else None
+
+
 def _iter_scannable_paths() -> list[Path]:
     """Return every tracked source/config file in the lint surface."""
     output = subprocess.check_output(["git", "ls-files", "-z"])
+    global_exclude = _precommit_global_exclude()
     return [
         path
         for raw_path in output.decode().split("\0")
@@ -234,6 +244,7 @@ def _iter_scannable_paths() -> list[Path]:
         if (path := Path(raw_path)).suffix in SOURCE_EXTENSIONS
         if path not in GENERATED_PATHS
         if not any(part in SKIP_PARTS for part in path.parts)
+        if not (global_exclude and global_exclude.search(path.as_posix()))
     ]
 
 

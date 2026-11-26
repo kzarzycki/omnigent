@@ -1,0 +1,16 @@
+{
+  "name": "apm-p-a40fd310",
+  "owner": {
+    "name": "APM"
+  },
+  "plugins": [
+    {
+      "name": "gatekeeper",
+      "source": "./gatekeeper"
+    },
+    {
+      "name": "omnigent",
+      "source": "./omnigent"
+    }
+  ]
+}
