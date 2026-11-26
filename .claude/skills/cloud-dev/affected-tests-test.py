@@ -360,4 +360,32 @@ with tempfile.TemporaryDirectory() as tmp:
         check=True,
     )
     assert lines(out.stdout) == requests_importers, out
+    # a test that starts Omnigent as a subprocess counts as importing the whole package
+    run("git", "checkout", "-q", "-B", "spawn", "base")
+    spawner = repo / "tests" / "server" / "integration" / "test_revocation_processes.py"
+    spawner.parent.mkdir()
+    spawner.write_text('import sys\nCMD = [sys.executable, "-m", "omnigent", "server"]\n')
+    (repo / "omnigent" / "server").mkdir()
+    (repo / "omnigent" / "server" / "auth.py").write_text("x = 1\n")
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "subprocess test")
+    run("git", "tag", "sub")
+    spawner_target = "tests/server/integration/test_revocation_processes.py"
+
+    def select_from_sub(files: dict[str, str]) -> list[str]:
+        run("git", "checkout", "-q", "-B", "work", "sub")
+        for name, text in files.items():
+            (repo / name).write_text(text)
+        run("git", "commit", "-q", "-am", "change")
+        out = subprocess.run(
+            [sys.executable, str(HERE / "affected_tests.py"), "sub"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout.split()
+
+    assert select_from_sub({"omnigent/server/auth.py": "x = 2\n"}) == [spawner_target]
+    assert select_from_sub({"omnigent/widgets/frob.py": "x = 2\n"}) == [spawner_target, widget]
+    assert select_from_sub({"README.md": "more\n"}) == []
 print("affected-tests: ok")
