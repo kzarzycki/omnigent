@@ -8,6 +8,7 @@
 .venv/
 build/
 dist/
+/*.whl
 !examples/extensions/hello-page/src/omnigent_hello_extension/dist/
 !examples/extensions/hello-page/src/omnigent_hello_extension/dist/extension.js
 !examples/extensions/hello-page/src/omnigent_hello_extension/dist/extension.css
