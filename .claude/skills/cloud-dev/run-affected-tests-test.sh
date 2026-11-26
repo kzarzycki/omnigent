@@ -131,7 +131,7 @@ def test_kill():
     os.kill(os.getpid(), signal.SIGKILL)
 EOF
 printf 'def test_other():\n    pass\n' > "$tmp/suite/test_other.py"
-real() { env -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD AFFECTED_TESTS_WORKERS=2 PATH="$tmp/realbin:$PATH" "$@" \
+real() { env -u CI -u AFFECTED_TESTS_FULL -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD -u AFFECTED_TESTS_SHARDS -u AFFECTED_TESTS_SHARD AFFECTED_TESTS_WORKERS=2 PATH="$tmp/realbin:$PATH" "$@" \
   bash "$here/run-affected-tests.sh" >"$tmp/real.out" 2>&1; }
 : > "$tmp/kills"; start=$SECONDS
 real AFFECTED_TESTS_RECORD="$tmp/record"; rc=$?
