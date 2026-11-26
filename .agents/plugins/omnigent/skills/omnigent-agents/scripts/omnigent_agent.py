@@ -20,6 +20,7 @@
     python3 scripts/omnigent_agent.py report <session> [<path>] [--registry <file>]
     python3 scripts/omnigent_agent.py watch [<session>...] [--children <parent>]
     python3 scripts/omnigent_agent.py reap [<session>...] [--children <parent>] [--registry <file>] [--force] [--merged [--pr N]]
+    python3 scripts/omnigent_agent.py sweep [--idle-hours H] [--keep-file FILE] [--dry-run]
     python3 scripts/omnigent_agent.py direct <session> [--off] [--registry <file>]
     python3 scripts/omnigent_agent.py supervise <session>=<report>... [--silent-seconds N]
     python3 scripts/omnigent_agent.py supervise --registry <file> [--notify <session>] [--console [--fyi skip|post] [--decisions FILE]] [<session>=<report>...]
@@ -62,7 +63,8 @@ ends``, it lands then), 5 while an approval prompt or a question holds it, 4 whe
 delivered (archived, a failed revive, neither pending nor in the history), 7 when the message was posted and
 a later read failed (delivered, unconfirmed: run it again, it posts no second copy), 8 when the
 session's host is offline (nothing sent, nothing kept: run it again once the host is back).
-``relay --unarchive`` unarchives an archived session first, so it resumes with its history. An open
+``relay --unarchive`` unarchives an archived session first, so it resumes with its history; ``send`` does so for a session the
+supervisor registry lists, and ``send --unarchive`` for one it does not. An open
 question card (``sys_ask_user_question``: elicitation id ``question_…``, not ``elicit_question_…``) holds
 nothing (``holds_input``): ``relay``, ``broadcast`` and ``watch`` treat the session as free and show
 ``card open: <question>``; a plain relay (or ``send``, which prints the same line before it waits) is
@@ -161,7 +163,7 @@ one; a new or changed item raises ``[owner]``), for a lead marked ``direct`` not
 that lost its runner, which the owner can't see in its session; ``--fyi post`` posts every line as without it too,
 ``--decisions`` names the owner's standing decisions for the small model. The chief of staff's console (not a manager's) also
 follows each live top-level session labelled ``omni.role=lead`` that no registry holds (none beside its own, nor a ``leads=``
-one), with a ``follow`` line and one ``adopted`` event, unless a followed lead created it, so a lead started with no
+one), with a ``follow`` line and one ``adopted`` event, unless a followed lead created it or it is under ``ADOPT_GRACE_SECONDS`` old (its launcher may still be writing its registry line), so a lead started with no
 registry is supervised all the same. Without it, it writes none of these and posts every line.
 A long-lived supervisor runs as ``supervise --registry <file> ... --install --log <file>``: it writes
 a user service running that same command line less ``--install`` and ``--log`` (a systemd user unit
@@ -272,7 +274,6 @@ import fcntl
 import hashlib
 import http.client
 import importlib.util
-import itertools
 import json
 import os
 import plistlib
@@ -356,6 +357,11 @@ TURN_END_SECONDS = 30.0
 PROMPT_CONFIRM_SECONDS = 120.0
 # how long one listing of every session serves ``Omnigent.creations``: well inside the prompt's hold
 CREATED_SECONDS = 30.0
+# A PR with this label is parked on purpose and dropped from the merge queue by a rule (#2164): it raises no stall and no
+# dequeue for a manager to fix (#2316).
+HOLD_LABEL = "loop:hold"
+# A session younger than this is not adopted: its launcher may still be writing it to its own supervisor's registry (#2313).
+ADOPT_GRACE_SECONDS = 60.0
 TITLES = 20  # <title>, then <title>-r2 up to this many: a create refused as taken tries the next
 # A loaded server times out reads the child never noticed; a GET is retried after each of these.
 RETRY_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0)  # a GET outlasts a server restart
@@ -785,12 +791,14 @@ CLOUD_RUN_LINE = (
     " and a foreground call there is cut short: start it detached as engineering-loop's verifier.md's recipe says (its"
     " log, pid and exit in files), then wait on it with one wake: one `omnigent_agent.py wait-for --log <log>"
     " --pid <pid> --budget <the run's expected length>` started as a background call your harness tracks"
-    " (Claude Code: Bash `run_in_background`, which keeps running across turns and wakes you when it"
-    " exits), never a short `wait-for`, `until grep` or `sleep` loop, since each return re-reads your"
-    " whole context. Before the run has ended and its result is posted, end a turn only on that tracked"
-    " wait, naming its task id. The lead waits on the completion signal you post (the PR comment or a"
-    " status file), not on your turn, so a `STILL WORKING` that names only your own detached run is not"
-    " a valid ending."
+    " (Claude Code: Bash `run_in_background`), never a short `wait-for`, `until grep` or `sleep` loop,"
+    " since each return re-reads your whole context. Before the run has ended and its result is posted,"
+    " end a turn only on that tracked wait, naming its task id. A turn the run wakes never reaches the"
+    " host (it sees a cloud turn only once it sends the next message), so the host checks in every 5"
+    " minutes while you wait: answer each check-in with your report once the run has ended, in full"
+    " even if a woken turn already gave it, else end the turn again naming the task id. The lead waits"
+    " on the completion signal you post (the PR comment or a status file), not on your turn, so a"
+    " `STILL WORKING` that names only your own detached run is not a valid ending."
 )
 PREAMBLE = """\
 The owner authorized this task; do it now, without asking for a go-ahead. This file is your brief.
@@ -1084,6 +1092,28 @@ CLOUD_NUDGE = (
     f" line `{CLOUD_QUESTION_LINE}` and your question: your files stay in the cloud VM, which the"
     " host never reads."
 )
+# What a cloud child idle on its own background run (``pending_runs``) gets every
+# CLOUD_CHECK_IN_SECONDS: a turn that run wakes never reaches the host (kzarzycki/omnigent#472, the
+# bridge mirrors a missed turn only on the next message), so the check-in is that message (#959).
+# ponytail: a fixed interval, ceiling one extra turn per 5 min of a long run; once the bridge
+# forwards a woken turn, drop the check-in and keep only the no-fail rule.
+CLOUD_CHECK_IN_SECONDS = 300.0
+CLOUD_CHECK_IN = (
+    "Host check-in on your background run {runs}: a turn it wakes never reaches the host. If it has"
+    " ended, give your report now as your brief says, in this reply and in full even if a turn it"
+    " woke already wrote it, since the host never saw that turn (a report already posted as a PR"
+    " comment: reply with its link). If it is still going, end your turn again naming its task id."
+)
+# The line the claude-cloud bridge opens each turn's output with; when the turn's first output is its
+# reply, the two share one message (#959), so the reply's marker is not its first line.
+BRIDGE_LINE = re.compile(r"\s*cloud session: https://claude\.ai/code/session_\S+\s*")
+
+
+def unprefixed(text: str) -> str:
+    """``text`` stripped, without the bridge's opening ``cloud session: <url>`` line."""
+    return text[m.end() :].strip() if (m := BRIDGE_LINE.match(text)) else text.strip()
+
+
 # A lead's cloud report opens with the ending line LEAD_PREAMBLE names.
 CLOUD_LEAD_ENDING = re.compile(r"[\s*_#>-]*(DONE|USER NEEDED|STILL WORKING|PARKED):")
 
@@ -1212,7 +1242,7 @@ def cloud_reply(items: list[dict], verdict: bool = False) -> tuple[str, str] | N
     last = last_message(items)
     if not last or last.get("role") != "assistant":
         return None
-    text = text_of(last).strip()
+    text = unprefixed(text_of(last))
     first, _, rest = text.partition("\n")
     if CLOUD_LEAD_ENDING.match(first):
         return None if verdict and not VERDICT.search(text) else ("report", text + "\n")
@@ -2487,6 +2517,47 @@ def archived_note(og: Omnigent, sid: str, info: dict) -> str:
     )
 
 
+# Claude Code's reply to a Bash ``run_in_background`` call, in a cloud session's history (#959)
+BACKGROUND_LAUNCH = re.compile(r"Command running in background with ID: ([A-Za-z0-9_-]+)")
+
+
+def pending_runs(items: list[dict]) -> list[str]:
+    """The task ids of the background runs a cloud session's idle turn waits on: each launched in
+    its last turn (the items after the last user message), or launched earlier and named by its
+    last assistant message. Omnigent's record shows none of a cloud session's tasks
+    (``background_tasks`` stays null), so the history is the only place they show."""
+    start = next(
+        (
+            n
+            for n in range(len(items) - 1, -1, -1)
+            if items[n].get("type") == "message" and items[n].get("role") == "user"
+        ),
+        -1,
+    )
+    said = last_said(items)
+    runs: list[str] = []
+    for n, item in enumerate(items):
+        if item.get("type") != "function_call_output":
+            continue
+        for run in BACKGROUND_LAUNCH.findall(str(item.get("output") or "")):
+            if run not in runs and (n > start or re.search(rf"\b{re.escape(run)}\b", said)):
+                runs.append(run)
+    return runs
+
+
+def on_own_run(items: list[dict]) -> bool:
+    """Whether a cloud session's last message is a ``STILL WORKING`` ending that names one of its
+    own ``pending_runs``: no report yet, though ``cloud_reply`` reads a lead's ending line as one,
+    since the run's result is still to come (#959)."""
+    said = last_said(items)
+    first = unprefixed(said).partition("\n")[0]
+    return bool(
+        (m := CLOUD_LEAD_ENDING.match(first))
+        and m[1] == "STILL WORKING"
+        and any(re.search(rf"\b{re.escape(run)}\b", said) for run in pending_runs(items))
+    )
+
+
 def last_message(items: list[dict]) -> dict | None:
     return next((i for i in reversed(items) if i.get("type") == "message"), None)
 
@@ -3682,7 +3753,24 @@ def refuse_shadowed_pin(workspace: Path, env: str, main: Path | None) -> None:
         )
 
 
-def pin_environment(workspace: Path) -> None:
+def cloud_env_id(name: str) -> str:
+    """The id of the environment called ``name`` on this host's claude login, for ``start --cloud-env``; a name
+    not there is a ``Fail`` listing the names that are, since a ``-code-mode`` variant is made apart."""
+    envs = cloud_environments()
+    try:
+        hit = ENVS.named(envs, name)
+    except ENVS.Refused as e:
+        raise Fail(f"--cloud-env {name}: {e}") from None
+    if hit:
+        return str(hit["environment_id"])
+    names = ", ".join(sorted({str(e.get("name")) for e in envs if e.get("name")})) or "none"
+    raise Fail(
+        f"--cloud-env {name}: no cloud environment named {name!r} on this host's claude login (it has: {names});"
+        " `claude-code-mode --cloud-env <base>` makes an environment's <base>-code-mode variant"
+    )
+
+
+def pin_environment(workspace: Path, cloud_env: str = "") -> None:
     """Make sure a cloud session started in ``workspace`` gets the repo's claude.ai environment: it
     takes ``remote.defaultEnvironmentId`` from the workspace's untracked settings file, which a new
     worktree lacks, and without it lands in the account's default environment. The environment the
@@ -3690,9 +3778,26 @@ def pin_environment(workspace: Path) -> None:
     and pinned, replacing another pin. With no name, a pin already there stays; a worktree missing
     one takes its main checkout's; with neither, the environment named after the repository, else
     the account's ``Default``, is pinned. With none of them, fail before any session exists, as with
-    a pin that the worktree's main checkout's shadows."""
+    a pin that the worktree's main checkout's shadows.
+
+    ``cloud_env`` (``start --cloud-env``) names the environment instead, and the workspace must already
+    pin it: the bridge reads the pin each time it creates the session's cloud session (on the first
+    prompt, and again on a later message after a failed setup or an unstarted stall), so a pin written
+    for one start and put back could be read back by that session in the project's environment. A launch
+    dir of its own holds it for good; any other workspace is refused, naming ``launch-dir``."""
     own = own_settings(workspace)
     main = main_worktree(workspace)  # no checkout: no main to copy from
+    if cloud_env:
+        env = cloud_env_id(cloud_env)
+        if (pinned := environment_pin(own)) != env:
+            raise Fail(
+                f"--cloud-env {cloud_env}: {workspace / SETTINGS} pins {pinned or 'no environment'}, not"
+                f" {cloud_env} ({env}), and a cloud session rereads its workspace's pin whenever its cloud"
+                f" session is made again: make a launch dir of its own, `launch-dir <remote> <branch> {env} <path>`,"
+                " and start with --workspace <path>"
+            )
+        refuse_shadowed_pin(workspace, env, main)
+        return
     line = cloud_worker(project_loop(workspace))
     named = line.env if line else ""
     if named:
@@ -4731,6 +4836,7 @@ def start(
     allow_older_model: bool = False,
     about: int | None = None,
     keep: bool = False,
+    registered: Callable[[str, bool], None] | None = None,
 ) -> tuple[str, list[str]]:
     """Return the confirmed session id and any abandoned sessions whose finish failed. A top-level
     lead subscribes its starter's root session (``subscriber`` when given) unless ``subscribe`` is false: a
@@ -4740,7 +4846,10 @@ def start(
     (``host_id``, else this one) since #849, not to this host's load. ``files`` (local
     paths, for a session on another host) are written beside ``report`` on that host through the
     session's file API before its brief is sent, so it finds them when it starts. ``about`` is the PR a
-    verifier reviews, labelled ``PR_LABEL`` on it as a ``--pr`` worker is, so its spend groups by PR (#945)."""
+    verifier reviews, labelled ``PR_LABEL`` on it as a ``--pr`` worker is, so its spend groups by PR (#945).
+    ``registered(sid, True)`` runs once the session exists, before its brief is sent, and ``registered(sid, False)``
+    when it is abandoned: the caller's registry line is there the whole time the brief is confirmed, which can
+    outlast the supervisor's ``ADOPT_GRACE_SECONDS`` (#2319)."""
     harness = agent if agent in AGENTS else og.harness(agent)
     agy = harness == AGY_HARNESS
     # a session has its parent's runner, so a cloud one placed on another host (run --host) has none
@@ -4950,6 +5059,9 @@ def start(
         except Fail as e:
             survivors.append(sid)
             print(f"abandoned session {sid} survives: {e}", file=sys.stderr)
+        else:
+            if registered:  # after the archive: a live session's line stays, so no sweep adopts it
+                registered(sid, False)
 
     def failed(reason: str) -> Fail:
         left = f"; abandoned sessions survive: {', '.join(survivors)}" if survivors else ""
@@ -5025,6 +5137,9 @@ def start(
                 f"create failed ({error}); briefing session {found}, made anyway", file=sys.stderr
             )
             sid = found
+        if registered:
+            # the moment the session is known: the calls below can each take HTTP_SECONDS
+            registered(sid, True)
         if name != title:
             print(f"session {sid} is titled {name}", file=sys.stderr)
         try:
@@ -5167,11 +5282,16 @@ def wait(
     host), one ending on a marked question has it written to ``<report>.question`` and raises
     ``Asked``, and any other gets the nudge; a file already there never counts, as with ``pr``.
     With ``home`` (a cloud ``run --host``, whose caller reads it) that reply is written here instead.
+    An ``acp:claude-cloud`` child (with or without ``pr``) whose idle turn waits on its own
+    background run (``pending_runs``) is working: no nudge and no fail, a ``CLOUD_CHECK_IN`` every
+    ``CLOUD_CHECK_IN_SECONDS`` instead, and a fail only at ``timeout``, naming the runs (#959).
     """
     deadline = time.monotonic() + timeout
     far = False  # on another host (no ``pr``): its files are read through its file API, not here
     cloud = False  # an acp:claude-cloud child without ``pr``: its last message is the report
     idle_since, nudged = None, False
+    told: list[str] = []  # the background runs last named as what an idle cloud child waits on
+    checked = 0.0  # when the idle cloud child was last checked in on (or first seen pending)
     recovered: dict[str, str] = {}  # what each recovery so far did, by its kind
     continued: float | None = None  # when the stalled session was told to continue
     ended: dict[str, float] = {}
@@ -5200,7 +5320,9 @@ def wait(
     while True:
         info = og.info(sid)
         far = not pr and elsewhere(og, info)
-        cloud = not pr and cloud_session(og, info)
+        on_cloud = cloud_session(og, info)
+        cloud = not pr and on_cloud
+        runs: list[str] = []
         if stamp(question) is not None:
             raise Asked(str(question))
         status = str(info.get("status"))
@@ -5270,7 +5392,13 @@ def wait(
             report.write_text(body)
             carry_files(body, report)
             break  # the turn has ended on the comment's URL: nothing rewrites it now
-        if turn_ended and cloud and status != "failed" and (reply := cloud_reply(items, verdict)):
+        if (
+            turn_ended
+            and cloud
+            and status != "failed"
+            and (reply := cloud_reply(items, verdict))
+            and not on_own_run(items)
+        ):
             kind, body = reply
             path = question if kind == "question" else report
             there = far and not home
@@ -5310,7 +5438,24 @@ def wait(
                     )
                 idle_since = None
                 continue
-            if not nudged:  # often a turn ended on a background command: one reminder
+            runs = pending_runs(items) if on_cloud else []
+            if runs:  # working on its own run, not failed: no nudge, no fail until the deadline
+                now = time.monotonic()
+                if runs != told:
+                    print(
+                        f"session {sid} is idle on its own background run {', '.join(runs)}:"
+                        " waiting for its report",
+                        file=sys.stderr,
+                    )
+                    told, checked = runs, checked or now
+                if now - checked >= CLOUD_CHECK_IN_SECONDS and now < deadline:
+                    check = CLOUD_CHECK_IN.format(runs=", ".join(runs))
+                    send_to_confirm(og, sid, check)
+                    # else its old last message reads as this turn's
+                    delivered(og, sid, check, 60.0)
+                    checked, idle_since = time.monotonic(), None
+                    continue
+            elif not nudged:  # often a turn ended on a background command: one reminder
                 nudge = (
                     (HELD_NUDGE if os.environ.get(DENY_LIST) else PR_NUDGE).format(
                         pr=pr, unposted=UNPOSTED
@@ -5328,10 +5473,14 @@ def wait(
                 delivered(og, sid, nudge, 60.0)  # else its old last message ends the wait at once
                 idle_since, nudged = None, True
                 continue
-            raise Fail(f"session {sid} ended ({status}) without {missing}\nlast message: {said}")
+            else:
+                raise Fail(
+                    f"session {sid} ended ({status}) without {missing}\nlast message: {said}"
+                )
         if time.monotonic() >= deadline:
+            on = f", still idle on its own background run {', '.join(runs)}" if runs else ""
             raise Fail(
-                f"session {sid} gave no {'verdict' if verdict else 'report'} after {timeout:.0f}s\nlast message: {said}"
+                f"session {sid} gave no {'verdict' if verdict else 'report'} after {timeout:.0f}s{on}\nlast message: {said}"
             )
         time.sleep(POLL_SECONDS)
     workspace = info.get("workspace")
@@ -5804,20 +5953,29 @@ def rest_if_changed(path: str, timeout: float = HTTP_SECONDS) -> tuple[bool, Any
     return True, found
 
 
+# the most pages rest_pages reads of one list (5,000 items), whatever the endpoint answers
+REST_PAGES_MAX = 50
+
+
 def rest_pages(path: str, key: str = "", timeout: float = HTTP_SECONDS) -> list:
     """Every item of the paged REST list at ``path`` (``repos/...``; the items under ``key`` when the body is an object,
     as a check-runs list is), each page read with its last ETag (``rest_if_changed``), so a poll of a list where nothing
     moved costs a 304 per page, which spends no quota (#2070). The supervisor's every list poll goes through here, so
     one function is where a push of GitHub events would replace the polling."""
     items: list = []
+    last: list | None = None
     base = path if "per_page=" in path else path + ("&" if "?" in path else "?") + "per_page=100"
-    for page in itertools.count(1):
+    for page in range(1, REST_PAGES_MAX + 1):
         body = rest_if_changed(f"{base}&page={page}", timeout)[1]
         got = (body.get(key) if key else body) or []
+        # an endpoint that ignores page= (git/matching-refs) answers the same page again (#2343)
+        if got == last:
+            return items
         items += got
         if len(got) < 100:
             return items
-    return items  # unreachable: the count never ends
+        last = got
+    return items  # the backstop: no list the loop reads runs to this many pages
 
 
 def etags_load(path: Path) -> None:
@@ -6088,26 +6246,21 @@ def pr_stall(facts: dict, threshold: float, now: float) -> tuple[float, str | No
 
 def queue_holds(pr: dict, checks: list[dict], statuses: list[dict]) -> bool:
     """Whether the merge queue holds PR ``pr`` (a REST pull) at its head: it carries ``QUEUED_LABEL`` and a queue check
-    (``QUEUE_CHECK``) on the head is still running by its newest run (``checks``, the head's check runs), or a queue
+    (``QUEUE_CHECK``) on the head has any run still running (``checks``, the head's check runs), whichever started last:
+    Mergify has ended the later of two runs a second apart `neutral` and left the earlier one live (#2428); or a queue
     status there is pending by its newest (``statuses``, newest first). Both stall sweeps ask it, so a PR waiting in the
     queue is never reported stalled (#2100). ponytail: from `land`'s label to Mergify's first check (about 40 s) the
     queue holds a PR this misses; the gatekeeper's `queued_here` covers that window, at a run of it per PR."""
     if QUEUED_LABEL not in {str(label.get("name")) for label in pr.get("labels") or []}:
         return False
-    latest: dict[
-        str, dict
-    ] = {}  # each queue check's newest run: Mergify ends an earlier one `neutral`
-    for c in checks:
-        name = str(c.get("name"))
-        if QUEUE_CHECK.search(name) and (c.get("started_at") or "") >= (
-            latest.get(name, {}).get("started_at") or ""
-        ):
-            latest[name] = c
     newest: dict[str, dict] = {}
     for s in statuses:
         newest.setdefault(str(s.get("context")), s)
     return any(
-        c.get("status") != "completed" and not c.get("conclusion") for c in latest.values()
+        QUEUE_CHECK.search(str(c.get("name")))
+        and c.get("status") != "completed"
+        and not c.get("conclusion")
+        for c in checks
     ) or any(QUEUE_CHECK.search(name) and s.get("state") == "pending" for name, s in newest.items())
 
 
@@ -6200,11 +6353,28 @@ def pr_stalls(
     refs: dict | None = None
     last = memo.get("swept", 0.0)  # the sweep before this one: a head new since was pushed after it
     said = []
+    memo["held"] = sorted(  # ``queue_round`` tells no dequeue of these
+        p["number"]
+        for p in listed
+        if HOLD_LABEL in {str(x.get("name")) for x in p.get("labels") or []}
+    )
     for row in sorted(listed, key=lambda p: p["number"]):
         if row.get("draft"):
             continue  # its lead is still building it: the lead's own deadline watches that
         key = str(row["number"])
         seen = prs.get(key) or {}
+        if row["number"] in memo["held"]:
+            # no read while held, but its head stays first-seen and it is due at once: it stalls as before when released
+            prs[key] = {
+                "head": row["head"]["sha"],
+                "updated": row.get("updated_at"),
+                "said": seen.get("said"),
+                "seen_at": seen.get("seen_at", 0.0)
+                if seen.get("head") == row["head"]["sha"]
+                else last,
+                "due": 0,
+            }
+            continue
         same = seen.get("head") == row["head"]["sha"] and seen.get("updated") == row.get(
             "updated_at"
         )
@@ -6840,6 +7010,31 @@ def pr_label(label: object) -> tuple[str, int] | None:
     return (m[1], int(m[2])) if m else None
 
 
+def label_refs(label: object) -> list[str]:
+    """The ``owner/name#N`` entries of a ``PR_LABEL`` value: one, or several joined by commas (a lead that lands
+    several PRs, or took one over: ``own_pr`` adds each)."""
+    return [p.strip() for p in str(label).split(",") if p.strip()]
+
+
+def pr_labels(label: object) -> list[tuple[str, int]]:
+    """The repository and PR number of every PR a ``PR_LABEL`` value names, in order; none that does not parse."""
+    return [found for ref in label_refs(label) if (found := pr_label(ref))]
+
+
+def own_pr(og: Omnigent, sid: str, refs: list[str]) -> str:
+    """Add PRs ``refs`` (``owner/name#N``) to ``sid``'s ``PR_LABEL`` list in one write, so a dequeue of any reaches
+    ``sid``: what a lead's ``land`` and a takeover write. Idempotent; the labels it holds already are kept."""
+    for ref in refs:
+        if not pr_label(ref):
+            raise Fail(f"own-pr needs owner/name#N, not {ref!r}")
+    held = label_refs((og.info(sid).get("labels") or {}).get(PR_LABEL, ""))
+    added = [r for r in dict.fromkeys(refs) if r not in held]
+    if not added:
+        return f"{sid}: already owns {', '.join(refs)}"
+    og.label(sid, {PR_LABEL: ",".join([*held, *added])})
+    return f"{sid}: owns {', '.join(added)}"
+
+
 def pr_hold(repo: str, pr: int) -> str | None:
     """Why a worker of PR ``pr`` of ``repo`` is still held: the PR is open; None once it is merged
     or closed. A PR that can't be read holds the worker, saying so. The lookup names ``repo``, never
@@ -6934,7 +7129,7 @@ def running_twin(og: Omnigent, label: str, role: str) -> str:
         labels = s.get("labels") or {}
         if (
             not s.get("archived")
-            and str(labels.get(PR_LABEL, "")) == label
+            and label in label_refs(labels.get(PR_LABEL, ""))
             and labels.get("omni.role") == role
             and str(s.get("status")) in RUNNING
         ):
@@ -6994,12 +7189,14 @@ def pr_workers(og: Omnigent, pr: int | None = None) -> list[str]:
     page = og.call("GET", "/v1/sessions?kind=any&limit=1000")
     found = []
     for s in page.get("data", []):
-        label = pr_label(held_by(s))
+        labelled = pr_labels(held_by(s))
         named = getattr(pr, "repo", "")
         if (
             not s.get("archived")
-            and label
-            and (pr is None or (label[1] == pr and (not named or label[0] == named)))
+            and labelled
+            and (
+                pr is None or any(n == pr and (not named or repo == named) for repo, n in labelled)
+            )
         ):
             found.append(str(s["id"]))
     return found
@@ -7084,15 +7281,19 @@ def finish_delivered(
         and (label := held_by(info))
         and not (force and (twin_stop or replaced(og, sid, info)))
     ):
-        found = pr_label(label)
-        if found and found not in held:
-            held[found] = pr_hold(*found)
-        if why := held[found] if found else f"label {label!r} names no PR":
+        found = pr_labels(label)
+        for each in found:
+            if each not in held:
+                held[each] = pr_hold(*each)
+        if why := next((held[each] for each in found if held[each]), "") or (
+            "" if found else f"label {label!r} names no PR"
+        ):
             return f"{name}: kept ({why})", False
-        if found and found not in cleared and not elsewhere(og, info):
-            cleared.add(found)  # the PR is merged or closed: its steps' events are over
-            prune_demo_branch(*found)
-            clear_closed_pr_events(*found, info.get("workspace"))
+        for each in found:
+            if each not in cleared and not elsewhere(og, info):
+                cleared.add(each)  # the PR is merged or closed: its steps' events are over
+                prune_demo_branch(*each)
+                clear_closed_pr_events(*each, info.get("workspace"))
     # an open card is the owner's question: archiving ends its way back, --force too
     if cards := cards_of(info) or [_asks(e) for e in getattr(og, "cards", {}).get(sid) or []]:
         return f"{name}: kept (card open: {'; '.join(cards)})", False
@@ -7147,6 +7348,174 @@ def finish_delivered(
         lines.append(f"  {kid_line}")
         bad |= kid_bad
     return "\n".join(lines), bad
+
+
+SWEEP_IDLE_SECONDS = (
+    86400  # a session idle this long is swept: archived unless a keep rule holds it
+)
+MANAGER_ROLES = (
+    "cos",
+    "pm",
+)  # a standing manager (the chief of staff, a project's manager): told by the round, never swept
+
+
+def keep_list(path: Path | None) -> set[str]:
+    """The sweep's keep list (the file a caller names with ``--keep-file``): a session id or exact title per line,
+    ``#`` starting a comment; an entry matches a whole id or a whole title, never a prefix. A missing file keeps nothing.
+    A path that is there but can't be read as a file (a directory, no permission, not UTF-8) is a ``Fail``: the sweep
+    then archives nothing, since it can't know what the list keeps."""
+    if not path or not (path.exists() or path.is_symlink()):
+        return set()
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"keep list {path} can't be read ({type(e).__name__}): nothing swept") from None
+    return {line.split("#", 1)[0].strip() for line in text.splitlines()} - {""}
+
+
+def owner_talked(og: Omnigent, sid: str) -> bool:
+    """Whether the owner typed a message in ``sid``, anywhere in its history (paged back): a ``role: user`` message with
+    a ``created_by``, not ``is_meta``, with no ``sender_session_id`` and opening as no agent's post (``agent_posted``),
+    the rule ``owner_said`` reads typed words by. A brief, a relay or a supervisor's post is no talk."""
+    after = ""
+    while True:
+        page = og.older(sid, after)
+        data = page.get("data") or []
+        for i in data:
+            if (
+                from_user(i)
+                and i.get("created_by")
+                and not i.get("is_meta")
+                and not i.get("sender_session_id")
+                and not agent_posted(text_of(i))
+            ):
+                return True
+        if not data or not page.get("has_more"):
+            return False
+        after = str(page.get("last_id") or data[-1].get("id"))
+
+
+def hold_of(info: dict) -> str:
+    """Why a session is held open now, else ``""``: running, an open question card, a pending prompt, background work or
+    input pending. A label is no hold here: a stale ``omnigent.keep`` stands only for the card it was set for."""
+    status = str(info.get("status"))
+    if status in RUNNING:
+        return status
+    if cards := cards_of(info):
+        return f"card open: {'; '.join(cards)}"
+    if prompts_of(info):
+        return "blocked on a prompt"
+    if live_tasks(info):
+        return "background work"
+    if info.get("pending_inputs"):
+        return "input pending"
+    return ""
+
+
+def sweep(
+    og: Omnigent,
+    *,
+    idle_seconds: float = SWEEP_IDLE_SECONDS,
+    keep: set[str] | frozenset[str] = frozenset(),
+    now: float | None = None,
+    dry_run: bool = False,
+) -> tuple[list[str], list[dict], bool]:
+    """The daily sweep (#1580): archive each unarchived session idle over ``idle_seconds`` through ``finish_delivered``,
+    the DONE path's finish, so its rules hold here too (a failed, cancelled or errored session is finished; a stale
+    ``omnigent.keep`` label holds nothing; ``omni.keep`` and an open PR hold). Kept besides: this session, a session on
+    ``keep`` (by id or title), a standing manager (``MANAGER_ROLES``) and anything ``hold_of`` names. A session the owner
+    talked to (``owner_talked``) is never archived here: it is returned for the one owner card (``sweep_card``).
+
+    Each session is judged on its own, sub-agents first: a parent's finish takes none of its children (``seen`` holds every
+    live session), so a child that is kept, talked to or not idle stays open when its parent is archived.
+    Returns a line per idle session, the owner-talked ones (``{"id", "title"}``) and whether a read or finish failed."""
+    now = time.time() if now is None else now
+    me = own_id()
+    rows = [
+        r
+        for r in og.listing()
+        if not r.get("archived")
+        and str(r.get("id")) != me
+        and 0 < float(r.get("updated_at") or 0) < now - idle_seconds
+    ]
+    rows.sort(key=lambda r: not r.get("parent_session_id"))  # children before their parents
+    live = {str(r.get("id")) for r in og.listing() if not r.get("archived")}
+    lines: list[str] = []
+    talked: list[dict] = []
+    spared: set[str] = set()
+    failed = False
+    for row in rows:
+        sid, title = str(row["id"]), str(row.get("title") or "")
+        name = f"{sid} {title}"
+        if sid in keep or (title and title in keep):
+            spared.add(sid)
+            lines.append(f"{name}: kept (keep list)")
+            continue
+        try:
+            info = og.info(sid)
+        except Fail as e:
+            failed = True
+            lines.append(f"{name}: unreadable: {e}")
+            continue
+        if info.get("archived"):  # a parent's finish took it in this sweep
+            continue
+        if (info.get("labels") or {}).get("omni.role") in MANAGER_ROLES:
+            lines.append(f"{name}: kept (a standing manager)")
+            continue
+        if why := hold_of(info):
+            lines.append(f"{name}: kept ({why})")
+            continue
+        if owner_talked(og, sid):
+            spared.add(sid)
+            talked.append({"id": sid, "title": title})
+            lines.append(f"{name}: kept (the owner talked to it: on the owner card)")
+            continue
+        if dry_run:
+            hours = (now - float(row["updated_at"])) / 3600
+            lines.append(f"{name}: would archive (idle {hours:.0f} h)")
+            continue
+        line, bad = finish_delivered(og, sid, settled=False, seen=live - {sid})
+        lines.append(line)
+        failed |= bad
+    return lines, talked, failed
+
+
+def sweep_card(base: str, talked: list[dict]) -> dict | None:
+    """The one owner card for the sessions the owner talked to, as ``sys_ask_user_question``'s input: one multiSelect
+    question listing them as links, "Archive all" first and recommended, then a "Keep" option per session for the
+    exceptions. None when there are none. Whoever posts it archives the rest with ``reap <id>...``."""
+    if not talked:
+        return None
+
+    def link(t: dict) -> str:
+        return f"[{t['title'] or t['id']}]({base}/c/{t['id']})"
+
+    listed = "\n".join(f"- {link(t)}" for t in talked)
+    return {
+        "questions": [
+            {
+                "header": "Idle sessions",
+                "multiSelect": True,
+                "question": (
+                    f"The daily sweep left {len(talked)} session(s) idle over a day open, since you talked to each:\n\n"
+                    f"{listed}\n\nArchive them all, or pick the ones to keep?"
+                ),
+                "options": [
+                    {
+                        "label": "Archive all (Recommended)",
+                        "description": "Archive every session listed; each transcript stays, and an unarchive brings one back.",
+                    }
+                ]
+                + [
+                    {
+                        "label": f"Keep {t['title'] or t['id']} ({t['id']})",
+                        "description": f"Keep {link(t)} open; the others are archived.",
+                    }
+                    for t in talked
+                ],
+            }
+        ]
+    }
 
 
 def reap(
@@ -7562,8 +7931,9 @@ def offline(og: Omnigent, sid: str, path: Path) -> Fail:
 
 def apply_route(args: argparse.Namespace) -> None:
     """Point a verifier start at its fallback route, the one switch: `gemini` runs agy's Gemini (bypass mode, which
-    agy needs to run unattended) and `claude` a fresh Claude session of another model than the author's, marked
-    same-family. Refused where the route can't run, naming the fix, since a verifier started wrong costs a pass."""
+    agy needs to run unattended) and `claude` a fresh Claude session of any model, the author's own included, marked
+    same-family: a fresh session given only the code and the spec is what makes a verifier independent. Refused where
+    the route can't run, naming the fix, since a verifier started wrong costs a pass."""
     if args.verifier_route == "gemini":
         if not args.host:
             raise Fail(
@@ -7574,16 +7944,6 @@ def apply_route(args: argparse.Namespace) -> None:
         return
     args.agent = "claude"
     args.same_family = True
-    if not args.model or not args.author_model:
-        raise Fail(
-            "--verifier-route claude names its model and the author's: pass --model and"
-            " --author-model, which differ"
-        )
-    if args.model == args.author_model:
-        raise Fail(
-            f"--verifier-route claude would verify {args.author_model}'s diff with the same model:"
-            " pass a different --model"
-        )
 
 
 def reviews(role: str | None) -> bool:
@@ -8194,6 +8554,16 @@ def lead_status(info: dict, items: list[dict]) -> dict:
     }
 
 
+def done_result(text: str) -> str:
+    """What the first ``DONE`` line of ``text`` says after the word, less a ``Report:`` path and punctuation: empty for a
+    bare ``DONE``, which reports no result (#2309)."""
+    m = next((m for m in STILL_OR_ENDING.finditer(text) if m.group(1) == "DONE"), None)
+    if not m:
+        return ""
+    rest = text[m.end() :].partition("\n")[0]
+    return re.sub(r"\bReport:.*", "", rest, flags=re.IGNORECASE).strip(" \t:.-*_`")
+
+
 def ending_of(text: str) -> str | None:
     """The ending a message names: ``USER NEEDED`` when any line opens with it, since an ask
     after a ``DONE`` line still needs its answer; else the first line that opens with an ending word, so a
@@ -8725,6 +9095,13 @@ def route(event: dict, ask: Callable[[], tuple[str, str]]) -> tuple[str, str, st
         if not event.get("parked"):
             return "rule", "act", "ended PARKED with no park message before it"
         return "rule", "record", "parked: waits on host capacity"
+    if ending == "DONE" and event.get("coordinator") and not done_result(text):
+        # a manager's turn that says nothing and closes on a bare DONE has no result to deliver (#2309)
+        return (
+            "rule",
+            "done",
+            "a coordinator's DONE with no result on its line: told only to its waiters",
+        )
     if ending == "DONE":
         if event.get("relayed"):  # it sent its result to the notified session itself (#2090)
             return (
@@ -8967,6 +9344,8 @@ def supervise_registry(
     ``pr-stall`` event naming its blocker (``pr_stalls``), which wakes the notified session, the manager; ``stall_after``
     0 turns the watch off.
     """
+    if hint := service_hint(dict(os.environ)):
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {hint}", flush=True)  # the log's first line
     og = Uncarded(og)
     rec = Recorded(og) if console else og
     state_path = registry.with_suffix(".state.json")
@@ -9233,6 +9612,9 @@ def supervise_registry(
             > RETRY_CAP_SECONDS,
             "decisions": bool(found),
             "direct": bool(lead.get("direct")),
+            "coordinator": bool(
+                lead.get("leads")
+            ),  # it follows leads of its own: a manager (#2309)
             "parked": parked_before(og, sid, items, said[-1] if said else None),
             "offline": not info.get("runner_online", True),
             "due": eid.endswith(":due"),
@@ -9244,6 +9626,13 @@ def supervise_registry(
             # taking it (#2090)
             "relayed": bool(info.get("archived")) or relayed_to(items, notify, last),
         }
+
+        # a coordinator's turn with nothing on its DONE line (#2309): its notified session is not woken for it
+        quiet = bool(
+            event["coordinator"]
+            and ending_of(parsed or "") == "DONE"
+            and not done_result(parsed or "")
+        )
 
         def ask() -> tuple[str, str]:
             if eid in answers:  # asked before a later write failed: the call is spent
@@ -9311,7 +9700,7 @@ def supervise_registry(
         elif action == "relay":  # a dequeue to its PR's lead, which ``relay`` unarchives first
             act_on(eid, [(sid, "dequeued", f"Supervisor: {line}")])
         elif action in ("act", "owner") or (
-            action == "done" and not event["direct"] and not event["relayed"]
+            action == "done" and not event["direct"] and not event["relayed"] and not quiet
         ):
             item = line if kind in ("loop-owner", "dequeued") else line.splitlines()[0]
             if asked := question_for(lead_ev, parsed):
@@ -9326,12 +9715,14 @@ def supervise_registry(
             for parked in state["leads"].values():
                 if (parked.get("retrying") or {}).get("limit"):
                     parked.pop("retrying")
-        if action == "done":
+        if (
+            action == "done"
+        ):  # ``quiet``: only its waiters are told, and it is no end of a followed session
             result = LEAD_TOLD.format(lead=head, line=lead.get("last_line") or "")
             waiters = [other for other, owes in owed.items() if owes[4] == sid]
             act_on(eid, [(other, "tell", result) for other in waiters])
             # a followed lead is taken once its follower is told
-            if waiters and not event["direct"]:
+            if waiters and not event["direct"] and not quiet:
                 finish_relayed(sid)
         logged_line = {"at": int(time.time()), "id": eid, "session": sid, "kind": kind}
         logged_line.update(line=line, settled=by, action=action, why=why)
@@ -9745,7 +10136,7 @@ def supervise_registry(
                 told_any = False
                 for lead_sid in owed:
                     lead = state["leads"].get(lead_sid) or {}
-                    own = pr_label(
+                    own = pr_labels(
                         (looks.get(lead_sid, ({}, []))[0].get("labels") or {}).get(PR_LABEL, "")
                     )
                     named = {  # a wait is a set, and may share it with the supervisor: each PR it names
@@ -9755,7 +10146,7 @@ def supervise_registry(
                         and m[1] in (None, repo)
                     }
                     if repos.get(lead_sid) == repo and (
-                        merged_prs & (named | ({own[1]} if own and own[0] == repo else set()))
+                        merged_prs & (named | {n for r, n in own if r == repo})
                     ):
                         head = f"{lead_sid} {lead.get('title') or ''}".rstrip()
                         # a lead waiting on the supervisor has no one else to tell it
@@ -9956,6 +10347,9 @@ def supervise_registry(
         for cid, entry in sorted(entries.items(), key=lambda x: x[1]["left_at"]):
             if entry["state"] != "dequeued" or entry.get("told"):
                 continue
+            if entry["pr"] in (state["pr_stalls"].get(repo) or {}).get("held", []):
+                entry["told"] = True  # parked on purpose: its drop is no news (#2316)
+                continue
             if sessions is None:
                 try:
                     sessions = every_session()
@@ -9966,13 +10360,17 @@ def supervise_registry(
                     )
                     return
                 log(("queue-sessions", repo), None)
+            ties.pop((repo, entry["pr"]), None)
             lead = pr_lead(repo, entry["pr"], sessions)
             entry["told"] = True  # on disk with the event it raises: each comment is sent once
             tries = entry.get(
                 "tries", 0
             )  # each try its own event: a settled id is never settled again
             eid = f"dequeued:{repo}:{cid}" + (f":{tries}" if tries else "")
-            say(dequeue_message(repo, entry, flakes), lead, eid, "dequeued")
+            text = dequeue_message(repo, entry, flakes)
+            if not lead and (both := ties.get((repo, entry["pr"]))):
+                text += f"\nFollowed leads whose reports name it: {', '.join(both)}; tell the one that owns it."
+            say(text, lead, eid, "dequeued")
             if any(
                 i["id"] == f"dequeued:{lead}:{eid}" and i["status"] == "offline"
                 for i in state["intents"]
@@ -9994,7 +10392,7 @@ def supervise_registry(
     def pr_lead(repo: str, pr: int, sessions: list[dict]) -> str:
         """The lead that owns PR ``pr`` of ``repo``, else empty: a lead (followed, or any ``omni.role`` lead, archived
         too) whose own ``PR_LABEL`` names it; else the lead that started a session labelled with it (a ``start --pr``
-        worker, archived too), found up its ``parent_session_id`` chain; else a followed lead whose wait names it."""
+        worker, archived too), found up its ``parent_session_id`` chain; else a followed lead whose wait names it, or whose report head names ``owner/name#N`` or its URL."""
         label = f"{repo}#{pr}"
         followed = [s for s, owes in owed.items() if owes[3]]
         by_id = {str(s.get("id")): s for s in sessions}
@@ -10008,9 +10406,9 @@ def supervise_registry(
             return sid in followed or labels(sid).get("omni.role") == "lead"
 
         for sid in [*followed, *by_id]:
-            if is_lead(sid) and str(labels(sid).get(PR_LABEL, "")) == label:
+            if is_lead(sid) and label in label_refs(labels(sid).get(PR_LABEL, "")):
                 return sid
-        for start in [s for s in by_id if str(labels(s).get(PR_LABEL, "")) == label]:
+        for start in [s for s in by_id if label in label_refs(labels(s).get(PR_LABEL, ""))]:
             sid, seen = start, set()
             while sid and sid not in seen:  # the list holds every session, so each parent is in it
                 seen.add(sid)
@@ -10023,6 +10421,16 @@ def supervise_registry(
                 m = re.fullmatch(r"(?:([\w.-]+/[\w.-]+))?#(\d+)", ref.strip())
                 if m and int(m[2]) == pr and (m[1] == repo or not m[1] and repos.get(sid) == repo):
                     return sid
+        url = rf"github\.com/{re.escape(repo)}/pull/{pr}(?!\d)"
+        named = []  # a lead that took the PR over, or lands it with others: its report head names it
+        for sid in followed:
+            head = report_head((state["leads"].get(sid) or {}).get("last_text") or "")
+            if re.search(rf"(?<![\w/.-]){re.escape(label)}(?!\d)|{url}", head):
+                named.append(sid)
+        if len(named) == 1:  # a label owner won above; two leads naming it is no owner
+            return named[0]
+        if named:
+            ties[(repo, pr)] = named  # the coordinator sees the dequeue, with both leads named
         return ""
 
     def alive(other: str, info: dict) -> bool:
@@ -10045,9 +10453,9 @@ def supervise_registry(
         then reads this directory's, and its refusal is the reason shown."""
         if named:
             return named
-        label = pr_label((looks.get(sid, ({}, []))[0].get("labels") or {}).get(PR_LABEL, ""))
+        label = pr_labels((looks.get(sid, ({}, []))[0].get("labels") or {}).get(PR_LABEL, ""))
         if label:
-            return label[0]
+            return label[0][0]
         if sid not in repos:
             try:
                 repos[sid] = workspace_repo(og, sid)
@@ -10055,6 +10463,9 @@ def supervise_registry(
                 return ""
         return repos[sid]
 
+    ties: dict[
+        tuple[str, int], list[str]
+    ] = {}  # PR -> the followed leads whose heads both name it (pr_lead)
     pr_shared: dict[str, list] = {}  # key -> the last read, whichever lead made it
 
     def settled(lead: dict, pr: int, repo: str, fresh: bool = False, run: bool = False):
@@ -10247,8 +10658,7 @@ def supervise_registry(
     def lead_branches(sid: str, lead: dict) -> set[str]:
         """The head branches of the PRs ``lead``'s wait names and of its own (its ``PR_LABEL``) in its own repository:
         its events' branches. A PR of another repository has its events there, which are not read."""
-        own = pr_label((looks.get(sid, ({}, []))[0].get("labels") or {}).get(PR_LABEL, ""))
-        found = {(own[0], own[1])} if own else set()
+        found = set(pr_labels((looks.get(sid, ({}, []))[0].get("labels") or {}).get(PR_LABEL, "")))
         for item in (lead.get("wait") or "").split(", "):
             if m := re.fullmatch(r"(?:([\w.-]+/[\w.-]+))?#(\d+)", item.strip()):
                 found.add((m[1] or "", int(m[2])))
@@ -10789,6 +11199,13 @@ def supervise_registry(
                 or og.info(sid).get("archived")  # the listing may be 30 s old
             ):
                 continue
+            try:
+                made = float(row.get("created_at") or og.info(sid).get("created_at") or 0)
+            except (TypeError, ValueError):
+                log("adopt", f"{sid}: skipped, its created_at is not a number")
+                continue  # one odd record skips that session, not the sweep (#2319)
+            if made and time.time() - made < ADOPT_GRACE_SECONDS:
+                continue  # its launcher may not have written its registry line yet: a later poll adopts it (#2313)
             # ponytail: the lead's real report is unknown; follow reads none, and a path in its workspace costs nothing.
             # Upgrade: read it from the lead's brief (its preamble names the report path) if a followed lead ever owes one.
             arm(registry, sid, Path(f"tmp/loop/{sid}.report.md"), followed=True)
@@ -11086,6 +11503,31 @@ def service_env(env: dict[str, str]) -> dict[str, str]:
     return carried
 
 
+SERVICE_MARK = (
+    "OMNIGENT_SERVICE"  # set by the unit or plist alone: `<manager>:<name>`; a hand run has none
+)
+
+
+def service_hint(env: dict[str, str], uid: int | None = None) -> str | None:
+    """The line a supervisor started by its service logs first: a kill is not a stop, with the exact
+    stop and restart commands. ``None`` run by hand, where ``env`` carries no ``SERVICE_MARK``."""
+    manager, _, name = env.get(SERVICE_MARK, "").partition(":")
+    if manager == "systemd" and name:
+        return (
+            f"running as the systemd user service {name}: a kill restarts it, so to pause it run"
+            f" `systemctl --user stop {name}`, and to pick up new code run"
+            f" `systemctl --user restart {name}`"
+        )
+    if manager == "launchd" and name:
+        target = f"gui/{os.getuid() if uid is None else uid}/{name}"
+        return (
+            f"running as the launchd agent {name}: a kill restarts it, so to pause it run"
+            f" `launchctl bootout {target}`, and to pick up new code run"
+            f" `launchctl kickstart -k {target}`"
+        )
+    return None
+
+
 def _systemd_quote(text: str) -> str:
     """One word for a unit file: double-quoted, ``%`` and ``$`` escaped from expansion."""
     text = text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
@@ -11102,7 +11544,10 @@ def systemd_unit(argv: list[str], log: Path, name: str, env: dict[str, str], cwd
         "[Service]",
         "ExecStart=" + " ".join(_systemd_quote(a).replace("$", "$$") for a in argv),
         f"WorkingDirectory={str(cwd).replace('%', '%%')}",  # systemd takes no quotes here
-        *(f"Environment={_systemd_quote(f'{k}={v}')}" for k, v in env.items()),
+        *(
+            f"Environment={_systemd_quote(f'{k}={v}')}"
+            for k, v in {**env, SERVICE_MARK: f"systemd:{name}"}.items()
+        ),
         "Restart=always",
         "RestartSec=5",
         f"StandardOutput=append:{log_path}",
@@ -11121,7 +11566,7 @@ def launchd_plist(argv: list[str], log: Path, label: str, env: dict[str, str], c
         "Label": label,
         "ProgramArguments": list(argv),
         "WorkingDirectory": str(cwd),
-        "EnvironmentVariables": dict(env),
+        "EnvironmentVariables": {**env, SERVICE_MARK: f"launchd:{label}"},
         "KeepAlive": True,
         "RunAtLoad": True,
         "StandardOutPath": str(log),
@@ -11348,12 +11793,12 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             default=None,
             help="which verifier a verifier start runs (default: $OMNIGENT_VERIFIER_ROUTE, else codex): codex is the"
             " agent as named; gemini replaces it with agy's Gemini (experimental, needs --host on a host with agy"
-            " logged in); claude with a fresh Claude session of another model than --author-model (same-family)."
+            " logged in); claude with a fresh Claude session of any --model (same-family)."
             " The two fallbacks are for a Codex refusal",
         )
         p.add_argument(
             "--author-model",
-            help="the model that wrote the diff: --verifier-route claude refuses to verify it with the same one",
+            help="the model that wrote the diff; not checked, since --verifier-route claude verifies with any --model",
         )
         p.add_argument(
             "--same-family",
@@ -11369,6 +11814,14 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             "--workspace",
             type=Path,
             help="the child's workspace (default: this directory); the report must be inside it",
+        )
+        p.add_argument(
+            "--cloud-env",
+            default="",
+            metavar="NAME",
+            help="a claude-cloud start's environment, by its name on this host's claude login, in place of the"
+            " project's; the workspace must be a launch dir pinned to it (`launch-dir <remote> <branch> <env-id>"
+            " <path>`)",
         )
         p.add_argument(
             "--host",
@@ -11407,6 +11860,12 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
     p.add_argument("session")
     p.add_argument("brief", help="the answer or follow-up: a file, or the text itself")
     p.add_argument("report", type=Path)
+    p.add_argument(
+        "--unarchive",
+        action="store_true",
+        help="unarchive an archived session even when the registry does not list it; a listed"
+        " one is unarchived without it, and an unlisted one exits 4",
+    )
     p.add_argument("--confirm-seconds", type=float, default=60.0)
     p.add_argument(
         "--expires", type=float, default=EXPIRES_MINUTES, metavar="MINUTES", help=EXPIRES_HELP
@@ -11568,6 +12027,13 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
     p = sub.add_parser("approve")
     p.add_argument("session")
     p.add_argument("--decline", action="store_true", help="decline instead of accept")
+    p = sub.add_parser(
+        "own-pr",
+        description="add a PR (owner/name#N) to this session's `omni.pr` label list, so the merge queue's"
+        " dequeue of it reaches this lead: what `land` and a takeover write",
+    )
+    p.add_argument("pr", nargs="+", help="owner/name#N, each")
+    p.add_argument("--session", default="", help="the session to label; default: this one")
     p = sub.add_parser("status")
     p.add_argument("sessions", nargs="+")
     p = sub.add_parser(
@@ -11602,6 +12068,15 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
     )
     p.add_argument(
         "--pr", type=pr_ref, help="with --merged, only the workers of this PR (N or owner/repo#N)"
+    )
+    p = sub.add_parser(
+        "sweep",
+        description="archive the sessions idle over a day that no keep rule holds; print the owner card for those the owner talked to",
+    )
+    p.add_argument("--idle-hours", type=float, default=SWEEP_IDLE_SECONDS / 3600)
+    p.add_argument("--keep-file", type=Path, help="the keep list: a session id or title per line")
+    p.add_argument(
+        "--dry-run", action="store_true", help="say what would be archived, archive nothing"
     )
     p = sub.add_parser("supervise")
     p.add_argument(
@@ -12110,6 +12585,9 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             lines, failed = approve(og, args.session, args.decline)
             print("\n".join(lines))
             return 1 if failed else 0
+        if args.cmd == "own-pr":
+            print(own_pr(og, args.session or own_id(), args.pr))
+            return 0
         if args.cmd == "status":
             # a snapshot: an idle look reads as a turn ended, which a notice has confirmed
             print("\n".join(observe(og, s, {}, baseline=True)[1] for s in args.sessions))
@@ -12126,6 +12604,17 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
                 og, args.sessions, args.children, args.registry, args.force, args.merged, args.pr
             )
             print("\n".join(lines))
+            return 1 if failed else 0
+        if args.cmd == "sweep":
+            lines, talked, failed = sweep(
+                og,
+                idle_seconds=args.idle_hours * 3600,
+                keep=keep_list(args.keep_file),
+                dry_run=args.dry_run,
+            )
+            print("\n".join(lines))
+            if card := sweep_card(og.base, talked):
+                print("CARD: " + json.dumps(card))
             return 1 if failed else 0
         if args.cmd == "supervise":
             if args.registry:
@@ -12226,10 +12715,20 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
                 raise Fail(
                     f"--host {args.host} is no verifier host loop.md lists: {', '.join(allowed)}"
                 )
+        if args.cmd in ("run", "start") and args.cloud_env:
+            if args.agent in AGENTS or og.harness(args.agent) != CLOUD_HARNESS:
+                raise Fail(
+                    f"--cloud-env: {args.agent} is not a cloud agent; it names a claude-cloud start's environment"
+                )
+            if args.host and og.host(args.host) != og.host_id:
+                raise Fail(
+                    f"--cloud-env: the launch dir's pin is read on this host, not on {args.host}: drop --host"
+                )
         if (
             args.cmd in ("run", "start")
             and not args.host
             and not args.top_level
+            and not args.cloud_env  # ponytail: its launch dir is here; another host's isn't checked
             and args.agent not in AGENTS
             and og.harness(args.agent) == CLOUD_HARNESS
             and (args.workspace is None or args.workspace.is_absolute())
@@ -12325,12 +12824,22 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             baseline = tracked_changes(workspace) if not args.pr else None  # as run's
             undeleted = None
             try:
-                send(og, args.session, f"{mark}\n{text}", report, args.confirm_seconds, far=far)
+                # an archived lead the registry still lists is the supervisor's own archive after
+                # its DONE, so its next brief resumes it; an unlisted one was reaped (#2420)
+                listed = bool(registry) and args.session in registered(Path(registry))[0]
+                send(
+                    og,
+                    args.session,
+                    f"{mark}\n{text}",
+                    report,
+                    args.confirm_seconds,
+                    far=far,
+                    unarchive=args.unarchive or listed,
+                )
             except Undeleted as e:  # the answer landed: supervise it, then fail on the question
                 undeleted = e
-            # armed once the message is in the history, as start arms: before it, the report or
-            # question of the turn before reads as newer than the last instruction; never for
-            # --pr, as start skips it
+            # armed once the message is in the history: before it, the report or question of the
+            # turn before reads as newer than the last instruction; never for --pr
             if not args.pr:
                 arm_quietly(
                     registry,
@@ -12402,7 +12911,7 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             refuse_unfit_cloud_host(og, host, workspace)
         # The aliases are native harnesses.
         if not remote and args.agent not in AGENTS and og.harness(args.agent) == CLOUD_HARNESS:
-            pin_environment(workspace)
+            pin_environment(workspace, args.cloud_env)
             refuse_untrusted_launch_dir(workspace)
             if args.pr:
                 named = getattr(args.pr, "repo", "")
@@ -12449,6 +12958,28 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
             registry = None
         survivors: list[str] = []
 
+        def arm_launched(s: str) -> None:
+            # a supervisor reads the report file, which for --pr only wait writes: it would revive
+            # and nudge a cloud worker toward a host path it can't write
+            if (not remote or (registry and args.top_level)) and not args.pr:
+                arm_quietly(
+                    registry,
+                    s,
+                    report,
+                    [brief_of(report)] if briefed_by_file(og, args.agent, host) else None,
+                    verdict=verifier,
+                    followed=args.top_level,
+                    after=args.after or "",
+                    leads=str(args.leads.resolve()) if args.leads else "",
+                    direct=args.direct,
+                )
+
+        def line_for(s: str, live: bool) -> None:
+            # the line is written when the session exists, before its brief is sent: confirming
+            # the brief can outlast ADOPT_GRACE_SECONDS, and a second supervisor adopts a lead
+            # no registry holds (#2319); an abandoned session's line goes
+            arm_launched(s) if live else arm_quietly(registry, s)
+
         def launch() -> str:
             """Start the child and arm it; again (``wait``'s ``relaunch``) for a setup failure."""
             nonlocal sid
@@ -12476,22 +13007,10 @@ def command(argv: list[str] | None, ended: dict[str, str]) -> int:
                 files=args.file,
                 about=verifies,
                 keep=bool(args.keep),
+                registered=line_for,
             )
             survivors.extend(abandoned)
-            # a supervisor reads the report file, which for --pr only wait writes: it would revive
-            # and nudge a cloud worker toward a host path it can't write
-            if (not remote or (registry and args.top_level)) and not args.pr:
-                arm_quietly(
-                    registry,
-                    sid,
-                    report,
-                    [brief_of(report)] if briefed_by_file(og, args.agent, host) else None,
-                    verdict=verifier,
-                    followed=args.top_level,
-                    after=args.after or "",
-                    leads=str(args.leads.resolve()) if args.leads else "",
-                    direct=args.direct,
-                )
+            arm_launched(sid)  # again: a held session attached to (no create) was never armed above
             print(sid, flush=True)
             return sid
 

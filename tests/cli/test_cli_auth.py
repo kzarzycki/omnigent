@@ -1177,12 +1177,13 @@ def test_refresh_rejects_unusable_response_fields(token_dir, monkeypatch) -> Non
     assert entry["expires_at"] < time.time() + 4000
 
 
-def _purge_tui_sdk_modules() -> None:
+def _purge_tui_sdk_modules(monkeypatch) -> None:
     """Drop loaded ``omnigent_ui_sdk`` modules so the no-import assertions
-    below hold regardless of what earlier tests imported."""
+    below hold regardless of what earlier tests imported. The test's end
+    restores them, so later tests on the worker keep one module identity."""
     for mod_name in list(sys.modules):
         if mod_name == "omnigent_ui_sdk" or mod_name.startswith("omnigent_ui_sdk."):
-            sys.modules.pop(mod_name, None)
+            monkeypatch.delitem(sys.modules, mod_name)
 
 
 def test_token_file_path_honors_data_dir_without_tui_sdk(tmp_path, monkeypatch) -> None:
@@ -1196,7 +1197,7 @@ def test_token_file_path_honors_data_dir_without_tui_sdk(tmp_path, monkeypatch) 
     from omnigent.cli_auth import _token_file_path
 
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    _purge_tui_sdk_modules()
+    _purge_tui_sdk_modules(monkeypatch)
 
     assert _token_file_path() == tmp_path / "auth_tokens.json"
     assert "omnigent_ui_sdk.terminal" not in sys.modules, (
@@ -1210,9 +1211,82 @@ def test_token_file_path_defaults_to_home_state_dir(tmp_path, monkeypatch) -> No
 
     monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _purge_tui_sdk_modules()
+    _purge_tui_sdk_modules(monkeypatch)
 
     assert _token_file_path() == tmp_path / ".omnigent" / "auth_tokens.json"
     assert "omnigent_ui_sdk.terminal" not in sys.modules, (
         "computing the auth token path imported the TUI SDK"
     )
+
+
+# ── Renewal check (can this stored login keep renewing?) ───────────
+
+
+def _post_status(monkeypatch, status: int, body: dict[str, object]) -> None:
+    import httpx
+
+    def _fake_post(url, *, data=None, headers=None, timeout=None):
+        return httpx.Response(status, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+
+def test_login_renewal_status_without_refresh_grant_cannot_renew(token_dir) -> None:
+    """A login with no refresh token lapses at its access expiry."""
+    from omnigent.cli_auth import login_renewal_status, store_token
+
+    store_token("http://localhost:6767", token="jwt", user_id="a@x", expires_at=time.time() + 3600)
+    status = login_renewal_status("http://localhost:6767")
+    assert (status.state, status.reason) == ("cannot_renew", "no_refresh_token")
+    assert status.access_expires_in is not None and status.access_expires_in > 0
+
+
+def test_login_renewal_status_warns_before_grant_ends(token_dir) -> None:
+    """A grant ending inside the warning window reports `expiring`."""
+    from omnigent.cli_auth import login_renewal_status, store_token
+
+    server = "http://localhost:6767"
+    store_token(
+        server,
+        token="jwt",
+        user_id="a@x",
+        expires_at=time.time() + 3600,
+        refresh_token="r1",
+        refresh_expires_at=time.time() + 10 * 3600,
+    )
+    status = login_renewal_status(server, warn_seconds=24 * 3600)
+    assert (status.state, status.reason) == ("expiring", "grant_ends_soon")
+    assert 9 * 3600 < (status.refresh_expires_in or 0) <= 10 * 3600
+    assert login_renewal_status(server, warn_seconds=3600).ok
+
+
+def test_login_renewal_status_live_detects_revoked_grant(token_dir, monkeypatch) -> None:
+    """An unexpired token whose grant the server refuses is caught by the live check."""
+    from omnigent.cli_auth import login_renewal_status, store_token
+
+    server = "http://localhost:6767"
+    store_token(
+        server, token="jwt", user_id="a@x", expires_at=time.time() + 1800, refresh_token="r1"
+    )
+    assert login_renewal_status(server).ok  # local view cannot tell
+    _post_status(monkeypatch, 400, {"error": "invalid_grant"})
+    status = login_renewal_status(server, live=True)
+    assert (status.state, status.reason) == ("cannot_renew", "refused_http_400")
+
+
+def test_login_renewal_status_live_records_grant_lifetime(token_dir, monkeypatch) -> None:
+    """A live renewal stores the grant lifetime the server reports."""
+    from omnigent.cli_auth import login_renewal_status, store_token
+
+    server = "http://localhost:6767"
+    store_token(
+        server, token="jwt", user_id="a@x", expires_at=time.time() + 1800, refresh_token="r1"
+    )
+    _post_status(
+        monkeypatch,
+        200,
+        {"access_token": "fresh", "expires_in": 3600, "refresh_expires_in": 40 * 3600},
+    )
+    status = login_renewal_status(server, live=True, warn_seconds=24 * 3600)
+    assert status.ok
+    assert 39 * 3600 < (status.refresh_expires_in or 0) <= 40 * 3600

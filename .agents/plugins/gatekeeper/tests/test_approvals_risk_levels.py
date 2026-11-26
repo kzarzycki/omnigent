@@ -280,13 +280,14 @@ def test_an_unknown_level_or_action_is_refused_naming_the_key(levels: str, said:
 
 def test_the_defaults_are_the_rule_before_levels() -> None:
     assert approvals.levels(loop_md()) == {
-        "low": {"spec": "policy", "merge": "gates"},
-        "high": {"spec": "policy", "merge": "go"},
-        "critical": {"spec": "policy", "merge": "owner"},
+        "low": {"spec": "policy", "merge": "gates", "rerun": False},
+        "high": {"spec": "policy", "merge": "go", "rerun": True},
+        "critical": {"spec": "policy", "merge": "owner", "rerun": True},
     }
     assert approvals.levels(loop_md("spec:\n  auto: true\n"))["high"] == {
         "spec": "owner",
         "merge": "gates",
+        "rerun": True,
     }
     # a level the policy names keeps the defaults of the keys it leaves out
     assert approvals.levels(loop_md("spec:\n  auto: true\nlevels:\n  high:\n    merge: go\n"))[
@@ -294,6 +295,7 @@ def test_the_defaults_are_the_rule_before_levels() -> None:
     ] == {
         "spec": "owner",
         "merge": "go",
+        "rerun": True,
     }
 
 

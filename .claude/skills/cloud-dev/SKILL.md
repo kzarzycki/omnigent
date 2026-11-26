@@ -79,7 +79,7 @@ The engineering loop's scripts on the landing host are the ones deployed in the 
 helper works in (`.claude/skills/engineering-loop/scripts/`; `approvals.py` is
 `.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py`), at the tag `apm.yml` pins.
 
-Checked in a VM against pack `engineering-v0.35.1` (`approvals.py check merge <pr>`, `record verdict --help`,
+Checked in a VM against pack `engineering-v0.35.10` (`approvals.py check merge <pr>`, `record verdict --help`,
 `record checks --help`): the pack reads GitHub through REST where GraphQL answers 403, so the gatekeeper steps run in
 the VM. Run them from the deployed copy (Loop role files above), as
 `.agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py`.

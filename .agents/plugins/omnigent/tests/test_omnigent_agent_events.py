@@ -22,6 +22,7 @@ from test_omnigent_agent import (
 )
 
 EVENTS = omnigent_agent._load_events()
+READS_LOOP_EVENTS = True  # conftest.no_origin_reads leaves this module its bare remote
 real_sleep = time.sleep  # `supervised` replaces the module-wide `time.sleep`
 WAIT = "STILL WORKING: waiting on #12"
 GREEN = (

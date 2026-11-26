@@ -7,6 +7,11 @@
           "type": "command",
           "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/engineering/hooks/heavy_run_guard.py\"",
           "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/engineering/hooks/secret_env_guard.py\"",
+          "timeout": 10
         }
       ],
       "_apm_source": "kzarzycki/agent-skills/engineering"

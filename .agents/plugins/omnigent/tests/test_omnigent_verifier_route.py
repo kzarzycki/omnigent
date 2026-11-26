@@ -34,16 +34,43 @@ def test_gemini_route_runs_agy_unattended_on_a_named_host() -> None:
         omnigent_agent.apply_route(route("gemini"))
 
 
-def test_claude_route_is_same_family_on_another_model_than_the_author_s() -> None:
-    args = route("claude", model="claude-opus-5-5", author_model="claude-sonnet-5-5")
-    omnigent_agent.apply_route(args)
-    assert (args.agent, args.same_family) == ("claude", True)
-    with pytest.raises(omnigent_agent.Fail, match="pass --model and --author-model"):
-        omnigent_agent.apply_route(route("claude"))
-    with pytest.raises(omnigent_agent.Fail, match="--author-model"):
-        omnigent_agent.apply_route(route("claude", model="claude-opus-5-5"))
-    with pytest.raises(omnigent_agent.Fail, match="different --model"):
-        omnigent_agent.apply_route(route("claude", model="x", author_model="x"))
+def test_claude_route_is_same_family_on_any_model_the_author_s_included() -> None:
+    for given in (
+        {"model": "claude-opus-5-5", "author_model": "claude-opus-5-5"},
+        {"model": "claude-opus-5-5"},
+        {},
+    ):
+        args = route("claude", **given)
+        omnigent_agent.apply_route(args)
+        assert (args.agent, args.same_family) == ("claude", True), given
+
+
+def test_claude_route_start_on_the_author_s_own_model_starts_a_child(
+    tmp_path: Path, role_file: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    og = FakeOmnigent()
+    monkeypatch.setattr(omnigent_agent, "Omnigent", lambda: og)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "b.md").write_text("review")
+    argv = [
+        "start",
+        "codex",
+        "t",
+        "b.md",
+        str(tmp_path / "r.md"),
+        "--role",
+        role_file("verifier.md"),
+    ]
+    argv += [
+        "--verifier-route",
+        "claude",
+        "--model",
+        "claude-opus-5-5",
+        "--author-model",
+        "claude-opus-5-5",
+    ]
+    assert omnigent_agent.main(argv) == 0
+    assert list(og.sessions) == ["s0"]
 
 
 def test_signature_names_agy() -> None:

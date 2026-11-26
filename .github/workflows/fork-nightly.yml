@@ -5,10 +5,24 @@ name: Fork nightly
 # "Nightly red since <sha>" issue through the engineering pack's nightly.py
 # (deployed under .claude/skills/engineering-loop/, pinned in apm.yml).
 
-on:
+# The merge queue runs only a floor for a build input (docs/agents/gatekeeper.md, `select`), so a push to
+# `mine` that touches one runs the full suite here after the merge.
+on: # timeouts: nightly
   schedule:
     - cron: "17 3 * * *"
+  push:
+    branches: [mine]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - mise.toml
+      - .github/**
   workflow_dispatch:
+
+# An older run of a push is covered by the newer one.
+concurrency:
+  group: fork-nightly-${{ github.event_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -56,7 +70,5 @@ jobs:
           if [ -z "$green" ] || ! git merge-base --is-ancestor "$green" "$red"; then
             green=$(git rev-list --first-parent -n 20 "$red" | tail -1)
           fi
-          # nightly.py looks for the gatekeeper skill beside it; APM deploys that package as a plugin
-          ln -sfn ../../.agents/plugins/gatekeeper/skills/gatekeeper .claude/skills/gatekeeper
           python3 .claude/skills/engineering-loop/scripts/nightly.py red --last-green "$green" --red "$red" \
             --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

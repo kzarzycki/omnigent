@@ -128,6 +128,8 @@ def wait(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(approvals, "git", origin)
     monkeypatch.setattr(approvals, "land_event", lambda pull, s, *a, **k: state["events"].append(s))
     monkeypatch.setattr(approvals, "CEILING", 1800)
+    # the wait's own ceiling, derived from `timeouts.run` (twice it), matches the patched lock staleness (#2228)
+    monkeypatch.setitem(approvals.TIMEOUTS, "run", "15m")
     monkeypatch.setattr(approvals, "project", lambda: (None, None))
     return state
 
@@ -373,7 +375,8 @@ def test_the_wait_ends_at_the_projects_land_wait_and_by_default_at_the_ceiling(
     given: str | None,
     ends: int,
 ) -> None:
-    """CEILING (here 1800) stays the default and the landing lock's staleness; `land.wait` moves only the wait."""
+    """With nothing set the wait ends at twice `timeouts.run` (here 15m, so 1800); `land.wait`, deprecated, still moves
+    only the wait, and CEILING stays the landing lock's staleness (#2228)."""
     configured(wait, monkeypatch, given)
     assert approvals.land(7, wait=True) == approvals.WAITING
     assert ends - approvals.POLL <= wait["now"] <= ends

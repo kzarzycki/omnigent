@@ -342,7 +342,8 @@ def batch_wait(
     monkeypatch.setattr(approvals, "QUEUE_POLL", approvals.POLL)
     # a CI wait whose checks never move runs its round again only after FULL (#1915): a round each poll, as before
     monkeypatch.setattr(approvals, "FULL", approvals.POLL)
-    monkeypatch.setattr(approvals, "CEILING", 6 * approvals.POLL)  # a few rounds, not the 2 hours
+    # a few rounds, not the 2 hours the policy's `timeouts` derive (#2228)
+    monkeypatch.setattr(approvals, "land_wait", lambda: 6 * approvals.POLL)
     lands["open"](7, {"7.txt": "7\n"})
     lands["open"](8, {"8.txt": "8\n"})
     monkeypatch.setattr(approvals, "landing_here", lambda named, *_a, **_k: round_of(named))

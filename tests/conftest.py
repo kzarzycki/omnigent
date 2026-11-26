@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shutil
 import sys
 import tempfile
 import time
+import warnings
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -32,6 +34,7 @@ for _name in list(os.environ):
     if _name.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_TERMINAL_")) or _name in (
         "OMNIGENT_PROCESS_LOG_FILE",
         "OMNIGENT_HARNESS_TMP_PARENT",
+        "OMNIGENT_HARNESS_TELEMETRY",
         "OMNIGENT_USER_ID",
     ):
         del os.environ[_name]
@@ -388,6 +391,46 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+
+
+# Opt-in suites whose session-scoped fixtures keep servers alive across modules;
+# a per-module reap would kill them, so the session-end reaper handles these.
+_SHARED_SERVER_SUITES = frozenset({"e2e", "e2e_ui", "e2e_live", "browser_ui", "integration"})
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Kill the Omnigent processes a test module leaves behind, and name the module.
+
+    Detached daemons, servers and zygotes hold ~150 MB each; across a whole-suite
+    run they pile up until the runner starves. Reaping per module keeps memory flat;
+    the warning lists what leaked so the module's tests can clean up after themselves.
+    """
+    from omnigent.testing.process_reaper import (
+        find_leaked_omnigent_processes,
+        reap_leaked_omnigent_processes,
+    )
+
+    relative_parts = request.path.relative_to(request.config.rootpath).parts
+    if len(relative_parts) > 1 and relative_parts[1] in _SHARED_SERVER_SUITES:
+        yield
+        return
+
+    before = frozenset(
+        proc.pid
+        for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR, detached_only=True)
+    )
+    yield
+    reaped, survivors = reap_leaked_omnigent_processes(
+        _TEST_OMNIGENT_DATA_DIR, exclude_pids=before, detached_only=True
+    )
+    if reaped or survivors:
+        listing = "; ".join(cmd[:120] for cmd in [*reaped, *survivors])
+        warnings.warn(
+            f"{request.node.nodeid} leaked {len(reaped) + len(survivors)} process(es) "
+            f"({len(survivors)} survived SIGKILL): {listing}",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -930,3 +973,38 @@ def lowered_idle_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(terminal_module, "_IDLE_POLL_INTERVAL_SECONDS", 0.1)
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_SUBSTRINGS", [])
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_THRESHOLD_SECONDS", 0.4)
+
+
+@pytest.fixture(autouse=True)
+def _restore_package_logger_state() -> Generator[None, None, None]:
+    """Undo a test's changes to the package loggers and the runner id log context.
+
+    ``setup_cli_logging`` sets ``omnigent.propagate = False``; left behind on an xdist
+    worker it hides every later ``omnigent.*`` record from ``caplog``. A runner id set
+    by one test would otherwise show up in later tests' log rows, and a tracing switch
+    left on makes later adapter turns build trace contexts.
+    """
+    names = ("omnigent", "omnigent_ui_sdk")
+    saved = [
+        (logging.getLogger(n), logging.getLogger(n).propagate, logging.getLogger(n).level)
+        for n in names
+    ]
+    handlers = {logger: list(logger.handlers) for logger, _, _ in saved}
+    tracing_enabled = getattr(sys.modules.get("omnigent.inner.tracing"), "_tracing_enabled", False)
+    runner_id_env = os.environ.get("OMNIGENT_RUNNER_ID")
+    yield
+    # The runner entrypoint writes its id straight into the environment.
+    if runner_id_env is None:
+        os.environ.pop("OMNIGENT_RUNNER_ID", None)
+    else:
+        os.environ["OMNIGENT_RUNNER_ID"] = runner_id_env
+    tracing = sys.modules.get("omnigent.inner.tracing")
+    if tracing is not None:
+        tracing._tracing_enabled = tracing_enabled
+    for logger, propagate, level in saved:
+        logger.propagate = propagate
+        logger.setLevel(level)
+        logger.handlers[:] = handlers[logger]
+    debug_logging = sys.modules.get("omnigent.debug_logging")
+    if debug_logging is not None:
+        debug_logging.set_current_runner_id(None)

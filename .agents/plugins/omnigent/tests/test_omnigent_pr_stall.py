@@ -434,20 +434,22 @@ DONE = {**RUN, "status": "completed", "conclusion": "failure"}
             False,
         ),
         ([], [{"context": "ci/test", "state": "pending"}], False),
-        ([{**RUN, "started_at": "1"}, {**DONE, "started_at": "2"}], [], False),
+        ([{**RUN, "started_at": "1"}, {**DONE, "started_at": "2"}], [], True),
+        ([{**DONE, "started_at": "1"}, {**DONE, "started_at": "2"}], [], False),
         ([{**DONE, "started_at": "1"}, {**RUN, "started_at": "2"}], [], True),
     ],
     ids=[
         "a pending queue status",
         "its newest status ended",
         "a pending status of no queue",
-        "a stale running run under a newer ended one",
+        "a running run under a newer ended one (#2428)",
+        "every run ended",
         "a running run over an older ended one",
     ],
 )
 def test_the_queue_holds_by_its_newest_check_run_or_status(
     checks: list[dict], statuses: list[dict], holds: bool
 ) -> None:
-    """A queue that reports through a commit status holds a PR as one with a check run does; each check or
-    status context is read at its newest run (statuses come newest first), so an older one never decides."""
+    """A queue that reports through a commit status holds a PR as one with a check run does; any queue check run still running holds it, whichever started last; a status context is read
+    at its newest (statuses come newest first)."""
     assert omnigent_agent.queue_holds(QUEUED, checks, statuses) is holds

@@ -6,5 +6,5 @@ targets:
 dependencies:
   apm:
   - git: kzarzycki/agent-skills/engineering
-    ref: engineering-v0.35.7
+    ref: engineering-v0.35.10
   mcp: []

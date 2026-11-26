@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 import test_omnigent_agent as base  # the faked server, the supervisor loop
 from test_omnigent_agent import (  # noqa: F401  (the fixtures apply here by name)
-    no_loop_events,
     no_model,
     no_sleep,
     this_repo,
