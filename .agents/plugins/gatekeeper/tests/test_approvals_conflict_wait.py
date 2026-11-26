@@ -41,7 +41,7 @@ def test_a_pr_not_reported_conflicting_still_waits_for_its_required_check(
     unchecked: dict[str, Any], monkeypatch: pytest.MonkeyPatch, mergeable: str
 ) -> None:
     unchecked["pulls"][7]["mergeable"] = mergeable
-    monkeypatch.setattr(approvals, "CEILING", 0)  # one look, then the ceiling
+    monkeypatch.setattr(approvals, "land_wait", lambda: 0)  # one look, then the ceiling
     code, lines = unchecked["land"]("7", "--wait")
     assert code == approvals.WAITING, lines
     assert lines == [NO_QUALIFY, "land --wait stopped after 0 hours, still waiting"]
@@ -52,7 +52,7 @@ def test_a_land_naming_no_pr_still_waits_on_a_conflicting_one(
 ) -> None:
     """The stop is the named PR's: a batch land with nothing named keeps the wait it has today."""
     unchecked["pulls"][7]["mergeable"] = "CONFLICTING"
-    monkeypatch.setattr(approvals, "CEILING", 0)
+    monkeypatch.setattr(approvals, "land_wait", lambda: 0)
     code, lines = unchecked["land"]("--wait")
     assert code == approvals.WAITING, lines
     assert lines == [NO_QUALIFY, "land --wait stopped after 0 hours, still waiting"]

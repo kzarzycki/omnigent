@@ -231,6 +231,94 @@ def test_dequeue_relays_to_labelled_lead(tmp_path, monkeypatch) -> None:
     assert [e["action"] for e in events_of(registry) if e["kind"] == "dequeued"] == ["relay"]
 
 
+def test_dequeue_relays_to_a_lead_whose_label_lists_the_pr(tmp_path, monkeypatch) -> None:
+    """A lead that ran `land` on a PR it didn't start has it in its label list, no report-head match: a dequeue of either PR
+    in the list reaches it."""
+    for pr in (12, 13):
+        (tmp_path / str(pr)).mkdir()
+        registry, og = fleet(tmp_path / str(pr))
+        og.snaps["a"] = {"labels": {"omni.pr": "o/r#12,o/r#13", "omni.role": "lead"}}
+        gh = GitHub(monkeypatch)
+        gh.comments.append(comment(100, pr, jobs=(7,)))
+        run(og, registry, monkeypatch, 2)
+        assert [s for s, _ in relays(og, pr)] == ["a"]
+        assert not acts(og, f"o/r#{pr}")
+
+
+def test_own_pr_adds_to_the_label_list_and_every_reader_takes_it() -> None:
+    """`own-pr` appends once; the readers of the label (the PR list, the reap hold, the twin check) take the list."""
+    labelled = {"omni.pr": "o/r#12"}
+
+    class Og:
+        def info(self, sid):
+            return {"labels": dict(labelled)}
+
+        def label(self, sid, labels):
+            labelled.update(labels)
+
+    assert omnigent_agent.own_pr(Og(), "a", ["o/r#13", "o/r#14"]) == "a: owns o/r#13, o/r#14"
+    assert labelled["omni.pr"] == "o/r#12,o/r#13,o/r#14"  # two refs, one write: none lost
+    assert omnigent_agent.own_pr(Og(), "a", ["o/r#13"]) == "a: already owns o/r#13"
+    assert labelled["omni.pr"] == "o/r#12,o/r#13,o/r#14"
+    assert omnigent_agent.pr_labels(labelled["omni.pr"]) == [("o/r", 12), ("o/r", 13), ("o/r", 14)]
+    with pytest.raises(omnigent_agent.Fail):
+        omnigent_agent.own_pr(Og(), "a", ["13"])
+
+
+def test_dequeue_relays_to_a_lead_landing_two_prs(tmp_path, monkeypatch) -> None:
+    """One lead's report head names two PRs: the dequeue of either reaches it."""
+    for pr in (12, 13):
+        (tmp_path / str(pr)).mkdir()
+        registry, og = fleet(tmp_path / str(pr))
+        og.histories["a"][-1] = ending("STILL WORKING: landing o/r#12 and o/r#13\nWaits: CI", 8000)
+        gh = GitHub(monkeypatch)
+        gh.comments.append(comment(100, pr, jobs=(7,)))
+        run(og, registry, monkeypatch, 2)
+        assert [s for s, _ in relays(og, pr)] == ["a"]
+        assert not acts(og, f"o/r#{pr}")
+
+
+def test_dequeue_relays_to_a_lead_that_took_the_pr_over(tmp_path, monkeypatch) -> None:
+    """No label and no worker: the followed lead's report head names the PR, as ``o/r#12`` or its URL."""
+    for pr, named in ((12, "o/r#12"), (13, "https://github.com/o/r/pull/13")):
+        (tmp_path / str(pr)).mkdir()
+        registry, og = fleet(tmp_path / str(pr))
+        og.histories["a"][-1] = ending(
+            f"STILL WORKING: re-landing {named}, its land run is going\nWaits: CI", 8000
+        )
+        gh = GitHub(monkeypatch)
+        gh.comments.append(comment(100, pr, jobs=(7,)))
+        run(og, registry, monkeypatch, 2)
+        assert [s for s, _ in relays(og, pr)] == ["a"]
+
+
+def test_dequeue_naming_leads_tie_goes_to_the_manager(tmp_path, monkeypatch) -> None:
+    """Two followed leads whose heads name the PR: neither is told, the manager gets the act event."""
+    registry, og = fleet(tmp_path)
+    registry.write_text(
+        registry.read_text() + f"b={tmp_path / 'b.md'}\t{tmp_path / 'b.md.brief'}\tfollow\n"
+    )
+    named = ending("STILL WORKING: landing o/r#12\nWaits: CI", 8000)
+    og.histories["a"][-1] = named
+    og.histories["b"] = [told("brief", 9000), named]
+    gh = GitHub(monkeypatch)
+    gh.comments.append(comment(100, 12, jobs=(7,)))
+    run(og, registry, monkeypatch, 3)
+    assert not [s for s, _ in relays(og, 12) if s in ("a", "b")]
+    [woken] = acts(og, "o/r#12")
+    assert "Followed leads whose reports name it: a, b" in woken
+
+
+def test_a_label_owner_beats_report_head_leads(tmp_path, monkeypatch) -> None:
+    """Lead ``L`` owns the PR by label; ``a`` only names it in its report: ``L`` gets it, no tie."""
+    registry, og = fleet(tmp_path, L={"labels": {"omni.role": "lead", "omni.pr": "o/r#12"}})
+    og.histories["a"][-1] = ending("STILL WORKING: landing o/r#12\nWaits: CI", 8000)
+    gh = GitHub(monkeypatch)
+    gh.comments.append(comment(100, 12, jobs=(7,)))
+    run(og, registry, monkeypatch, 3)
+    assert [s for s, _ in relays(og, 12) if s != "cos"] == ["L"]
+
+
 def test_a_dequeue_is_relayed_once_across_a_restart(tmp_path, monkeypatch) -> None:
     registry, og = fleet(tmp_path)
     og.snaps["a"] = {"labels": {"omni.pr": "o/r#12", "omni.role": "lead"}}

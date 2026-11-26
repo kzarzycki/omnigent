@@ -95,7 +95,7 @@ who added `approved:spec` (the approver) from the issue's timeline, refuses an i
 assigned to anyone else, and, once every build proof holds, assigns the approver where no
 one is and the PR its issue's assignees. Before assigning it comments `Assigned: @<login>`
 on the issue as the record that the loop made the assignment; when that comment is refused
-it says so and leaves the issue unassigned. When you park an issue (`needs-owner`) or drop
+it says so and leaves the issue unassigned. Under Omnigent the record also names the lead's session (`Session: <link>`) and sets the issue's optional `Session` field (the gatekeeper's SKILL.md). When you park an issue (`needs-owner`) or drop
 it, run `uv run <engineering-loop>/scripts/loop.py release <issue>`: it removes an assignee that record
 names, unless someone assigned them again after the loop did, and keeps any other. Assign by hand
 only a person: `gh issue edit <number> --add-assignee <login>`.

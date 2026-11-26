@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from approvals_harness import (
+    AS_WRITTEN,
     AUTO,
     BARE,
     HEAD,
@@ -17,10 +18,12 @@ from approvals_harness import (
     approvals,
     by,
     git_in,
+    issue,
     lands,  # noqa: F401
     loop_md,
     merge,
     pull,
+    record,
     specced,
     verdict_on,
     writers,  # noqa: F401
@@ -337,4 +340,22 @@ def test_a_paths_term_off_its_shape_is_refused_naming_the_key(term: str) -> None
         approvals.settings(loop_md(f"spec:\n  auto:\n{term}"))
     assert str(raised.value).startswith(
         "loop.md's `spec.auto` term must be `paths`, a list of globs"
+    )
+
+
+def test_a_spec_outside_its_paths_passes_on_the_owners_approval(writers: list[str]) -> None:
+    """The `spec:paths` line explains why the spec is the owner's only while the owner's approval is missing."""
+    approved = issue(
+        1,
+        "area:web",
+        "size:S",
+        "kind:chore",
+        "spec:paths",
+        "approved:spec",
+        comments=(record("spec", "owner", spec=AS_WRITTEN),),
+    )
+    spec = by("worker", approved)
+    assert approvals.proofs("build", pull(files=("app.py",)), [spec], SCOPED) == []
+    assert approvals.proofs("build", pull(files=("app.py",)), [tooling()], SCOPED) == owners(
+        "the PR changes `app.py`, outside `spec.auto`'s `paths`"
     )

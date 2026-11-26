@@ -23,5 +23,6 @@ checkout, read the label names and the tracker settings through the `gatekeeper`
   (github.md, Board).
 - `scripts/rulesets.py` commits what the repo's rulesets are meant to block (`snapshot`) and notices
   when they stop (`check`).
+- `scripts/_installed.py` is the one lookup these scripts use to find a skill another package ships; read it to add a host layout.
 
 Each docstring is its manual.

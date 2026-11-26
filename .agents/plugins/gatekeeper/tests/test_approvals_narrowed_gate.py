@@ -97,25 +97,26 @@ def test_an_explicit_base_overrides_the_merge_base(repo: dict[str, Any]) -> None
     assert repo["ran"]() == [f"selected app.py docs/agents/loop.md against {first}"]
 
 
-def test_a_base_git_cannot_resolve_runs_nothing_and_says_so(
+def test_a_base_git_cannot_resolve_selects_against_the_merge_base(
     repo: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """#1872: no base, so it can't tell what changed: nothing runs, never the whole suite."""
+    """#2217: a base git can't resolve falls back to the merge base with the branch's base, never to nothing."""
     repo["loop"]("# Loop\n\nAffected tests: SELECTOR\n")
+    merge_base = git_in(repo["work"], "merge-base", "origin/main", "HEAD").strip()
     assert approvals.main(["affected-tests", "--base", "0" * 40]) == 0
-    assert repo["ran"]() == []
+    assert repo["ran"]() == [f"selected app.py docs/agents/loop.md against {merge_base}"]
     said = capsys.readouterr().err
-    assert f"the base {'0' * 40} is no commit here" in said
-    assert "affected-tests: nothing: no base to select against" in said
+    assert f"the base {'0' * 40} is no commit here: it selects against the merge base" in said
 
 
-def test_without_the_line_no_base_is_resolved(
+def test_without_the_line_or_select_the_full_check_runs(
     repo: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """#2217: no selector and no `select` cut can narrow the change, so the project's full check runs."""
     repo["loop"]("# Loop\n")
     assert approvals.main(["affected-tests", "--base", "0" * 40]) == 0
-    assert repo["ran"]() == []
-    assert "is no commit here" not in capsys.readouterr().err
+    assert repo["ran"]() == ["mise run check base=unset"]
+    assert "the project's full check runs" in capsys.readouterr().err
 
 
 def test_a_base_variable_written_on_the_line_never_overrides_the_narrowed_base(

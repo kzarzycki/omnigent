@@ -1,6 +1,6 @@
 {
   "name": "omnigent",
-  "version": "0.1.9",
+  "version": "0.1.15",
   "description": "Omnigent as the agent runner: the backend and driver that start, message and watch agent sessions, operating a local install, and its telemetry.",
   "author": {
     "name": "Krzysztof Zarzycki"

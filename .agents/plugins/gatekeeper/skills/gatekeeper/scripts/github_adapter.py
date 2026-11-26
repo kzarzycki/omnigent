@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import zipfile
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
@@ -1246,6 +1247,112 @@ def comment(number: int, body: str) -> str:
     ).strip()
 
 
+# the repository's text issue fields, which its owner's account defines; ponytail: the first 100
+TEXT_FIELDS = "issueFields(first: 100) { nodes { ... on IssueFieldText { id name } } }"
+
+
+def issue_field(number: int, name: str) -> tuple[str | None, str]:
+    """(the id of the repository's text issue field `name`, None when the account defines none by that name; issue
+    `number`'s node id), in one GraphQL read. Issue fields are GitHub's own, outside the tracker port, like the board."""
+    found = _graphql(_repository(f"{TEXT_FIELDS} issue(number: $n) {{ id }}"), n=number)
+    fields = ((found.get("issueFields") or {}).get("nodes")) or []
+    ids = [field["id"] for field in fields if field and field.get("name") == name]
+    return (ids[0] if ids else None), found["issue"]["id"]
+
+
+def set_issue_field(issue: str, field: str, text: str) -> None:
+    """Set the text issue field `field` (its id) on the issue whose node id is `issue`; GitHub sends no notification
+    and leaves the issue's body alone."""
+    gh(
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation($issue: ID!, $field: ID!, $text: String!) { setIssueFieldValue(input: {issueId: $issue,"
+        " issueFields: [{fieldId: $field, textValue: $text}]}) { clientMutationId } }",
+        "-f",
+        f"issue={issue}",
+        "-f",
+        f"field={field}",
+        "-f",
+        f"text={text}",
+        "--silent",
+    )
+
+
+# the REST version whose issues carry `issue_field_values`, the one GitHub's issue field docs name
+FIELDS_VERSION = "X-GitHub-Api-Version: 2026-03-10"
+
+
+def rest_has_issue_field(name: str) -> bool:
+    """Whether the repository has the issue field `name`, from REST: GitHub answers a list filtered on a field it has
+    (`issue_field_values=<slug>:<value>`) and refuses one it lacks with a 422. One call, for a token GraphQL refuses."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    try:
+        gh(
+            "api",
+            "-X",
+            "GET",
+            "-H",
+            FIELDS_VERSION,
+            "repos/{owner}/{repo}/issues",
+            "-f",
+            f"issue_field_values={slug}:-",
+            "-f",
+            "per_page=1",
+            "--silent",
+        )
+    except subprocess.CalledProcessError as exc:
+        if "HTTP 422" in (exc.stderr or ""):
+            return False
+        raise
+    return True
+
+
+def rest_issue_field_id(name: str) -> int | None:
+    """The database id of the issue field `name`, read off the newest 100 issues updated, which REST shows only on an
+    issue carrying a value: no REST route lists a personal account's fields. None when none of them carries it."""
+    found = json.loads(
+        gh(
+            "api",
+            "-X",
+            "GET",
+            "-H",
+            FIELDS_VERSION,
+            "repos/{owner}/{repo}/issues",
+            "-f",
+            "state=all",
+            "-f",
+            "sort=updated",
+            "-f",
+            "per_page=100",
+        )
+    )
+    ids = [
+        value["issue_field_id"]
+        for item in found
+        for value in item.get("issue_field_values") or []
+        if value.get("issue_field_name") == name
+    ]
+    return int(ids[0]) if ids else None
+
+
+def rest_set_issue_field(number: int, field: int, text: str) -> None:
+    """Set the text issue field whose database id is `field` on issue `number`, over REST (POST adds or replaces this
+    field's value and leaves the issue's other fields)."""
+    gh(
+        "api",
+        "-X",
+        "POST",
+        "-H",
+        FIELDS_VERSION,
+        f"repos/{{owner}}/{{repo}}/issues/{number}/issue-field-values",
+        "--input",
+        "-",
+        "--silent",
+        data=json.dumps({"issue_field_values": [{"field_id": field, "value": text}]}),
+    )
+
+
 def minimize(comment_id: str) -> None:
     """Collapse a comment on GitHub as outdated; it stays readable, and the gate still reads it."""
     gh(
@@ -1719,7 +1826,7 @@ def dequeue_pull(number: int, node: str) -> None:
 
 def commit_checks(ref: str) -> dict[str, dict[str, Any]]:
     """The newest run of each check on commit (or branch) `ref`, by name: its conclusion as GraphQL spells it, link,
-    id, which for an Actions job is the job's, and its output's title. ponytail: check runs only, one per name; read status contexts and
+    id, which for an Actions job is the job's, and its output's title and summary. ponytail: check runs only, one per name; read status contexts and
     workflow names when a queue's required check is a status or one name runs in two workflows."""
     runs = rest_pages(f"commits/{ref}/check-runs?filter=latest&per_page=100", ".check_runs[]")
     return {
@@ -1728,6 +1835,8 @@ def commit_checks(ref: str) -> dict[str, dict[str, Any]]:
             "url": run.get("html_url") or "",
             "id": run.get("id"),
             "title": (run.get("output") or {}).get("title") or "",
+            "summary": (run.get("output") or {}).get("summary") or "",
+            "completed_at": run.get("completed_at") or "",
         }
         for run in runs
     }
@@ -1789,6 +1898,23 @@ def file_at(ref: str, path: str, repo: str | None = None) -> str | None:
         raise
 
 
+def pusher(ref: str) -> dict[str, Any] | None:
+    """The newest push to the branch `ref` (`refs/heads/<name>`), from the repository's activity: `after`, the commit
+    it set the branch to, `login`, the account that pushed, and `app`, true where that account is an app's (GitHub's
+    actor type `Bot`, as a workflow's token pushes), which no person's token can act as; None when it lists none."""
+    found = rest(
+        f"repos/{{owner}}/{{repo}}/activity?ref={urllib.parse.quote(ref, safe='')}&per_page=1"
+    )
+    if not found:
+        return None
+    who = found[0].get("actor") or {}
+    return {
+        "after": found[0].get("after") or "",
+        "login": who.get("login"),
+        "app": who.get("type") == "Bot",
+    }
+
+
 class Port:
     """One port's operations, each this module's function of that name, looked up at the call, so a stub set on the
     module (a test's) is the one called."""
@@ -1840,5 +1966,6 @@ forge = Port(
     "repo_tags",
     "tag_tree",
     "file_at",
+    "pusher",
 )
 evidence = Port("statuses", "post_status", "post_review", "minimize")

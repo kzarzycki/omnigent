@@ -5,6 +5,38 @@
 New entries are files in [changelog.d/](changelog.d/), one per issue, until a release moves
 them here.
 
+## 0.1.15 - 2026-11-25
+
+- omnigent-agents: `omnigent_agent.py sweep` archives each session idle over a day through `finish_delivered`, keeping running sessions, open cards, background work, managers and a keep-list file, and prints one multiSelect owner card (`CARD:`) for the sessions the owner talked to, "Archive all" recommended (#1580).
+- omnigent-agents: `start --cloud-env <name>` runs one cloud start in the named environment instead of the project's, from a launch dir pinned to it; an unknown name, another workspace, a host agent or another host is refused before any session exists, the unknown name listing the environments on the login (#2246).
+- omnigent-agents: a supervisor started by its `--install` service logs, as its first line, that a kill restarts it, with the exact stop and restart commands for its platform; SKILL.md says to stop the service to pause it and restart it to pick up new code (#2350)
+- omnigent-agents: `send` unarchives an archived session the supervisor registry lists, then delivers and waits for its report; an unlisted one is still refused, and `send --unarchive` forces it, as `relay` does (#2420)
+- omnigent-agents: the stall sweep treats a `loop:queued` PR with any queue check run still `in_progress` as held by the queue, whichever run started last, so a PR in a live Mergify batch is no longer reported stalled (#2428)
+
+## 0.1.14 - 2026-11-24
+
+- `omnigent_agent.py supervise`: a merge-queue dequeue reaches the lead that owns the PR when the lead lands several or took the PR over. A lead's `omni.pr` label may hold several PRs, comma-joined (new `omnigent_agent.py own-pr <owner/name#N>` adds one); every reader of the label takes the list. A followed lead whose report head names `<repo>#<n>` or the PR's URL is the fallback, used only when exactly one lead matches: a label owner wins, and a tie goes to the coordinator naming both leads. `own-pr` takes several refs and writes once, checking only their format, so a mistyped PR number holds the session in `reap` (#2161).
+- `omnigent_agent.py supervise`: a PR carrying `loop:hold` raises no `pr-stall` and no `dequeued` event for a manager to fix, until the label comes off (#2316).
+- operating-omnigent: the "Restart server" row says running turns keep going through a restart, as observed, not that it interrupts mid-turn work (#2389)
+
+## 0.1.13 - 2026-11-24
+
+- `omnigent_agent.py start` and `run` write the registry line when the session is created, before its brief is sent, so a slow cold start can no longer pass the 60 s adoption grace and be followed by a second supervisor; and a non-numeric `created_at` skips that one session in the console's adoption sweep instead of ending the sweep (#2319).
+- `omnigent_agent.py`: `rest_pages` stops on a page that repeats the one before and at 50 pages, so an endpoint that ignores `page=` (`git/matching-refs`, once a repo holds 100 loop refs) no longer loops forever and spends the REST quota (#2343).
+
+## 0.1.12 - 2026-11-24
+
+- `omnigent_agent.py supervise`: a followed coordinator (a manager with its own leads registry) whose turn ends on a `DONE` with no result on its line no longer wakes the notified session; the leads waiting on it are still told, and it stays followed (#2309).
+- `omnigent_agent.py supervise`: the chief of staff console adopts no lead younger than 60 seconds, so a launcher that writes its lead to another registry is not followed twice, nor reported as a lead on no registry (#2313).
+
+## 0.1.11 - 2026-11-24
+
+- `start --verifier-route claude` accepts any `--model`, the author's own included, and no longer needs `--author-model`; the session is still marked same-family. A fresh session given only the code and the spec is what makes a verifier independent, so the same-model refusal only pushed verifiers onto models nobody chose (#2297).
+
+## 0.1.10 - 2026-11-24
+
+- `wait`, and with it `run` and `claude-cloud-run`, reads a claude-cloud child idle on its own background run as working: it finds the run in the session's history (Omnigent's record shows no cloud task), sends a check-in every 5 minutes instead of a nudge, and fails only at `--timeout`, naming the run. A `STILL WORKING` ending naming that run is no report, and a reply sharing the bridge's opening `cloud session:` line is still read (#959).
+
 ## 0.1.9 - 2026-11-24
 
 - The supervisor reads a registered PR wait through ETag reads (the pull, its check runs and its combined status), so a poll of an unchanged PR answers 304 and spends no quota, and a restart's backfill reads each PR once however many waits name it. Part of #2068.

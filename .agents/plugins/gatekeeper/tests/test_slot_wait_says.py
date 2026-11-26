@@ -134,7 +134,9 @@ def test_land_wait_repeats_an_unchanged_state_every_say_interval(
     monkeypatch.setattr(approvals, "landing", landing)
     monkeypatch.setattr(approvals, "POLL", 0.02)
     monkeypatch.setattr(approvals, "poll_seconds", lambda *_: approvals.POLL)  # no real quota read
-    monkeypatch.setattr(approvals, "CEILING", 1)
+    monkeypatch.setattr(
+        approvals, "land_wait", lambda: 1
+    )  # the wait's ceiling, derived from `timeouts` (#2228)
     monkeypatch.setattr(approvals, "SLOT_SAY_SECONDS", 0.2)
     assert approvals.land(1, wait=True) == approvals.WAITING
     said = capsys.readouterr().out.count("another land holds the landing lock")

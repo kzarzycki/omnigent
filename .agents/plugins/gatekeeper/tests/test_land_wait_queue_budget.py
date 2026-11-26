@@ -172,6 +172,9 @@ def wait(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> dic
     monkeypatch.setattr(approvals.time, "sleep", sleep)
     monkeypatch.setattr(approvals, "landing", counted)
     monkeypatch.setattr(approvals, "CEILING", 2 * WAIT)
+    monkeypatch.setattr(
+        approvals, "land_wait", lambda: 2 * WAIT
+    )  # the wait's own, derived ceiling (#2228)
     github.forget()
 
     def queued(number: int = 7) -> str:

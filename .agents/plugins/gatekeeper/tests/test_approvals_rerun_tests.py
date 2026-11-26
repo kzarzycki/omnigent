@@ -73,6 +73,8 @@ def worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         git_in(repo, "commit", "-qm", path)
 
     def set_loop(text: str) -> None:
+        # git drops the folder on a checkout without loop.md
+        (repo / "docs" / "agents").mkdir(parents=True, exist_ok=True)
         (repo / "docs" / "agents" / "loop.md").write_text(text)
 
     return {
@@ -180,11 +182,10 @@ def test_a_red_with_no_history_shared_with_the_base_refuses(
 def test_a_rerun_that_is_red_again_stays_red(
     worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    red = red_head(worker)
+    red_head(worker)
     worker["set_loop"]("# Loop\n\nAffected tests: false\n")
-    git_in(
-        worker["repo"], "commit", "-qam", "red again"
-    )  # a loop.md change is no fix of app.py's test
+    git_in(worker["repo"], "commit", "-qam", "a red selection")  # the red run's own selection fails
+    red = git_in(worker["repo"], "rev-parse", "HEAD").strip()
     code, err = rerun(worker, red, capsys)
     assert code != 0 and "red again on the same selection: the change caused it" in err
 
@@ -234,3 +235,190 @@ def test_a_fix_that_misses_one_of_two_failed_tests_reruns_the_whole_selection(
     code, err = rerun(worker, red, capsys)
     assert code == 0 and worker["ran"]() == ["selected app.py other.py"]
     assert "flake candidate: other.py::test_other" in err and "flake candidate: app.py" not in err
+
+
+# a stand-in `mise` that defines no task: `run` and `tasks info` fail as mise does for an unknown task (exit 1)
+NO_TASKS = """#!/bin/sh
+echo "mise $*" >> "$(dirname "$0")/ran.log"
+echo "mise ERROR no task $3 found" >&2
+exit 1
+"""
+
+
+def red_with_loop(worker: dict[str, Any], loop: str) -> str:
+    """A red head whose own loop.md is `loop`, committed with it, so the red run's selection is that line's."""
+    red_head(worker)
+    worker["set_loop"](loop)
+    git_in(worker["repo"], "commit", "-qam", "the red run's loop.md")
+    return git_in(worker["repo"], "rev-parse", "HEAD").strip()
+
+
+def test_a_rerun_runs_the_red_heads_selection_never_the_bases(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base's loop.md names a task the red head lacks (a head behind its base): the rerun is the red run's own
+    selection, so it runs the red head's command and never the base's (#2275)."""
+    repo = worker["repo"]
+    git_in(repo, "checkout", "-q", "main")
+    worker["commit"]("docs/agents/loop.md", "# Loop\n\nAffected tests: mise run check-affected\n")
+    git_in(repo, "push", "-q", "origin", "main")
+    git_in(repo, "checkout", "-q", "work")
+    # the policy is origin/main's, as on a real PR
+    monkeypatch.delenv(approvals.WORKING_TREE_POLICY)
+    red = red_head(worker)
+    code, err = rerun(worker, red, capsys)
+    assert code == 0
+    assert worker["ran"]() == ["selected app.py other.py"]
+    assert "check-affected" not in err
+
+
+def test_a_rerun_whose_task_mise_lacks_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """mise exits 1 for an unknown task, as for a red test: the rerun ran no test, so it is never red again (#2275)."""
+    (worker["repo"].parent / "tools" / "mise").write_text(NO_TASKS)
+    red = red_with_loop(worker, "# Loop\n\nAffected tests: mise run check-affected\n")
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert (
+        "rerun did not run" in err
+        and "`mise run check-affected`, a task mise doesn't define here" in err
+    )
+    assert "the change caused it" not in err
+
+
+def test_a_selection_that_cannot_start_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    red = red_with_loop(worker, "# Loop\n\nAffected tests: /no/such/selector\n")
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "rerun did not run" in err and "the change caused it" not in err
+
+
+def test_a_red_head_with_no_selector_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no `Affected tests:` line the selection runs nothing and exits 0, which a rerun would read as a flake
+    that passed: it ran no test, so it says so instead (#2275)."""
+    red = red_with_loop(worker, "# Loop\n")
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "names no `Affected tests:` selector" in err and "Flaky" not in err
+    assert worker["ran"]() == []
+
+
+# a selection that writes a JUnit report of `count` test cases to `report.xml`, as a runner given a junit flag does,
+# and exits `code`; a `count` of `none` writes no report, as a step that fails before the runner starts
+REPORTER = """import pathlib, sys
+count, code = sys.argv[1], int(sys.argv[2])
+if count != "none":
+    cases = "".join(f'<testcase classname="app.py" name="t{i}"/>' for i in range(int(count)))
+    (pathlib.Path.cwd() / "report.xml").write_text(f'<testsuite tests="{count}">{cases}</testsuite>')
+sys.exit(code)
+"""
+
+
+def red_with_report(worker: dict[str, Any], count: int | str, code: int = 0) -> str:
+    """A red head whose loop.md's selection writes a report of `count` tests to the `Test report:` path and exits
+    `code`."""
+    reporter = worker["repo"].parent / "tools" / "reporter.py"
+    reporter.write_text(REPORTER)
+    return red_with_loop(
+        worker,
+        f"# Loop\n\nAffected tests: {sys.executable} {reporter} {count} {code}\n\nTest report: report.xml\n",
+    )
+
+
+def red_ran(worker: dict[str, Any], failed: list[str], selected: list[str]) -> None:
+    """The red run's failed-tests file holds `failed` and `selected`."""
+    Path(worker["failed"]).write_text(json.dumps({"failed": failed, "selected": selected}))
+
+
+def test_a_rerun_that_collected_zero_tests_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The selection exits 0 having run no test, where the red ran some: that is no flake that passed, since the
+    rerun says nothing about the change (#2277)."""
+    red = red_with_report(worker, 0)
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "rerun did not run: zero tests collected" in err and "Flaky" not in err
+
+
+def test_a_rerun_whose_report_shows_tests_is_read_by_its_exit(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    red = red_with_report(worker, 2)
+    code, err = rerun(worker, red, capsys)
+    assert code == 0
+    assert "a flake: open or update its `Flaky:` issue" in err and "did not run" not in err
+
+
+def test_a_report_an_earlier_run_left_is_never_counted(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A report from before the rerun shows tests this rerun never ran: it is removed first (#2277)."""
+    red = red_with_loop(
+        worker, f"# Loop\n\nAffected tests: {worker['selector']}\n\nTest report: report.xml\n"
+    )
+    (worker["repo"] / "report.xml").write_text(
+        '<testsuite><testcase classname="a" name="b"/></testsuite>'
+    )
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "zero tests collected" in err
+
+
+def test_a_rerun_red_before_its_tests_is_red_again(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A step ahead of the runner fails (a lint step, an unkeyed check), so no report is written: that is red, as any
+    red rerun is, never `did not run` (#2277)."""
+    red = red_with_report(worker, "none", 1)
+    code, err = rerun(worker, red, capsys)
+    assert code == 1
+    assert "red again" in err and "did not run" not in err
+
+
+def test_a_runner_that_collected_nothing_and_said_so_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A runner that exits nonzero for an empty collection still writes its report, showing zero tests (#2277)."""
+    red = red_with_report(worker, 0, 5)
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "zero tests collected" in err
+
+
+def test_a_red_that_listed_tests_none_of_them_failed_counts_as_having_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The red run's report listed tests though none failed (a red step after them): it ran some (#2277)."""
+    red = red_with_report(worker, 0)
+    red_ran(worker, [], ["app.py::test_value"])
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "zero tests collected" in err
+
+
+def test_a_red_that_ran_no_tests_keeps_its_reruns_exit(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A red run with neither failed nor listed tests ran none, so a rerun that runs none is read by its exit (#2277)."""
+    red = red_with_report(worker, 0)
+    red_ran(worker, [], [])
+    code, err = rerun(worker, red, capsys)
+    assert code == 0
+    assert "did not run" not in err
+
+
+def test_a_fix_rerun_that_collected_zero_tests_did_not_run(
+    worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fix path counts the report too: a fix since the red whose rerun runs nothing is no pass (#2277)."""
+    red = red_with_report(worker, 0)
+    worker["commit"]("app.py", "value = 3\n")  # the fix, in the failed test's own file
+    code, err = rerun(worker, red, capsys)
+    assert code == approvals.DID_NOT_RUN
+    assert "so those and what it reaches run" in err and "zero tests collected" in err
