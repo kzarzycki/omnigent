@@ -1,58 +1,37 @@
 #!/usr/bin/env bash
 # Run pytest on the tests the change touches (selector: affected_tests.py).
 # Shared by `mise run check-fast` and the fork CI so both run the same line.
-# AFFECTED_TESTS_SINCE: an earlier run's record to build on (affected_tests.py --since).
 # AFFECTED_TESTS_SHARDS / AFFECTED_TESTS_SHARD: run only this shard (0-based) of that many, a hash partition of the
 # selected tests by node id (pytest-shard), so a test lands in the same shard whatever else is selected.
-# AFFECTED_TESTS_RECORD: a directory this run writes its record into, whatever pytest's outcome:
-# tree (git ls-tree -r -z HEAD), selected, lastfailed.json, exit, and flakes (failed there, not
-# reselected, passed here).
+# AFFECTED_TESTS_RECORD: a directory this run writes failed-tests.json into ({"failed": [...]}, what
+# `approvals.py rerun-tests` reads of a red run), whatever pytest's outcome.
 # A whole-suite selection (`tests`) in an unsharded run outside CI is skipped: the merge queue's sharded gate runs
 # it (about 18 min, against hours on one worker). AFFECTED_TESTS_FULL=1 forces the local run.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 selector=.claude/skills/cloud-dev/affected_tests.py
-since=${AFFECTED_TESTS_SINCE:-}
 record=${AFFECTED_TESTS_RECORD:-}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-# No exit code until pytest ends, so a run that dies early leaves a record nothing builds on.
-[ -z "$record" ] || { mkdir -p "$record" && rm -f "$record/exit"; }
+# failed-tests.json is written only once the run ends, so a run that dies early leaves nothing to rerun from.
+[ -z "$record" ] || { mkdir -p "$record" && rm -f "$record/failed-tests.json"; }
 targets=$(python3 "$selector")
 run=$targets
-: > "$work/candidates"
-if [ -n "$since" ]; then
-  if run=$(python3 "$selector" --since "$since" 2> "$work/why"); then
-    sed -n 's/^affected tests: flake candidate: //p' "$work/why" > "$work/candidates"
-  else
-    run=$targets
-    echo "affected tests: the selector failed on the record; running the full selection" >> "$work/why"
-  fi
-  cat "$work/why" >&2
-fi
-if [ -n "$record" ]; then
-  git ls-tree -r -z HEAD > "$record/tree"
-  printf '%s\n' "$targets" > "$record/selected"
-  printf '{}\n' > "$record/lastfailed.json"
-  : > "$record/flakes"
-fi
 shards=${AFFECTED_TESTS_SHARDS:-1}
 if [ "$targets" = tests ] && [ "$shards" -le 1 ] && [ -z "${CI:-}" ] && [ "${AFFECTED_TESTS_FULL:-}" != 1 ]; then
-  skipped="affected tests: whole suite selected; the merge queue's sharded gate runs it"
-  echo "$skipped"
-  # selected stays empty, so a later --since run treats the suite as not yet run
-  [ -z "$record" ] || { : > "$record/selected"; echo "$skipped" > "$record/skipped"; echo 0 > "$record/exit"; }
+  echo "affected tests: whole suite selected; the merge queue's sharded gate runs it"
+  [ -z "$record" ] || echo '{"failed": []}' > "$record/failed-tests.json"
   exit 0
 fi
 if [ -z "$run" ]; then
   echo "affected tests: none touched"
-  [ -z "$record" ] || echo 0 > "$record/exit"
+  [ -z "$record" ] || echo '{"failed": []}' > "$record/failed-tests.json"
   exit 0
 fi
 echo "affected tests: $run"
 # One argument per line, so a node id with spaces stays whole; a fresh cache holds only this run's failures.
 set --
-[ -z "$since$record" ] || set -- -o "cache_dir=$work/cache"
+[ -z "$record" ] || set -- -o "cache_dir=$work/cache"
 [ "$shards" -le 1 ] || set -- "$@" --num-shards="$shards" --shard-id="${AFFECTED_TESTS_SHARD:?AFFECTED_TESTS_SHARDS needs AFFECTED_TESTS_SHARD}"
 while IFS= read -r target; do set -- "$@" "$target"; done <<< "$run"
 # Per-test cap: the slowest passing test took 38 s on a loaded 4-CPU VM, so 90 s ends a hang early (pyproject's
@@ -73,27 +52,12 @@ if [ "$rc" = 1 ] && grep -q 'xdist: worker .* crashed and worker restarting disa
 fi
 # A shard the selection puts no test in is a pass (pytest exits 5 when it collects nothing).
 [ "$shards" -le 1 ] || [ "$rc" != 5 ] || rc=0
-lastfailed=$work/cache/v/cache/lastfailed
 if [ -n "$record" ]; then
-  [ ! -s "$lastfailed" ] || cp "$lastfailed" "$record/lastfailed.json"
-  echo "$rc" > "$record/exit"
-fi
-# A flake: failed in the earlier run, reselected by nothing, and not failed in this complete run. A file
-# (a collection error) failed when a test in it did, and a test failed when its file failed to collect.
-if [ -s "$work/candidates" ] && { [ "$rc" = 0 ] || [ "$rc" = 1 ]; }; then
-  python3 - "$work/candidates" "$lastfailed" "$rc" > "$work/flakes" <<'PY'
+  python3 - "$work/cache/v/cache/lastfailed" "$record/failed-tests.json" <<'PY'
 import json, os, sys
-candidates = [line for line in open(sys.argv[1]).read().split("\n") if line]
-path = sys.argv[2]
-failed = list(json.load(open(path))) if os.path.isfile(path) and os.path.getsize(path) else []
-# exit 1 with nothing failed: pytest died before its session started, so nothing ran (as for a record)
-if sys.argv[3] == "1" and not failed:
-    candidates = []
-for test in candidates:
-    if not any(f == test or f.startswith(test + "::") or test.startswith(f + "::") for f in failed):
-        print(test)
+path = sys.argv[1]
+failed = sorted(json.load(open(path))) if os.path.isfile(path) and os.path.getsize(path) else []
+json.dump({"failed": failed}, open(sys.argv[2], "w"))
 PY
-  sed 's/^/affected tests: flaky, passed on the rerun: /' "$work/flakes" >&2
-  [ -z "$record" ] || cp "$work/flakes" "$record/flakes"
 fi
 exit "$rc"
