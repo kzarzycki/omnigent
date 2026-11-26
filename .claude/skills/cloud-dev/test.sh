@@ -2,6 +2,7 @@
 # setup.sh against fake installers: a failed install logs the missing tools as
 # FAILED; with every tool present it logs done. Both exit 0 (setup.sh says why).
 # The uv step replaces a uv older than uv.toml requires, or logs FAILED and goes on.
+# The pre-commit hook is installed from the repo root.
 # The uv warm-up syncs with the Gate's flags from the repo root; a failed or
 # timed-out warm-up is logged and still ends in done. A gh-quota shim that fails to
 # fetch or its checksum is logged, installs nothing, and still ends in done.
@@ -64,7 +65,8 @@ run "$tmp/fail"; rc=$?
 [ "$rc" = 0 ] && grep -q "FAILED, missing: uv bwrap ssh-keygen pre-commit mise$" "$tmp/init.log" \
   && grep -q "gh-quota shim install failed" "$tmp/init.log" \
   || { echo "!! failed installs: exit $rc, log: $(cat "$tmp/init.log")"; exit 1; }
-for t in apt-get npm sudo bwrap ssh-keygen pre-commit mise; do fake "$tmp/ok/$t" "echo $t 1.0"; done
+for t in apt-get npm sudo bwrap ssh-keygen mise; do fake "$tmp/ok/$t" "echo $t 1.0"; done
+fake "$tmp/ok/pre-commit" "echo \"\$PWD \$*\" >> $tmp/hook.calls"
 # curl fetches files whose sums don't match the pinned ones: the shim step must refuse them
 fake "$tmp/ok/curl" 'while [ $# -gt 0 ]; do [ "$1" = -o ] && { echo tampered > "$2"; shift; }; shift; done'
 # fake_uv <path> <version> <tag> <sync step>: logs "<tag> <args>" per call, records sync's context
@@ -76,11 +78,13 @@ fake_uv "$tmp/newuv" 0.13.8 new "exit 0"
 printf 'mkdir -p "$HOME/.local/bin" && cp %s "$HOME/.local/bin/uv"\n' "$tmp/newuv" > "$tmp/installer.sh"
 check() {  # check <case> <sync step of the fake uv> <expected warm-up log line> [old uv version]
   fake_uv "$tmp/ok/uv" "${4:-0.13.8}" old "$2"
+  rm -f "$tmp/hook.calls"
   rm -rf "$tmp/sync.args" "$tmp/uv.calls" "$tmp/pip.ran" "$tmp/home/.local" "$tmp/home/.bashrc"
   printf '[ -z "$PS1" ] && return\n' > "$tmp/home/.bashrc"
   run "$tmp/ok"; rc=$?
   [ "$rc" = 0 ] && grep -q "init done: uv 0.13.8; bwrap 1.0; mise 1.0" "$tmp/init.log" && grep -q "$3" "$tmp/init.log" \
     && [ "$(cat "$tmp/sync.args" 2>/dev/null)" = "$tmp/user/omnigent true sync --locked --extra all --group test --group lint" ] \
+    && [ "$(cat "$tmp/hook.calls" 2>/dev/null)" = "$tmp/user/omnigent install" ] \
     || { echo "!! $1: exit $rc, sync: $(cat "$tmp/sync.args" 2>/dev/null), log: $(cat "$tmp/init.log")"; exit 1; }
 }
 check "satisfying uv" "exit 0" "uv warm-up done in"
