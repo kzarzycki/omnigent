@@ -7875,7 +7875,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
         for chunk in batched(conversation_ids, 200):
             ids = list(chunk)
-            counts: dict[str, dict[str, int]] = {cid: {} for cid in ids}
+            counts: dict[str, dict[int, int]] = {cid: {} for cid in ids}
             tools: dict[str, dict[str, int]] = {cid: {} for cid in ids}
             with self._conv_session("get_session_item_stats") as session:
                 where = (
@@ -7892,20 +7892,20 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .group_by(SqlConversationItem.conversation_id, SqlConversationItem.type)
                 ):
                     counts[cid][kind] = count
-                inherited = dict(
-                    session.execute(
-                        select(SqlConversationItem.conversation_id, func.count())
-                        .join(
-                            SqlConversation,
-                            and_(
-                                SqlConversation.workspace_id == SqlConversationItem.workspace_id,
-                                SqlConversation.id == SqlConversationItem.conversation_id,
-                            ),
-                        )
-                        .where(*where, SqlConversationItem.created_at < SqlConversation.created_at)
-                        .group_by(SqlConversationItem.conversation_id)
-                    ).all()
-                )
+                inherited: dict[str, int] = {}
+                for cid, count in session.execute(
+                    select(SqlConversationItem.conversation_id, func.count())
+                    .join(
+                        SqlConversation,
+                        and_(
+                            SqlConversation.workspace_id == SqlConversationItem.workspace_id,
+                            SqlConversation.id == SqlConversationItem.conversation_id,
+                        ),
+                    )
+                    .where(*where, SqlConversationItem.created_at < SqlConversation.created_at)
+                    .group_by(SqlConversationItem.conversation_id)
+                ):
+                    inherited[cid] = count
                 # Only the types whose JSON carries what is counted are read.
                 turns: dict[str, int] = {}
                 for cid, kind, data in session.execute(
