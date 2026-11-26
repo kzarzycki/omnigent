@@ -1,0 +1,271 @@
+{
+ "repo": "kzarzycki/scratch-gate-revert",
+ "runs": [
+  {
+   "id": 11,
+   "workflow_id": 5,
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "status": "completed",
+   "conclusion": "failure",
+   "completed_at": "2026-10-01T12:00:00Z",
+   "updated_at": "2026-10-01T12:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/11",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "pull_request"
+  },
+  {
+   "id": 12,
+   "workflow_id": 5,
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-10-01T13:00:00Z",
+   "updated_at": "2026-10-01T13:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/12",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "workflow_dispatch"
+  },
+  {
+   "id": 21,
+   "workflow_id": 5,
+   "head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-09-30T10:00:00Z",
+   "updated_at": "2026-09-30T10:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/21",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "push"
+  },
+  {
+   "id": 22,
+   "workflow_id": 5,
+   "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-09-30T20:00:00Z",
+   "updated_at": "2026-09-30T20:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/22",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "pull_request"
+  },
+  {
+   "id": 31,
+   "workflow_id": 5,
+   "head_sha": "dddddddddddddddddddddddddddddddddddddddd",
+   "status": "completed",
+   "conclusion": "failure",
+   "completed_at": "2026-10-01T08:00:00Z",
+   "updated_at": "2026-10-01T08:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/31",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "push"
+  },
+  {
+   "id": 32,
+   "workflow_id": 5,
+   "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "status": "completed",
+   "conclusion": "failure",
+   "completed_at": "2026-09-30T08:00:00Z",
+   "updated_at": "2026-09-30T08:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/32",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "push"
+  },
+  {
+   "id": 41,
+   "workflow_id": 5,
+   "head_sha": "9999999999999999999999999999999999999999",
+   "status": "completed",
+   "conclusion": "failure",
+   "completed_at": "2026-09-01T08:00:00Z",
+   "updated_at": "2026-09-01T08:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/41",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "push"
+  },
+  {
+   "id": 51,
+   "workflow_id": 5,
+   "head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-10-01T12:00:00Z",
+   "updated_at": "2026-10-01T12:00:00Z",
+   "html_url": "https://github.com/someone/else/actions/runs/51",
+   "repository": {
+    "full_name": "someone/else"
+   },
+   "head_repository": {
+    "full_name": "someone/else"
+   },
+   "event": "push"
+  },
+  {
+   "id": 52,
+   "workflow_id": 6,
+   "head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-10-01T12:00:00Z",
+   "updated_at": "2026-10-01T12:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/52",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "push"
+  },
+  {
+   "id": 61,
+   "workflow_id": 5,
+   "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+   "status": "completed",
+   "conclusion": "success",
+   "completed_at": "2026-10-01T15:00:00Z",
+   "updated_at": "2026-10-01T15:00:00Z",
+   "html_url": "https://github.com/kzarzycki/scratch-gate-revert/actions/runs/61",
+   "repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "head_repository": {
+    "full_name": "kzarzycki/scratch-gate-revert"
+   },
+   "event": "pull_request"
+  }
+ ],
+ "artifacts": {
+  "11": {
+   "failed": [
+    "tests/test_a.py::test_slow",
+    "tests/test_b.py::test_flaky"
+   ],
+   "selected": [
+    "tests/test_a.py::test_slow",
+    "tests/test_b.py::test_flaky",
+    "tests/test_c.py::test_ok"
+   ]
+  },
+  "12": {
+   "failed": [],
+   "selected": [
+    "tests/test_a.py::test_slow",
+    "tests/test_b.py::test_flaky"
+   ]
+  },
+  "31": {
+   "failed": [
+    "tests/test_a.py::test_slow",
+    "tests/test_b.py::test_flaky"
+   ],
+   "selected": []
+  },
+  "32": {
+   "failed": [
+    "tests/test_b.py::test_flaky"
+   ],
+   "selected": []
+  },
+  "41": {
+   "failed": [
+    "tests/test_z.py::test_old"
+   ],
+   "selected": []
+  }
+ },
+ "jobs": {
+  "11": [
+   {
+    "name": "qualify",
+    "conclusion": "failure",
+    "steps": [
+     {
+      "name": "tests",
+      "conclusion": "failure"
+     }
+    ]
+   }
+  ],
+  "13": [
+   {
+    "name": "qualify",
+    "conclusion": "cancelled",
+    "steps": []
+   }
+  ],
+  "21": [
+   {
+    "name": "qualify",
+    "conclusion": "success",
+    "steps": [
+     {
+      "name": "tests",
+      "conclusion": "success"
+     }
+    ]
+   }
+  ],
+  "22": [
+   {
+    "name": "qualify",
+    "conclusion": "success",
+    "steps": [
+     {
+      "name": "tests",
+      "conclusion": "success"
+     }
+    ]
+   }
+  ],
+  "61": [
+   {
+    "name": "qualify",
+    "conclusion": "success",
+    "steps": [
+     {
+      "name": "tests",
+      "conclusion": "success"
+     }
+    ]
+   }
+  ]
+ }
+}
