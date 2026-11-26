@@ -46,7 +46,7 @@ affected() {
 # Without a record, pytest gets today's arguments exactly.
 affected; rc=$?
 [ "$rc" = 0 ] || fail "a pass exited $rc"
-printf '%s\n' run --no-sync pytest -n auto --dist=loadfile --timeout=90 tests/example_test.py > "$tmp/expected"
+printf '%s\n' run --no-sync pytest -n auto --dist=loadfile --max-worker-restart=0 --timeout=90 tests/example_test.py > "$tmp/expected"
 cmp -s "$tmp/expected" "$tmp/args" || fail "arguments without a record changed: $(cat "$tmp/args")"
 affected HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 [ "$rc" = 124 ] || fail "a hung run exited $rc, not 124"
@@ -54,7 +54,7 @@ affected HANG=1 AFFECTED_TESTS_WALL_SECONDS=1; rc=$?
 # A shard runs its slice of the selection, and one holding no selected test passes (pytest's exit 5).
 affected AFFECTED_TESTS_SHARDS=4 AFFECTED_TESTS_SHARD=2; rc=$?
 [ "$rc" = 0 ] || fail "a shard exited $rc"
-printf '%s\n' run --no-sync pytest -n auto --dist=loadfile --timeout=90 --num-shards=4 --shard-id=2 tests/example_test.py > "$tmp/expected"
+printf '%s\n' run --no-sync pytest -n auto --dist=loadfile --max-worker-restart=0 --timeout=90 --num-shards=4 --shard-id=2 tests/example_test.py > "$tmp/expected"
 cmp -s "$tmp/expected" "$tmp/args" || fail "shard arguments: $(cat "$tmp/args")"
 affected AFFECTED_TESTS_SHARDS=4 AFFECTED_TESTS_SHARD=2 PYTEST_EXIT=5; rc=$?
 [ "$rc" = 0 ] || fail "an empty shard exited $rc, not 0"
@@ -118,6 +118,29 @@ affected AFFECTED_TESTS_RECORD="$tmp/record" SELECTS_NOTHING=1; rc=$?
 [ "$rc" = 0 ] && [ "$(cat "$tmp/record/exit")" = 0 ] && [ ! -e "$tmp/args" ] || fail "an empty selection exited $rc or ran pytest"
 affected AFFECTED_TESTS_RECORD="$tmp/record" FULL_FAILS=1; rc=$?
 [ "$rc" != 0 ] && [ ! -e "$tmp/record/exit" ] || fail "a failed selector exited $rc and left exit $(cat "$tmp/record/exit")"
+# A worker that SIGKILLs itself, with real pytest and the gate's flags on a two-worker generated suite: the run ends
+# at once with exit 70 (not pytest's 1, so a record never reads it as complete), names the worker and test, and
+# runs the killing test once (a restarted worker would run it again). Without the flag the same suite exits 1.
+mkdir "$tmp/suite" "$tmp/realbin"
+printf '#!/bin/bash\n[ "${2:-}" = --since ] && exit 3\necho "%s"\n' "$tmp/suite" > "$tmp/realbin/python3"
+chmod +x "$tmp/realbin/python3"
+cat > "$tmp/suite/test_crash.py" <<EOF
+import os, signal
+def test_kill():
+    open("$tmp/kills", "a").write("x\n")
+    os.kill(os.getpid(), signal.SIGKILL)
+EOF
+printf 'def test_other():\n    pass\n' > "$tmp/suite/test_other.py"
+real() { env -u CI -u AFFECTED_TESTS_FULL -u AFFECTED_TESTS_SINCE -u AFFECTED_TESTS_RECORD -u AFFECTED_TESTS_SHARDS -u AFFECTED_TESTS_SHARD AFFECTED_TESTS_WORKERS=2 PATH="$tmp/realbin:$PATH" "$@" \
+  bash "$here/run-affected-tests.sh" >"$tmp/real.out" 2>&1; }
+: > "$tmp/kills"; start=$SECONDS
+real AFFECTED_TESTS_RECORD="$tmp/record"; rc=$?
+[ "$rc" = 70 ] || fail "a crashed worker exited $rc, not 70: $(tail -5 "$tmp/real.out")"
+[ $((SECONDS - start)) -lt 60 ] || fail "a crashed worker took $((SECONDS - start)) s to end the run"
+grep -q "worker 'gw[0-9]*' crashed while running 'test_crash.py::test_kill'" "$tmp/real.out" || fail "the crash names no worker and test"
+kills=$(wc -l < "$tmp/kills")  # BSD wc pads the count with spaces: compare it as a number
+[ "$kills" -eq 1 ] || fail "the killing test ran $kills times: the worker was restarted"
+[ "$(cat "$tmp/record/exit")" = 70 ] || fail "the record holds exit $(cat "$tmp/record/exit"), not 70"
 # A whole-suite selection, unsharded and outside CI, is skipped (record: exit 0, nothing selected); a shard, CI
 # or AFFECTED_TESTS_FULL=1 runs it.
 line="affected tests: whole suite selected; the merge queue's sharded gate runs it"
