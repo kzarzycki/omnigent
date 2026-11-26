@@ -110,28 +110,29 @@ def test_the_base_goes_in_the_variable_the_gate_base_line_names(
     assert worker["ran"]() == ["selected app.py"]
 
 
-def test_without_the_line_it_cant_tell_and_runs_nothing(
+def test_without_the_line_the_full_check_runs(
     worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """#1872: no selector, so it can't tell what the change affects: it runs nothing, says so, and passes."""
+    """#2217: no selector, and no `select` cut to narrow by: the project's full check runs, never nothing."""
     worker["set_loop"]("# Loop\n\nNo selector here.\n")
     worker["commit"]("app.py", "x = 1\n")
     assert approvals.main(["affected-tests"]) == 0
-    assert worker["ran"]() == []
+    assert worker["ran"]() == ["mise run check base=unset"]
     assert (
-        "affected-tests: nothing: loop.md names no `Affected tests:` selector"
-        in capsys.readouterr().err
+        "affected-tests: loop.md names no `Affected tests:` selector, so it can't narrow the change: the"
+        " project's full check runs" in capsys.readouterr().err
     )
 
 
-def test_a_base_git_cant_resolve_runs_nothing(
+def test_a_base_git_cant_resolve_selects_against_the_merge_base(
     worker: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """#1872: a push of a new branch (an all-zeros base) names no base to select against: nothing runs."""
+    """#2217: a push of a new branch (an all-zeros base) selects against the merge base with the default branch."""
     worker["set_loop"](f"# Loop\n\nAffected tests: {worker['selector']}\n")
+    worker["commit"]("app.py", "value = 2\n")
     assert approvals.main(["affected-tests", "--base", "0" * 40]) == 0
-    assert worker["ran"]() == []
-    assert "affected-tests: nothing: no base to select against" in capsys.readouterr().err
+    assert worker["ran"]() == ["selected app.py"]
+    assert "it selects against the merge base" in capsys.readouterr().err
 
 
 def test_the_opt_out_runs_check_with_no_base_set(

@@ -1,7 +1,9 @@
 # yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
 #
 # The Mergify merge queue `land` hands PRs to when the policy sets `land.queue: mergify` (gatekeeper's policy.md). The
-# pack ships this file as gatekeeper/skills/gatekeeper/mergify.yml; a repo copies it to `.mergify.yml` unchanged.
+# pack ships this file as gatekeeper/skills/gatekeeper/mergify.yml; a repo commits it as `.mergify.yml` rendered by
+# `approvals.py queue-config`, which sets the queue rule's `batch_size` and `batch_max_wait_time` from gatekeeper.md's
+# `land` block (`batch_size`, 1 for one PR per entry, and `batch_wait_seconds`) and leaves the rest as it is here.
 #
 # `land` judges each PR (its proofs, the owner's go where high risk, the base's required checks green on its head),
 # then posts the `land` status on that head and adds `loop:queued`. Mergify takes a PR in only with both, tests each
@@ -14,8 +16,9 @@
 # A cloud session's GitHub proxy refuses the status write: there `land` comments a `Queued for Mergify` record naming the
 # head, and the repo's `.github/workflows/land-status.yml` posts `land` on that head while it is still the PR's.
 #
-# No CI check is named here: Mergify reads the base's required checks from its rules (`branch_protection_injection_mode`,
-# default `queue`) and requires them on the PR to queue it and on the draft PR to merge it. So the file suits any repo
+# The one CI check named here is `queue-run`, in `merge_conditions` (Refused without a queue run, below). Mergify
+# reads the base's required checks from its rules (`branch_protection_injection_mode`, default `queue`) and requires
+# them on the PR to queue it and on the draft PR to merge it. So the file suits any repo
 # whose default branch is `main`, whose main requires its CI check and does not require `land` itself (`land` never
 # reaches the draft PR), and whose required check runs on Mergify's draft PRs: a `pull_request` trigger that filters
 # out neither drafts nor `mergify/merge-queue/*` head branches, else no batch ever merges.
@@ -50,7 +53,13 @@
 # `qualify`, where the test step does not run. `allow_inplace_checks` cannot be set (it is computed); the one key
 # that forbids it is `merge_conditions` that differ from `queue_conditions` (two-step CI: `queue_conditions` gate
 # entry, `merge_conditions` gate the final merge, evaluated on the draft PR). `-conflict` is that difference: true on
-# every draft PR the queue builds, so it adds no check, and no CI name, to the file.
+# every draft PR the queue builds, so it adds no check of its own.
+#
+# Refused without a queue run (engineering-loop SKILL.md, R6): a batch merges only on `check-success = queue-run`, a CI
+# job that runs only on a `queue_branch_prefix` branch, after the required check, and passes only when the batch's test
+# step ran its selection (the unkeyed checks, the cross-change tests, and the affected tests of a PR with no record).
+# A path that skips that step (a renamed prefix, a drifted step-level `if`, a PR checked in place) leaves `queue-run`
+# skipped or red, so nothing merges and the batch's checks say why. A repo on this file needs that job.
 
 queue_rules:
   - name: default
@@ -68,7 +77,9 @@ queue_rules:
     # many rounds that takes; only it leaves the queue. A number would dequeue a part still holding several PRs once
     # it ran out
     batch_max_failure_resolution_attempts: null
-    # a batch whose checks never report leaves the queue instead of holding it
+    # a batch whose checks never report leaves the queue instead of holding it. Set from gatekeeper.md's
+    # `timeouts.run` (`approvals.py queue-config` writes this file), never by hand: `land --wait` and the CI
+    # jobs derive their limits from the same value, and `gatekeeper.py timeouts --check` fails on a file out of step
     checks_timeout: 1 hour
     queue_conditions:
       - base = main
@@ -79,6 +90,7 @@ queue_rules:
     # two-step CI, so the queue never checks a PR in place (Never in place, above): different from `queue_conditions`
     merge_conditions:
       - -conflict
+      - check-success = queue-run
 
 pull_request_rules:
   - name: queue what land handed over

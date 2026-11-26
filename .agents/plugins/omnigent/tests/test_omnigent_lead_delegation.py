@@ -19,6 +19,9 @@ from test_omnigent_agent import (  # noqa: F401  (the fixtures apply here by nam
 )
 
 omnigent_agent = base.omnigent_agent
+READS_LEAD_DELEGATION = (
+    True  # conftest.no_origin_reads leaves this module the real reader, on synthetic checkouts
+)
 
 POLICY = "docs/agents/gatekeeper.md"
 

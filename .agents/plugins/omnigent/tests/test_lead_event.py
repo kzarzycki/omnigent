@@ -236,3 +236,19 @@ def test_only_the_followed_leads_own_branch_is_read(
         clone, tmp_path, monkeypatch, "USER NEEDED: Should the epic split into two? Report: r.md"
     )
     assert "OLD-QUESTION-BODY" not in post
+
+
+class Spawned(BaseException):
+    """A process start: a BaseException, so no reader's `except Exception` turns it into "unknown"."""
+
+
+def test_a_supervisor_test_reads_no_origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """conftest.no_origin_reads reaches modules that never import it: a real read here hung CI to the 60 s timeout
+    (#2384). Any process start raises, so a reader that runs fails here even where origin is unreachable."""
+
+    def spawned(*args: object, **kwargs: object) -> None:
+        raise Spawned(args)
+
+    monkeypatch.setattr(subprocess, "Popen", spawned)
+    assert oa.read_loop_events() is None
+    assert oa.lead_delegation(None, str(tmp_path)) == ""

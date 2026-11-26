@@ -4,8 +4,8 @@
 # mergify.yml (read its header for what each key does); edit that script, never this file, and
 # rerun it after the pack moves. This fork's changes to the template: base `mine`; the
 # queue-only variant, so `merge_conditions` is `check-success = gate` (`gate` runs on Mergify's
-# draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` above
-# `gate`'s 240-minute job timeout; the `default` queue leaves `sync/*` heads to the `sync`
+# draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` from the
+# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves `sync/*` heads to the `sync`
 # queue, which merges them with a merge commit so `mine` keeps upstream's parent
 # (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and `commands_restrictions` limits
 # `@mergifyio queue` to write access.
@@ -26,8 +26,10 @@ queue_rules:
     # many rounds that takes; only it leaves the queue. A number would dequeue a part still holding several PRs once
     # it ran out
     batch_max_failure_resolution_attempts: null
-    # a batch whose checks never report leaves the queue instead of holding it
-    checks_timeout: 4 hours 15 minutes
+    # a batch whose checks never report leaves the queue instead of holding it. Set from gatekeeper.md's
+    # `timeouts.run` (`approvals.py queue-config` writes this file), never by hand: `land --wait` and the CI
+    # jobs derive their limits from the same value, and `gatekeeper.py timeouts --check` fails on a file out of step
+    checks_timeout: 2 hours
     queue_conditions:
       - base = mine
       - -draft
@@ -44,7 +46,7 @@ queue_rules:
     merge_method: merge
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 4 hours 15 minutes
+    checks_timeout: 2 hours
     queue_conditions:
       - base = mine
       - -draft

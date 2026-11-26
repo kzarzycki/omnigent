@@ -129,3 +129,21 @@ def test_a_top_level_lead_start_with_no_registry_is_refused(
     monkeypatch.setenv("OMNIGENT_SUPERVISE_REGISTRY", str(registry))
     assert omnigent_agent.main(args) == 0
     assert omnigent_agent.entry(registry.read_text().strip())[4] is True
+
+
+def test_a_fresh_lead_is_adopted_only_after_the_grace_period_2313(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launcher writes its lead to its own supervisor's registry a moment after the session exists: inside the
+    grace window the console leaves it be, after it the console adopts a lead no registry holds."""
+    import time
+
+    registry = tmp_path / "leads.registry"
+    registry.write_text("")
+    og = base.Leads(**{STRAY: [base.told("brief", 60)]})
+    og.rows = [lead_row(STRAY, created_at=time.time() - 5)]
+    base.supervised(og, registry, monkeypatch, 2, console=True)
+    assert registry.read_text() == "" and adopted(registry) == []  # young: not adopted
+    og.rows = [lead_row(STRAY, created_at=time.time() - omnigent_agent.ADOPT_GRACE_SECONDS - 5)]
+    base.supervised(og, registry, monkeypatch, 2, console=True)
+    assert registry.read_text().startswith(f"{STRAY}=") and len(adopted(registry)) == 1

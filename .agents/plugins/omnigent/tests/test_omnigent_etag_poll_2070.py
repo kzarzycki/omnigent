@@ -61,3 +61,19 @@ def test_kept_etags_survive_a_restart(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert oa.rest_pages("repos/o/r/pulls") == [{"n": 1}]
     assert (hub.spent, hub.free) == (1, 1)
     oa.etags_load(tmp_path / "missing.json")  # none kept: no error
+
+
+def test_a_non_paging_endpoint_is_read_once_2343(monkeypatch: pytest.MonkeyPatch) -> None:
+    """git/matching-refs ignores page=: the same 100 items come back for every page, which looped forever (#2343)."""
+    full = [{"ref": f"refs/heads/loop/{i}"} for i in range(100)]
+    calls: list[str] = []
+
+    def run(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd[-1])
+        assert len(calls) <= 10, "rest_pages never stopped"
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"HTTP/2.0 200 OK\n\n{json.dumps(full)}")
+
+    monkeypatch.setattr(oa, "ETAGS", {})
+    monkeypatch.setattr(oa.subprocess, "run", run)
+    assert oa.rest_pages("repos/o/r/git/matching-refs/loop/") == full
+    assert len(calls) == 2

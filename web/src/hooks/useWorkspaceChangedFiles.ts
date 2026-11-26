@@ -15,7 +15,7 @@
 // (e.g. cloud-only agents).
 
 import { useCallback, useEffect, useRef } from "react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type Query, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
@@ -76,7 +76,10 @@ export function useTrailingInvalidate(
   conversationId: string | undefined,
   sessionActive: boolean,
   queryKeyPrefix: string,
+  options?: { enabled?: boolean; predicate?: (query: Query) => boolean },
 ) {
+  const enabled = options?.enabled ?? true;
+  const predicate = options?.predicate;
   const queryClient = useQueryClient();
   const prev = useRef<{ id: string | undefined; active: boolean }>({
     id: conversationId,
@@ -86,10 +89,14 @@ export function useTrailingInvalidate(
     const sameSession = prev.current.id === conversationId;
     const justWentIdle = sameSession && prev.current.active && !sessionActive;
     prev.current = { id: conversationId, active: sessionActive };
-    if (justWentIdle && conversationId) {
-      queryClient.invalidateQueries({ queryKey: [queryKeyPrefix, conversationId] });
+    if (justWentIdle && conversationId && enabled) {
+      // Join a fetch already in flight rather than restarting it.
+      queryClient.invalidateQueries(
+        { queryKey: [queryKeyPrefix, conversationId], predicate },
+        { cancelRefetch: false },
+      );
     }
-  }, [conversationId, sessionActive, queryClient, queryKeyPrefix]);
+  }, [conversationId, sessionActive, queryClient, queryKeyPrefix, enabled, predicate]);
 }
 
 // The primary workspace environment is always "default".  Terminals also each

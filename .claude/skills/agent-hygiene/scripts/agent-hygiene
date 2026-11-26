@@ -23,6 +23,9 @@ Steps, each skipped when in use:
                 and after, and warns above 80% of the pty limit
   caches        each tool's own command (uv, pnpm, npm, go, pre-commit, brew, and docker's
                 build cache unused for 24 h)
+  sessions      once a day, Omnigent sessions idle over a day, archived through omnigent-agents' finish_delivered
+                (`omnigent_agent.py sweep`); kept: running, an open card, background work, a manager, the keep list
+                ~/.config/agent-hygiene/keep. Those the owner talked to go on one owner card, printed as a CARD: line
 
 Never touched: agent state (~/.claude, ~/.codex, ~/.omnigent), user files, simulator devices,
 VM or container images. What may be wanted is asked about instead, once, in the chief of staff's
@@ -978,6 +981,59 @@ def forwarders():
     return found
 
 
+KEEP_FILE = HOME / '.config/agent-hygiene/keep'  # the sweep's keep list: a session id or exact title per line
+SWEEP_EVERY = 20 * 3600  # the session sweep runs in at most one round a day
+
+
+def omnigent_agent_script():
+    """omnigent-agents' omnigent_agent.py in the home skill install, whose `sweep` finishes through `finish_delivered`."""
+    return next((path for skills in HOME_SKILLS
+                 if (path := skills / 'omnigent-agents/scripts/omnigent_agent.py').is_file()), None)
+
+
+def session_sweep(run, dry_run=False):
+    """Once a day, archive the Omnigent sessions idle over a day that no keep rule holds (`omnigent_agent.py sweep`,
+    with the keep list); its lines go to the log. Returns the owner card's JSON for the sessions the owner talked to
+    (`sys_ask_user_question` input, for the round to post), else None. The card is saved, so a run later the same day (the
+    round's second run) shows it again rather than losing it. A failed sweep fails the run and runs again next
+    round; a skill install without omnigent-agents skips it."""
+    stamp, saved = STATE / 'swept', STATE / 'card'  # the day's card, shown again by every run until the next sweep
+    if stamp.exists() and stamp.stat().st_mtime > time.time() - SWEEP_EVERY:
+        run.say('sweep: sessions already swept in the last 20 h')
+        if card := (saved.read_text().strip() if saved.is_file() else ''):
+            run.say(f'sweep: the owner card of that sweep, again, for whoever posts it\nCARD: {card}')
+            return card
+        return None
+    if not (script := omnigent_agent_script()):
+        run.say('note: no omnigent-agents skill installed: session sweep skipped')
+        return None
+    command = [sys.executable, str(script), 'sweep', '--keep-file', str(KEEP_FILE)] + (['--dry-run'] if dry_run else [])
+    try:
+        done = subprocess.run(command, text=True, capture_output=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        run.failed = True
+        run.say(f'FAIL session sweep: {type(error).__name__}')
+        return None
+    card = None
+    for line in done.stdout.splitlines():
+        if line.startswith('CARD: '):
+            card = line.removeprefix('CARD: ')
+        elif line.strip():
+            run.say(f'sweep: {line}')
+    if done.returncode:
+        run.failed = True
+        run.say(f'FAIL session sweep: exit {done.returncode}: {done.stderr.strip()[-300:]}')
+    elif not dry_run:
+        stamp.touch()
+        if card:
+            saved.write_text(card + '\n')
+        else:
+            saved.unlink(missing_ok=True)
+    if card:
+        run.say(f'CARD: {card}')
+    return card
+
+
 DRIFT_ROUTES = {}  # a doctor finding inside a repo -> that repo (owner/name), whose manager is told
 
 
@@ -1149,6 +1205,7 @@ def main():
         run.say(f'note: {int(kb) / 1e6:.1f} GB of staged ChatGPT updates in {SPARKLE}, left alone')
         asks.append(f'staged ChatGPT updates in {SPARKLE}: update ChatGPT or delete them in Finder '
                     '(App Management blocks deleting them from a shell)')
+    session_sweep(run, args.dry_run)
     end = free()
     run.say(f'free {start / GB:.1f} -> {end / GB:.1f} GB (freed {(end - start) / GB:.1f} GB); log {run.log}')
     low, parts, warning = end < args.floor_gb * GB, [], False

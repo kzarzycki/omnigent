@@ -4789,11 +4789,12 @@ def test_augment_claude_args_leaves_bypass_consent_alone_otherwise(
     ("prompt_args", "absent_key"),
     [
         (("--permission-mode", "bypassPermissions"), "defaultMode"),
+        (("--permission-mode=bypassPermissions",), "defaultMode"),
         (("--dangerously-skip-permissions",), "skipDangerousModePermissionPrompt"),
         (("--model", "claude-fable-5"), "model"),
         (("--effort", "xhigh"), "effortLevel"),
     ],
-    ids=["permission-mode", "skip-flag", "model", "effort"],
+    ids=["permission-mode", "permission-mode-joined", "skip-flag", "model", "effort"],
 )
 def test_augment_claude_args_ignores_launch_flags_after_separator(
     prompt_args: tuple[str, ...],
@@ -4810,6 +4811,22 @@ def test_augment_claude_args_ignores_launch_flags_after_separator(
     settings = _load_invocation_settings(args)
     assert absent_key not in settings
     assert absent_key not in settings.get("permissions", {})
+    assert "skipDangerousModePermissionPrompt" not in settings
+
+
+def test_augment_claude_args_skip_switch_takes_no_value(tmp_path: Path) -> None:
+    """`--dangerously-skip-permissions=false` is not the switch: no consent, no bypass mode."""
+    from omnigent.runner.native.orchestration import _claude_launch_permission_mode
+
+    launch_args = ("--dangerously-skip-permissions=false",)
+    args = augment_claude_args(
+        launch_args,
+        bridge_dir=tmp_path,
+        python_executable="/venv/bin/python",
+    )
+
+    assert "skipDangerousModePermissionPrompt" not in _load_invocation_settings(args)
+    assert _claude_launch_permission_mode(list(launch_args)) != "bypassPermissions"
 
 
 def test_augment_claude_args_reads_launch_flags_before_separator(tmp_path: Path) -> None:

@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Render .mergify.yml from the gatekeeper pack's deployed mergify.yml template.
+"""Render .mergify.yml from the gatekeeper pack's `timeouts --mergify` output.
 
 Usage: render-mergify.py [--check]   (no flag rewrites .mergify.yml; --check exits 1 when stale)
 
-The template's queue-only variant (its header says how) with this fork's values: base `mine`,
-the `gate` merge condition, batch size and timeout sized to `gate.yml`, and a `sync` queue that
+The pack's template with the policy's limits (`checks_timeout` from `timeouts.run`) and this fork's
+values: base `mine`, the `gate` merge condition in place of `queue-run`, batch size 5, and a `sync` queue that
 merges `sync/*` heads with a merge commit (`land.merge_commit_heads` in
 docs/agents/gatekeeper.md). Rerun after `apm install` moves the pack.
 """
 
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-TEMPLATE = ROOT / ".agents/plugins/gatekeeper/skills/gatekeeper/mergify.yml"
+APPROVALS = ROOT / ".agents/plugins/gatekeeper/skills/gatekeeper/scripts/approvals.py"
 OUTPUT = ROOT / ".mergify.yml"
 
 HEADER = """\
@@ -23,8 +25,8 @@ HEADER = """\
 # mergify.yml (read its header for what each key does); edit that script, never this file, and
 # rerun it after the pack moves. This fork's changes to the template: base `mine`; the
 # queue-only variant, so `merge_conditions` is `check-success = gate` (`gate` runs on Mergify's
-# draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` above
-# `gate`'s 240-minute job timeout; the `default` queue leaves `sync/*` heads to the `sync`
+# draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` from the
+# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves `sync/*` heads to the `sync`
 # queue, which merges them with a merge commit so `mine` keeps upstream's parent
 # (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and `commands_restrictions` limits
 # `@mergifyio queue` to write access.
@@ -35,8 +37,7 @@ HEADER = """\
 EDITS = [
     ("base = main", "base = mine", 2),
     ("batch_size: 3", "batch_size: 5", 1),
-    ("checks_timeout: 1 hour\n", "checks_timeout: 4 hours 15 minutes\n", 1),
-    ("      - -conflict\n", "      - check-success = gate\n", 1),
+    ("      - -conflict\n      - check-success = queue-run\n", "      - check-success = gate\n", 1),
     ("      - -draft\n", "      - -draft\n      - -head ~= ^sync/\n", 2),
 ]
 
@@ -46,7 +47,7 @@ SYNC_QUEUE = """\
     merge_method: merge
     batch_size: 1
     max_checks_retries: 1
-    checks_timeout: 4 hours 15 minutes
+    checks_timeout: {checks_timeout}
     queue_conditions:
       - base = mine
       - -draft
@@ -83,8 +84,12 @@ commands_restrictions:
 
 
 def render() -> str:
-    body = TEMPLATE.read_text()
+    body = subprocess.run(
+        [sys.executable, str(APPROVALS), "timeouts", "--mergify"],
+        check=True, capture_output=True, text=True, cwd=ROOT,
+    ).stdout
     body = body[body.index("queue_rules:") :]
+    checks_timeout = re.search(r"^    checks_timeout: (.+)$", body, re.M).group(1)
     for old, _, count in EDITS:
         if body.count(old) != count:
             found = body.count(old)
@@ -96,7 +101,7 @@ def render() -> str:
     for anchor, block in (("pull_request_rules:", SYNC_QUEUE), ("merge_queue:", SYNC_RULE)):
         if body.count(anchor) != 1:
             sys.exit(f"render-mergify: the template changed: no single {anchor!r}")
-        body = body.replace(anchor, block + anchor)
+        body = body.replace(anchor, block.replace("{checks_timeout}", checks_timeout) + anchor)
     return HEADER + body.rstrip("\n") + "\n" + RESTRICTIONS
 
 
