@@ -55,6 +55,7 @@ import os
 import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
@@ -127,9 +128,72 @@ _GRANT_MAX_LIFETIME_SECONDS = 30 * 24 * 3600  # 30 days
 _GRANT_MAX_LIFETIME_ENV = "OMNIGENT_GRANT_MAX_LIFETIME_DAYS"
 
 
-def grant_max_lifetime_seconds() -> int:
-    """Public alias of :func:`_grant_max_lifetime_seconds` for the login routes."""
-    return _grant_max_lifetime_seconds()
+# Opt-in sliding renewal for first-party login grants: each successful refresh
+# pushes the grant's expiry out, so it dies after this many idle days instead
+# of a fixed time after login. Off by default; the absolute cap above, when set
+# explicitly, still applies on top.
+_GRANT_SLIDING_ENV = "OMNIGENT_GRANT_SLIDING_RENEWAL"
+_GRANT_IDLE_DAYS_ENV = "OMNIGENT_GRANT_IDLE_DAYS"
+_GRANT_IDLE_DAYS_DEFAULT = 30
+
+
+@dataclass(frozen=True)
+class _LoginGrantPolicy:
+    """How long a login grant renews.
+
+    :ivar idle_seconds: Seconds of disuse after which the grant dies, or
+        ``None`` when sliding renewal is off.
+    :ivar cap_seconds: Absolute lifetime from login: the configured cap with
+        sliding on (``None`` when unset), or the fixed lifetime with it off.
+    """
+
+    idle_seconds: int | None
+    cap_seconds: int | None
+
+    def deadline(self, approved_at: int, last_renewed_at: int | None) -> int | None:
+        """Epoch second the grant stops renewing, or ``None`` for no limit."""
+        deadlines = []
+        if self.idle_seconds is not None:
+            deadlines.append((last_renewed_at or approved_at) + self.idle_seconds)
+        if self.cap_seconds is not None:
+            deadlines.append(approved_at + self.cap_seconds)
+        return min(deadlines) if deadlines else None
+
+
+def _positive_days_env(name: str) -> int | None:
+    """Return a positive whole-day env value, or ``None`` when unset or invalid."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 0
+    if days <= 0:
+        _logger.warning("%s=%r must be a positive integer — ignoring it", name, raw)
+        return None
+    return days
+
+
+def login_grant_policy() -> _LoginGrantPolicy:
+    """Read the login-grant renewal policy from the environment."""
+    if os.environ.get(_GRANT_SLIDING_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
+        idle_days = _positive_days_env(_GRANT_IDLE_DAYS_ENV) or _GRANT_IDLE_DAYS_DEFAULT
+        # Unset means no absolute cap; a set but invalid value falls back to
+        # the default cap, never to unbounded.
+        cap_set = bool(os.environ.get(_GRANT_MAX_LIFETIME_ENV, "").strip())
+        return _LoginGrantPolicy(
+            idle_seconds=idle_days * 86400,
+            cap_seconds=_grant_max_lifetime_seconds() if cap_set else None,
+        )
+    return _LoginGrantPolicy(idle_seconds=None, cap_seconds=_grant_max_lifetime_seconds())
+
+
+def login_grant_lifetime_seconds() -> int:
+    """Seconds a just-issued login grant renews for (what login responses report)."""
+    now = int(time.time())
+    deadline = login_grant_policy().deadline(now, None)
+    return (deadline - now) if deadline is not None else _GRANT_MAX_LIFETIME_SECONDS
 
 
 def _grant_max_lifetime_seconds() -> int:
@@ -411,6 +475,7 @@ def create_oauth_token_router(
     _client_secret_ok = client_secret_ok or _make_client_secret_gate()
     # Resolve grant max lifetime once at mount time (not on every refresh).
     _grant_max_lifetime = _grant_max_lifetime_seconds()
+    _login_policy = login_grant_policy()
     router = APIRouter()
     # Throttle for the opportunistic grant purge (bounds the table without a
     # separate scheduler). Mutable one-field dict so the closures can update
@@ -431,7 +496,11 @@ def create_oauth_token_router(
         _last_purge["at"] = now_wall
         try:
             device_grant_store.purge_expired(
-                int(now_wall), max_lifetime_seconds=_grant_max_lifetime
+                int(now_wall),
+                max_lifetime_seconds=_grant_max_lifetime,
+                login_client_id=LOGIN_GRANT_CLIENT_ID,
+                login_idle_seconds=_login_policy.idle_seconds,
+                login_cap_seconds=_login_policy.cap_seconds,
             )
         except Exception:  # housekeeping must never fail a refresh
             _logger.debug("oauth/token: opportunistic grant purge failed", exc_info=True)
@@ -524,9 +593,17 @@ def create_oauth_token_router(
         # Refuse to refresh a grant past its absolute lifetime — the user
         # must re-consent. Checked before rotating so an aged grant simply
         # stops working (it is NOT reuse, so it must not revoke/oscillate).
-        if grant.approved_at is not None and (
-            int(time.time()) - grant.approved_at >= _grant_max_lifetime
-        ):
+        now = int(time.time())
+        if _is_login_grant(grant.client_id):
+            # A login grant's deadline follows the sliding policy when on.
+            login_deadline = (
+                _login_policy.deadline(grant.approved_at, grant.last_polled_at)
+                if grant.approved_at is not None
+                else None
+            )
+            if login_deadline is not None and now >= login_deadline:
+                return _oauth_error("expired_token")
+        elif grant.approved_at is not None and now - grant.approved_at >= _grant_max_lifetime:
             return _oauth_error("expired_token")
         if grant.user_id is None:
             return _oauth_error("invalid_grant")
@@ -540,6 +617,12 @@ def create_oauth_token_router(
             # access token is renewed. Revocation + the absolute lifetime cap
             # bound the exposure.
             access_token = _issue_access_token(grant.id, grant.user_id, grant.client_id or "")
+            renewed_at = grant.last_polled_at
+            if _login_policy.idle_seconds is not None:
+                # Sliding renewal: record this use so the idle clock restarts.
+                device_grant_store.touch_login_grant(grant.id, now)
+                renewed_at = now
+            deadline = _login_policy.deadline(grant.approved_at or now, renewed_at)
             return JSONResponse(
                 status_code=200,
                 content={
@@ -547,7 +630,7 @@ def create_oauth_token_router(
                     "refresh_token": refresh_token,
                     "token_type": "Bearer",
                     "expires_in": _ACCESS_TOKEN_TTL_SECONDS,
-                    "refresh_expires_in": _grant_remaining_seconds(grant),
+                    "refresh_expires_in": max(0, (deadline or now) - now),
                 },
                 headers=NO_STORE_HEADERS,
             )
@@ -676,6 +759,7 @@ def create_device_auth_router(
     _client_secret_ok = _make_client_secret_gate()
     # Resolve grant max lifetime once at mount (not on every purge).
     _grant_max_lifetime = _grant_max_lifetime_seconds()
+    _login_policy = login_grant_policy()
 
     router = APIRouter()
     _rate_limiter = SlidingWindowRateLimiter(
@@ -730,7 +814,11 @@ def create_device_auth_router(
             _last_purge["at"] = now_wall
             try:
                 device_grant_store.purge_expired(
-                    int(now_wall), max_lifetime_seconds=_grant_max_lifetime
+                    int(now_wall),
+                    max_lifetime_seconds=_grant_max_lifetime,
+                    login_client_id=LOGIN_GRANT_CLIENT_ID,
+                    login_idle_seconds=_login_policy.idle_seconds,
+                    login_cap_seconds=_login_policy.cap_seconds,
                 )
             except Exception:  # housekeeping must never fail a request
                 _logger.exception("device grant purge failed")
