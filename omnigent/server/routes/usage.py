@@ -92,13 +92,17 @@ def _day_offset(day_utc: str, *, days: int) -> str:
     return (base - timedelta(days=days)).date().isoformat()
 
 
-def _session_models(usage: dict[str, Any]) -> dict[str, float]:
+_TOKEN_BUCKET_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
+
+
+def _session_models(usage: dict[str, Any]) -> dict[str, float | None]:
     """
     Project a session's ``by_model`` map into a ``{model_id: cost_usd}`` dict.
 
     Mirrors the web session sidebar's per-model list: each model's recorded
-    cost, keyed by the raw harness model id, shown faithfully. Models with no
-    recorded cost are omitted. NOT guaranteed to sum to the session's
+    cost, keyed by the raw harness model id, shown faithfully. A model with
+    recorded tokens but no price maps to ``None`` (unpriced, not free); a
+    model with neither is omitted. NOT guaranteed to sum to the session's
     ``total_cost_usd`` — see :class:`SessionUsage`.
 
     :param usage: A subtree-summed ``session_usage`` dict.
@@ -107,9 +111,13 @@ def _session_models(usage: dict[str, Any]) -> dict[str, float]:
     by_model = usage.get("by_model")
     if not isinstance(by_model, dict):
         return {}
-    models: dict[str, float] = {}
+    models: dict[str, float | None] = {}
     for name, bucket in by_model.items():
-        if not isinstance(bucket, dict) or "total_cost_usd" not in bucket:
+        if not isinstance(bucket, dict):
+            continue
+        if "total_cost_usd" not in bucket:
+            if any(bucket.get(key) for key in _TOKEN_BUCKET_KEYS):
+                models[str(name)] = None
             continue
         try:
             models[str(name)] = float(bucket["total_cost_usd"])
@@ -152,19 +160,20 @@ def _resolve_session_harness(conv: Conversation) -> str | None:
     return _resolve_harness_impl(conv, agents_by_id=_preloaded_agents.get())
 
 
-def _session_cost(usage: dict[str, Any]) -> float:
+def _session_cost(usage: dict[str, Any]) -> float | None:
     """
-    Read a session's authoritative cumulative cost, or ``0.0`` when unpriced.
+    Read a session's authoritative cumulative cost, or ``None`` when unpriced.
 
     ``total_cost_usd`` is present only on priced sessions (the "priced ⟺ key
-    present" contract); an absent or malformed value reads as ``0.0``.
+    present" contract); an absent or malformed value reads as ``None``, so an
+    unpriced session is not shown as $0.
     """
     if "total_cost_usd" not in usage:
-        return 0.0
+        return None
     try:
         return float(usage["total_cost_usd"])
     except (TypeError, ValueError):
-        return 0.0
+        return None
 
 
 _TREE_PAGE_SIZE = 500

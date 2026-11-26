@@ -1102,3 +1102,58 @@ def test_usage_metrics_follow_the_hosts_answer_for_a_repository_excluded_session
     assert points(excluded.id) == []
     assert points(unknown.id) == []  # no answer yet: skipped, as the host fails closed
     assert len(points(allowed.id)) == 1
+
+
+_AGY_TURN = {
+    "cumulative_input_tokens": 1000,
+    "cumulative_output_tokens": 100,
+    "cumulative_cache_read_input_tokens": 200,
+}
+
+
+def _gemini_catalog_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Price only the catalog id ``gemini-2.5-flash`` (the suite disables live lookup)."""
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: (
+            ModelPricing(input_per_token=3e-7, output_per_token=2.5e-6)
+            if model == "gemini-2.5-flash"
+            else None
+        ),
+    )
+
+
+def test_antigravity_known_gemini_model_records_model_and_cost(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A priced Gemini display name records its model and a non-zero cost."""
+    _gemini_catalog_only(monkeypatch)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="agy-priced", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(conv.id, {**_AGY_TURN, "model": "Gemini 2.5 Flash"}, store)
+    usage = _usage(store, conv.id)
+    assert usage["total_cost_usd"] > 0
+    assert usage["by_model"]["Gemini 2.5 Flash"]["total_cost_usd"] == pytest.approx(
+        usage["total_cost_usd"]
+    )
+    assert usage["by_model"]["Gemini 2.5 Flash"]["output_tokens"] == 100
+
+
+def test_antigravity_unpriced_model_records_tokens_and_no_cost(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unpriced model keeps its tokens; cost stays absent, so /v1/usage reads null."""
+    _gemini_catalog_only(monkeypatch)
+    from omnigent.server.routes.usage import _session_cost, _session_models
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="agy-unpriced", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(
+        conv.id, {**_AGY_TURN, "model": "Gemini 99 Imaginary (High)"}, store
+    )
+    usage = _usage(store, conv.id)
+    assert "total_cost_usd" not in usage
+    assert usage["output_tokens"] == 100
+    assert usage["by_model"]["Gemini 99 Imaginary (High)"]["output_tokens"] == 100
+    assert _session_cost(usage) is None
+    assert _session_models(usage) == {"Gemini 99 Imaginary (High)": None}

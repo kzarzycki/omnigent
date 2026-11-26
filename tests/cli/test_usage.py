@@ -131,3 +131,42 @@ def test_usage_command_json() -> None:
     payload = json.loads(result.output)
     assert payload["cost_today"] == 1.5
     assert payload["sessions"][0]["models"] == {"claude-opus-4-8": 1.5}
+
+
+def test_render_usage_null_session_cost(capsys: pytest.CaptureFixture[str]) -> None:
+    _render_usage({"sessions": [{"id": "conv_a", "cost_usd": None, "models": {}}]}, limit=10)
+    out = capsys.readouterr().out
+    assert "conv_a" in out
+    assert "—" in out
+
+
+def test_render_usage_mixed_priced_and_null_models(capsys: pytest.CaptureFixture[str]) -> None:
+    _render_usage(
+        {
+            "sessions": [
+                {
+                    "id": "conv_b",
+                    "cost_usd": 1.0,
+                    "models": {"unpriced-model": None, "priced-a": 0.25, "priced-b": 0.75},
+                }
+            ]
+        },
+        limit=10,
+    )
+    out = capsys.readouterr().out
+    # Priced models lead, highest cost first; the unpriced one sorts last.
+    assert out.index("priced-b") < out.index("priced-a") < out.index("unpriced-model")
+
+
+def test_render_usage_only_null_models(capsys: pytest.CaptureFixture[str]) -> None:
+    _render_usage(
+        {
+            "sessions": [
+                {"id": "conv_c", "cost_usd": None, "models": {"gem-a": None, "gem-b": None}}
+            ]
+        },
+        limit=10,
+    )
+    out = capsys.readouterr().out
+    assert "gem-a" in out
+    assert "gem-b" in out

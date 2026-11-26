@@ -4233,18 +4233,19 @@ class SessionUsage(BaseModel):
     :param updated_at: Unix epoch seconds of last activity.
     :param title: Optional human-readable title.
     :param cost_usd: Authoritative cumulative USD spend for this session's
-        subtree.
+        subtree, or ``None`` when no model in it has a known price.
     :param models: Per-model recorded cost, keyed by the raw harness model
-        id (e.g. ``{"claude-opus-4-8": 14.03}``). Empty when no per-model
-        cost was recorded. May not sum to ``cost_usd`` (see above).
+        id (e.g. ``{"claude-opus-4-8": 14.03}``); ``None`` for a model whose
+        tokens were recorded but has no known price. Empty when nothing was
+        recorded. May not sum to ``cost_usd`` (see above).
     """
 
     id: str
     created_at: int
     updated_at: int
     title: str | None = None
-    cost_usd: float = 0.0
-    models: dict[str, float] = Field(default_factory=dict)
+    cost_usd: float | None = None
+    models: dict[str, float | None] = Field(default_factory=dict)
     harness: str | None = None
     other_harnesses: list[str] | None = None
     llm_model: str | None = None
