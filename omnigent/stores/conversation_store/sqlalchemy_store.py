@@ -2109,9 +2109,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             "total_tokens": 1850}``. May carry a nested ``"by_model"``
             sub-dict (per-model token/cost buckets), hence ``Any``. Child
             runs recorded by :meth:`record_child_usage` are not the caller's to
-            replace: unless *usage* carries its own ``"child_usage"``, the stored
-            one is kept (read under the same row lock), so a snapshot taken
-            before a child post cannot erase it.
+            replace: the stored ``"child_usage"`` is always kept (read under the
+            same row lock) and any ``"child_usage"`` in *usage* is ignored, so a
+            snapshot taken before a child post, stale copy included, cannot
+            erase or revert it.
         """
         import json
 
@@ -2123,11 +2124,11 @@ class SqlAlchemyConversationStore(ConversationStore):
             if self._meta_supports_for_update:
                 q = q.with_for_update()
             meta = session.scalars(q).first()
-            merged = usage
-            if meta is not None and meta.session_usage and "child_usage" not in usage:
+            merged = {key: value for key, value in usage.items() if key != "child_usage"}
+            if meta is not None and meta.session_usage:
                 stored = json.loads(meta.session_usage)
                 if isinstance(stored, dict) and stored.get("child_usage"):
-                    merged = {**usage, "child_usage": stored["child_usage"]}
+                    merged["child_usage"] = stored["child_usage"]
             encoded_usage = json.dumps(merged)
             session.execute(
                 update(SqlConversationMetadata)

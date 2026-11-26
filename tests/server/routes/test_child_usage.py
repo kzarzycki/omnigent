@@ -226,9 +226,18 @@ async def test_child_usage_survives_a_full_row_usage_write(
 
     # A writer holding a snapshot taken before the post, as the policy engine does.
     stores.conversations.set_session_usage(session_id, {"input_tokens": 5})
+    # One that read the row first, so its copy of child_usage predates a later post.
+    stale = dict(stores.conversations.get_conversation(session_id).session_usage)
+    await client.post(
+        f"/v1/sessions/{session_id}/child-usage",
+        json=_body(key="verify-2"),
+        headers=_from(session_id),
+    )
+    stores.conversations.set_session_usage(session_id, {**stale, "input_tokens": 6})
 
     usage = stores.conversations.get_conversation(session_id).session_usage
-    assert usage["input_tokens"] == 5
+    assert usage["input_tokens"] == 6
+    assert set(usage["child_usage"]) == {"verify-1", "verify-2"}
     assert usage["child_usage"]["verify-1"]["harness"] == "codex"
 
 
