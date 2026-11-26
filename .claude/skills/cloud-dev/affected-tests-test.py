@@ -108,6 +108,21 @@ with tempfile.TemporaryDirectory() as tmp:
     run("git", "commit", "-q", "-m", "e2e")
     run("git", "tag", "-f", "base")
     assert select(repo, {"omnigent/widgets/frob.py": "x = 3\n"}) == [widget]
+    # the deployed pack's own tests run in the pack's repo, not here
+    assert select(repo, {".agents/plugins/demo/tests/test_demo.py": "x = 1\n"}) == []
+    # nor does its conftest stand for the shared setup, so the lint config's test still selects
+    run("git", "checkout", "-q", "-B", "work", "base")
+    (repo / "tests" / "dev").mkdir()
+    lint_test = repo / "tests" / "dev" / "test_lint_surface.py"
+    lint_test.write_text('read(".pre-commit-config.yaml")\n')
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", "lint surface test")
+    run("git", "tag", "-f", "base")
+    pack_change = {
+        ".agents/plugins/demo/tests/conftest.py": "# c\n",
+        ".pre-commit-config.yaml": "exclude: x\nrepos: []\n",
+    }
+    assert select(repo, pack_change) == ["tests/dev/test_lint_surface.py"]
     # the queue's floor: a build input alone selects nothing the tests don't name
     floor = {"AFFECTED_TESTS_BUILD_INPUTS": "floor"}
     requests_test = "tests/server/test_requests.py"
