@@ -33,6 +33,7 @@ for _name in list(os.environ):
     if _name.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_TERMINAL_")) or _name in (
         "OMNIGENT_PROCESS_LOG_FILE",
         "OMNIGENT_HARNESS_TMP_PARENT",
+        "OMNIGENT_HARNESS_TELEMETRY",
         "OMNIGENT_USER_ID",
     ):
         del os.environ[_name]
