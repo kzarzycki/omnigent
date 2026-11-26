@@ -3,9 +3,9 @@
 
 Usage: render-mergify.py [--check]   (no flag rewrites .mergify.yml; --check exits 1 when stale)
 
-The pack's template with the policy's limits (`checks_timeout` from `timeouts.run`) and this fork's
-values: base `mine`, the `gate` merge condition in place of `queue-run`, batch size 5, and a `sync` queue that
-merges `sync/*` heads with a merge commit (`land.merge_commit_heads` in
+The pack's template with the policy's limits (`checks_timeout` from `timeouts.run`) and this
+fork's values: base `mine`, the `gate` merge condition in place of `queue-run`, batch size 5,
+and a `sync` queue that merges `sync/*` heads with a merge commit (`land.merge_commit_heads` in
 docs/agents/gatekeeper.md). Rerun after `apm install` moves the pack.
 """
 
@@ -26,10 +26,10 @@ HEADER = """\
 # rerun it after the pack moves. This fork's changes to the template: base `mine`; the
 # queue-only variant, so `merge_conditions` is `check-success = gate` (`gate` runs on Mergify's
 # draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` from the
-# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves `sync/*` heads to the `sync`
-# queue, which merges them with a merge commit so `mine` keeps upstream's parent
-# (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and `commands_restrictions` limits
-# `@mergifyio queue` to write access.
+# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves
+# `sync/*` heads to the `sync` queue, which merges them with a merge commit so `mine` keeps
+# upstream's parent (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and
+# `commands_restrictions` limits `@mergifyio queue` to write access.
 
 """
 
@@ -37,7 +37,11 @@ HEADER = """\
 EDITS = [
     ("base = main", "base = mine", 2),
     ("batch_size: 3", "batch_size: 5", 1),
-    ("      - -conflict\n      - check-success = queue-run\n", "      - check-success = gate\n", 1),
+    (
+        "      - -conflict\n      - check-success = queue-run\n",
+        "      - check-success = gate\n",
+        1,
+    ),
     ("      - -draft\n", "      - -draft\n      - -head ~= ^sync/\n", 2),
 ]
 
@@ -86,7 +90,10 @@ commands_restrictions:
 def render() -> str:
     body = subprocess.run(
         [sys.executable, str(APPROVALS), "timeouts", "--mergify"],
-        check=True, capture_output=True, text=True, cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
     ).stdout
     body = body[body.index("queue_rules:") :]
     checks_timeout = re.search(r"^    checks_timeout: (.+)$", body, re.M).group(1)

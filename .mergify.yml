@@ -5,10 +5,10 @@
 # rerun it after the pack moves. This fork's changes to the template: base `mine`; the
 # queue-only variant, so `merge_conditions` is `check-success = gate` (`gate` runs on Mergify's
 # draft PRs alone, `.github/workflows/gate.yml`); `batch_size` 5; `checks_timeout` from the
-# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves `sync/*` heads to the `sync`
-# queue, which merges them with a merge commit so `mine` keeps upstream's parent
-# (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and `commands_restrictions` limits
-# `@mergifyio queue` to write access.
+# policy's `timeouts.run` (`approvals.py timeouts --mergify`); the `default` queue leaves
+# `sync/*` heads to the `sync` queue, which merges them with a merge commit so `mine` keeps
+# upstream's parent (`land.merge_commit_heads`, docs/agents/gatekeeper.md); and
+# `commands_restrictions` limits `@mergifyio queue` to write access.
 
 queue_rules:
   - name: default
