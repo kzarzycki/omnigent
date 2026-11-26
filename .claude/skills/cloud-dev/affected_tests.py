@@ -15,6 +15,8 @@ Usage: python3 affected_tests.py [<base>]   (default: GATE_BASE, else merge base
   module (`omnigent/a/b.py`: `omnigent.a.b`, or `from omnigent.a import b`; `__init__.py`: its
   package) or its file name; any other non-Markdown file, the test files that name
   its file name.
+- A change under `omnigent/` also runs every test file that starts Omnigent as a subprocess
+  (`-m omnigent`, `"-m", "omnigent"`, or the `omnigent` entry point): it imports the whole package.
 - A conftest below `tests/` selects its own directory, since pytest applies it only there (none
   in a suite check-fast doesn't run), and the test files that import it by module or load it
   through `pytest_plugins`.
@@ -83,6 +85,12 @@ def names(path: Path, text: str, by_file_name: bool = True) -> bool:
         re.search(rf"from {re.escape(parent)} import[^\n]*\b{stem}\b", text)
         or re.search(rf"from {re.escape(parent)} import \([^)]*\b{stem}\b", text)
     )
+
+
+# a test that starts Omnigent as a subprocess: `-m omnigent`, `"-m", "omnigent"`, or the entry point
+SUBPROCESS_START = re.compile(
+    r"""["']-m["']\s*,\s*["']omnigent["']|-m omnigent\b|\[\s*["']omnigent["']\s*,"""
+)
 
 
 # the build inputs the queue's floor leaves to the nightly
@@ -204,6 +212,13 @@ def targets(
             if f == "uv.lock" and floor and (pattern := imports_any(moved or set())):
                 picked.update(
                     str(t.relative_to(root)) for t, text in tests.items() if pattern.search(text)
+                )
+            if path.parts[0] == "omnigent":
+                # a subprocess test imports the whole package, whatever its text names
+                picked.update(
+                    str(t.relative_to(root))
+                    for t, text in tests.items()
+                    if SUBPROCESS_START.search(text)
                 )
             conftest = path.name == "conftest.py"
             if (
