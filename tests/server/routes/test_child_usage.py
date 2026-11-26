@@ -19,11 +19,13 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.server.app import create_app
+from omnigent.server.auth import LEVEL_OWNER, UnifiedAuthProvider
 from omnigent.server.routes import usage as usage_routes
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _AGENT = "1" * 32
 _BUNDLE_HASH = "c" * 64
@@ -41,16 +43,25 @@ class _AgentCacheStub:
 def stores(db_uri: str) -> SimpleNamespace:
     agents = SqlAlchemyAgentStore(db_uri)
     agents.create(_AGENT, "agent-1", f"{_AGENT}/{_BUNDLE_HASH}")
-    return SimpleNamespace(agents=agents, conversations=SqlAlchemyConversationStore(db_uri))
+    return SimpleNamespace(
+        agents=agents,
+        conversations=SqlAlchemyConversationStore(db_uri),
+        permissions=SqlAlchemyPermissionStore(db_uri),
+    )
 
 
-def _app(stores: SimpleNamespace, tmp_path: Path) -> FastAPI:
+def _app(stores: SimpleNamespace, tmp_path: Path, *, auth: bool = False) -> FastAPI:
+    extra: dict[str, Any] = {}
+    if auth:
+        extra["auth_provider"] = UnifiedAuthProvider(source="header", local_single_user=False)
+        extra["permission_store"] = stores.permissions
     return create_app(
         agent_store=stores.agents,
         file_store=SqlAlchemyFileStore(stores.conversations.storage_location),
         conversation_store=stores.conversations,
         artifact_store=LocalArtifactStore(str(tmp_path / "artifacts")),
         agent_cache=_AgentCacheStub(),  # type: ignore[arg-type]
+        **extra,
     )
 
 
@@ -205,6 +216,75 @@ async def test_repeated_key_counts_once(
     assert by_key["verify-1"]["cost_usd"] == 0.7
 
 
+async def test_child_usage_survives_a_full_row_usage_write(
+    client: httpx.AsyncClient, stores: SimpleNamespace
+) -> None:
+    session_id = _session(stores)
+    await client.post(
+        f"/v1/sessions/{session_id}/child-usage", json=_body(), headers=_from(session_id)
+    )
+
+    # A writer holding a snapshot taken before the post, as the policy engine does.
+    stores.conversations.set_session_usage(session_id, {"input_tokens": 5})
+
+    usage = stores.conversations.get_conversation(session_id).session_usage
+    assert usage["input_tokens"] == 5
+    assert usage["child_usage"]["verify-1"]["harness"] == "codex"
+
+
+async def test_sub_agent_child_usage_lists_under_the_parent_row(
+    client: httpx.AsyncClient, stores: SimpleNamespace
+) -> None:
+    parent = _session(stores)
+    sub = stores.conversations.create_conversation(
+        agent_id=_AGENT,
+        runner_id=token_bound_runner_id(_TOKEN),
+        parent_conversation_id=parent,
+        sub_agent_name="verifier",
+    ).id
+
+    resp = await client.post(f"/v1/sessions/{sub}/child-usage", json=_body(), headers=_from(sub))
+
+    assert resp.status_code == 200, resp.text
+    [row] = await _report_sessions(client)
+    assert row["id"] == parent
+    assert [(c["key"], c["session_id"]) for c in row["child_usage"]] == [("verify-1", sub)]
+
+
+async def test_auth_on_refuses_another_users_session(
+    stores: SimpleNamespace, tmp_path: Path
+) -> None:
+    session_id = _session(stores)
+    stores.permissions.grant("alice@example.com", session_id, LEVEL_OWNER)
+    transport = httpx.ASGITransport(app=_app(stores, tmp_path, auth=True))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        url = f"/v1/sessions/{session_id}/child-usage"
+        alice = {"X-Forwarded-Email": "alice@example.com", **_from(session_id)}
+        bob = {"X-Forwarded-Email": "bob@example.com", **_from(session_id)}
+
+        refused = await c.post(url, json=_body(), headers=bob)
+        anonymous = await c.post(url, json=_body(), headers=_from(session_id))
+        accepted = await c.post(url, json=_body(), headers=alice)
+
+    assert refused.status_code == 403, refused.text
+    assert anonymous.status_code == 401, anonymous.text
+    assert accepted.status_code == 200, accepted.text
+
+
+async def test_one_sided_token_count_leaves_total_null(
+    client: httpx.AsyncClient, stores: SimpleNamespace
+) -> None:
+    session_id = _session(stores)
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/child-usage",
+        json={"key": "k", "harness": "codex", "input_tokens": 10},
+        headers=_from(session_id),
+    )
+
+    assert resp.json()["child"]["total_tokens"] is None
+
+
 async def test_unpriced_total_only_report(
     client: httpx.AsyncClient, stores: SimpleNamespace
 ) -> None:
@@ -253,6 +333,7 @@ async def test_cost_is_priced_server_side_when_the_cli_gives_none(
         {"key": "has space"},
         {"key": ""},
         {"harness": ""},
+        {"harness": "   "},
         {"surprise": 1},
         {"input_tokens": None, "output_tokens": None, "cost_usd": None},
     ],
@@ -262,6 +343,7 @@ async def test_cost_is_priced_server_side_when_the_cli_gives_none(
         "bad-key",
         "empty-key",
         "no-harness",
+        "blank-harness",
         "extra",
         "empty",
     ],

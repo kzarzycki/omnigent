@@ -520,7 +520,8 @@ def create_usage_router(
         **Response** (200): ``{"object": "child_usage", "session_id": "<id>",
         "child": {key, harness, model, input_tokens, output_tokens,
         total_tokens, cost_usd}, "replaced": <bool>}``. ``total_tokens`` is
-        input + output when only those were sent. 404 for an unknown session;
+        input + output when both were sent without a total, else as sent
+        (``null`` when absent). 404 for an unknown session;
         409 when the session already holds
         :data:`MAX_CHILD_USAGE_PER_SESSION` other runs.
         """
@@ -545,8 +546,8 @@ def create_usage_router(
             )
         cost = await asyncio.to_thread(_price_child_run, body)
         total = body.total_tokens
-        if total is None and (body.input_tokens is not None or body.output_tokens is not None):
-            total = (body.input_tokens or 0) + (body.output_tokens or 0)
+        if total is None and body.input_tokens is not None and body.output_tokens is not None:
+            total = body.input_tokens + body.output_tokens
         child = ChildUsage(
             key=body.key,
             harness=body.harness,

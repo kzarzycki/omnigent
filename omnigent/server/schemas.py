@@ -4224,8 +4224,8 @@ class ChildUsage(BaseModel):
     :param model: The model it ran, or ``None`` when unknown.
     :param input_tokens: Input tokens when reported, else ``None``.
     :param output_tokens: Output tokens when reported, else ``None``.
-    :param total_tokens: Total tokens (input + output when only those were
-        reported), or ``None`` when no count was.
+    :param total_tokens: Total tokens (input + output when both were
+        reported without a total), or ``None`` when no count was.
     :param cost_usd: The CLI's own cost, or the server's catalog price; ``None``
         when neither exists (unpriced, not free).
     :param session_id: The session that holds the entry; set on a report's
@@ -4261,7 +4261,7 @@ class ChildUsageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
-    harness: str = Field(min_length=1, max_length=64)
+    harness: str = Field(min_length=1, max_length=64, pattern=r"\S")
     model: str | None = Field(default=None, min_length=1, max_length=200)
     input_tokens: int | None = Field(default=None, ge=0, le=10**12)
     output_tokens: int | None = Field(default=None, ge=0, le=10**12)
