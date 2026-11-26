@@ -264,7 +264,7 @@ environment `omnigent-dev`), so the load is off the owner's machines. In such a
 session (`CLAUDE_CODE_REMOTE` is set), read `.claude/skills/cloud-dev/SKILL.md`
 first. The VM can't reach GitHub's GraphQL API, so every
 `approvals.py` step, the land and the Codex verifier run on the landing host (the
-one with `gh`, the agent-skills checkout, signing and the report paths), through a
+one with `gh`, signing and the report paths), through a
 host helper session the skill describes. Any host that bridges cloud sessions is a
 bridge host; the helper and verifier are created on the landing host by naming it
 (`placement='host'`, `host_id`, `workspace`), whichever host bridges the lead.

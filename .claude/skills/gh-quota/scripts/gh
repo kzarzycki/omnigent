@@ -1,0 +1,94 @@
+#!/bin/sh
+# gh-quota's logging shim: installed ahead of the real gh on PATH, it appends one line per call to a local log and
+# then execs the real gh with the same arguments, stdin, stdout and stderr, so gh's output and exit code never change
+# and the shim makes no API call of its own. A failure to log never stops the call.
+#
+# Line (tab-separated): UTC time, host, session ids (OMNIGENT_* only), cwd, parent command, gh arguments.
+# Arguments are cut to 400 characters; GitHub tokens, Authorization headers, secret and variable values and token-,
+# secret-, password-, key- or auth-named fields are masked; no env value but the OMNIGENT_* session ids is logged.
+# Log: $GH_QUOTA_LOG, else ${XDG_STATE_HOME:-$HOME/.local/state}/gh-quota/calls.log.
+# Real gh: $GH_QUOTA_REAL, else the first gh on PATH that is not this file.
+
+self=$0
+case $self in */*) ;; *) self=$(command -v -- "$0") ;; esac
+here=$(cd "$(dirname "$self")" 2>/dev/null && pwd -P)/$(basename "$self")
+
+real=${GH_QUOTA_REAL:-}
+if [ -z "$real" ]; then
+	ifs=$IFS
+	IFS=:
+	for dir in $PATH; do
+		[ -n "$dir" ] && [ -x "$dir/gh" ] && [ ! -d "$dir/gh" ] || continue
+		cand=$(cd "$dir" 2>/dev/null && pwd -P)/gh
+		[ "$cand" = "$here" ] && continue
+		# a second copy of the shim (another install) is skipped too
+		head -c 120 "$cand" 2>/dev/null | grep -q "gh-quota's logging shim" && continue
+		real=$dir/gh
+		break
+	done
+	IFS=$ifs
+fi
+if [ -z "$real" ]; then
+	echo "gh-quota shim: no real gh on PATH after $here" >&2
+	exit 127
+fi
+
+{
+	log=${GH_QUOTA_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/gh-quota/calls.log}
+	mkdir -p "$(dirname "$log")" 2>/dev/null
+	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	host=$(hostname 2>/dev/null || uname -n 2>/dev/null)
+	host=${host%%.*}
+	session=${OMNIGENT_SESSION_ID:-}
+	[ -n "${OMNIGENT_RUNNER_PRIMARY_SESSION_ID:-}" ] && session="$session/${OMNIGENT_RUNNER_PRIMARY_SESSION_ID}"
+	[ -n "$session" ] || session=${OMNIGENT_TERMINAL_LAUNCH_SESSION_ID:--}
+	parent=$(ps -o ppid= -o args= -p "$PPID" 2>/dev/null)
+	grand=${parent%%[!0-9 ]*}
+	# a token in the parent command is masked before the cut, so a cut never leaves part of one
+	mask() { sed -E 's/([Tt][Oo][Kk][Ee][Nn]=)[^ ]+/\1***/g; s/[0-9a-f]{40}/***/g'; }
+	# and each path cut to its file name first, so a long interpreter path never cuts off the script's name
+	short() { sed -E 's#(^| )[^ ]*/([^ /]+)#\1\2#g'; }
+	parent=$(printf '%s' "${parent#"$grand"}" | mask | short | cut -c1-200)
+	# a shell running gh says little: name the command that ran the shell too
+	case $parent in
+	sh\ * | bash\ * | zsh\ * | dash\ * | */sh\ * | */bash\ * | */zsh\ * | -*)
+		above=$(ps -o args= -p $grand 2>/dev/null | mask | short | cut -c1-120)
+		[ -n "$above" ] && parent="$above > $parent"
+		;;
+	esac
+	# the arguments, masked: a secret's or variable's value, and a field whose name says token, secret, password,
+	# key or auth, are never logged
+	args=
+	next=
+	case "${1:-} ${2:-}" in secret\ * | variable\ *) hide=1 ;; *) hide=0 ;; esac
+	for word in "$@"; do
+		if [ -n "$next" ]; then
+			word='***'
+			next=
+		else
+			case $word in
+			-b | --body | --value) [ $hide = 1 ] && next=1 ;;
+			--body=* | --value=*) [ $hide = 1 ] && word="${word%%=*}=***" ;;
+			-b?*) [ $hide = 1 ] && word="-b***" ;;
+			*[Tt][Oo][Kk][Ee][Nn]*=* | *[Ss][Ee][Cc][Rr][Ee][Tt]*=* | *[Pp][Aa][Ss][Ss]*=* | *[Kk][Ee][Yy]*=* | *[Aa][Uu][Tt][Hh]*=*)
+				case $word in [Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:*) ;; *) word="${word%%=*}=***" ;; esac
+				;;
+			esac
+		fi
+		# a word with a space is quoted, so the report reads `-H 'Accept: x'` as one flag value
+		# (a quote inside it as '\'', the shell's own escape, so shlex reads it back whole)
+		case $word in *[[:space:]]* | *\'*) word="'$(printf '%s' "$word" | sed "s/'/'\\\\''/g")'" ;; esac
+		args="$args${args:+ }$word"
+	done
+	# one line per call: tabs and newlines inside a field become spaces; tokens and Authorization headers are masked;
+	# long fields are cut to 400 characters
+	clean() {
+		printf '%s' "$1" | tr '\t\n\r' '   ' |
+			sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/\1***/g; s/'"'"'([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:)[^'"'"']*'"'"'/'"'"'\1 ***'"'"'/g; s/(^| )([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:)[^ '"'"']+/\1\2***/g; s/([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:) +([A-Za-z-]+ +)?[^ '"'"']+/\1 ***/g' |
+			cut -c1-400
+	}
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$(clean "$host")" "$(clean "$session")" "$(clean "$PWD")" \
+		"$(clean "${parent:--}")" "$(clean "$args")" >>"$log"
+} 2>/dev/null
+
+exec "$real" "$@"

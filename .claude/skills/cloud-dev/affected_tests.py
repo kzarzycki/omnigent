@@ -189,7 +189,13 @@ def targets(
     for f in files:
         path = Path(f)
         if path.name.startswith("test_") and path.suffix == ".py":
-            if (root / path).exists() and path.parts[1:2] and path.parts[1] not in NOT_RUN:
+            # .agents/ is the deployed pack; its tests run in the pack's own repo.
+            if (
+                (root / path).exists()
+                and path.parts[1:2]
+                and path.parts[0] != ".agents"
+                and path.parts[1] not in NOT_RUN
+            ):
                 picked.add(f)
         elif path.suffix != ".md":
             if f == "uv.lock" and floor and (pattern := imports_any(moved or set())):
