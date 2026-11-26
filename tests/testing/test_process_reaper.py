@@ -255,3 +255,24 @@ def test_reap_skips_excluded_pids(data_dir: Path) -> None:
     finally:
         _kill_quietly(old)
         _kill_quietly(new)
+
+
+def test_detached_only_skips_a_plain_child_but_finds_a_new_session_spawn(data_dir: Path) -> None:
+    """A child in the caller's session is left alone; a detached spawn is found."""
+    marker = f"sqlite:///{data_dir}/chat.db"
+    plain = _spawn(_SLEEP_CHILD, "omnigent-plain", marker)
+    detached = subprocess.Popen(
+        [sys.executable, "-c", _SLEEP_CHILD, "omnigent-detached", marker],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    _wait_ready(detached)
+    try:
+        found = {p.pid for p in find_leaked_omnigent_processes(data_dir, detached_only=True)}
+        assert detached.pid in found
+        assert plain.pid not in found
+    finally:
+        _kill_quietly(plain)
+        _kill_quietly(detached)

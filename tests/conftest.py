@@ -416,11 +416,12 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
         return
 
     before = frozenset(
-        proc.pid for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR)
+        proc.pid
+        for proc in find_leaked_omnigent_processes(_TEST_OMNIGENT_DATA_DIR, detached_only=True)
     )
     yield
     reaped, survivors = reap_leaked_omnigent_processes(
-        _TEST_OMNIGENT_DATA_DIR, exclude_pids=before
+        _TEST_OMNIGENT_DATA_DIR, exclude_pids=before, detached_only=True
     )
     if reaped or survivors:
         listing = "; ".join(cmd[:120] for cmd in [*reaped, *survivors])
