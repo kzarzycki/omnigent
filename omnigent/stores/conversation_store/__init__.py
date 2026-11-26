@@ -5,7 +5,7 @@ import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from omnigent.entities import (
@@ -561,6 +561,26 @@ class ProfileHostBinding:
     runner_id: str | None
     profile_snapshot: bytes | None
     profile_host_id: str | None
+
+
+@dataclass(frozen=True)
+class SessionItemStats:
+    """
+    Per-session item aggregates for the telemetry report.
+
+    :param items: Every item the session holds.
+    :param turns: User messages (one per turn).
+    :param compactions: Compaction items.
+    :param inherited_items: Items older than the session itself, i.e. copied
+        from a fork's source.
+    :param tool_calls: Calls by tool name (function calls and native tools).
+    """
+
+    items: int = 0
+    turns: int = 0
+    compactions: int = 0
+    inherited_items: int = 0
+    tool_calls: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2831,6 +2851,22 @@ class ConversationStore(ABC):
     @abstractmethod
     def has_session_subscription(self, subscriber_id: str, target_id: str) -> bool:
         """Whether *subscriber_id* watches *target_id*."""
+        ...
+
+    @abstractmethod
+    def get_session_item_stats(
+        self, conversation_ids: Sequence[str]
+    ) -> dict[str, SessionItemStats]:
+        """
+        Aggregate each session's items: counts, turns and tool calls by name.
+
+        Read-only. Backs ``GET /v1/usage/telemetry``, which passes a bounded
+        list of sessions, so no call reads more than those sessions' items.
+
+        :param conversation_ids: Sessions to aggregate.
+        :returns: Stats by session id; a session with no items maps to an
+            empty :class:`SessionItemStats`.
+        """
         ...
 
     @abstractmethod
