@@ -87,7 +87,7 @@ def names(path: Path, text: str, by_file_name: bool = True) -> bool:
     )
 
 
-# a test that starts Omnigent as a subprocess: `-m omnigent`, `"-m", "omnigent"`, or the entry point
+# a test that starts Omnigent as a subprocess: `-m omnigent` or the `omnigent` entry point
 SUBPROCESS_START = re.compile(
     r"""["']-m["']\s*,\s*["']omnigent["']|-m omnigent\b|\[\s*["']omnigent["']\s*,"""
 )
