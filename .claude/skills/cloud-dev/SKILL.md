@@ -48,8 +48,11 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   `gh api`, which works for reads and writes:
   - draft PR: `gh api repos/kzarzycki/omnigent/pulls -f title=… -f head=<branch> -f base=mine -F draft=true -f body=…`
   - comments, labels, issue edits: the `issues/<n>/…` REST routes.
-- **Gate.** `mise trust -q && OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint && pnpm install --frozen-lockfile --filter web --filter ./editors/vscode && mise run check:all`,
-  after the fetch above and after your first commit: its pre-commit covers
+- **Gate.** After the fetch above and before your first commit, run
+  `mise trust -q && OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint && pnpm install --frozen-lockfile --filter web --filter ./editors/vscode`.
+  Setup installs the repo's git hooks, and they need `.venv` and `node_modules`: without
+  them every commit fails (`Executable '.venv/bin/python' not found`, `Cannot find module 'typescript'`).
+  Then, after your first commit, `mise run check:all`: its pre-commit covers
   `merge-base origin/mine..HEAD`, so before a commit it checks no files. The sync takes
   seconds once setup's warm-up has filled uv's cache, and minutes when it didn't finish. The `pnpm install` gives the JS hooks
   (`vscode-tsc`, `web-tsc`, ...) their `node_modules`; without it they exit 1 silently on a
