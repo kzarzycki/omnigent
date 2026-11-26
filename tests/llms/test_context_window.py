@@ -419,3 +419,18 @@ def test_get_model_context_window_encoded_and_offline_fallback(
     assert get_model_context_window("claude-opus-4-8[1m]") == 1_000_000
     assert get_model_context_window("anthropic/claude-opus-4-8[1m]") == 1_000_000
     assert get_model_context_window("uncatalogued-model") == 128_000
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+        ("Gemini 3 Pro (High)", "gemini-3-pro"),
+        ("gemini-2.5-flash", None),
+        ("Claude Sonnet 4.6", None),
+    ],
+)
+def test_gemini_catalog_id(name: str, expected: str | None) -> None:
+    from omnigent.llms.context_window import gemini_catalog_id
+
+    assert gemini_catalog_id(name) == expected

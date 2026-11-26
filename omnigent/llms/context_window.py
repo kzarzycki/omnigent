@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -308,6 +309,29 @@ def compute_llm_cost(usage: dict[str, Any], pricing: ModelPricing) -> float:
     )
 
 
+_GEMINI_DISPLAY_TIER = re.compile(r"\s*\([^)]*\)")
+
+
+def gemini_catalog_id(model: str) -> str | None:
+    """
+    Map an Antigravity Gemini display name to its catalog model id.
+
+    The antigravity-native harness reports the model's display name
+    (``"Gemini 2.5 Flash"``, ``"Gemini 3 Pro (High)"``), which the catalog
+    does not index. The catalog keys are hyphenated (``"gemini-2.5-flash"``),
+    and a trailing parenthesised effort tier is not part of the model id.
+
+    :param model: A model name as reported by the harness.
+    :returns: The candidate catalog id, or ``None`` when *model* is not a
+        Gemini display name (ids already in catalog form return ``None``
+        too, since the direct lookup covers them).
+    """
+    stripped = _GEMINI_DISPLAY_TIER.sub("", model).strip()
+    if not stripped.lower().startswith("gemini ") or " " not in stripped:
+        return None
+    return "-".join(stripped.lower().split())
+
+
 def fetch_model_pricing_with_provider(
     model: str,
     provider_config: dict[str, Any] | None = None,
@@ -408,6 +432,10 @@ def fetch_model_pricing_with_provider(
     catalog_pricing = fetch_model_pricing(model)
     if catalog_pricing is not None:
         return catalog_pricing
+    # Antigravity reports Gemini display names; retry under the catalog id.
+    catalog_id = gemini_catalog_id(model)
+    if catalog_id is not None:
+        return fetch_model_pricing(catalog_id)
 
     # Step 3: No pricing available
     return None
