@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "gatekeeper@apm-p-a40fd310": false,
+    "omnigent@apm-p-a40fd310": false
+  }
+}

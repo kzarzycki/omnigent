@@ -1,0 +1,1849 @@
+lockfile_version: '4'
+apm_version: 0.39.0
+manifest_targets:
+- claude
+dependencies:
+- repo_url: kzarzycki/agent-skills
+  name: engineering
+  host: github.com
+  resolved_commit: b87071348addb5eff72ca160566dcc72e44e3cba
+  resolved_ref: engineering-v0.35.10
+  version: 0.35.10
+  virtual_path: engineering
+  is_virtual: true
+  package_type: skill_bundle
+  deployed_files:
+  - .claude/hooks/engineering/hooks/heavy_run_guard.py
+  - .claude/hooks/engineering/hooks/secret_env_guard.py
+  - .claude/skills/agent-hygiene
+  - .claude/skills/agent-hygiene/SKILL.md
+  - .claude/skills/agent-hygiene/scripts/agent-hygiene
+  - .claude/skills/ask-matt
+  - .claude/skills/ask-matt/SKILL.md
+  - .claude/skills/ask-matt/agents/openai.yaml
+  - .claude/skills/audit-third-party-software
+  - .claude/skills/audit-third-party-software/SKILL.md
+  - .claude/skills/audit-third-party-software/references/binary-analysis.md
+  - .claude/skills/audit-third-party-software/references/domain-triage.md
+  - .claude/skills/audit-third-party-software/references/templates.md
+  - .claude/skills/audit-third-party-software/scripts/extract_strings_urls.py
+  - .claude/skills/browsing
+  - .claude/skills/browsing/SKILL.md
+  - .claude/skills/browsing/scripts/browse.py
+  - .claude/skills/claude-handoff
+  - .claude/skills/claude-handoff/SKILL.md
+  - .claude/skills/claude-handoff/agents/openai.yaml
+  - .claude/skills/code-review
+  - .claude/skills/code-review/SKILL.md
+  - .claude/skills/code-review/agents/openai.yaml
+  - .claude/skills/codebase-design
+  - .claude/skills/codebase-design/DESIGN-IT-TWICE.md
+  - .claude/skills/codebase-design/SKILL.md
+  - .claude/skills/codebase-design/agents/openai.yaml
+  - .claude/skills/context-extractor
+  - .claude/skills/context-extractor/SKILL.md
+  - .claude/skills/demo
+  - .claude/skills/demo/SKILL.md
+  - .claude/skills/demo/agents/openai.yaml
+  - .claude/skills/demo/recorders/android.md
+  - .claude/skills/demo/recorders/browser.md
+  - .claude/skills/demo/recorders/cli.md
+  - .claude/skills/demo/recorders/ios.md
+  - .claude/skills/demo/scripts/demo.sh
+  - .claude/skills/diagnosing-bugs
+  - .claude/skills/diagnosing-bugs/SKILL.md
+  - .claude/skills/diagnosing-bugs/agents/openai.yaml
+  - .claude/skills/diagnosing-bugs/scripts/hitl-loop.template.sh
+  - .claude/skills/domain-modeling
+  - .claude/skills/domain-modeling/ADR-FORMAT.md
+  - .claude/skills/domain-modeling/GLOSSARY-FORMAT.md
+  - .claude/skills/domain-modeling/SKILL.md
+  - .claude/skills/domain-modeling/agents/openai.yaml
+  - .claude/skills/grill-with-docs
+  - .claude/skills/grill-with-docs/SKILL.md
+  - .claude/skills/grill-with-docs/agents/openai.yaml
+  - .claude/skills/grilling
+  - .claude/skills/grilling/SKILL.md
+  - .claude/skills/grilling/agents/openai.yaml
+  - .claude/skills/handoff
+  - .claude/skills/handoff/SKILL.md
+  - .claude/skills/handoff/agents/openai.yaml
+  - .claude/skills/implement
+  - .claude/skills/implement-spec
+  - .claude/skills/implement-spec/SKILL.md
+  - .claude/skills/implement-spec/agents/openai.yaml
+  - .claude/skills/implement/SKILL.md
+  - .claude/skills/implement/agents/openai.yaml
+  - .claude/skills/improve-codebase-architecture
+  - .claude/skills/improve-codebase-architecture/SKILL.md
+  - .claude/skills/improve-codebase-architecture/agents/openai.yaml
+  - .claude/skills/loop-me
+  - .claude/skills/loop-me/SKILL.md
+  - .claude/skills/loop-me/agents/openai.yaml
+  - .claude/skills/orchestrating-agents
+  - .claude/skills/orchestrating-agents/SKILL.md
+  - .claude/skills/orchestrating-agents/agents/openai.yaml
+  - .claude/skills/orchestrating-agents/backends/herdr-link.md
+  - .claude/skills/orchestrating-agents/backends/native.md
+  - .claude/skills/orchestrating-agents/scripts/claude_cloud.py
+  - .claude/skills/orchestrating-agents/scripts/claude_environments.py
+  - .claude/skills/orchestrating-agents/scripts/omnigent_agent.py
+  - .claude/skills/pr
+  - .claude/skills/pr/CREDITS.md
+  - .claude/skills/pr/SKILL.md
+  - .claude/skills/pr/agents/openai.yaml
+  - .claude/skills/prototype
+  - .claude/skills/prototype/LOGIC.md
+  - .claude/skills/prototype/SKILL.md
+  - .claude/skills/prototype/UI.md
+  - .claude/skills/prototype/agents/openai.yaml
+  - .claude/skills/research
+  - .claude/skills/research/SKILL.md
+  - .claude/skills/research/agents/openai.yaml
+  - .claude/skills/retro
+  - .claude/skills/retro/SKILL.md
+  - .claude/skills/retro/agents/openai.yaml
+  - .claude/skills/tdd
+  - .claude/skills/tdd/SKILL.md
+  - .claude/skills/tdd/agents/openai.yaml
+  - .claude/skills/teach
+  - .claude/skills/teach/GLOSSARY-FORMAT.md
+  - .claude/skills/teach/LEARNING-RECORD-FORMAT.md
+  - .claude/skills/teach/MISSION-FORMAT.md
+  - .claude/skills/teach/RESOURCES-FORMAT.md
+  - .claude/skills/teach/SKILL.md
+  - .claude/skills/teach/agents/openai.yaml
+  - .claude/skills/to-spec
+  - .claude/skills/to-spec/SKILL.md
+  - .claude/skills/to-spec/agents/openai.yaml
+  - .claude/skills/to-tickets
+  - .claude/skills/to-tickets/SKILL.md
+  - .claude/skills/to-tickets/agents/openai.yaml
+  - .claude/skills/triage
+  - .claude/skills/triage/AGENT-BRIEF.md
+  - .claude/skills/triage/OUT-OF-SCOPE.md
+  - .claude/skills/triage/SKILL.md
+  - .claude/skills/triage/agents/openai.yaml
+  - .claude/skills/wait-what
+  - .claude/skills/wait-what/SKILL.md
+  - .claude/skills/wait-what/agents/openai.yaml
+  - .claude/skills/wayfinder
+  - .claude/skills/wayfinder/SKILL.md
+  - .claude/skills/wayfinder/agents/openai.yaml
+  - .claude/skills/wizard
+  - .claude/skills/wizard/SKILL.md
+  - .claude/skills/wizard/agents/openai.yaml
+  - .claude/skills/wizard/template.sh
+  deployed_file_hashes:
+    .claude/hooks/engineering/hooks/heavy_run_guard.py: sha256:178cb4d80f64bb6388c43366fab076036c9559b1a9a6891f40e00760711112ad
+    .claude/hooks/engineering/hooks/secret_env_guard.py: sha256:ff4952fb7aab562204f4684f54182ae42a008164b9087c09de51b6a99fa744da
+    .claude/skills/agent-hygiene/SKILL.md: sha256:09fa85fdc9f8cea1e77dd5467f29e86d4b9aac9c3df0aaa45769fe5827c2e8f8
+    .claude/skills/agent-hygiene/scripts/agent-hygiene: sha256:7f5aef5d362d6f6c7a10881cc85b2495ee3b31d0457534689fec624cedaf135a
+    .claude/skills/ask-matt/SKILL.md: sha256:f9bcd307d112b35c0220b347134861d4c1320397b9b01fa1e549cf844d442475
+    .claude/skills/ask-matt/agents/openai.yaml: sha256:bdffbc5a0a99ed1b6ef3253d251d755fd18162b9845972e380007f844b09b05c
+    .claude/skills/audit-third-party-software/SKILL.md: sha256:2b250a2c4915cd7dddc24309339909bf45e01f3143b8586c698c18e72e837b1b
+    .claude/skills/audit-third-party-software/references/binary-analysis.md: sha256:61a1974e78e50a5cc033624b79f90c9eb5a7f6a7939a0ab53f312242e11a5b5c
+    .claude/skills/audit-third-party-software/references/domain-triage.md: sha256:a46abf3feebd423ff5d5e251b5a566e9c032e10dc60e1220a22dfaaeadc25492
+    .claude/skills/audit-third-party-software/references/templates.md: sha256:77d9f6be4298f119a2fe8771cdce26f4f8c6c278eb3e45de1c7b71ce646521bd
+    .claude/skills/audit-third-party-software/scripts/extract_strings_urls.py: sha256:ea86c2ea8f28a8765c14ccb199ed29468abe457d5ebadb295f63b5d018cb553f
+    .claude/skills/browsing/SKILL.md: sha256:339cb7c79a852d8865e843cd4f76187b4ccad4dce056b5d07d9e63b99d134b88
+    .claude/skills/browsing/scripts/browse.py: sha256:168847da84f5f03689bc9f81d7f8acdc991e6cecdc68d951f4acb202ad74cb3f
+    .claude/skills/claude-handoff/SKILL.md: sha256:ec9f129237c870b31c2dd8a992925cd57defab6c1201808b99063f3667e63ea4
+    .claude/skills/claude-handoff/agents/openai.yaml: sha256:2308a672978864633286fb9f0792b08657e501426b3f7883fc418d5d2eac5eb0
+    .claude/skills/code-review/SKILL.md: sha256:3fab3a8d1e53ea4b8fdf61f720b705bb31f81da3f10e2f2cda58655d406e2e5d
+    .claude/skills/code-review/agents/openai.yaml: sha256:8229ca854e11dc8e6aef2131ee03f31fb1561cf905fab9ccc325180cf3331352
+    .claude/skills/codebase-design/DESIGN-IT-TWICE.md: sha256:72ec579e616c5d564321f446ada271a56d6acb0e084351520c81be4a08dba317
+    .claude/skills/codebase-design/SKILL.md: sha256:8a06080df412d4576f57d35f606d67fd3d82340d086e6a29d475ab45d8624e66
+    .claude/skills/codebase-design/agents/openai.yaml: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
+    .claude/skills/context-extractor/SKILL.md: sha256:bb913afdfd0c7555533afabb593e6cb1bbb18f8c032523c3bf89bb09d50de38b
+    .claude/skills/demo/SKILL.md: sha256:216d9b497875441d545d2576484c335a2fb365939740c0f199a745f8fbf65ec2
+    .claude/skills/demo/agents/openai.yaml: sha256:5c55f2de622e0910a51830a23ad4cd85ed5520300447261533df27a6b2f442b6
+    .claude/skills/demo/recorders/android.md: sha256:7cf3401fa5f0ff7cf357c51d55f76ecb1f5004f96125901677f8b75085ccf8cb
+    .claude/skills/demo/recorders/browser.md: sha256:16ca081fc0abf5e7aef07284b7334b0263425a251519518f72edfdfba07866d4
+    .claude/skills/demo/recorders/cli.md: sha256:d64fce2a99f981ed02cbd83f05c7b2c0aa34d31ddceae446c15fdb6b335e330c
+    .claude/skills/demo/recorders/ios.md: sha256:fe497ae477db8199c16384a699b03da6fea0bed91c81e8643d5e3a890bff6383
+    .claude/skills/demo/scripts/demo.sh: sha256:22c86c376cf3e048868350b3bfa8475d4c643a6b86f3dce34c1218a5d5fbd15d
+    .claude/skills/diagnosing-bugs/SKILL.md: sha256:997751df4f369908aa3f6ca2752731b96784cef5b8c58b8b2e209299bd8a4358
+    .claude/skills/diagnosing-bugs/agents/openai.yaml: sha256:3e430dbe4334a87597488c060cb3dc3786bb00c9182877d6f5ec41f62490e90b
+    .claude/skills/diagnosing-bugs/scripts/hitl-loop.template.sh: sha256:35103539fc36873eea36074769ad454f9379d6fc8b2dc0e26ce987fd3bfe5503
+    .claude/skills/domain-modeling/ADR-FORMAT.md: sha256:0960e6473d479783f1bc3abfc609b4be22531a9270df1234d9b7c1a53803e494
+    .claude/skills/domain-modeling/GLOSSARY-FORMAT.md: sha256:a881be42e0c9feae0f686373ecb66fe9c5700e7fac09007d2a5325c41c2cf507
+    .claude/skills/domain-modeling/SKILL.md: sha256:024c8668c5d0255d2bacb01bfaba45d8977c15ea1c05f1e3582db90c90b77b35
+    .claude/skills/domain-modeling/agents/openai.yaml: sha256:f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b
+    .claude/skills/grill-with-docs/SKILL.md: sha256:e50417b3416bc41277ba6fbe033de84a6369f62d1d33ad3d19a94fbaad8f1379
+    .claude/skills/grill-with-docs/agents/openai.yaml: sha256:94cd0ab161fb468a836349f5ed482ba58ce8e709a05c57ce533d739dbd35cca9
+    .claude/skills/grilling/SKILL.md: sha256:8d3bce0cf9eb146c7355d982273aeba79e51f362b5be5124f452af19d03d67cb
+    .claude/skills/grilling/agents/openai.yaml: sha256:1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b
+    .claude/skills/handoff/SKILL.md: sha256:c4f72a2434997d7806e0dc04fdc760c8ef485cfdbd2f382396d6dcce41097139
+    .claude/skills/handoff/agents/openai.yaml: sha256:5c479fd562c691851690e8b18c8501045bef0943c10743d636b2fae26add1d28
+    .claude/skills/implement-spec/SKILL.md: sha256:3d855e3e2f1e909803ea7879086814f2c42a059278462f447fc84230f5a1f902
+    .claude/skills/implement-spec/agents/openai.yaml: sha256:a7b810e94b9d3cb5108a01fc72b2f663efb52de04d57bf694a4d4edebd2b1b6d
+    .claude/skills/implement/SKILL.md: sha256:67f221f1a2c229676bc9cb379e76c17f8d17c93cdf9372fcbae549e475bf00d6
+    .claude/skills/implement/agents/openai.yaml: sha256:8970a8596ade0c28ab427f41a4ea242d6bdf6186c59ebf55e1238dbecaab79dc
+    .claude/skills/improve-codebase-architecture/SKILL.md: sha256:d5ea838df5a9f1b9534f90044480d03e10e8f56a77e6bb8d79d69c2107306bf0
+    .claude/skills/improve-codebase-architecture/agents/openai.yaml: sha256:c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1
+    .claude/skills/loop-me/SKILL.md: sha256:f4dd785022222ae416bc8bef27a8e3393c0dfd329f1dc9a34142f70f45b70c4f
+    .claude/skills/loop-me/agents/openai.yaml: sha256:b66fa10079957051be6a812f45e55b67ac394b71d5ba88349962b4c9205802c3
+    .claude/skills/orchestrating-agents/SKILL.md: sha256:bd6edad4b7146e6be952717e25f0147885910a04eaf522a7ea3fb2a239580480
+    .claude/skills/orchestrating-agents/agents/openai.yaml: sha256:bee3121e0b1fd3049913f30b0eda156db09541d161089c39f38418d7debab471
+    .claude/skills/orchestrating-agents/backends/herdr-link.md: sha256:393e6df1c3d394bb1df8c9f5979984e8a968454b8015a73ae177816fe07ad35e
+    .claude/skills/orchestrating-agents/backends/native.md: sha256:32d58fd3bea1e36200b69c178e93199245ea455e9b366bd13bd08f4b69e119cc
+    .claude/skills/orchestrating-agents/scripts/claude_cloud.py: sha256:77b533c9774ca3deefacc10b9e4708d47b39b613eebdd99fca0147d0a42523e7
+    .claude/skills/orchestrating-agents/scripts/claude_environments.py: sha256:0c2dadb634c8dd14e9c2ae5e12482d370a44d71e6d7f62c833243a665f776cb1
+    .claude/skills/orchestrating-agents/scripts/omnigent_agent.py: sha256:d36dfc8092ab6aabfb4a48eeac63ae68cc951e93513d8d526b152226b36d98c6
+    .claude/skills/pr/CREDITS.md: sha256:ac9da0b1f2814a47b4a64c9588675e6f7aeff868d91d5ed795173253060a330b
+    .claude/skills/pr/SKILL.md: sha256:f92c28a76fd33976c30217db41ab4f48e27debf90f037a4e1de56ce0a68d8601
+    .claude/skills/pr/agents/openai.yaml: sha256:2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad
+    .claude/skills/prototype/LOGIC.md: sha256:74913de90cd82f678cb8fcd8a8bdb69e33e161395af9c223febe4cba5023015f
+    .claude/skills/prototype/SKILL.md: sha256:bd46b45be77aef4e95e055fb37d6c8fb7121bcfa4eae6df84558de076977f178
+    .claude/skills/prototype/UI.md: sha256:4f49367cc843ff3b5cf73f0515e15e455ca8c028b9da5e86a7dbbf1aaadea28c
+    .claude/skills/prototype/agents/openai.yaml: sha256:5af65e43ab41a350436697b81e27b7f848d36782043b73c322bb2c9fa9cc55dc
+    .claude/skills/research/SKILL.md: sha256:59fccc2f9c8547c2eed14d1492098090c54e6479c118a6e4443842550dab1081
+    .claude/skills/research/agents/openai.yaml: sha256:9b4c470d63221c1f68f22df70b83e2f12401b317babe0d1b7b5f24a974474d0d
+    .claude/skills/retro/SKILL.md: sha256:a36cc034f4fade40efaa252e68ef7ed93bd972d44460ef3107807f6870935e54
+    .claude/skills/retro/agents/openai.yaml: sha256:cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c
+    .claude/skills/tdd/SKILL.md: sha256:a2851a3f8bebbdd251ecb414386f9525f23730bceec98eb16063a7aae4d2ad87
+    .claude/skills/tdd/agents/openai.yaml: sha256:ea6f01cf1b8c06a4b0f5b649d74b1b8ce8685e72af1b38d70d877693e092af0b
+    .claude/skills/teach/GLOSSARY-FORMAT.md: sha256:883378b04d2fc3a7245eaf8eb8b725daaf9a99dea74a6a02cd7a2901c4a5b715
+    .claude/skills/teach/LEARNING-RECORD-FORMAT.md: sha256:928a39f4aa0bcad493b14ce3abbdd66bc209bd15439e81fa72ef01f3663fdaf1
+    .claude/skills/teach/MISSION-FORMAT.md: sha256:64976b1e2564b99e88285f0a5d2270b9cdbe229f762a22394a060dc9ed182660
+    .claude/skills/teach/RESOURCES-FORMAT.md: sha256:2d98f5e126f80a8f383375f7153db64b2a26724d81c1ec907403f21afcb977a4
+    .claude/skills/teach/SKILL.md: sha256:b9ec98f91415acb355a0ae1971b95a03959bc10f5f42585cf1956aa665b49b34
+    .claude/skills/teach/agents/openai.yaml: sha256:5856f3ae8aec742f1499c640aecdd5f1d6af5fa210a7c6ec794de8263a6f733f
+    .claude/skills/to-spec/SKILL.md: sha256:b3f40abbc3a8e5d695939774e75f46ba0c5f75539a683d293c27f9a14428f082
+    .claude/skills/to-spec/agents/openai.yaml: sha256:1c5b4d1e3d8e52287ef19cc2742fdbbfae1914ac75d33af3e4c8174f08cc55bb
+    .claude/skills/to-tickets/SKILL.md: sha256:45cac3136763d069aa99678c3e0ba2bc4fae8a55c7f99a9a49f7c8e952c84816
+    .claude/skills/to-tickets/agents/openai.yaml: sha256:21bc6215fffcd7614e9f772bb1760e87cc5fc7dcc707e7d282bc9414267a6090
+    .claude/skills/triage/AGENT-BRIEF.md: sha256:400984ce5f7a03a11eaa633e47152498e172984b85cbf6d6f086d5ff00f58117
+    .claude/skills/triage/OUT-OF-SCOPE.md: sha256:141d874a78f80a5c23f70c5f25ef8542025a7d4d030f408d0dd6a5755452785e
+    .claude/skills/triage/SKILL.md: sha256:55a2844cf3c65113b69405525bfd055e99c641bffaf8c27a0bbdc4791b1a8320
+    .claude/skills/triage/agents/openai.yaml: sha256:2e683717720cf456d165d0bb1a68bb600d0b6a8ccb61841c172e50d26f95351c
+    .claude/skills/wait-what/SKILL.md: sha256:72ae0370759b2dc48f5ec8460292086be60b8a3bc1a110a50dbae0b60c68a81d
+    .claude/skills/wait-what/agents/openai.yaml: sha256:b41faadf741d51e4ea184148b2d1854d93f947aaf754c7844f70a00f04194999
+    .claude/skills/wayfinder/SKILL.md: sha256:3b02daf6dc92c5d8ff761ba0e57e4980e4671d3cced59499408a53e393dfc9c1
+    .claude/skills/wayfinder/agents/openai.yaml: sha256:88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073
+    .claude/skills/wizard/SKILL.md: sha256:2fb85928b7ab44f20348553392b68142e1da0022142772473e2daed45789b65e
+    .claude/skills/wizard/agents/openai.yaml: sha256:98f44d682d58e262f160dc59a8befc365e0aa65820dd0261864af26aa8e59d83
+    .claude/skills/wizard/template.sh: sha256:2b9bceab14f71bf05d54847155b37c466065f2e86d83b348a70dacc0bff0a01f
+  content_hash: sha256:345753ef86a53d0ea5f5e52e7f93b7c382d0b14ba2bf2d3c6540f983347d7c0b
+  package_targets:
+  - claude
+  - codex
+- repo_url: kzarzycki/agent-skills
+  name: chief-of-staff
+  host: github.com
+  resolved_commit: d55110ef52633faa656ced31ff4d43f3699634e6
+  resolved_ref: chief-of-staff-v0.1.4
+  version: 0.1.4
+  virtual_path: chief-of-staff
+  is_virtual: true
+  depth: 2
+  resolved_by: kzarzycki/agent-skills
+  package_type: skill_bundle
+  deployed_files:
+  - .claude/skills/chief-of-staff
+  - .claude/skills/chief-of-staff/SKILL.md
+  - .claude/skills/chief-of-staff/agents/openai.yaml
+  - .claude/skills/chief-of-staff/scripts/cos_page.py
+  - .claude/skills/chief-of-staff/scripts/memory.py
+  deployed_file_hashes:
+    .claude/skills/chief-of-staff/SKILL.md: sha256:8d1802d4b0ccefeb41d60b5f1c28eb0cfed01aaa726baee87cb820d1bf7a7aac
+    .claude/skills/chief-of-staff/agents/openai.yaml: sha256:a2999df9f29bea6c2ff76f3e084b290aa8be2e83b08010f0aa811f68c2e33ec1
+    .claude/skills/chief-of-staff/scripts/cos_page.py: sha256:fb3ce70f500b104f49fdfb9cfd097ebd46f20d1aa02a8b14cfd08962d81cb3a7
+    .claude/skills/chief-of-staff/scripts/memory.py: sha256:c37c7f34d5a5dd8a5c4454c6e5b5a0ed33f7d911dd8b405b3f8fd2e2195d6b17
+  content_hash: sha256:f17d87813a77cee6a66b84d105a700e36082208c702dffb0207066fdbf4c7171
+  package_targets:
+  - claude
+  - codex
+  constraint: ^0.1.0
+  resolved_tag: chief-of-staff-v0.1.4
+  resolved_at: '2026-11-26T01:19:30+00:00'
+- repo_url: kzarzycki/agent-skills
+  name: gatekeeper
+  host: github.com
+  resolved_commit: b87071348addb5eff72ca160566dcc72e44e3cba
+  resolved_ref: gatekeeper-v0.1.16
+  version: 0.1.16
+  virtual_path: gatekeeper
+  is_virtual: true
+  depth: 2
+  resolved_by: kzarzycki/agent-skills
+  package_type: marketplace_plugin
+  content_hash: sha256:2d20ccd6082762e274c4174914211626c312261368d9b8a667c9c6583030e9e7
+  package_targets:
+  - claude
+  - codex
+  constraint: ^0.1.0
+  resolved_tag: gatekeeper-v0.1.16
+  resolved_at: '2026-11-26T01:19:30+00:00'
+  native_plugin:
+    name: gatekeeper
+    root: .agents/plugins/gatekeeper
+    fingerprint: sha256:f4e0e88ed5972386e842673fb91d7bd5533096f025b221b861d10cdad278beb6
+    marketplace:
+      name: apm-p-a40fd310
+      path: ./.agents/plugins
+  native_declared:
+  - claude
+- repo_url: kzarzycki/agent-skills
+  name: github
+  host: github.com
+  resolved_commit: b87071348addb5eff72ca160566dcc72e44e3cba
+  resolved_ref: github-v0.1.4
+  version: 0.1.4
+  virtual_path: github
+  is_virtual: true
+  depth: 2
+  resolved_by: kzarzycki/agent-skills
+  package_type: skill_bundle
+  deployed_files:
+  - .claude/skills/gh-quota
+  - .claude/skills/gh-quota/SKILL.md
+  - .claude/skills/gh-quota/scripts/gh
+  - .claude/skills/gh-quota/scripts/gh_quota.py
+  - .claude/skills/github-tracker
+  - .claude/skills/github-tracker/SKILL.md
+  - .claude/skills/github-tracker/github.md
+  - .claude/skills/github-tracker/scripts/_installed.py
+  - .claude/skills/github-tracker/scripts/board.py
+  - .claude/skills/github-tracker/scripts/labels.py
+  - .claude/skills/github-tracker/scripts/rulesets.py
+  deployed_file_hashes:
+    .claude/skills/gh-quota/SKILL.md: sha256:8935b914f3c6a47997d4cebd2b487d185f3613797932bd17f23de44ce2c04dad
+    .claude/skills/gh-quota/scripts/gh: sha256:31c9eeae51cf1fc772ccdea078384e6219d2d67f608e86d771a7de8130ff2a65
+    .claude/skills/gh-quota/scripts/gh_quota.py: sha256:2f2b0d4b5adb627ef3087765e76cbe411cd19ffdb6e099a76dd8af2d8ae16417
+    .claude/skills/github-tracker/SKILL.md: sha256:9654a6531345e2517363a7ef7116edbec46cdad128ab5abfe2ad318d33232431
+    .claude/skills/github-tracker/github.md: sha256:84d6a4d4ec5b9615af1b83849d1eddc238dce8edabdec479d4bf0c0677c5266a
+    .claude/skills/github-tracker/scripts/_installed.py: sha256:e57c0a14fccc0f4fabef1d24a02b0ea0d168dcb31ef58b83b7bac5fa816172f3
+    .claude/skills/github-tracker/scripts/board.py: sha256:74deafd52627b884eb2551a4813cf233a35a2c10fd30a801a6de8cecacabfa1f
+    .claude/skills/github-tracker/scripts/labels.py: sha256:cb99706d94eadb7fb81a3854db442cc08d5272a6c19b51ec6b96fcfb5de849ce
+    .claude/skills/github-tracker/scripts/rulesets.py: sha256:2a6906f5083c01e4f3cec5bad3f5035924b5278230c9ea5eb9a54cb2f570c9a9
+  content_hash: sha256:aa64d2793b283fbd98191f7edb84fee15c7c0a030ba20c22ae45db9f8ce939c6
+  package_targets:
+  - claude
+  - codex
+  constraint: ^0.1.0
+  resolved_tag: github-v0.1.4
+  resolved_at: '2026-11-26T01:19:30+00:00'
+- repo_url: kzarzycki/agent-skills
+  name: loop
+  host: github.com
+  resolved_commit: 29e68e260edd604317bcb0385b485f6d10649d50
+  resolved_ref: loop-v0.1.10
+  version: 0.1.10
+  virtual_path: loop
+  is_virtual: true
+  depth: 2
+  resolved_by: kzarzycki/agent-skills
+  package_type: skill_bundle
+  deployed_files:
+  - .claude/skills/engineering-loop
+  - .claude/skills/engineering-loop/SKILL.md
+  - .claude/skills/engineering-loop/agents/openai.yaml
+  - .claude/skills/engineering-loop/coding-standards.md
+  - .claude/skills/engineering-loop/issues.md
+  - .claude/skills/engineering-loop/lead.md
+  - .claude/skills/engineering-loop/proof-run.md
+  - .claude/skills/engineering-loop/scripts/_installed.py
+  - .claude/skills/engineering-loop/scripts/acceptance.py
+  - .claude/skills/engineering-loop/scripts/approvals.py
+  - .claude/skills/engineering-loop/scripts/board.py
+  - .claude/skills/engineering-loop/scripts/browse.py
+  - .claude/skills/engineering-loop/scripts/cloud_verifier.py
+  - .claude/skills/engineering-loop/scripts/events.py
+  - .claude/skills/engineering-loop/scripts/gatekeeper.py
+  - .claude/skills/engineering-loop/scripts/labels.py
+  - .claude/skills/engineering-loop/scripts/loop.py
+  - .claude/skills/engineering-loop/scripts/mutate.py
+  - .claude/skills/engineering-loop/scripts/nightly.py
+  - .claude/skills/engineering-loop/scripts/rulesets.py
+  - .claude/skills/engineering-loop/verifier.md
+  - .claude/skills/engineering-loop/worker.md
+  deployed_file_hashes:
+    .claude/skills/engineering-loop/SKILL.md: sha256:a825a500ebe2b4189bb004cba83c7f7c45a211e4dc37bac5663ed153ffd9b4b3
+    .claude/skills/engineering-loop/agents/openai.yaml: sha256:26e240be83b139fc23b1e361c26a732119fcfddd89c066e6afdb2f99217f039e
+    .claude/skills/engineering-loop/coding-standards.md: sha256:6fb7839983e70a0096fa6fbda09257b5a8e0bbbfd261ee0113beda15d684639f
+    .claude/skills/engineering-loop/issues.md: sha256:732abc4d6f49b867f42e37a5879cc4d302a2d2991a35ebea1e9d4cb62b2dbb2c
+    .claude/skills/engineering-loop/lead.md: sha256:9e98e7550e6bcea8546ed82e2af645361e3d374dd013b897dd67f77d9140dc8b
+    .claude/skills/engineering-loop/proof-run.md: sha256:75a25b5ed8ee8fbb7e88cd5e87980de02154508ffca5c1570f0be4a8c140d531
+    .claude/skills/engineering-loop/scripts/_installed.py: sha256:e57c0a14fccc0f4fabef1d24a02b0ea0d168dcb31ef58b83b7bac5fa816172f3
+    .claude/skills/engineering-loop/scripts/acceptance.py: sha256:4120d3923ffe02fa1515fbc4283813da24a04f2cc93b19dff4d8403f1f7d73fd
+    .claude/skills/engineering-loop/scripts/approvals.py: sha256:eec500a5249943b61c5d226920856e53ce6edc79ad553676477d45f57a61194e
+    .claude/skills/engineering-loop/scripts/board.py: sha256:ed2ce82c2e590770ab0ef40e940d8c25812c919cc90a7a9d0b5ba2996bad7557
+    .claude/skills/engineering-loop/scripts/browse.py: sha256:8799f83e3fb136180b50be31ca656fc430982e113d42b9d4bf85a2ebad396043
+    .claude/skills/engineering-loop/scripts/cloud_verifier.py: sha256:55df22f0fec455e240c7c758386c9b89896674749cf9e6824d745ce1b85f27d8
+    .claude/skills/engineering-loop/scripts/events.py: sha256:678594ef36bfded37953d8b3226a44d67fe673176272598f5fbccdd3fd954c16
+    .claude/skills/engineering-loop/scripts/gatekeeper.py: sha256:d04fd8befca6d5d716509b481ea8771397611a0e5cbd56a2ede138c2e376502e
+    .claude/skills/engineering-loop/scripts/labels.py: sha256:00014c074305f67a3a2ce2c2c0bf87ab358cf169e711a0380ca1ec2e9285afe2
+    .claude/skills/engineering-loop/scripts/loop.py: sha256:7c5be89db12c8ae4ed9afd9d9280fdbf72eae59df1eb3992c42523cd2185a59f
+    .claude/skills/engineering-loop/scripts/mutate.py: sha256:c0d69205b3c302b407b9283ecb0241a3c7ab131554f816b03fc0b9a214f4687d
+    .claude/skills/engineering-loop/scripts/nightly.py: sha256:2ce7d7023f2b13ca10568974d290b526c86b65d9146d2ffeb7b39c58727494cd
+    .claude/skills/engineering-loop/scripts/rulesets.py: sha256:df0c6e60762596ebeb3906943ba362c06d13124fb9bdf9e2a39e8e1cc9a1e06e
+    .claude/skills/engineering-loop/verifier.md: sha256:4816742b8cb95bb1d531d2acbcace929d1f916fb0c5809f98f47ef3b8f6a4e1b
+    .claude/skills/engineering-loop/worker.md: sha256:94c465f8d459820121e84e4513d5f3f6e3ac557a3d3d8f2555e902338fb977b7
+  content_hash: sha256:0880593b5912ea153df4f14c4dceb0b7411035c2e4446040eaf8fbf6731f1dd1
+  package_targets:
+  - claude
+  - codex
+  constraint: ^0.1.0
+  resolved_tag: loop-v0.1.10
+  resolved_at: '2026-11-26T01:19:30+00:00'
+- repo_url: kzarzycki/agent-skills
+  name: omnigent
+  host: github.com
+  resolved_commit: b87071348addb5eff72ca160566dcc72e44e3cba
+  resolved_ref: omnigent-v0.1.15
+  version: 0.1.15
+  virtual_path: omnigent
+  is_virtual: true
+  depth: 2
+  resolved_by: kzarzycki/agent-skills
+  package_type: marketplace_plugin
+  content_hash: sha256:d46e11db0fd7bdb7931f43ac9d7e09ad98e4ab574a011ada8a2f54f8b6d76256
+  package_targets:
+  - claude
+  - codex
+  constraint: ^0.1.0
+  resolved_tag: omnigent-v0.1.15
+  resolved_at: '2026-11-26T01:19:31+00:00'
+  native_plugin:
+    name: omnigent
+    root: .agents/plugins/omnigent
+    fingerprint: sha256:8274f725fa6ccd7f3b2a15bcf007c6dd748458a3c42ae11390eb81331f884f35
+    marketplace:
+      name: apm-p-a40fd310
+      path: ./.agents/plugins
+  native_declared:
+  - claude
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/hooks/engineering/hooks/heavy_run_guard.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:178cb4d80f64bb6388c43366fab076036c9559b1a9a6891f40e00760711112ad
+- kind: project-relative
+  target: claude
+  value: .claude/hooks/engineering/hooks/secret_env_guard.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:ff4952fb7aab562204f4684f54182ae42a008164b9087c09de51b6a99fa744da
+- kind: project-relative
+  target: claude
+  value: .claude/skills/agent-hygiene
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/agent-hygiene/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:09fa85fdc9f8cea1e77dd5467f29e86d4b9aac9c3df0aaa45769fe5827c2e8f8
+- kind: project-relative
+  target: claude
+  value: .claude/skills/agent-hygiene/scripts/agent-hygiene
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:7f5aef5d362d6f6c7a10881cc85b2495ee3b31d0457534689fec624cedaf135a
+- kind: project-relative
+  target: claude
+  value: .claude/skills/ask-matt
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/ask-matt/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:f9bcd307d112b35c0220b347134861d4c1320397b9b01fa1e549cf844d442475
+- kind: project-relative
+  target: claude
+  value: .claude/skills/ask-matt/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:bdffbc5a0a99ed1b6ef3253d251d755fd18162b9845972e380007f844b09b05c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2b250a2c4915cd7dddc24309339909bf45e01f3143b8586c698c18e72e837b1b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software/references/binary-analysis.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:61a1974e78e50a5cc033624b79f90c9eb5a7f6a7939a0ab53f312242e11a5b5c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software/references/domain-triage.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:a46abf3feebd423ff5d5e251b5a566e9c032e10dc60e1220a22dfaaeadc25492
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software/references/templates.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:77d9f6be4298f119a2fe8771cdce26f4f8c6c278eb3e45de1c7b71ce646521bd
+- kind: project-relative
+  target: claude
+  value: .claude/skills/audit-third-party-software/scripts/extract_strings_urls.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:ea86c2ea8f28a8765c14ccb199ed29468abe457d5ebadb295f63b5d018cb553f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/browsing
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/browsing/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:339cb7c79a852d8865e843cd4f76187b4ccad4dce056b5d07d9e63b99d134b88
+- kind: project-relative
+  target: claude
+  value: .claude/skills/browsing/scripts/browse.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:168847da84f5f03689bc9f81d7f8acdc991e6cecdc68d951f4acb202ad74cb3f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/chief-of-staff
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/chief-of-staff
+  active_owner: kzarzycki/agent-skills/chief-of-staff
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/chief-of-staff/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/chief-of-staff
+  active_owner: kzarzycki/agent-skills/chief-of-staff
+  content_hash: sha256:8d1802d4b0ccefeb41d60b5f1c28eb0cfed01aaa726baee87cb820d1bf7a7aac
+- kind: project-relative
+  target: claude
+  value: .claude/skills/chief-of-staff/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/chief-of-staff
+  active_owner: kzarzycki/agent-skills/chief-of-staff
+  content_hash: sha256:a2999df9f29bea6c2ff76f3e084b290aa8be2e83b08010f0aa811f68c2e33ec1
+- kind: project-relative
+  target: claude
+  value: .claude/skills/chief-of-staff/scripts/cos_page.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/chief-of-staff
+  active_owner: kzarzycki/agent-skills/chief-of-staff
+  content_hash: sha256:fb3ce70f500b104f49fdfb9cfd097ebd46f20d1aa02a8b14cfd08962d81cb3a7
+- kind: project-relative
+  target: claude
+  value: .claude/skills/chief-of-staff/scripts/memory.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/chief-of-staff
+  active_owner: kzarzycki/agent-skills/chief-of-staff
+  content_hash: sha256:c37c7f34d5a5dd8a5c4454c6e5b5a0ed33f7d911dd8b405b3f8fd2e2195d6b17
+- kind: project-relative
+  target: claude
+  value: .claude/skills/claude-handoff
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/claude-handoff/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:ec9f129237c870b31c2dd8a992925cd57defab6c1201808b99063f3667e63ea4
+- kind: project-relative
+  target: claude
+  value: .claude/skills/claude-handoff/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2308a672978864633286fb9f0792b08657e501426b3f7883fc418d5d2eac5eb0
+- kind: project-relative
+  target: claude
+  value: .claude/skills/code-review
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/code-review/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:3fab3a8d1e53ea4b8fdf61f720b705bb31f81da3f10e2f2cda58655d406e2e5d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/code-review/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:8229ca854e11dc8e6aef2131ee03f31fb1561cf905fab9ccc325180cf3331352
+- kind: project-relative
+  target: claude
+  value: .claude/skills/codebase-design
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/codebase-design/DESIGN-IT-TWICE.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:72ec579e616c5d564321f446ada271a56d6acb0e084351520c81be4a08dba317
+- kind: project-relative
+  target: claude
+  value: .claude/skills/codebase-design/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:8a06080df412d4576f57d35f606d67fd3d82340d086e6a29d475ab45d8624e66
+- kind: project-relative
+  target: claude
+  value: .claude/skills/codebase-design/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/context-extractor
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/context-extractor/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:bb913afdfd0c7555533afabb593e6cb1bbb18f8c032523c3bf89bb09d50de38b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:216d9b497875441d545d2576484c335a2fb365939740c0f199a745f8fbf65ec2
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:5c55f2de622e0910a51830a23ad4cd85ed5520300447261533df27a6b2f442b6
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/recorders/android.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:7cf3401fa5f0ff7cf357c51d55f76ecb1f5004f96125901677f8b75085ccf8cb
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/recorders/browser.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:16ca081fc0abf5e7aef07284b7334b0263425a251519518f72edfdfba07866d4
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/recorders/cli.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:d64fce2a99f981ed02cbd83f05c7b2c0aa34d31ddceae446c15fdb6b335e330c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/recorders/ios.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:fe497ae477db8199c16384a699b03da6fea0bed91c81e8643d5e3a890bff6383
+- kind: project-relative
+  target: claude
+  value: .claude/skills/demo/scripts/demo.sh
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:22c86c376cf3e048868350b3bfa8475d4c643a6b86f3dce34c1218a5d5fbd15d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/diagnosing-bugs
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/diagnosing-bugs/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:997751df4f369908aa3f6ca2752731b96784cef5b8c58b8b2e209299bd8a4358
+- kind: project-relative
+  target: claude
+  value: .claude/skills/diagnosing-bugs/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:3e430dbe4334a87597488c060cb3dc3786bb00c9182877d6f5ec41f62490e90b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/diagnosing-bugs/scripts/hitl-loop.template.sh
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:35103539fc36873eea36074769ad454f9379d6fc8b2dc0e26ce987fd3bfe5503
+- kind: project-relative
+  target: claude
+  value: .claude/skills/domain-modeling
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/domain-modeling/ADR-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:0960e6473d479783f1bc3abfc609b4be22531a9270df1234d9b7c1a53803e494
+- kind: project-relative
+  target: claude
+  value: .claude/skills/domain-modeling/GLOSSARY-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:a881be42e0c9feae0f686373ecb66fe9c5700e7fac09007d2a5325c41c2cf507
+- kind: project-relative
+  target: claude
+  value: .claude/skills/domain-modeling/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:024c8668c5d0255d2bacb01bfaba45d8977c15ea1c05f1e3582db90c90b77b35
+- kind: project-relative
+  target: claude
+  value: .claude/skills/domain-modeling/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:a825a500ebe2b4189bb004cba83c7f7c45a211e4dc37bac5663ed153ffd9b4b3
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:26e240be83b139fc23b1e361c26a732119fcfddd89c066e6afdb2f99217f039e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/coding-standards.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:6fb7839983e70a0096fa6fbda09257b5a8e0bbbfd261ee0113beda15d684639f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/issues.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:732abc4d6f49b867f42e37a5879cc4d302a2d2991a35ebea1e9d4cb62b2dbb2c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/lead.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:9e98e7550e6bcea8546ed82e2af645361e3d374dd013b897dd67f77d9140dc8b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/proof-run.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:75a25b5ed8ee8fbb7e88cd5e87980de02154508ffca5c1570f0be4a8c140d531
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/_installed.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:e57c0a14fccc0f4fabef1d24a02b0ea0d168dcb31ef58b83b7bac5fa816172f3
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/acceptance.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:4120d3923ffe02fa1515fbc4283813da24a04f2cc93b19dff4d8403f1f7d73fd
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/approvals.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:eec500a5249943b61c5d226920856e53ce6edc79ad553676477d45f57a61194e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/board.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:ed2ce82c2e590770ab0ef40e940d8c25812c919cc90a7a9d0b5ba2996bad7557
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/browse.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:8799f83e3fb136180b50be31ca656fc430982e113d42b9d4bf85a2ebad396043
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/cloud_verifier.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:55df22f0fec455e240c7c758386c9b89896674749cf9e6824d745ce1b85f27d8
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/events.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:678594ef36bfded37953d8b3226a44d67fe673176272598f5fbccdd3fd954c16
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/gatekeeper.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:d04fd8befca6d5d716509b481ea8771397611a0e5cbd56a2ede138c2e376502e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/labels.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:00014c074305f67a3a2ce2c2c0bf87ab358cf169e711a0380ca1ec2e9285afe2
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/loop.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:7c5be89db12c8ae4ed9afd9d9280fdbf72eae59df1eb3992c42523cd2185a59f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/mutate.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:c0d69205b3c302b407b9283ecb0241a3c7ab131554f816b03fc0b9a214f4687d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/nightly.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:2ce7d7023f2b13ca10568974d290b526c86b65d9146d2ffeb7b39c58727494cd
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/scripts/rulesets.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:df0c6e60762596ebeb3906943ba362c06d13124fb9bdf9e2a39e8e1cc9a1e06e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/verifier.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:4816742b8cb95bb1d531d2acbcace929d1f916fb0c5809f98f47ef3b8f6a4e1b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/engineering-loop/worker.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/loop
+  active_owner: kzarzycki/agent-skills/loop
+  content_hash: sha256:94c465f8d459820121e84e4513d5f3f6e3ac557a3d3d8f2555e902338fb977b7
+- kind: project-relative
+  target: claude
+  value: .claude/skills/gh-quota
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/gh-quota/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:8935b914f3c6a47997d4cebd2b487d185f3613797932bd17f23de44ce2c04dad
+- kind: project-relative
+  target: claude
+  value: .claude/skills/gh-quota/scripts/gh
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:31c9eeae51cf1fc772ccdea078384e6219d2d67f608e86d771a7de8130ff2a65
+- kind: project-relative
+  target: claude
+  value: .claude/skills/gh-quota/scripts/gh_quota.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:2f2b0d4b5adb627ef3087765e76cbe411cd19ffdb6e099a76dd8af2d8ae16417
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:9654a6531345e2517363a7ef7116edbec46cdad128ab5abfe2ad318d33232431
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/github.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:84d6a4d4ec5b9615af1b83849d1eddc238dce8edabdec479d4bf0c0677c5266a
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/scripts/_installed.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:e57c0a14fccc0f4fabef1d24a02b0ea0d168dcb31ef58b83b7bac5fa816172f3
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/scripts/board.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:74deafd52627b884eb2551a4813cf233a35a2c10fd30a801a6de8cecacabfa1f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/scripts/labels.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:cb99706d94eadb7fb81a3854db442cc08d5272a6c19b51ec6b96fcfb5de849ce
+- kind: project-relative
+  target: claude
+  value: .claude/skills/github-tracker/scripts/rulesets.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/github
+  active_owner: kzarzycki/agent-skills/github
+  content_hash: sha256:2a6906f5083c01e4f3cec5bad3f5035924b5278230c9ea5eb9a54cb2f570c9a9
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grill-with-docs
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grill-with-docs/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:e50417b3416bc41277ba6fbe033de84a6369f62d1d33ad3d19a94fbaad8f1379
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grill-with-docs/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:94cd0ab161fb468a836349f5ed482ba58ce8e709a05c57ce533d739dbd35cca9
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grilling
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grilling/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:8d3bce0cf9eb146c7355d982273aeba79e51f362b5be5124f452af19d03d67cb
+- kind: project-relative
+  target: claude
+  value: .claude/skills/grilling/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/handoff
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/handoff/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:c4f72a2434997d7806e0dc04fdc760c8ef485cfdbd2f382396d6dcce41097139
+- kind: project-relative
+  target: claude
+  value: .claude/skills/handoff/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:5c479fd562c691851690e8b18c8501045bef0943c10743d636b2fae26add1d28
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement-spec
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement-spec/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:3d855e3e2f1e909803ea7879086814f2c42a059278462f447fc84230f5a1f902
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement-spec/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:a7b810e94b9d3cb5108a01fc72b2f663efb52de04d57bf694a4d4edebd2b1b6d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:67f221f1a2c229676bc9cb379e76c17f8d17c93cdf9372fcbae549e475bf00d6
+- kind: project-relative
+  target: claude
+  value: .claude/skills/implement/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:8970a8596ade0c28ab427f41a4ea242d6bdf6186c59ebf55e1238dbecaab79dc
+- kind: project-relative
+  target: claude
+  value: .claude/skills/improve-codebase-architecture
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/improve-codebase-architecture/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:d5ea838df5a9f1b9534f90044480d03e10e8f56a77e6bb8d79d69c2107306bf0
+- kind: project-relative
+  target: claude
+  value: .claude/skills/improve-codebase-architecture/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1
+- kind: project-relative
+  target: claude
+  value: .claude/skills/loop-me
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/loop-me/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:f4dd785022222ae416bc8bef27a8e3393c0dfd329f1dc9a34142f70f45b70c4f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/loop-me/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:b66fa10079957051be6a812f45e55b67ac394b71d5ba88349962b4c9205802c3
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:bd6edad4b7146e6be952717e25f0147885910a04eaf522a7ea3fb2a239580480
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:bee3121e0b1fd3049913f30b0eda156db09541d161089c39f38418d7debab471
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/backends/herdr-link.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:393e6df1c3d394bb1df8c9f5979984e8a968454b8015a73ae177816fe07ad35e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/backends/native.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:32d58fd3bea1e36200b69c178e93199245ea455e9b366bd13bd08f4b69e119cc
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/scripts/claude_cloud.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:77b533c9774ca3deefacc10b9e4708d47b39b613eebdd99fca0147d0a42523e7
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/scripts/claude_environments.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:0c2dadb634c8dd14e9c2ae5e12482d370a44d71e6d7f62c833243a665f776cb1
+- kind: project-relative
+  target: claude
+  value: .claude/skills/orchestrating-agents/scripts/omnigent_agent.py
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:d36dfc8092ab6aabfb4a48eeac63ae68cc951e93513d8d526b152226b36d98c6
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr/CREDITS.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:ac9da0b1f2814a47b4a64c9588675e6f7aeff868d91d5ed795173253060a330b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:f92c28a76fd33976c30217db41ab4f48e27debf90f037a4e1de56ce0a68d8601
+- kind: project-relative
+  target: claude
+  value: .claude/skills/pr/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad
+- kind: project-relative
+  target: claude
+  value: .claude/skills/prototype
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/prototype/LOGIC.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:74913de90cd82f678cb8fcd8a8bdb69e33e161395af9c223febe4cba5023015f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/prototype/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:bd46b45be77aef4e95e055fb37d6c8fb7121bcfa4eae6df84558de076977f178
+- kind: project-relative
+  target: claude
+  value: .claude/skills/prototype/UI.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:4f49367cc843ff3b5cf73f0515e15e455ca8c028b9da5e86a7dbbf1aaadea28c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/prototype/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:5af65e43ab41a350436697b81e27b7f848d36782043b73c322bb2c9fa9cc55dc
+- kind: project-relative
+  target: claude
+  value: .claude/skills/research
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/research/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:59fccc2f9c8547c2eed14d1492098090c54e6479c118a6e4443842550dab1081
+- kind: project-relative
+  target: claude
+  value: .claude/skills/research/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:9b4c470d63221c1f68f22df70b83e2f12401b317babe0d1b7b5f24a974474d0d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/retro
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/retro/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:a36cc034f4fade40efaa252e68ef7ed93bd972d44460ef3107807f6870935e54
+- kind: project-relative
+  target: claude
+  value: .claude/skills/retro/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/tdd
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/tdd/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:a2851a3f8bebbdd251ecb414386f9525f23730bceec98eb16063a7aae4d2ad87
+- kind: project-relative
+  target: claude
+  value: .claude/skills/tdd/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:ea6f01cf1b8c06a4b0f5b649d74b1b8ce8685e72af1b38d70d877693e092af0b
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/GLOSSARY-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:883378b04d2fc3a7245eaf8eb8b725daaf9a99dea74a6a02cd7a2901c4a5b715
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/LEARNING-RECORD-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:928a39f4aa0bcad493b14ce3abbdd66bc209bd15439e81fa72ef01f3663fdaf1
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/MISSION-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:64976b1e2564b99e88285f0a5d2270b9cdbe229f762a22394a060dc9ed182660
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/RESOURCES-FORMAT.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2d98f5e126f80a8f383375f7153db64b2a26724d81c1ec907403f21afcb977a4
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:b9ec98f91415acb355a0ae1971b95a03959bc10f5f42585cf1956aa665b49b34
+- kind: project-relative
+  target: claude
+  value: .claude/skills/teach/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:5856f3ae8aec742f1499c640aecdd5f1d6af5fa210a7c6ec794de8263a6f733f
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-spec
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-spec/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:b3f40abbc3a8e5d695939774e75f46ba0c5f75539a683d293c27f9a14428f082
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-spec/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:1c5b4d1e3d8e52287ef19cc2742fdbbfae1914ac75d33af3e4c8174f08cc55bb
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-tickets
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-tickets/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:45cac3136763d069aa99678c3e0ba2bc4fae8a55c7f99a9a49f7c8e952c84816
+- kind: project-relative
+  target: claude
+  value: .claude/skills/to-tickets/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:21bc6215fffcd7614e9f772bb1760e87cc5fc7dcc707e7d282bc9414267a6090
+- kind: project-relative
+  target: claude
+  value: .claude/skills/triage
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/triage/AGENT-BRIEF.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:400984ce5f7a03a11eaa633e47152498e172984b85cbf6d6f086d5ff00f58117
+- kind: project-relative
+  target: claude
+  value: .claude/skills/triage/OUT-OF-SCOPE.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:141d874a78f80a5c23f70c5f25ef8542025a7d4d030f408d0dd6a5755452785e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/triage/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:55a2844cf3c65113b69405525bfd055e99c641bffaf8c27a0bbdc4791b1a8320
+- kind: project-relative
+  target: claude
+  value: .claude/skills/triage/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2e683717720cf456d165d0bb1a68bb600d0b6a8ccb61841c172e50d26f95351c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wait-what
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wait-what/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:72ae0370759b2dc48f5ec8460292086be60b8a3bc1a110a50dbae0b60c68a81d
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wait-what/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:b41faadf741d51e4ea184148b2d1854d93f947aaf754c7844f70a00f04194999
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wayfinder
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wayfinder/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:3b02daf6dc92c5d8ff761ba0e57e4980e4671d3cced59499408a53e393dfc9c1
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wayfinder/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wizard
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wizard/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2fb85928b7ab44f20348553392b68142e1da0022142772473e2daed45789b65e
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wizard/agents/openai.yaml
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:98f44d682d58e262f160dc59a8befc365e0aa65820dd0261864af26aa8e59d83
+- kind: project-relative
+  target: claude
+  value: .claude/skills/wizard/template.sh
+  runtime: null
+  scope: project
+  owners:
+  - kzarzycki/agent-skills/engineering
+  active_owner: kzarzycki/agent-skills/engineering
+  content_hash: sha256:2b9bceab14f71bf05d54847155b37c466065f2e86d83b348a70dacc0bff0a01f
