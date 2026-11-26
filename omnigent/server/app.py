@@ -174,6 +174,7 @@ from omnigent.server.routes.sessions import (
 from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
+from omnigent.server.routes.usage_telemetry import create_usage_telemetry_router
 from omnigent.server.routes.user_settings import create_user_settings_router
 from omnigent.server.runner_session_init import (
     TRANSIENT_REJECTION_STATUSES,
@@ -4493,6 +4494,17 @@ def create_app(
             conversation_store,
             auth_provider=auth_provider,
             feature_flags=resolved_feature_flags,
+        ),
+        prefix="/v1",
+        tags=["usage"],
+    )
+    # Read-only telemetry for the omnigent-telemetry report (same user scope).
+    app.include_router(
+        create_usage_telemetry_router(
+            conversation_store,
+            scheduled_task_store=scheduled_task_store,
+            host_store=host_store,
+            auth_provider=auth_provider,
         ),
         prefix="/v1",
         tags=["usage"],
