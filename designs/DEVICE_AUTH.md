@@ -412,6 +412,15 @@ the stored `{token, user_id, expires_at}` record simply lapsed, default
   `OMNIGENT_GRANT_MAX_LIFETIME_DAYS` lets an operator extend it
   deliberately for long-lived unattended hosts. Invalid values fall back
   to the default (never fail open to unbounded).
+- **Sliding renewal (login grants only, off by default)** —
+  `OMNIGENT_GRANT_SLIDING_RENEWAL=1` makes each successful refresh of a
+  first-party login grant restart an idle clock: the grant then dies after
+  `OMNIGENT_GRANT_IDLE_DAYS` (default 30) without use. With it on,
+  `OMNIGENT_GRANT_MAX_LIFETIME_DAYS` applies only when set explicitly, as an
+  absolute cap from login. Third-party device grants keep the fixed lifetime.
+  The last renewal is stored in `last_polled_at`, which login grants never use
+  for polling. Refresh responses report the effective deadline as
+  `refresh_expires_in`.
 - **Client-secret interaction** — `OMNIGENT_DEVICE_CLIENT_SECRET` gates
   the endpoints that mint from an ephemeral code (device authorize + the
   `device_code` exchange). Refresh and revoke are NOT gated: the presented
