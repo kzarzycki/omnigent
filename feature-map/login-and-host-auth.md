@@ -15,6 +15,11 @@ be able to write resources without a separate Omnigent account.
 - `login-auto-detect`: `omnigent login <url>` detects the server's sign-in mode.
   States: accounts, OIDC, header mode, Databricks-fronted, and a workspace URL
   with an org selector.
+- `login-renewal-status`: `omnigent login-status <url>` reports whether the saved
+  login can keep renewing and how long until the access token and the refresh
+  grant expire. States: renewable, grant ending soon (exit 1), cannot renew
+  (exit 2); `--live` proves the grant with one renewal. A host refused five
+  times in a row writes `host_auth_rejected.json` and logs the login command.
 - `workspace-selector-validation`: a URL's `?o=` routes the current command
   without replacing saved login details. Login and launch auth probes compare
   it with the server's workspace header, even on HTTP 200; a mismatch names both
