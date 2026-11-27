@@ -99,8 +99,12 @@ CLI_TIMEOUT_S = 300
 # The CLI refreshes its token from 5 minutes before expiry.
 REFRESH_WINDOW_S = 300
 REFRESH_EVERY_S = 60
-# ponytail: unverified that this subcommand refreshes; without it the next call fails clearly.
-REFRESH_CMD = [CLAUDE_CLI, "agents", "--json"]
+# `claude -p` is the one command seen to rotate the token (`agents --json` does not); no
+# tools and the small model keep that one turn cheap. The prompt comes first because
+# `--tools` takes a list.
+REFRESH_CMD = [
+    CLAUDE_CLI, "-p", "ok", "--model", "haiku", "--no-session-persistence", "--tools", "",
+]
 _last_refresh = -float(REFRESH_EVERY_S)
 PROTOCOL_VERSION = 1
 SESSION_ID_RE = re.compile(r"\b((?:session|cse)_[A-Za-z0-9]{10,})")
@@ -182,8 +186,20 @@ def access_token() -> str:
         if time.monotonic() - _last_refresh > REFRESH_EVERY_S:
             _last_refresh = time.monotonic()
             log("access token near expiry; asking the CLI to refresh it")
-            subprocess.run(REFRESH_CMD, capture_output=True, timeout=CLI_TIMEOUT_S, check=False)
+            old_expiry = oauth.get("expiresAt", 0)
+            try:
+                done = subprocess.run(
+                    REFRESH_CMD, capture_output=True, timeout=CLI_TIMEOUT_S, check=False
+                )
+                code, err = done.returncode, done.stderr[:300].decode(errors="replace")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                code, err = "error", type(exc).__name__
             oauth = _read_login()
+            new_expiry = oauth.get("expiresAt", 0)
+            if new_expiry > old_expiry:
+                log(f"token refreshed: expiresAt {old_expiry} -> {new_expiry}")
+            else:
+                log(f"token refresh did not move expiresAt {old_expiry}; CLI exit {code}, stderr: {err!r}")
         if oauth.get("expiresAt", 0) / 1000 < time.time():
             raise RuntimeError(
                 "the Claude Code login has expired; run `claude` once to refresh it"
@@ -2523,8 +2539,12 @@ def self_check() -> None:
     logins = [{"accessToken": "old", "expiresAt": (time.time() + 60) * 1000}]
     logins.append({"accessToken": "new", "expiresAt": (time.time() + 3600) * 1000})
     runs: list[list[str]] = []
+
+    def ok(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
     globals()["_read_login"] = lambda: logins[0] if not runs else logins[1]
-    real_run, subprocess.run = subprocess.run, lambda cmd, **_: runs.append(cmd)
+    real_run, subprocess.run = subprocess.run, lambda cmd, **_: runs.append(cmd) or ok(cmd)
     try:
         assert access_token() == "new" and runs == [REFRESH_CMD], runs
         assert access_token() == "new" and len(runs) == 1  # fresh token: no second refresh
@@ -2537,7 +2557,7 @@ def self_check() -> None:
             if boot_runs
             else {"accessToken": "old", "expiresAt": (time.time() + 60) * 1000}
         )
-        subprocess.run = lambda cmd, **_: boot_runs.append(cmd)
+        subprocess.run = lambda cmd, **_: boot_runs.append(cmd) or ok(cmd)
         real_monotonic, time.monotonic = time.monotonic, lambda: 5.0
         try:
             assert fresh["access_token"]() == "new" and boot_runs == [fresh["REFRESH_CMD"]], (
@@ -2547,6 +2567,57 @@ def self_check() -> None:
             time.monotonic = real_monotonic
     finally:
         subprocess.run = real_run
+    # A fake CLI and a temp HOME with a fake credential file: one fake moves expiresAt
+    # (the refresh works), one does not (the bridge logs the CLI's exit code and stderr).
+    real_home, real_read = os.environ.get("HOME"), globals()["_read_login"]
+    real_cmd, real_log = globals()["REFRESH_CMD"], globals()["log"]
+    real_mono, real_last = time.monotonic, globals()["_last_refresh"]
+    with tempfile.TemporaryDirectory() as home:
+        creds = Path(home, ".claude", ".credentials.json")
+        creds.parent.mkdir()
+        near = int((time.time() + 60) * 1000)
+
+        def fake_cli(name: str, body: str) -> list[str]:
+            script = Path(home, name)
+            script.write_text(
+                "#!/bin/sh\n" + body.replace("CREDS", str(creds)) + "\n"
+            )
+            script.chmod(0o755)
+            return [str(script), "-p", "ok"]
+
+        moves = fake_cli(
+            "moves",
+            'printf \'{"claudeAiOauth":{"accessToken":"rotated","expiresAt":%s}}\' '
+            f"{near + 3_600_000} > CREDS",
+        )
+        stuck = fake_cli("stuck", "echo 'login required' >&2; exit 3")
+        os.environ["HOME"] = home
+        globals()["_read_login"] = lambda: json.loads(creds.read_text())["claudeAiOauth"]
+        lines: list[str] = []
+        globals()["log"] = lines.append
+        try:
+            for cmd, token in ((moves, "rotated"), (stuck, None)):
+                creds.write_text(
+                    json.dumps({"claudeAiOauth": {"accessToken": "old", "expiresAt": near}})
+                )
+                globals()["REFRESH_CMD"], globals()["_last_refresh"] = cmd, -1e9
+                lines.clear()
+                if token:
+                    assert access_token() == token, lines
+                    assert any("token refreshed" in line for line in lines), lines
+                else:
+                    # Inside the window but unexpired: the old token is still used, and
+                    # the log names the failure.
+                    assert access_token() == "old", lines
+                    failed = [line for line in lines if "did not move" in line]
+                    assert failed and "exit 3" in failed[0] and "login required" in failed[0], lines
+        finally:
+            globals()["REFRESH_CMD"], globals()["_last_refresh"] = real_cmd, real_last
+            globals()["_read_login"], globals()["log"] = real_read, real_log
+            if real_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = real_home
     # Each prompt re-registers the MCP servers before it, for a CLI a new sandbox started.
     posts: list[str] = []
 
