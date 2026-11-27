@@ -180,6 +180,13 @@ def _resolve_harness_idle_timeout_s() -> float:
 # enough that a wedged subprocess doesn't block Omnigent shutdown.
 _RELEASE_GRACE_S = 5.0
 
+# A worker that decided to end itself (an idle exit) leaves a marker file named by this env var
+# before it signals itself. Until it is gone its socket is still open but it refuses new work, so
+# `get_client` waits for its exit and treats it as gone: one path for a message (the next worker
+# resumes) and for an archive (the idle-worker fallback).
+_HARNESS_ENDING_FILE_ENV = "OMNIGENT_HARNESS_ENDING_FILE"
+_ENDING_EXIT_WAIT_S = 15.0
+
 # Timeout for the per-conversation socket file to appear after
 # uvicorn boots inside the runner. Cold-start of an external SDK
 # (Claude Code, Codex, etc.) plus uvicorn is typically 1–3s; the
@@ -511,6 +518,11 @@ class _SubprocessEntry:
         self.model = model
         self.acp_config = acp_config or {}
         self.last_used_at: float = 0.0
+        self.ending_file: Path | None = None
+
+    def ending_file_exists(self) -> bool:
+        """Whether the worker has left its marker that it is ending itself."""
+        return self.ending_file is not None and self.ending_file.exists()
 
 
 def _model_env_key(harness: str) -> str:
@@ -812,6 +824,19 @@ class HarnessProcessManager:
                     "while get_client waited"
                 )
             entry = self._entries.get(conversation_id)
+            if (
+                entry is not None
+                and entry.process.returncode is None
+                and entry.ending_file_exists()
+            ):
+                # The worker is in its shutdown window: still connected, but it will refuse
+                # what we send. Wait for it to go and respawn like for any exited worker.
+                _logger.info(
+                    "harness for conversation %s is ending; waiting for its exit",
+                    conversation_id,
+                )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(entry.process.wait(), timeout=_ENDING_EXIT_WAIT_S)
             # "any" control callers may hold an established connection past the
             # unlink; don't kill the turn they're interrupting. Concrete-harness
             # (new-turn) callers reconnect via the pathname and own recovery.
@@ -1367,6 +1392,11 @@ class HarnessProcessManager:
             auth_token = secrets.token_urlsafe(32)
             effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
 
+        ending_file = self._instance_dir / f"conv-{conversation_id}.ending"
+        with contextlib.suppress(OSError):
+            ending_file.unlink()
+        effective_env[_HARNESS_ENDING_FILE_ENV] = str(ending_file)
+
         parent_pid = os.getpid()
 
         # Subprocess inherits AP's stdout/stderr per §Process
@@ -1439,7 +1469,7 @@ class HarnessProcessManager:
                 # liveness to the heartbeat path.
                 timeout=httpx.Timeout(5.0, read=None),
             )
-            return _SubprocessEntry(
+            spawned = _SubprocessEntry(
                 process=process,
                 client=client,
                 endpoint=endpoint,
@@ -1451,6 +1481,8 @@ class HarnessProcessManager:
                 model=(env or {}).get(_model_env_key(harness)),
                 acp_config=_acp_startup_config(env) if harness == "acp" else None,
             )
+            spawned.ending_file = ending_file
+            return spawned
         except BaseException:
             # From spawn onward the process must have exactly one owner:
             # either it reaches the caller (who registers it in ``_entries``)

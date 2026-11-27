@@ -55,10 +55,12 @@ Env vars read at startup:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import signal
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -203,6 +205,12 @@ def _end_this_worker() -> None:
     Called when an agent that declared an idle exit (the claude-cloud bridge) has left between
     turns. The runner starts a worker again for the next message.
     """
+    # Tell the process manager first: until this process is gone its socket is still open but
+    # it refuses new work, so the manager must wait for the exit instead of sending to it.
+    marker = os.environ.get("OMNIGENT_HARNESS_ENDING_FILE")
+    if marker:
+        with contextlib.suppress(OSError):
+            Path(marker).touch()
     signal.raise_signal(signal.SIGTERM)
 
 

@@ -75,6 +75,11 @@ a worker and a new bridge, which re-attaches the same cloud session from the rep
 transcript's `cloud session:` line. A session archived while it holds no worker still reaches
 its cloud session: the runner starts a worker just to deliver `session_ended`, which finds the ACP
 session the idle worker noted and tells a fresh bridge, as it does for any idle-exited bridge.
+A worker that is ending (it has marked itself, but its process is still there) counts as gone: the runner
+waits for its exit before it looks for a worker, so an archive or a new message in that window
+goes to the next worker and the same cloud session. The runner needs the session's agent spec
+for this start, which it keeps in memory: after a runner restart, an archive of an idle-exited
+session does not reach the cloud session (archive it with `--archive`).
 
 ### Another bridge host
 
