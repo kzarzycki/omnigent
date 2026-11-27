@@ -2297,6 +2297,125 @@ async def test_session_ended_after_idle_exit_restarts_agent_and_tells_it(tmp_pat
     ]
 
 
+@pytest.mark.asyncio
+async def test_agent_leaving_idle_after_its_turn_ends_the_worker(tmp_path: Path) -> None:
+    """An agent that declared an idle exit and left after answering its turn tells the
+    worker to end (the runner then holds nothing for the session); the next turn, in a new
+    worker, gets its answer from the same session id."""
+    agent_path = tmp_path / "idle_then_ended_acp_agent.py"
+    agent_path.write_text(_IDLE_THEN_ENDED_ACP_AGENT)
+    log_path = tmp_path / "events.jsonl"
+    ended = asyncio.Event()
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join([sys.executable, str(agent_path), str(log_path)]), name="Fake"
+        ),
+        on_idle_exit=ended.set,
+    )
+    try:
+        events = [ev async for ev in ex.run_turn([{"role": "user", "content": "hi"}], [], "")]
+        assert any(isinstance(e, TurnComplete) for e in events), events
+        await asyncio.wait_for(ended.wait(), timeout=10)
+    finally:
+        await ex.close()
+
+    # What the next worker does: a fresh executor starts the agent and replies again.
+    again = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join([sys.executable, str(agent_path), str(log_path)]), name="Fake"
+        )
+    )
+    try:
+        events = [
+            ev async for ev in again.run_turn([{"role": "user", "content": "again"}], [], "")
+        ]
+    finally:
+        await again.close()
+    assert any(isinstance(e, TurnComplete) for e in events), events
+
+
+def test_harness_executor_ends_its_process_on_an_idle_exit(monkeypatch) -> None:
+    """The harness wires an idle exit to a SIGTERM of its own process (a graceful stop)."""
+    import signal
+
+    from omnigent.inner import acp_harness
+
+    monkeypatch.setenv("HARNESS_ACP_COMMAND", "agent")
+    raised: list[int] = []
+    monkeypatch.setattr(signal, "raise_signal", raised.append)
+    executor = acp_harness._build_acp_executor()
+    assert isinstance(executor, AcpExecutor)
+    assert executor._on_idle_exit is not None
+    executor._on_idle_exit()
+    assert raised == [signal.SIGTERM]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("capability", "status"), [("declared", 1), ("undeclared", 75)])
+async def test_other_agent_exits_do_not_end_the_worker(
+    tmp_path: Path, capability: str, status: int
+) -> None:
+    """Only the exit status an agent declared counts as idle: a crash, or an agent that
+    declared nothing, leaves the worker to its normal lifecycle."""
+    agent_path = tmp_path / "idle_leaving_acp_agent.py"
+    agent_path.write_text(_IDLE_LEAVING_ACP_AGENT)
+    left: list[bool] = []
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join(
+                [
+                    sys.executable,
+                    str(agent_path),
+                    str(tmp_path / "prompts.jsonl"),
+                    str(tmp_path / "left"),
+                    str(status),
+                    capability,
+                ]
+            ),
+            name="Leaver",
+        ),
+        on_idle_exit=lambda: left.append(True),
+    )
+    try:
+        [ev async for ev in ex.run_turn([{"role": "user", "content": "hi"}], [], "")]
+        await asyncio.sleep(0.5)
+    finally:
+        await ex.close()
+    assert left == []
+
+
+@pytest.mark.asyncio
+async def test_idle_exit_during_a_turn_does_not_end_the_worker(tmp_path: Path) -> None:
+    """The agent that leaves as a prompt arrives is started again by the turn itself, so
+    the worker stays for that turn."""
+    agent_path = tmp_path / "idle_leaving_acp_agent.py"
+    agent_path.write_text(_IDLE_LEAVING_ACP_AGENT)
+    left: list[bool] = []
+    ex = AcpExecutor(
+        AcpAgentConfig(
+            command=shlex.join(
+                [
+                    sys.executable,
+                    str(agent_path),
+                    str(tmp_path / "prompts.jsonl"),
+                    str(tmp_path / "left"),
+                    "75",
+                    "declared",
+                ]
+            ),
+            name="Leaver",
+        ),
+        on_idle_exit=lambda: left.append(True),
+    )
+    try:
+        events = [ev async for ev in ex.run_turn([{"role": "user", "content": "hi"}], [], "")]
+        await asyncio.sleep(0.5)
+    finally:
+        await ex.close()
+    assert any(isinstance(e, TurnComplete) for e in events), events
+    assert left == []
+
+
 # ---------------------------------------------------------------------------
 # Omnigent MCP bridge (session/new.mcpServers via the shared serve-mcp relay)
 # ---------------------------------------------------------------------------

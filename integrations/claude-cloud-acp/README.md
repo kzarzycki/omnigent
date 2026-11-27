@@ -69,8 +69,11 @@ on macOS, or `~/.claude/.credentials.json`.
 
 An idle bridge exits after `CLAUDE_CLOUD_IDLE_EXIT_S` seconds (default 60, `0` keeps
 it), taking its MCP server child with it, and a bridge whose runner is gone exits
-at once. The next message starts a new bridge, which re-attaches the same cloud
-session from the replayed transcript's `cloud session:` line.
+at once. The runner's worker for the session (the harness process that drives the bridge)
+ends with it, so an idle session holds no process on the bridge host. The next message starts
+a worker and a new bridge, which re-attaches the same cloud session from the replayed
+transcript's `cloud session:` line. A session archived while it holds no worker has no
+bridge to tell, so its cloud session is archived by hand with `--archive`.
 
 ### Another bridge host
 

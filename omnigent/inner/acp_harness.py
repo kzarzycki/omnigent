@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 
 from fastapi import FastAPI
 
@@ -192,7 +193,17 @@ def _build_acp_executor(extension: AcpExtension | None = None) -> Executor:
         cwd=cwd,
         os_env=_resolve_os_env(),
         extension=extension if extension is not None else generic_acp_extension(),
+        on_idle_exit=_end_this_worker,
     )
+
+
+def _end_this_worker() -> None:
+    """End this harness process, as a SIGTERM would, so an idle session holds no worker.
+
+    Called when an agent that declared an idle exit (the claude-cloud bridge) has left between
+    turns. The runner starts a worker again for the next message.
+    """
+    signal.raise_signal(signal.SIGTERM)
 
 
 def create_app(extension: AcpExtension | None = None) -> FastAPI:

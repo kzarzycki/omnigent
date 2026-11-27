@@ -482,6 +482,7 @@ class AcpExecutor(Executor):
         os_env: OSEnvSpec | None = None,
         *,
         extension: AcpExtension = NO_ACP_EXTENSION,
+        on_idle_exit: Callable[[], None] | None = None,
     ) -> None:
         """Initialize the generic ACP executor.
 
@@ -495,8 +496,17 @@ class AcpExecutor(Executor):
             that vendor's harness wrap (e.g.
             a vendor wrap). The default is protocol-only,
             so the generic ``acp`` harness reads no vendor field.
+        :param on_idle_exit: Called, on the event loop, once an agent that declared an idle
+            exit has left with that status between turns. The harness process passes the call
+            that ends itself, so the runner holds no worker for a session whose agent is gone;
+            the next message starts a worker, which starts the agent again.
         """
         self._config = config
+        self._on_idle_exit = on_idle_exit
+        self._idle_watch_task: asyncio.Task[None] | None = None
+        self._turns_active = 0
+        self._between_turns = asyncio.Event()
+        self._between_turns.set()
         self._extension = extension
         self._cwd = _resolve_cwd(cwd)
         self._os_env = os_env
@@ -928,6 +938,7 @@ class AcpExecutor(Executor):
         )
         status = idle_exit.get("status") if isinstance(idle_exit, dict) else None
         self._idle_exit_status = status if isinstance(status, int) else None
+        self._watch_idle_exit()
         ended = (
             result.get("agentCapabilities", {}).get(_SESSION_ENDED_CAPABILITY)
             if isinstance(result, dict)
@@ -1611,6 +1622,28 @@ class AcpExecutor(Executor):
         candidates = {c for c in (name, raw_tool, meta_tool) if c}
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
+    def _watch_idle_exit(self) -> None:
+        """Report the agent's idle exit to ``on_idle_exit``, once it happens between turns."""
+        proc, status = self._proc, self._idle_exit_status
+        if self._on_idle_exit is None or proc is None or status is None:
+            return
+        if self._idle_watch_task is not None:
+            self._idle_watch_task.cancel()
+
+        async def watch() -> None:
+            await proc.wait()
+            # An agent leaves right after answering, before its turn has returned, so wait the
+            # turn out. One that left as a prompt arrived is replaced by that turn (it resends the
+            # prompt), and a stopped agent is not an idle one.
+            await self._between_turns.wait()
+            if proc.returncode != status or proc is not self._proc:
+                return
+            logger.info("acp[%s] agent left idle; ending this worker", self._config.name)
+            if self._on_idle_exit is not None:
+                self._on_idle_exit()
+
+        self._idle_watch_task = asyncio.create_task(watch())
+
     async def _exited_idle(self) -> bool:
         """Whether the agent declared an idle exit and ended with its status."""
         if self._proc is None or self._idle_exit_status is None:
@@ -1955,6 +1988,24 @@ class AcpExecutor(Executor):
                 await self._respond_to_agent_request(stale)
 
     async def run_turn(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        system_prompt: str,
+        config: ExecutorConfig | None = None,
+    ) -> AsyncIterator[ExecutorEvent]:
+        """Run one turn of the agent loop via ACP, counted so an idle exit never ends it."""
+        self._turns_active += 1
+        self._between_turns.clear()
+        try:
+            async for event in self._run_turn(messages, tools, system_prompt, config):
+                yield event
+        finally:
+            self._turns_active -= 1
+            if not self._turns_active:
+                self._between_turns.set()
+
+    async def _run_turn(
         self,
         messages: list[Message],
         tools: list[ToolSpec],
@@ -2318,6 +2369,9 @@ class AcpExecutor(Executor):
         self._cancel_grace_deadline = None
         self._active_prompt_request_id = None
         self._reset_session_state()
+        if self._idle_watch_task is not None:
+            self._idle_watch_task.cancel()
+            self._idle_watch_task = None
         # Tear down the Omnigent MCP relay HTTP server + its bridge dir first.
         with contextlib.suppress(Exception):
             self._mcp.close()
