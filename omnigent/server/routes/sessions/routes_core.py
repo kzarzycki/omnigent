@@ -1758,6 +1758,19 @@ def register_core_routes(
             else:
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
+        if explicit_host and body.host_id is not None:
+            from omnigent.server.scripted_host_policy import require_scripted_host_placement
+
+            # One check for every caller of a host-placed create; refused before the
+            # session exists, so a rejected create leaves nothing behind.
+            await require_scripted_host_placement(
+                getattr(request.app.state, "scripted_host_policy", None),
+                request.app.state.host_store,
+                body.host_id,
+                agent_store,
+                body.agent_id,
+                agent_cache,
+            )
         orchestration_marks = getattr(request.app.state, "orchestration_hosts", None)
         if orchestration_marks is not None and body.host_id is not None:
             from omnigent.server.orchestration_hosts import require_host_allows_agent

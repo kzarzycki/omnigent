@@ -17,6 +17,7 @@ from omnigent.server.feature_flags import (
     FeatureFlags,
     resolve_feature_flags,
 )
+from omnigent.server.scripted_host_policy import load_scripted_host_policy
 from omnigent.server.sharing_settings import write_peer_session_messaging_override
 from omnigent.stores.conversation_store import (
     CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
@@ -3201,6 +3202,9 @@ async def test_scripted_host_worktree_respects_ownership_and_policy(
             + ("sibling_sessions" if nested else "-sibling_sessions")
         }
     )
+    auth_app.state.scripted_host_policy = load_scripted_host_policy(
+        {"scripted_host_policy": {"rules": [{"host": "review-host", "agents": ["*"]}]}}
+    )
     host = uuid4().hex
     owner = "bob" if scenario == "foreign_host" else "alice"
     _register_online_host(auth_app, host, owner)
@@ -3266,6 +3270,122 @@ async def test_scripted_host_worktree_respects_ownership_and_policy(
     assert worktree.branch_name == "review" and worktree.base_branch == "main"
     launch = next(f for f in frames if isinstance(f, HostLaunchRunnerFrame))
     assert launch.workspace == "/repos/review"
+
+
+_POLICY_RULES = {
+    "allowed_by_name": [{"host": "review-host", "agents": ["*"]}],
+    "allowed_by_id": [{"host": "{host}", "agents": ["*"]}],
+    "no_rule_for_host": [{"host": "other-host", "agents": ["*"]}],
+    "local_agent_on_cloud_bridge_only_host": [
+        {"host": "review-host", "agents": ["@cloud-bridge"]}
+    ],
+    "unregistered_agent_name_rule": [{"host": "review-host", "agents": ["{agent}"]}],
+    "no_policy": None,
+}
+
+
+@pytest.mark.parametrize("scenario", list(_POLICY_RULES))
+async def test_scripted_host_placement_policy(
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario
+):
+    """A host-placed create needs a policy rule that names the host and the agent."""
+    from omnigent.host.frames import (
+        HostCreateWorktreeFrame,
+        HostLaunchRunnerFrame,
+        HostStatFrame,
+        decode_host_frame,
+    )
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    auth_app.state.feature_flags = resolve_feature_flags({FEATURES_ENV_VAR: "scripted_sessions"})
+    host = uuid4().hex
+    _register_online_host(auth_app, host, "alice")
+    auth_app.state.host_store.upsert_on_connect(host, "review-host", "alice")
+    rules = _POLICY_RULES[scenario]
+    if rules is None:
+        auth_app.state.scripted_host_policy = None
+    else:
+        rules = json.loads(
+            json.dumps(rules).replace("{host}", host).replace("{agent}", "some-agent")
+        )
+        auth_app.state.scripted_host_policy = load_scripted_host_policy(
+            {"scripted_host_policy": {"rules": rules}}
+        )
+        assert auth_app.state.scripted_host_policy is not None
+    frames = []
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        frames.append(frame)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostCreateWorktreeFrame):
+            connection.pending_create_worktrees[frame.request_id].set_result(
+                {"status": "ok", "worktree_path": "/repos/review", "branch": frame.branch_name}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    store = SqlAlchemyConversationStore(db_uri)
+    before = {s.id for s in store.list_conversations().data}
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps(
+                {
+                    "agent_id": source["agent_id"],
+                    "placement": "host",
+                    "host_id": host,
+                    "workspace": "/repos/example",
+                }
+            ),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    if scenario.startswith("allowed"):
+        assert "error" not in result, result
+        assert store.get_conversation(result["conversation_id"]).host_id == host
+        return
+    assert "error" in result, result
+    # The runner's early check names the missing policy; the server names its refusal.
+    refusal = result.get("detail", "") + result["error"]
+    assert "placement policy refused" in refusal or "no scripted host placement policy" in refusal
+    if scenario == "no_policy":
+        return
+    assert {s.id for s in store.list_conversations().data} == before
+    assert not frames
+
+
+async def test_info_reports_whether_a_scripted_host_policy_is_loaded(auth_client, auth_app):
+    auth_app.state.scripted_host_policy = None
+    info = (await auth_client.get("/v1/info")).json()
+    assert "scripted_host_policy" in info, sorted(info)
+    assert info["scripted_host_policy"] is False
+    auth_app.state.scripted_host_policy = load_scripted_host_policy(
+        {"scripted_host_policy": {"rules": [{"host": "h", "agents": ["*"]}]}}
+    )
+    assert (await auth_client.get("/v1/info")).json()["scripted_host_policy"] is True
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"scripted_host_policy": "yes"},
+        {"scripted_host_policy": {"rules": "h"}},
+        {"scripted_host_policy": {"rules": [{"host": "h"}]}},
+        {"scripted_host_policy": {"rules": [{"host": "h", "agents": ["*"], "repos": ["x"]}]}},
+    ],
+)
+def test_scripted_host_policy_fails_closed_on_missing_or_invalid_config(config):
+    assert load_scripted_host_policy(config) is None
 
 
 @pytest.mark.parametrize(

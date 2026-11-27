@@ -1558,6 +1558,48 @@ async def test_explicit_host_create_preserves_worktree_and_project(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy_loaded", [False, True, None])
+async def test_host_placement_refused_early_when_server_has_no_policy(policy_loaded):
+    """`/v1/info` saying no policy is loaded stops the create before any POST."""
+    posts = []
+
+    def respond(request):
+        if request.url.path == "/v1/info":
+            info = {"scripted_sessions": True}
+            if policy_loaded is not None:
+                info["scripted_host_policy"] = policy_loaded
+            return httpx.Response(200, json=info)
+        if request.method == "POST" and not request.url.path.endswith("/events"):
+            posts.append(request)
+        return httpx.Response(201, json={"id": uuid4().hex})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {
+                        "agent_id": "worker",
+                        "placement": "host",
+                        "host_id": uuid4().hex,
+                        "workspace": "/repos/example",
+                    }
+                ),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+    if policy_loaded is False:
+        assert "no scripted host placement policy" in result["error"]
+        assert not posts
+    else:
+        # An older server omits the field; its own check decides.
+        assert posts
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
     [

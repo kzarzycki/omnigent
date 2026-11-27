@@ -215,6 +215,38 @@ placement. Older servers refuse the tool's new options through the
 host-create and PR-link routes also reject requests that reach older replicas
 in a mixed-version deployment.
 
+#### Placement policy for `placement="host"`
+
+A host-placed create is refused unless the server config (`config.yaml`, resolved
+like the rest of the server config) has a `scripted_host_policy` that allows the
+host and the agent. With the flag on and no policy, every `placement="host"`
+request is refused (fail closed); a malformed block is logged and counts as no
+policy. Child, same-host and managed placement are unchanged. The check sits where
+the server resolves the host for `/sessions/orchestrated/host`, so it runs before
+any session, worktree or runner exists, and every caller shares it.
+
+```yaml
+scripted_host_policy:
+  rules:
+    - host: build-host            # host name or host id
+      agents: ["*"]               # any agent
+    - host: orchestration-host
+      agents: ["@cloud-bridge"]   # only agents on the cloud-bridge harness
+    - host: review-host
+      agents: [reviewer]          # operator-registered agents, by name
+```
+
+A request is allowed when some rule names the host and lists the agent: `"*"`,
+`"@cloud-bridge"`, or the name of an operator-registered agent (a user-uploaded
+agent never matches by name). The refusal names the host and agent and says the
+placement policy refused it. `GET /v1/info` reports `scripted_host_policy`
+(whether a policy is loaded); the runner's early check refuses with "no scripted
+host placement policy" when it is false, and leaves an older server that omits the
+field to its own check.
+
+There are no per-repo rules: the server cannot learn a workspace's git origin from
+the host without trusting the host's own, spoofable answer, so repo limits stay out.
+
 Independent creates can use an existing owned `project_id` instead of
 `project_name`; never supply both. Project defaults do not replace the
 explicit agent, workspace or git selection. `sys_session_link_pr` takes
