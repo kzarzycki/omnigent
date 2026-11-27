@@ -434,6 +434,48 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
 
 
 @pytest.fixture(autouse=True)
+def _dispose_sqlite_engines_created_by_test() -> Generator[None, None, None]:
+    """Dispose the SQLite engines a test left in the process-wide engine cache.
+
+    ``get_or_create_engine`` caches one engine per database URI for the life of the
+    process. A test that builds its own app or store on a fresh ``tmp_path`` database
+    (not through ``db_uri``, which cleans up after itself) leaves that engine cached, and
+    with it the engine's compiled-statement cache (~20 MB). A server-suite worker grew from
+    ~0.4 GB to ~4 GB over a run (tracking issue #790). Entries added during the test are
+    dropped and disposed here; engines that existed before it, and non-SQLite ones, stay.
+    """
+    import importlib
+
+    from omnigent.db import utils as db_utils
+
+    # Server modules that memoise a store per database URI in a module-level ``_stores``
+    # dict; each store holds its engine, so a cached store keeps the engine alive too.
+    store_dicts = [
+        importlib.import_module(name)._stores
+        for name in (
+            "omnigent.stores.user_settings_store",
+            "omnigent.server.workflows",
+            "omnigent.server.session_journal",
+            "omnigent.server.session_pull_requests",
+        )
+    ]
+    with db_utils._engine_lock:
+        before = frozenset(db_utils._engine_cache)
+    stores_before = [frozenset(d) for d in store_dicts]
+    yield
+    for stores, known in zip(store_dicts, stores_before, strict=True):
+        for uri in [u for u in stores if u not in known and u.startswith("sqlite")]:
+            stores.pop(uri, None)
+    with db_utils._engine_lock:
+        created = [
+            uri for uri in db_utils._engine_cache if uri not in before and uri.startswith("sqlite")
+        ]
+        engines = [db_utils._engine_cache.pop(uri) for uri in created]
+    for engine in engines:
+        engine.dispose()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_gh_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
