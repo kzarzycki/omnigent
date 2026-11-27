@@ -1588,6 +1588,237 @@
         "title": "ChildSessionSummary",
         "type": "object"
       },
+      "ChildUsage": {
+        "description": "One child CLI run's usage, recorded under its parent session.\n\nA child run is a CLI (e.g. `codex`, `agy`) the session's agent started in\nits own VM, which Omnigent cannot see otherwise. It is reported by\n`POST /v1/sessions/{session_id}/child-usage` and listed under the parent\nin `GET /v1/usage`; it is never part of the parent's own `cost_usd` or\n`models` rows.",
+        "properties": {
+          "cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The CLI's own cost, or the server's catalog price; `None` when neither exists (unpriced, not free).",
+            "title": "Cost Usd"
+          },
+          "harness": {
+            "description": "The CLI, e.g. `\"codex\"`.",
+            "title": "Harness",
+            "type": "string"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Input tokens when reported, else `None`.",
+            "title": "Input Tokens"
+          },
+          "key": {
+            "description": "The run's idempotency key, e.g. `\"verify-1\"`.",
+            "title": "Key",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The model it ran, or `None` when unknown.",
+            "title": "Model"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Output tokens when reported, else `None`.",
+            "title": "Output Tokens"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session that holds the entry; set on a report's child rows, which may come from a sub-agent session of the listed one.",
+            "title": "Session Id"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Total tokens (input + output when both were reported without a total), or `None` when no count was.",
+            "title": "Total Tokens"
+          }
+        },
+        "required": [
+          "key",
+          "harness"
+        ],
+        "title": "ChildUsage",
+        "type": "object"
+      },
+      "ChildUsageRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /v1/sessions/{session_id}/child-usage`.\n\nAt least one token count or `cost_usd` is required.",
+        "properties": {
+          "cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "maximum": 1000000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cost the CLI printed, when it did; used as given.",
+            "title": "Cost Usd"
+          },
+          "harness": {
+            "description": "The CLI, e.g. `\"codex\"`.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Harness",
+            "type": "string"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "maximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Input tokens, when known.",
+            "title": "Input Tokens"
+          },
+          "key": {
+            "description": "Idempotency key for the child run (1-64 chars of `[A-Za-z0-9._:-]`); a repeated key replaces its entry.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "title": "Key",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The model it ran; needed to price tokens server-side.",
+            "title": "Model"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "maximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Output tokens, when known.",
+            "title": "Output Tokens"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "maximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Total tokens, when that is all the CLI prints.",
+            "title": "Total Tokens"
+          }
+        },
+        "required": [
+          "key",
+          "harness"
+        ],
+        "title": "ChildUsageRequest",
+        "type": "object"
+      },
+      "ChildUsageResponse": {
+        "description": "Response of `POST /v1/sessions/{session_id}/child-usage`.",
+        "properties": {
+          "child": {
+            "$ref": "#/components/schemas/ChildUsage",
+            "description": "The stored entry."
+          },
+          "object": {
+            "const": "child_usage",
+            "default": "child_usage",
+            "title": "Object",
+            "type": "string"
+          },
+          "replaced": {
+            "default": false,
+            "description": "`True` when the key was already recorded and its entry was replaced, so the run still counts once.",
+            "title": "Replaced",
+            "type": "boolean"
+          },
+          "session_id": {
+            "description": "The parent session the entry was recorded under.",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "child"
+        ],
+        "title": "ChildUsageResponse",
+        "type": "object"
+      },
       "ClearCodexGoalResponse": {
         "description": "Response body for `DELETE /v1/sessions/{id}/codex_goal`.",
         "properties": {
@@ -14939,12 +15170,25 @@
             ],
             "title": "Agent Name"
           },
+          "child_usage": {
+            "items": {
+              "$ref": "#/components/schemas/ChildUsage"
+            },
+            "title": "Child Usage",
+            "type": "array"
+          },
           "cost_usd": {
-            "default": 0.0,
-            "description": "Authoritative cumulative USD spend for this session's subtree.",
-            "format": "double",
-            "title": "Cost Usd",
-            "type": "number"
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authoritative cumulative USD spend for this session's subtree, or `None` when no model in it has a known price.",
+            "title": "Cost Usd"
           },
           "created_at": {
             "description": "Unix epoch seconds of creation.",
@@ -14981,10 +15225,17 @@
           },
           "models": {
             "additionalProperties": {
-              "format": "double",
-              "type": "number"
+              "anyOf": [
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "description": "Per-model recorded cost, keyed by the raw harness model id (e.g. `{\"claude-opus-4-8\": 14.03}`). Empty when no per-model cost was recorded. May not sum to `cost_usd` (see above).",
+            "description": "Per-model recorded cost, keyed by the raw harness model id (e.g. `{\"claude-opus-4-8\": 14.03}`); `None` for a model whose tokens were recorded but has no known price. Empty when nothing was recorded. May not sum to `cost_usd` (see above).",
             "title": "Models",
             "type": "object"
           },
@@ -15780,6 +16031,362 @@
           "kind"
         ],
         "title": "StoreHarnessCredentialRequest",
+        "type": "object"
+      },
+      "TelemetryModelUsage": {
+        "description": "Tokens and cost one model accounts for across the report's sessions.",
+        "properties": {
+          "cache_read_input_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Cache Read Input Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "input_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "output_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "sessions": {
+            "default": 0,
+            "format": "int64",
+            "title": "Sessions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "TelemetryModelUsage",
+        "type": "object"
+      },
+      "TelemetryScheduledTask": {
+        "description": "One scheduled task and its runs scheduled inside the window.",
+        "properties": {
+          "failed": {
+            "default": 0,
+            "format": "int64",
+            "title": "Failed",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "runs": {
+            "default": 0,
+            "format": "int64",
+            "title": "Runs",
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "format": "int64",
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "succeeded": {
+            "default": 0,
+            "format": "int64",
+            "title": "Succeeded",
+            "type": "integer"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state"
+        ],
+        "title": "TelemetryScheduledTask",
+        "type": "object"
+      },
+      "TelemetrySession": {
+        "description": "One session (root or sub-agent) in a tree the window touched.",
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent"
+          },
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "compactions": {
+            "default": 0,
+            "format": "int64",
+            "title": "Compactions",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "inherited_items": {
+            "default": 0,
+            "format": "int64",
+            "title": "Inherited Items",
+            "type": "integer"
+          },
+          "items": {
+            "default": 0,
+            "format": "int64",
+            "title": "Items",
+            "type": "integer"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "live_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Status"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "root_id": {
+            "title": "Root Id",
+            "type": "string"
+          },
+          "sub_agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sub Agent Name"
+          },
+          "subscribes_to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Subscribes To",
+            "type": "array"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "tool_calls": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "title": "Tool Calls",
+            "type": "object"
+          },
+          "turns": {
+            "default": 0,
+            "format": "int64",
+            "title": "Turns",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TelemetrySessionUsage"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "root_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TelemetrySession",
+        "type": "object"
+      },
+      "TelemetrySessionUsage": {
+        "description": "One session's own recorded usage (not its subtree's).",
+        "properties": {
+          "by_model": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TelemetryModelUsage"
+            },
+            "title": "By Model",
+            "type": "object"
+          },
+          "cache_read_input_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Cache Read Input Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "input_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "default": 0,
+            "format": "int64",
+            "title": "Output Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "TelemetrySessionUsage",
+        "type": "object"
+      },
+      "TelemetrySidebar": {
+        "description": "Unarchived top-level sessions, and how many scheduled runs created.",
+        "properties": {
+          "from_scheduled_tasks": {
+            "default": 0,
+            "format": "int64",
+            "title": "From Scheduled Tasks",
+            "type": "integer"
+          },
+          "unarchived": {
+            "default": 0,
+            "format": "int64",
+            "title": "Unarchived",
+            "type": "integer"
+          }
+        },
+        "title": "TelemetrySidebar",
         "type": "object"
       },
       "TerminalCommandData": {
@@ -17120,6 +17727,71 @@
           }
         },
         "title": "UsageReport",
+        "type": "object"
+      },
+      "UsageTelemetry": {
+        "description": "What the `omnigent-telemetry` report reads, aggregated in the server.\n\n`GET /v1/usage/telemetry` \u2014 see the route's docstring for the shape.",
+        "properties": {
+          "daily_cost": {
+            "items": {
+              "$ref": "#/components/schemas/DailyCost"
+            },
+            "title": "Daily Cost",
+            "type": "array"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/TelemetryModelUsage"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "object": {
+            "const": "usage_telemetry",
+            "default": "usage_telemetry",
+            "title": "Object",
+            "type": "string"
+          },
+          "scheduled_tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TelemetryScheduledTask"
+            },
+            "title": "Scheduled Tasks",
+            "type": "array"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/TelemetrySession"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "sidebar": {
+            "$ref": "#/components/schemas/TelemetrySidebar"
+          },
+          "since": {
+            "format": "int64",
+            "title": "Since",
+            "type": "integer"
+          },
+          "truncated": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Truncated",
+            "type": "array"
+          },
+          "until": {
+            "format": "int64",
+            "title": "Until",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "since",
+          "until"
+        ],
+        "title": "UsageTelemetry",
         "type": "object"
       },
       "ValidationError": {
@@ -24138,6 +24810,59 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/child-usage": {
+      "post": {
+        "description": "Record a child CLI run's usage under its parent session.\n\nA cloud session's agent can run a CLI (`codex`, `agy`) as a child\nprocess whose tokens Omnigent never sees. The session's own runner\nreports them here; `GET /v1/usage` lists each under the parent as a\n`child_usage` entry, apart from the parent's own `cost_usd` and\n`models` rows. A child run is not added to the user's daily-cost\nrollup either.\n\n**Path.** `POST /v1/sessions/{session_id}/child-usage`: the parent\nsession's id (bare hex, as in the session's own routes).\n\n**Auth.** The session's own runner credentials, as for the Inbox post:\nthe `X-Omnigent-Orchestration-Source` header must name `{session_id}`, and\nthe runner tunnel token must be the one that session is bound to. A\nsession can therefore post only for itself; another session's id, a\nmissing or wrong token or a header naming a different session is 403.\nWith auth on, the caller must also own the session.\n\n**Body** (JSON; unknown fields are 422):\n\n- `key` (required): idempotency key for the child run, 1-64 chars of\n  `[A-Za-z0-9._:-]`. A repeated key replaces its entry, so a retried\n  post counts once; use a new key for each run.\n- `harness` (required): the CLI, e.g. `\"codex\"`.\n- `model`: the model it ran.\n- `input_tokens`, `output_tokens`: when known; `total_tokens`: when\n  that is all the CLI prints. At least one of the three counts or\n  `cost_usd` is required.\n- `cost_usd`: the cost the CLI printed, used as given. Otherwise,\n  when `model` and both input and output counts are given, the server\n  prices them with the same catalog / provider pricing as session\n  turns. With no price the entry's `cost_usd` is `null` (unpriced,\n  not free).\n\n**Response** (200): `{\"object\": \"child_usage\", \"session_id\": \"<id>\", \"child\": {key, harness, model, input_tokens, output_tokens, total_tokens, cost_usd}, \"replaced\": <bool>}`. `total_tokens` is\ninput + output when both were sent without a total, else as sent\n(`null` when absent). 404 for an unknown session;\n409 when the session already holds\n`MAX_CHILD_USAGE_PER_SESSION` other runs.",
+        "operationId": "post_child_usage_v1_sessions__session_id__child_usage_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChildUsageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChildUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Child Usage",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/child_sessions": {
       "get": {
         "description": "List sub-agent (child) sessions under a parent session.\n\nReturns a page of `ChildSessionSummary` objects\nderived from child conversations (`kind=\"sub_agent\"`,\n`parent_conversation_id=session_id`) plus each child's\nlatest task. Powers the web / REPL debug surfaces' \"child\nsessions\" panel without parsing parent\n`function_call_output` JSON handles. Pagination contract\nmatches `list_session_items` so existing client code\ncan reuse the same cursor logic.\n\n**Returns:** A `PaginatedList` of `ChildSessionSummary` objects.\n\n**Raises**\n\n- `OmnigentError` \u2014 403 if the caller lacks READ on `session_id`; 404 if no session exists there.",
@@ -30043,6 +30768,92 @@
           }
         },
         "summary": "Get Usage",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
+    "/v1/usage/telemetry": {
+      "get": {
+        "description": "Read-only telemetry for the calling user, aggregated in the server.\n\nScoped like `GET /v1/usage`: sessions the caller holds a grant on,\nthe caller's daily-cost rollup and the caller's scheduled tasks. The\nwindow is `[since, until]` (epoch seconds, at most 90 days); a\nsession is in it when its top-level session was last active inside\nit, and its sub-agents come with it. Bounds that cut a section short\nare named in `truncated`.\n\nResponse (`object: \"usage_telemetry\"`)::\n\n    since, until: int                    # the window used\n    daily_cost: [{day: \"YYYY-MM-DD\", cost_usd: float}]\n    models: [{model, input_tokens, output_tokens,\n              cache_read_input_tokens, cost_usd: float|null, sessions}]\n    sessions: [{                         # every session in the trees\n      id, parent_id|null, root_id, title, created_at, updated_at,\n      archived, agent|null, harness|null, host|null, workspace|null,\n      live_status|null (\"idle\"|\"running\"|\"waiting\"|\"failed\"),\n      sub_agent_name|null, labels: {str: str},\n      items, turns, compactions, inherited_items: int,\n      tool_calls: {tool name: count},\n      usage: {cost_usd|null, input_tokens, output_tokens,\n              cache_read_input_tokens, by_model: {model: {...as models}}},\n      subscribes_to: [session id]\n    }]\n    scheduled_tasks: [{id, name, state, workspace|null, runs,\n                       succeeded, failed, skipped, last_error|null}]\n    sidebar: {unarchived, from_scheduled_tasks}\n    truncated: [str]                     # sections a bound cut short\n\n`usage` is each session's own recorded usage, cumulative since it\nbegan; `models` adds those up over the returned sessions.\n`turns` counts user messages; `inherited_items` counts items older\nthan the session (copied from a fork). A scheduled run counts as failed\nwhen it failed or its session's last status was `failed`;\n`from_scheduled_tasks` counts unarchived top-level sessions labelled\nas serving a scheduled run.",
+        "operationId": "get_usage_telemetry_v1_usage_telemetry_get",
+        "parameters": [
+          {
+            "description": "Window start, epoch seconds. Default: 7 days ago.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window start, epoch seconds. Default: 7 days ago.",
+              "title": "Since"
+            }
+          },
+          {
+            "description": "Window end, epoch seconds. Default: now.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window end, epoch seconds. Default: now.",
+              "title": "Until"
+            }
+          },
+          {
+            "description": "Most top-level sessions (their sub-agents come with them).",
+            "in": "query",
+            "name": "max_sessions",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "description": "Most top-level sessions (their sub-agents come with them).",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Sessions",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageTelemetry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Usage Telemetry",
         "tags": [
           "usage"
         ]
