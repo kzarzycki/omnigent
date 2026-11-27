@@ -103,7 +103,14 @@ REFRESH_EVERY_S = 60
 # tools and the small model keep that one turn cheap. The prompt comes first because
 # `--tools` takes a list.
 REFRESH_CMD = [
-    CLAUDE_CLI, "-p", "ok", "--model", "haiku", "--no-session-persistence", "--tools", "",
+    CLAUDE_CLI,
+    "-p",
+    "ok",
+    "--model",
+    "haiku",
+    "--no-session-persistence",
+    "--tools",
+    "",
 ]
 _last_refresh = -float(REFRESH_EVERY_S)
 PROTOCOL_VERSION = 1
@@ -188,18 +195,28 @@ def access_token() -> str:
             log("access token near expiry; asking the CLI to refresh it")
             old_expiry = oauth.get("expiresAt", 0)
             try:
+                # DEVNULL: the bridge's stdin is the ACP pipe, and the CLI waits on it.
                 done = subprocess.run(
-                    REFRESH_CMD, capture_output=True, timeout=CLI_TIMEOUT_S, check=False
+                    REFRESH_CMD,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=CLI_TIMEOUT_S,
+                    check=False,
                 )
-                code, err = done.returncode, done.stderr[:300].decode(errors="replace")
+                code = done.returncode
+                err = done.stderr[:300].decode(errors="replace")
+                out = done.stdout[:300].decode(errors="replace")
             except (OSError, subprocess.TimeoutExpired) as exc:
-                code, err = "error", type(exc).__name__
+                code, err, out = "error", type(exc).__name__, ""
             oauth = _read_login()
             new_expiry = oauth.get("expiresAt", 0)
             if new_expiry > old_expiry:
                 log(f"token refreshed: expiresAt {old_expiry} -> {new_expiry}")
             else:
-                log(f"token refresh did not move expiresAt {old_expiry}; CLI exit {code}, stderr: {err!r}")
+                log(
+                    f"token refresh did not move expiresAt {old_expiry}; CLI exit {code}, "
+                    f"stderr: {err!r}, stdout: {out!r}"
+                )
         if oauth.get("expiresAt", 0) / 1000 < time.time():
             raise RuntimeError(
                 "the Claude Code login has expired; run `claude` once to refresh it"
@@ -2571,7 +2588,7 @@ def self_check() -> None:
     # (the refresh works), one does not (the bridge logs the CLI's exit code and stderr).
     real_home, real_read = os.environ.get("HOME"), globals()["_read_login"]
     real_cmd, real_log = globals()["REFRESH_CMD"], globals()["log"]
-    real_mono, real_last = time.monotonic, globals()["_last_refresh"]
+    real_last = globals()["_last_refresh"]
     with tempfile.TemporaryDirectory() as home:
         creds = Path(home, ".claude", ".credentials.json")
         creds.parent.mkdir()
@@ -2579,9 +2596,7 @@ def self_check() -> None:
 
         def fake_cli(name: str, body: str) -> list[str]:
             script = Path(home, name)
-            script.write_text(
-                "#!/bin/sh\n" + body.replace("CREDS", str(creds)) + "\n"
-            )
+            script.write_text("#!/bin/sh\n" + body.replace("CREDS", str(creds)) + "\n")
             script.chmod(0o755)
             return [str(script), "-p", "ok"]
 
@@ -2590,7 +2605,7 @@ def self_check() -> None:
             'printf \'{"claudeAiOauth":{"accessToken":"rotated","expiresAt":%s}}\' '
             f"{near + 3_600_000} > CREDS",
         )
-        stuck = fake_cli("stuck", "echo 'login required' >&2; exit 3")
+        stuck = fake_cli("stuck", "echo 'Not logged in'; echo 'login required' >&2; exit 3")
         os.environ["HOME"] = home
         globals()["_read_login"] = lambda: json.loads(creds.read_text())["claudeAiOauth"]
         lines: list[str] = []
@@ -2610,7 +2625,9 @@ def self_check() -> None:
                     # the log names the failure.
                     assert access_token() == "old", lines
                     failed = [line for line in lines if "did not move" in line]
-                    assert failed and "exit 3" in failed[0] and "login required" in failed[0], lines
+                    assert failed and all(
+                        want in failed[0] for want in ("exit 3", "login required", "Not logged in")
+                    ), lines
         finally:
             globals()["REFRESH_CMD"], globals()["_last_refresh"] = real_cmd, real_last
             globals()["_read_login"], globals()["log"] = real_read, real_log
