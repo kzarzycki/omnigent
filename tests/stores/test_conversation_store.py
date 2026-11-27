@@ -3677,8 +3677,6 @@ def test_rebind_stamps_previous_binding_so_seed_names_the_old_host(
 
     stamp_seed_origin(conversation_store, conv.id, old_host, "/old/repo")
     conversation_store.clear_host_binding(conv.id, keep_runner=True)
-    # The managed-move path clears, then rebinds: no previous host to stamp.
-    stamp_seed_origin(conversation_store, conv.id, None, None)
     conversation_store.set_host_id(conv.id, new_host, "/new/repo")
 
     moved = conversation_store.get_conversation(conv.id)

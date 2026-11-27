@@ -3388,6 +3388,23 @@ def test_seeded_origin_prefers_move_stamp_over_current_binding() -> None:
     assert claude_native._origin_from_session_record(None) == {"host": None, "cwd": None}
 
 
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {"omnigent.seed_origin.host": "", "omnigent.seed_origin.cwd": ""},
+        {"omnigent.seed_origin.host": "", "omnigent.seed_origin.cwd": "/kept"},
+        {"omnigent.seed_origin.cwd": "/kept"},
+    ],
+)
+def test_seeded_origin_stamp_is_authoritative_even_when_empty(labels: dict[str, str]) -> None:
+    """An unknown part of a stamp stays null; it never falls back to the new binding."""
+    origin = claude_native._origin_from_session_record(
+        {"host_id": "host_new", "workspace": "/new", "labels": labels}
+    )
+    assert origin["host"] is None
+    assert origin["cwd"] == (labels.get("omnigent.seed_origin.cwd") or None)
+
+
 @pytest.mark.asyncio
 async def test_fork_seed_origin_reads_the_source_session() -> None:
     """A fork's own row is bound to the new host, so its origin is the source's binding."""

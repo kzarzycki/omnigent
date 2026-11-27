@@ -646,6 +646,67 @@ async def test_launch_runner_rolls_back_worktree_on_launch_failure(
     )
 
 
+_OLD_HOST_ID = "a" * 32
+_STAMP_HOST = "omnigent.seed_origin.host"
+_STAMP_CWD = "omnigent.seed_origin.cwd"
+
+
+async def test_cross_host_launch_stamps_the_previous_binding(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A launch that moves a bound session records the host and workspace it left."""
+    register_host(launch_status="launched")
+    session_id = await _bare_session(client, "stamp-cross-host")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(session_id, _OLD_HOST_ID, "/old/repo")
+
+    resp = await _launch(client, session_id)
+
+    assert resp.status_code == 200, resp.text
+    conv = store.get_conversation(session_id)
+    assert conv is not None and conv.host_id == _HOST_ID
+    assert conv.labels[_STAMP_HOST] == _OLD_HOST_ID
+    assert conv.labels[_STAMP_CWD] == "/old/repo"
+
+
+async def test_first_launch_stamps_an_unknown_origin(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A never-bound session has no previous host: the stamp is empty, never the new host."""
+    register_host(launch_status="launched")
+    session_id = await _bare_session(client, "stamp-first-launch")
+
+    resp = await _launch(client, session_id)
+
+    assert resp.status_code == 200, resp.text
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+    assert conv is not None
+    assert (conv.labels[_STAMP_HOST], conv.labels[_STAMP_CWD]) == ("", "")
+
+
+async def test_failed_cross_host_launch_leaves_no_stamp(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A launch that fails and rolls back restores the stamp it found (none here)."""
+    register_host(launch_status="failed")
+    session_id = await _bare_session(client, "stamp-failed-launch")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(session_id, _OLD_HOST_ID, "/old/repo")
+
+    resp = await _launch(client, session_id)
+
+    assert resp.status_code == 502, resp.text
+    conv = store.get_conversation(session_id)
+    assert conv is not None
+    assert _STAMP_HOST not in conv.labels and _STAMP_CWD not in conv.labels
+
+
 async def test_launch_runner_retry_succeeds_after_failed_launch(
     register_host: RegisterHost,
     client: httpx.AsyncClient,

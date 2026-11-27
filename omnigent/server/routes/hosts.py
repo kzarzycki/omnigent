@@ -1500,24 +1500,11 @@ def create_hosts_router(
             elif host_profile is None:
                 await asyncio.to_thread(conversation_store.clear_host_binding, body.session_id)
             try:
-                from omnigent.stores.conversation_store import (
-                    SEED_ORIGIN_CWD_LABEL_KEY,
-                    SEED_ORIGIN_HOST_LABEL_KEY,
-                )
+                from omnigent.server.routes._sessions.helpers import restore_seed_origin
 
-                # Put the seed-origin stamp back to what it was before this attempt.
-                for stamp_key in (SEED_ORIGIN_HOST_LABEL_KEY, SEED_ORIGIN_CWD_LABEL_KEY):
-                    previous_stamp = target.conv.labels.get(stamp_key)
-                    if previous_stamp is None:
-                        await asyncio.to_thread(
-                            conversation_store.delete_label, body.session_id, stamp_key
-                        )
-                    else:
-                        await asyncio.to_thread(
-                            conversation_store.set_labels,
-                            body.session_id,
-                            {stamp_key: previous_stamp},
-                        )
+                await asyncio.to_thread(
+                    restore_seed_origin, conversation_store, body.session_id, target.conv.labels
+                )
                 if worktree is not None or (body.git is not None and body.git.existing_worktree):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 

@@ -13543,9 +13543,11 @@ def stamp_seed_origin(
     """
     Record the host and workspace a session is about to leave.
 
-    Called before a server-driven move rebinds the session, while the old
-    binding is still readable. A session with no previous host or workspace
-    (never bound, or already cleared) is left alone so an earlier stamp survives.
+    Called around a server-driven rebind, while the old binding is still
+    readable. Always writes both keys: an empty value means "unknown" (the
+    session had no host or no workspace), so the seed names null instead of
+    falling back to the new binding. A brand-new session's first launch stamps
+    two empty values, which is right: it has no history to attribute.
 
     :param conversation_store: Store holding the session's labels.
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
@@ -13557,9 +13559,35 @@ def stamp_seed_origin(
         SEED_ORIGIN_HOST_LABEL_KEY,
     )
 
-    if not host_id or not workspace:
-        return
     conversation_store.set_labels(
         session_id,
-        {SEED_ORIGIN_HOST_LABEL_KEY: host_id, SEED_ORIGIN_CWD_LABEL_KEY: workspace},
+        {
+            SEED_ORIGIN_HOST_LABEL_KEY: host_id or "",
+            SEED_ORIGIN_CWD_LABEL_KEY: workspace or "",
+        },
     )
+
+
+def restore_seed_origin(
+    conversation_store: Any, session_id: str, previous_labels: dict[str, str]
+) -> None:
+    """
+    Put the seed-origin stamp back to what it was before a failed move.
+
+    :param conversation_store: Store holding the session's labels.
+    :param session_id: Omnigent session id.
+    :param previous_labels: The session's labels before the attempt.
+    """
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    for key in (SEED_ORIGIN_HOST_LABEL_KEY, SEED_ORIGIN_CWD_LABEL_KEY):
+        previous = previous_labels.get(key)
+        if previous is None:
+            # The move may have failed before it stamped anything.
+            with contextlib.suppress(Exception):
+                conversation_store.delete_label(session_id, key)
+        else:
+            conversation_store.set_labels(session_id, {key: previous})

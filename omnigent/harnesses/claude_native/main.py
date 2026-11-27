@@ -6338,8 +6338,12 @@ def _origin_from_session_record(record: _JsonObject | None) -> _JsonObject:
     record = record or {}
     labels = record.get("labels")
     labels = labels if isinstance(labels, dict) else {}
-    host = labels.get(SEED_ORIGIN_HOST_LABEL_KEY) or record.get("host_id")
-    cwd = labels.get(SEED_ORIGIN_CWD_LABEL_KEY) or record.get("workspace")
+    if SEED_ORIGIN_HOST_LABEL_KEY in labels or SEED_ORIGIN_CWD_LABEL_KEY in labels:
+        # A stamp is authoritative even when empty (origin unknown): no per-field
+        # fallback to the current binding, which is the destination.
+        host, cwd = labels.get(SEED_ORIGIN_HOST_LABEL_KEY), labels.get(SEED_ORIGIN_CWD_LABEL_KEY)
+    else:
+        host, cwd = record.get("host_id"), record.get("workspace")
     return {
         "host": host if isinstance(host, str) and host else None,
         "cwd": cwd if isinstance(cwd, str) and cwd else None,
@@ -6392,7 +6396,11 @@ async def _fetch_seeded_origin(
         source_id = labels.get(FORK_SOURCE_LABEL_KEY)
         if SEED_ORIGIN_HOST_LABEL_KEY not in labels and isinstance(source_id, str) and source_id:
             # A fork's own row is bound to the new host; its history ran on the source's.
-            return _origin_from_session_record(await _get_session_record(client, source_id))
+            source = await _get_session_record(client, source_id)
+            # The source's current binding, not its own move stamp.
+            return _origin_from_session_record(
+                {k: source[k] for k in ("host_id", "workspace") if source and k in source}
+            )
     return _origin_from_session_record(session_record)
 
 
