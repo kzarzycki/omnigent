@@ -83,7 +83,7 @@ describe("ToolValueView", () => {
       "Follow-up to [#11607](<https://github.com/omnigent-ai/omnigent/pull/11607>).\n\n1. Show counts";
     const container = renderValue({ identifier: "OMNI-13632", description });
     const prose = screen.getByTestId("tool-prose-value");
-    const link = await screen.findByRole("link", { name: "#11607" });
+    const link = await screen.findByRole("link", { name: "omnigent#11607" });
     expect(prose.contains(link)).toBe(true);
     expect(link).toHaveAttribute("href", "https://github.com/omnigent-ai/omnigent/pull/11607");
     expect(prose.textContent).not.toContain("](");

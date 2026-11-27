@@ -4,8 +4,9 @@
 
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "zustand";
-import { XIcon } from "lucide-react";
-import { useNavigate } from "@/lib/routing";
+import { LocateFixedIcon, XIcon } from "lucide-react";
+import { isSearchTimeout } from "@/hooks/useConversations";
+import { useNavigate, useParams } from "@/lib/routing";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,7 +19,8 @@ import {
 } from "@/components/ui/quick-pick";
 import { occurrenceRanges } from "@/components/ui/quick-pick/match";
 import { usePaletteCommandsStore } from "@/store/paletteCommands";
-import { useAppCommands } from "./appCommands";
+import { type ActionCommand, useAppCommands } from "./appCommands";
+import { requestRevealSessionInSidebar } from "./sidebarReveal";
 import { SESSION_SWITCHER, useQuickPickAppCommands } from "./quickPickAppCommands";
 import type { CommandPaletteProps } from "./CommandPalette";
 import {
@@ -39,6 +41,14 @@ import { PaletteSessionContext } from "./PaletteSessionContext";
 import type { PaletteTarget as PaletteRow } from "./paletteTarget";
 import { useSettingChoicesPage } from "./settingChoicesPage";
 import { type PaletteSession, usePaletteSessionSearch } from "./usePaletteSessionSearch";
+
+// Page-opening actions, which close the mobile sidebar drawer like a session pick.
+const ACTION_PATHS: Readonly<Record<string, string>> = {
+  "new-chat": "/",
+  "go-inbox": "/inbox",
+  "go-tasks": "/tasks",
+  "go-settings": "/settings",
+};
 
 const COMMAND_HISTORY_KEY = "command-palette:commands";
 
@@ -86,18 +96,43 @@ export function QuickPickCommandPalette({
   onToggleLeftSidebar,
   onToggleRightSidebar,
   rightSidebarShortcutEnabled = true,
+  onCloseSidebar,
   onGoToSession,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { conversationId } = useParams<{ conversationId: string }>();
   const isMobile = useIsMobileViewport();
+  // On mobile the sidebar is a drawer over the chat, so leave it closed behind the page a
+  // pick opens; the docked desktop sidebar keeps its state.
+  const go = (path: string): void => {
+    if (isMobile) onCloseSidebar?.(path);
+    navigate(path);
+  };
   const search = usePaletteSessionSearch({ open, sessionsOnly });
   const { query, debouncedQuery, titleSearch, contentSearch } = search;
   const close = (): void => onOpenChange(false);
-  const actions = useAppCommands({
+  const appActions = useAppCommands({
     onToggleLeftSidebar,
     onToggleRightSidebar,
     rightSidebarShortcutEnabled,
   });
+  const actions: ActionCommand[] = [
+    ...appActions.map((command) => {
+      const path = ACTION_PATHS[command.id];
+      return path === undefined ? command : { ...command, run: () => go(path) };
+    }),
+    ...(conversationId
+      ? [
+          {
+            id: "reveal-in-sidebar",
+            label: "Show current session in sidebar",
+            icon: LocateFixedIcon,
+            keywords: ["locate", "find", "reveal", "scroll", "highlight", "where"],
+            run: () => requestRevealSessionInSidebar(conversationId),
+          },
+        ]
+      : []),
+  ];
   const featureGroups = usePaletteCommandsStore((state) => state.groups);
   const context = useCommandContext();
   // Only an open palette follows focus between regions; a closed one skips those renders.
@@ -176,7 +211,12 @@ export function QuickPickCommandPalette({
     ),
     // Sessions list by their own activity; the history holds commands only.
     rememberInHistory: false,
-    value: { kind: "session", id: session.id },
+    // A content match opens the chat's find bar on that query.
+    value: {
+      kind: "session",
+      id: session.id,
+      findQuery: session.snippet ? debouncedQuery : undefined,
+    },
   });
   const showMoreItem = (
     scope: "title" | "content",
@@ -316,11 +356,13 @@ export function QuickPickCommandPalette({
       return undefined;
     }
     search.rememberSearchRow(row.id);
-    navigate(`/c/${row.id}`);
+    go(row.findQuery ? `/c/${row.id}?find=${encodeURIComponent(row.findQuery)}` : `/c/${row.id}`);
     return undefined;
   };
 
   const label = sessionsOnly ? "Switch session" : "Command palette";
+  const searchTimedOut =
+    searching && [titleSearch, contentSearch].some((group) => isSearchTimeout(group.error));
   const loadingSessions = sessionsOnly && search.isFetching;
   const loadStatus =
     search.loadError || loadingSessions ? (
@@ -329,7 +371,9 @@ export function QuickPickCommandPalette({
           {search.loadError
             ? search.loadMoreError
               ? "Couldn't load more sessions."
-              : "Couldn't load sessions."
+              : searchTimedOut
+                ? "Search took too long. Try a longer or more specific word."
+                : "Couldn't load sessions."
             : "Loading sessions…"}
         </span>
         {search.loadError && (

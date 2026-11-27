@@ -124,7 +124,7 @@ describe("find in chat reveals collapsed content", () => {
   it("opens only the reasoning section for a reasoning match", () => {
     const items = toolTurn.map((item) =>
       item.id === "rs_1"
-        ? { ...item, summary: [{ type: "summary_text", text: "think zorblat" }] }
+        ? { ...item, summary: [{ type: "summary_text", text: "headline\n\nthink zorblat" }] }
         : item,
     ) as ConversationItem[];
     const reveal = { anchor: "resp_1", itemIds: ["rs_1"], query: "zorblat" };
@@ -269,7 +269,7 @@ describe("find in chat reveals each collapsible card", () => {
     const reasoning = (reveal?: "current") => (
       <TooltipProvider>
         <ReasoningView
-          text="zorblat thought"
+          text={"headline\n\nzorblat thought"}
           isStreaming={false}
           duration={2}
           findReveal={reveal}

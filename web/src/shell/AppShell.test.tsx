@@ -2679,7 +2679,7 @@ describe("Workspace rail maximize", () => {
       const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
         ...baseMatchMedia(query),
         matches:
-          viewport === "desktop" ? query === "(min-width: 768px)" : query.includes("max-width"),
+          viewport === "desktop" ? query === "(min-width: 1181px)" : query.includes("max-width"),
       }));
       onTestFinished(() => matchMedia.mockRestore());
       mockConversations([

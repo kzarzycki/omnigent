@@ -411,7 +411,7 @@ describe("CommandPalette — sessions", () => {
       act(() => {
         vi.advanceTimersByTime(300);
       });
-      expect(screen.getByRole("status").textContent).toContain("Search took too long.");
+      expect(announced()).toContain("Search took too long.");
     } finally {
       vi.useRealTimers();
     }

@@ -3,7 +3,7 @@ import type { PaletteCommandRow } from "./paletteCommandRows";
 
 /** What accepting a ⌘K row does: open a session, run a command, or pick on a command's page. */
 export type PaletteTarget =
-  | { kind: "session"; id: string }
+  | { kind: "session"; id: string; findQuery?: string }
   | { kind: "action"; action: ActionCommand }
   | PaletteCommandRow
   /** A session group's paging row; the selection parks on `lastRowId` while more load. */
