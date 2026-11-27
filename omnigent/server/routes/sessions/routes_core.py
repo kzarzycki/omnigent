@@ -238,6 +238,7 @@ from omnigent.server.routes._sessions.helpers import (
     _validated_cost_control_mode_override,
     _validated_subagent_routing_override,
     reconcile_orphaned_running_status,
+    stamp_seed_origin,
 )
 from omnigent.server.routes._sessions.orchestration import (
     HOST_OFFLINE_HOLD_S,
@@ -5907,6 +5908,14 @@ def register_core_routes(
         async def detach_old_host() -> None:
             # Runs once the launch is visible to message handling, so a message
             # sent from now on waits for the sandbox instead of being dropped.
+            await _settled_write(
+                session_id,
+                stamp_seed_origin,
+                conversation_store,
+                session_id,
+                previous_host_id,
+                previous_workspace,
+            )
             cleared = await _settled_write(
                 session_id,
                 conversation_store.clear_host_binding,

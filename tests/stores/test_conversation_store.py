@@ -3659,6 +3659,35 @@ def test_runner_host_rebind_does_not_bump_updated_at(
     )
 
 
+def test_rebind_stamps_previous_binding_so_seed_names_the_old_host(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    After a move rebinds the session, the seed origin is the old host, not the new.
+
+    The row's ``host_id``/``workspace`` name the destination by the time the
+    runner seeds, so the origin must come from the stamp written before the rebind.
+    """
+    from omnigent.harnesses.claude_native.main import _origin_from_session_record
+    from omnigent.server.routes._sessions.helpers import stamp_seed_origin
+
+    old_host, new_host = "a" * 32, "b" * 32
+    conv = conversation_store.create_conversation()
+    conversation_store.set_host_id(conv.id, old_host, "/old/repo")
+
+    stamp_seed_origin(conversation_store, conv.id, old_host, "/old/repo")
+    conversation_store.clear_host_binding(conv.id, keep_runner=True)
+    # The managed-move path clears, then rebinds: no previous host to stamp.
+    stamp_seed_origin(conversation_store, conv.id, None, None)
+    conversation_store.set_host_id(conv.id, new_host, "/new/repo")
+
+    moved = conversation_store.get_conversation(conv.id)
+    assert moved is not None
+    record = {"host_id": moved.host_id, "workspace": moved.workspace, "labels": moved.labels}
+    assert record["host_id"] == new_host
+    assert _origin_from_session_record(record) == {"host": old_host, "cwd": "/old/repo"}
+
+
 # ── sort_by=updated_at ────────────────────────────────
 
 

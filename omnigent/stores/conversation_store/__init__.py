@@ -45,6 +45,14 @@ if TYPE_CHECKING:
 # the SQLAlchemy store both import it.
 FORK_SOURCE_LABEL_KEY = "omnigent.fork.source_id"
 
+# Where a session's history last ran before a server-driven move rebound it:
+# the previous host id and workspace, stamped just before the rebind. The
+# claude-native resume seed writes them into each seeded transcript record's
+# ``omnigentSeeded`` marker. Overwritten on every move (a session moved twice
+# names the intermediate host, not the first), absent on a never-moved session.
+SEED_ORIGIN_HOST_LABEL_KEY = "omnigent.seed_origin.host"
+SEED_ORIGIN_CWD_LABEL_KEY = "omnigent.seed_origin.cwd"
+
 # One-shot fork directive: the SOURCE session's runtime-native session id
 # (e.g. the source claude-native Claude Code session uuid), stamped on the
 # clone at fork time when the source had one. A native harness launching

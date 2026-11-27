@@ -5673,6 +5673,7 @@ async def _resolve_cold_resume_args(
         workspace=Path.cwd().resolve(),
         bridge_dir=bridge_dir_for_bridge_id(labels.get(BRIDGE_ID_LABEL_KEY) or session_id),
         resume_copy=resume_session_id != external_session_id,
+        session_record=payload if isinstance(payload, dict) else None,
     )
     if transcript is None:
         # No resumable records: ``claude --resume`` against an empty (or
@@ -5754,6 +5755,7 @@ async def _ensure_local_claude_resume_transcript(
     workspace: Path,
     bridge_dir: Path | None = None,
     resume_copy: bool = False,
+    session_record: _JsonObject | None = None,
 ) -> Path | None:
     """
     Refresh Claude Code's local JSONL transcript for cold resume.
@@ -5781,6 +5783,8 @@ async def _ensure_local_claude_resume_transcript(
     :param bridge_dir: Launch bridge path identifying the attachment cache.
         Defaults to the legacy session-id bridge when omitted.
     :param resume_copy: Mark a temporary native copy so local import excludes it.
+    :param session_record: The session's ``GET /v1/sessions/{id}`` body when the
+        caller already holds it, so the origin marker needs no second read.
     :returns: Path to the local transcript that was written; ``None`` if
         *external_session_id* is not a safe transcript stem, or if the AP
         history yields no resumable records (an empty transcript would make
@@ -5831,7 +5835,7 @@ async def _ensure_local_claude_resume_transcript(
         external_session_id=external_session_id,
         cwd=current,
         bridge_dir=bridge_dir or bridge_dir_for_conversation_id(session_id),
-        seeded_origin=await _fetch_seeded_origin(client, session_id),
+        seeded_origin=await _fetch_seeded_origin(client, session_id, session_record),
     )
     # Empty transcript → ``claude --resume`` exits fatally ("No conversation
     # found"), killing the terminal-as-agent. Return None so the caller
@@ -6083,6 +6087,7 @@ def _claude_transcript_records_from_session_items(
                             "trigger": "auto",
                             "postTokens": item.get("token_count"),
                         },
+                        "omnigentSeeded": _seeded_marker(item, seeded_origin),
                     }
                 )
                 parent_uuid = boundary_uuid
@@ -6310,25 +6315,85 @@ def _seeded_marker(item: _JsonObject, seeded_origin: _JsonObject | None) -> _Jso
     }
 
 
-async def _fetch_seeded_origin(client: httpx.AsyncClient, session_id: str) -> _JsonObject:
+_SEEDED_ORIGIN_TIMEOUT = httpx.Timeout(5.0)
+
+
+def _origin_from_session_record(record: _JsonObject | None) -> _JsonObject:
     """
-    Best-effort read of the session's recorded host and workspace.
+    Read the origin host and cwd a session record names.
+
+    The move stamp (``SEED_ORIGIN_*`` labels) wins: a server-driven move has
+    already rebound ``host_id``/``workspace`` to the new host by the time the
+    runner seeds, so those fields would name the destination. With no stamp
+    the session never moved, so its current host and workspace are the origin.
+
+    :param record: ``GET /v1/sessions/{id}`` body, or ``None``.
+    :returns: ``{"host": ..., "cwd": ...}``; values are ``None`` when unknown.
+    """
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    record = record or {}
+    labels = record.get("labels")
+    labels = labels if isinstance(labels, dict) else {}
+    host = labels.get(SEED_ORIGIN_HOST_LABEL_KEY) or record.get("host_id")
+    cwd = labels.get(SEED_ORIGIN_CWD_LABEL_KEY) or record.get("workspace")
+    return {
+        "host": host if isinstance(host, str) and host else None,
+        "cwd": cwd if isinstance(cwd, str) and cwd else None,
+    }
+
+
+async def _get_session_record(client: httpx.AsyncClient, session_id: str) -> _JsonObject | None:
+    """Best-effort bounded read of one session record; ``None`` on any failure."""
+    try:
+        resp = await client.get(
+            f"/v1/sessions/{url_component(session_id)}",
+            params={"include_usage": "false"},
+            timeout=_SEEDED_ORIGIN_TIMEOUT,
+        )
+        return _json_object(resp.json()) if resp.status_code < 400 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def _fetch_seeded_origin(
+    client: httpx.AsyncClient,
+    session_id: str,
+    session_record: _JsonObject | None = None,
+) -> _JsonObject:
+    """
+    Work out where a session's history originally ran.
+
+    Never returns the new host as the origin of moved history: a moved session
+    names its stamped previous binding, a fork names its source session, and
+    anything unknown stays ``None``.
+
+    ponytail: one stamp per session, overwritten on each move, so a session
+    moved twice names the intermediate host; a fork names the source's
+    binding at seed time.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Omnigent conversation id.
-    :returns: ``{"host": ..., "cwd": ...}``; values are ``None`` when unavailable.
+    :param session_record: Already-fetched session body, to skip the read.
+    :returns: ``{"host": ..., "cwd": ...}``.
     """
-    try:
-        resp = await client.get(f"/v1/sessions/{session_id}")
-        payload = _json_object(resp.json()) if resp.status_code < 400 else None
-    except (httpx.HTTPError, ValueError):
-        payload = None
-    payload = payload or {}
-    host, workspace = payload.get("host_id"), payload.get("workspace")
-    return {
-        "host": host if isinstance(host, str) else None,
-        "cwd": workspace if isinstance(workspace, str) else None,
-    }
+    from omnigent.stores.conversation_store import (
+        FORK_SOURCE_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    if session_record is None:
+        session_record = await _get_session_record(client, session_id)
+    labels = (session_record or {}).get("labels")
+    if isinstance(labels, dict):
+        source_id = labels.get(FORK_SOURCE_LABEL_KEY)
+        if SEED_ORIGIN_HOST_LABEL_KEY not in labels and isinstance(source_id, str) and source_id:
+            # A fork's own row is bound to the new host; its history ran on the source's.
+            return _origin_from_session_record(await _get_session_record(client, source_id))
+    return _origin_from_session_record(session_record)
 
 
 def _transcript_items_equal_ignoring_envelope(

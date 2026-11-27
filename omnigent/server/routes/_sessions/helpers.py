@@ -13535,3 +13535,31 @@ __all__ = [
     "cancel_managed_launch_tasks",
     "prefetch_session_routing_catalogs",
 ]
+
+
+def stamp_seed_origin(
+    conversation_store: Any, session_id: str, host_id: str | None, workspace: str | None
+) -> None:
+    """
+    Record the host and workspace a session is about to leave.
+
+    Called before a server-driven move rebinds the session, while the old
+    binding is still readable. A session with no previous host or workspace
+    (never bound, or already cleared) is left alone so an earlier stamp survives.
+
+    :param conversation_store: Store holding the session's labels.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :param host_id: Host the session currently runs on, or ``None``.
+    :param workspace: Its workspace on that host, or ``None``.
+    """
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    if not host_id or not workspace:
+        return
+    conversation_store.set_labels(
+        session_id,
+        {SEED_ORIGIN_HOST_LABEL_KEY: host_id, SEED_ORIGIN_CWD_LABEL_KEY: workspace},
+    )

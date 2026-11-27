@@ -1500,6 +1500,24 @@ def create_hosts_router(
             elif host_profile is None:
                 await asyncio.to_thread(conversation_store.clear_host_binding, body.session_id)
             try:
+                from omnigent.stores.conversation_store import (
+                    SEED_ORIGIN_CWD_LABEL_KEY,
+                    SEED_ORIGIN_HOST_LABEL_KEY,
+                )
+
+                # Put the seed-origin stamp back to what it was before this attempt.
+                for stamp_key in (SEED_ORIGIN_HOST_LABEL_KEY, SEED_ORIGIN_CWD_LABEL_KEY):
+                    previous_stamp = target.conv.labels.get(stamp_key)
+                    if previous_stamp is None:
+                        await asyncio.to_thread(
+                            conversation_store.delete_label, body.session_id, stamp_key
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            conversation_store.set_labels,
+                            body.session_id,
+                            {stamp_key: previous_stamp},
+                        )
                 if worktree is not None or (body.git is not None and body.git.existing_worktree):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 
@@ -1694,6 +1712,19 @@ def create_hosts_router(
                 if bound is not None:
                     await asyncio.to_thread(
                         _drop_claude_launch_args_from_another_host, conversation_store, bound
+                    )
+                if target.conv.host_id != host_id or target.conv.workspace != workspace:
+                    from omnigent.server.routes._sessions.helpers import stamp_seed_origin
+
+                    # Stamped after the rebind lands, so a failed one leaves no stamp.
+                    # ponytail: only the latest previous binding is kept, so a
+                    # session moved twice names the intermediate host.
+                    await asyncio.to_thread(
+                        stamp_seed_origin,
+                        conversation_store,
+                        body.session_id,
+                        target.conv.host_id,
+                        target.conv.workspace,
                     )
 
             persist_task = asyncio.create_task(persist_binding())
