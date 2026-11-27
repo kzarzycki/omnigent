@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import weakref
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -1954,6 +1955,44 @@ def _publish_elicitation_resolved_to_ancestors(
                 resolved_by=resolved_by,
                 choices=choices,
             )
+
+
+@restart_on_stale_cursor
+def _descendant_sessions(
+    conv_store: ConversationStore,
+    session_id: str,
+) -> list[Conversation]:
+    """
+    Return descendant sub-agent conversations for a session.
+
+    :param conv_store: Store used to list conversations.
+    :param session_id: Ancestor session id, e.g. ``"conv_root123"``.
+    :returns: Sub-agent conversations below ``session_id``. Empty
+        for sessions with no descendants.
+    """
+    descendants: list[Conversation] = []
+    queue: deque[str] = deque([session_id])
+    seen = {session_id}
+    while queue:
+        parent_id = queue.popleft()
+        after: str | None = None
+        while True:
+            page = conv_store.list_conversations(
+                kind="sub_agent",
+                parent_conversation_id=parent_id,
+                limit=100,
+                after=after,
+            )
+            for child in page.data:
+                if child.id in seen:
+                    continue
+                seen.add(child.id)
+                descendants.append(child)
+                queue.append(child.id)
+            if not page.has_more or page.last_id is None:
+                break
+            after = page.last_id
+    return descendants
 
 
 def _pending_elicitation_snapshot_for_session(
@@ -11812,8 +11851,6 @@ def _inherited_parent_permission_launch_args(
         return None
 
 
-
-
 def _spec_declares_stance(spec: AgentSpec) -> bool:
     """Whether the spec names a permission mode or a ``yolo`` flag, whatever its harness."""
     config = spec.executor.config
@@ -13730,6 +13767,7 @@ __all__ = [
     "_delete_session_tree_files",
     "_delete_stored_session_bundle_after_failure",
     "_derive_terminal_launch_args_from_spec",
+    "_descendant_sessions",
     "_devin_subagent_display_tool",
     "_devin_subagent_labels_from_body",
     "_discovery_key",
