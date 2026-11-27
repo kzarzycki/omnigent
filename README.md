@@ -631,6 +631,34 @@ until it idles out (`runner.idle_timeout_s`). The daemon reads the key when it
 starts, and refuses to start when the value is not `true` or `false`.
 `omnigent host stop` always ends the runners.
 
+#### Host capabilities
+
+A host can declare what its machine has, so a session start can ask for it. A
+capability is a lowercase namespaced tag, with no version and no value:
+
+| Namespace | Meaning | Example |
+|---|---|---|
+| `os:` | Operating system; the host adds it itself | `os:macos`, `os:linux`, `os:windows` |
+| `tool:` | A toolchain installed on the machine | `tool:xcode` |
+| `device:` | A device attached to the machine | `device:iphone-15` |
+| `login:` | A signed-in account the machine holds | `login:browser` |
+
+Set the others in `~/.omnigent/config.yaml`; the daemon reads them when it
+connects and ignores the key, with a warning, when a tag is malformed:
+
+```yaml
+host:
+  capabilities: [tool:xcode, device:iphone-15]
+```
+
+`GET /v1/hosts` returns each host's `capabilities`; `null` means no report yet,
+not "has nothing". `POST /v1/sessions` takes `needs`, a list of tags, together
+with `host_id`. A host qualifies when `needs` is a subset of its capabilities;
+otherwise the start is refused with `invalid_input`, naming the missing tags. A
+start with no `needs` behaves as before. A cloud sandbox kind declares its own
+set in `cloud_kind_capabilities` of `GET /v1/info`, e.g.
+`{"claude-cloud": ["os:linux"]}`.
+
 > [!TIP]
 > On your own network you don't need a deploy. Open your machine's LAN
 > address on your phone (e.g. `http://192.168.x.x:6767`).

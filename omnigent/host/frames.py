@@ -349,6 +349,10 @@ class HostHelloFrame:
     :param interactive_shells: Ordered interactive shells installed on this
         machine, with its login shell first. ``None`` means an older host did
         not report an inventory.
+    :param host_capabilities: Namespaced tags for what this machine has, e.g.
+        ``["os:macos", "tool:xcode"]`` (see ``omnigent.host_capabilities``). Not
+        the build tokens in ``capabilities``. ``None`` means an older host did not
+        report any.
     :param capabilities: Optional build-capability tokens this host advertises
         (see ``HOST_CAPABILITIES`` / ``CAP_*``). Empty from an older host that
         predates a given capability, so the server treats absence as "not
@@ -375,6 +379,7 @@ class HostHelloFrame:
     harness_accounts: HarnessAccounts | None = None
     gateway_inference: dict[str, bool] | None = None
     interactive_shells: list[str] | None = None
+    host_capabilities: list[str] | None = None
     telemetry_opt_out: bool = False
     installation_id: str | None = None
     capabilities: list[str] = field(default_factory=list)
@@ -1909,6 +1914,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "harness_accounts": frame.harness_accounts,
                 "gateway_inference": frame.gateway_inference,
                 "interactive_shells": frame.interactive_shells,
+                "host_capabilities": frame.host_capabilities,
                 "telemetry_opt_out": frame.telemetry_opt_out,
                 "installation_id": frame.installation_id,
                 "capabilities": list(frame.capabilities),
@@ -3156,6 +3162,11 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         interactive_shells=(
             _optional_str_list(msg, "interactive_shells")
             if msg.get("interactive_shells") is not None
+            else None
+        ),
+        host_capabilities=(
+            _optional_str_list(msg, "host_capabilities")
+            if msg.get("host_capabilities") is not None
             else None
         ),
         telemetry_opt_out=bool(msg.get("telemetry_opt_out", False)),

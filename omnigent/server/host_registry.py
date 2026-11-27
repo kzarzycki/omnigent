@@ -56,6 +56,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.host.harness_startup import HarnessStartup
+from omnigent.host_capabilities import normalize_capability_tags
 from omnigent.runner.transports.ws_tunnel.diagnostics import OutboundFrame, TunnelDiagnostics
 from omnigent.server.feature_flags import FeatureFlags, McpDisabledServersGate, active_harnesses
 
@@ -687,6 +688,7 @@ class HostRegistry:
         # server re-learns it from the reconnect handshake.
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
+        self._host_capabilities: dict[str, list[str]] = {}
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
@@ -809,6 +811,12 @@ class HostRegistry:
                 )
             else:
                 self._interactive_shells.pop(host_id, None)
+            if hello.host_capabilities is not None:
+                self._host_capabilities[host_id] = normalize_capability_tags(
+                    hello.host_capabilities
+                )
+            else:
+                self._host_capabilities.pop(host_id, None)
         return conn
 
     def deregister(
@@ -999,6 +1007,16 @@ class HostRegistry:
         with self._lock:
             reported = self._gateway_inference.get(_canonical_host_id(host_id))
         return dict(reported) if reported is not None else None
+
+    def host_capabilities(self, host_id: str) -> list[str] | None:
+        """Return the capability tags last reported by *host_id*.
+
+        ``None`` when this replica has no report (an older host, or the tunnel is
+        on another replica); readers treat that as "unknown", not "none".
+        """
+        with self._lock:
+            reported = self._host_capabilities.get(_canonical_host_id(host_id))
+        return list(reported) if reported is not None else None
 
     def interactive_shells(self, host_id: str) -> list[str] | None:
         """Return the ordered shell inventory last reported by *host_id*."""

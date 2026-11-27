@@ -17,6 +17,7 @@ from typing import Any, TypeGuard
 from pydantic import ValidationError
 
 from omnigent.errors import ErrorCode, OmnigentError, WrongReplicaError
+from omnigent.host_capabilities import missing_needs
 from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_EDIT, RESERVED_USER_LOCAL, local_single_user_enabled
@@ -558,8 +559,13 @@ async def validate_existing_host_workspace(
     host_store: Any | None,
     host_registry: Any | None,
     machine_access: MachineSessionAccess | None = None,
+    needs: list[str] | None = None,
 ) -> str:
-    """Validate a connected-host workspace against the agent's os_env boundary."""
+    """Validate a connected-host workspace against the agent's os_env boundary.
+
+    :param needs: Capability tags the host must have; one it lacks is refused,
+        naming it. ``None`` or empty skips the check.
+    """
     workspace = _require_absolute_host_workspace(workspace)
     if agent_cache is None:
         # Should never happen in production — the route factory always wires
@@ -582,6 +588,14 @@ async def validate_existing_host_workspace(
         host_registry=host_registry,
         machine_access=machine_access,
     )
+
+    if needs:
+        missing = missing_needs(needs, host_registry.host_capabilities(host_id))
+        if missing:
+            raise OmnigentError(
+                f"host {host_name or host_id!r} lacks required capabilities: {', '.join(missing)}",
+                code=ErrorCode.INVALID_INPUT,
+            )
 
     # Read the agent's os_env.cwd — None when the spec has no os_env block
     # (headless agents). Headless agents have no filesystem access at all but
