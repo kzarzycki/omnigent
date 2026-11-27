@@ -14560,3 +14560,68 @@ async def test_session_endpoints_return_null_tokens_without_recorded_usage(
     for body in (snapshot, listed):
         assert body["input_tokens"] is None
         assert body["output_tokens"] is None
+
+
+async def _register_capable_host(
+    app: Any, db_uri: str, host_id: str, capabilities: list[str] | None
+) -> None:
+    """Register a connected host reporting ``capabilities`` (``None``: an older host)."""
+    HostStore(db_uri).upsert_on_connect(host_id, "cap-host", "local")
+    app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="cap-host",
+            host_capabilities=capabilities,
+        ),
+        owner="local",
+    )
+
+
+async def test_start_refused_when_host_lacks_a_need(
+    client: httpx.AsyncClient, app: Any, db_uri: str
+) -> None:
+    """A start whose ``needs`` the host lacks is refused, naming the missing tags."""
+    host_id = "ab9c07bfb42f687d53af44f018adebee"
+    await _register_capable_host(app, db_uri, host_id, ["os:linux"])
+    agent = await create_test_agent(client, name="needs-agent")
+
+    response = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_id": host_id,
+            "workspace": "/tmp/needs",
+            "needs": ["os:macos", "os:linux", "tool:xcode"],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_input"
+    assert "os:macos, tool:xcode" in error["message"]
+    assert "os:linux," not in error["message"]
+
+
+async def test_start_with_needs_and_no_host_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    """``needs`` is matched against a host, so one without ``host_id`` is refused."""
+    agent = await create_test_agent(client, name="needs-no-host-agent")
+
+    response = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "needs": ["os:macos"]}
+    )
+
+    assert response.status_code == 400, response.text
+    assert "needs requires host_id" in response.text
+
+
+async def test_info_lists_cloud_kind_capabilities(client: httpx.AsyncClient) -> None:
+    """``GET /v1/info`` carries the capability set of each cloud sandbox kind."""
+    response = await client.get("/v1/info")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["cloud_kind_capabilities"]["claude-cloud"] == ["os:linux"]

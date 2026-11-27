@@ -6177,6 +6177,20 @@ class HostProcess:
         else:
             await diagnostics.send(ws.send, data)
 
+    def _host_capability_tags(self) -> list[str]:
+        """Tags from ``host.capabilities`` plus the detected ``os:`` tag.
+
+        A malformed config is logged and ignored: the host still connects, with
+        its ``os:`` tag only, so a typo cannot take the machine offline.
+        """
+        from omnigent.host_capabilities import detected_os_tag, load_host_capability_tags
+
+        try:
+            return load_host_capability_tags(self._config_path)
+        except (ValueError, OSError, yaml.YAMLError) as exc:
+            _logger.warning("Ignoring host.capabilities: %s", exc)
+            return [detected_os_tag()]
+
     async def _serve_frames(
         self, ws: websockets.asyncio.client.ClientConnection, *, connection_id: str | None = None
     ) -> None:
@@ -6208,6 +6222,7 @@ class HostProcess:
             harness_accounts=self._harness_accounts,
             gateway_inference=self._gateway_inference,
             interactive_shells=self._interactive_shells,
+            host_capabilities=await asyncio.to_thread(self._host_capability_tags),
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
             capabilities=list(HOST_CAPABILITIES),
