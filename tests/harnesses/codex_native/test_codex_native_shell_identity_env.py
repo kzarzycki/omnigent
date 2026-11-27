@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
@@ -60,6 +61,13 @@ async def test_app_server_env_carries_session_identity_but_no_runner_secret(
     assert spawn_env["OMNIGENT_SESSION_ID"] == "child-session"
     assert not RUNNER_AUTH_SECRET_ENV_VARS & spawn_env.keys()
     assert "runner-secret" not in spawn_env.values()
+    # The file the env names is what a shell reads after a /clear rotation.
+    identity_file = Path(spawn_env["OMNIGENT_SESSION_IDENTITY_FILE"])
+    assert json.loads(identity_file.read_text()) == {
+        "session_id": "child-session",
+        "primary_session_id": "parent-session",
+    }
+    assert not any("runner-secret" in line for line in identity_file.read_text().splitlines())
 
 
 @pytest.mark.parametrize("inherited_primary", [None, "outer-session"])

@@ -84,6 +84,11 @@ from omnigent.harnesses.codex_native.process_registry import (
     register_codex_native_process,
     unregister_codex_native_process,
 )
+from omnigent.harnesses.codex_native.shell_identity import (
+    IDENTITY_FILE_ENV_VAR,
+    identity_file_for_bridge_dir,
+    write_shell_identity,
+)
 from omnigent.harnesses.codex_native.stderr_diagnostics import (
     MAX_STDERR_RECORD_BYTES,
     CodexStderrDiagnostics,
@@ -4482,12 +4487,19 @@ def build_codex_native_server(
         )
     env = _clean_codex_env()
     # The app-server runs the agent's shell; its tools read which session called them.
-    # ponytail: fixed at app-server launch, so a native /clear rotation keeps the old
-    # session's names; per-thread env (Codex shell_environment_policy.set) lifts it.
+    # ponytail: these two are fixed at app-server launch, so a native /clear rotation
+    # leaves them naming the old session. The identity file named below follows the
+    # rotation; per-thread env (Codex shell_environment_policy.set) would lift this.
     if primary_session_id:
         env[PRIMARY_SESSION_ID_ENV_VAR] = primary_session_id
     if session_id:
         env[SESSION_ID_ENV_VAR] = session_id
+        write_shell_identity(
+            bridge_dir,
+            session_id=session_id,
+            primary_session_id=primary_session_id or session_id,
+        )
+        env[IDENTITY_FILE_ENV_VAR] = str(identity_file_for_bridge_dir(bridge_dir))
     config_overrides: list[str] = []
     pinned_model = model
     if profile is not None:
