@@ -2366,7 +2366,7 @@ class AcpExecutor(Executor):
                     session_key,
                 )
                 return
-            if self._proc.returncode is not None:
+            if self._proc is not None and self._proc.returncode is not None:
                 if self._proc.returncode != self._idle_exit_status:
                     logger.warning(
                         "acp[%s] session %s ended after the agent exited (status %s)",
