@@ -42,6 +42,7 @@ from omnigent.entities import (
     TerminalCommandData,
 )
 from omnigent.entities.conversation import StartupInputOptions
+from omnigent.host_capabilities import is_capability_tag
 from omnigent.inner.native_attachments import reject_authored_framework_notices
 from omnigent.onboarding.sandboxes.profiles import SandboxProfileSummary
 from omnigent.util.uuid import normalize_uuid
@@ -1757,6 +1758,9 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         ACP cloud agent (``acp:claude-cloud``), e.g. ``"env_01AbCdEfGhIjKlMn"``. The
         cloud session starts in that environment; a malformed id or another harness
         is a 400.
+    :param needs: Optional capability tags the target host must have, e.g.
+        ``["os:macos", "tool:xcode"]``. Needs a ``host_id``; a host missing one is
+        refused with the missing tags named. ``None`` or empty places as before.
     :param model_override: Optional per-session LLM model override to
         persist at create time, e.g. ``"databricks-claude-sonnet-4-6"``.
         Set by ``sys_session_send``'s per-dispatch ``model`` arg so the
@@ -1840,12 +1844,25 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     permission_mode: str | None = Field(default=None, min_length=1, max_length=64)
     created_by_session_id: str | None = Field(default=None, min_length=1, max_length=128)
     cloud_environment_id: str | None = Field(default=None, min_length=1, max_length=128)
+    needs: list[str] | None = Field(default=None, max_length=64)
     model_override: str | None = None
     reasoning_effort: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     harness_override: str | None = None
     smart_routing_message: str | None = None
+
+    @field_validator("needs")
+    @classmethod
+    def _check_needs(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        bad = [t for t in value if not is_capability_tag(t)]
+        if bad:
+            raise ValueError(
+                f"needs must be lowercase namespaced tags such as 'os:macos'; got {bad!r}"
+            )
+        return sorted(set(value))
 
     @model_validator(mode="after")
     def _check_startup_input(self) -> Self:

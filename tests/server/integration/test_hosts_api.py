@@ -222,6 +222,39 @@ async def test_list_hosts_empty(
     assert resp.json()["hosts"] == []
 
 
+async def test_list_hosts_returns_capabilities(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """
+    A host's reported capability tags appear in list and get, malformed ones
+    dropped; a host that reported none shows null (unknown), not an empty list.
+    """
+    app, registry, host_store, _cs = host_api_app
+    for host_id, tags in (
+        ("c1c07bfb42f687d53af44f018adebee1", ["tool:xcode", "os:macos", "bad tag"]),
+        ("c2c07bfb42f687d53af44f018adebee2", None),
+    ):
+        host_store.upsert_on_connect(host_id, f"h-{host_id[:2]}", "local")
+        registry.register(
+            host_id,
+            type("FakeWS", (), {})(),
+            HostHelloFrame(
+                version="0.1.0", frame_protocol_version=1, name="h", host_capabilities=tags
+            ),
+            owner="local",
+        )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/v1/hosts")
+        one = await client.get("/v1/hosts/c1c07bfb42f687d53af44f018adebee1")
+
+    assert listed.status_code == 200, listed.text
+    by_id = {h["host_id"]: h for h in listed.json()["hosts"]}
+    assert by_id["c1c07bfb42f687d53af44f018adebee1"]["capabilities"] == ["os:macos", "tool:xcode"]
+    assert by_id["c2c07bfb42f687d53af44f018adebee2"]["capabilities"] is None
+    assert one.json()["capabilities"] == ["os:macos", "tool:xcode"]
+
+
 async def test_list_hosts_returns_connected_host(
     host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> None:

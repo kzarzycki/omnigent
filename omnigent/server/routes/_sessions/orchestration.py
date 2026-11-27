@@ -14089,6 +14089,11 @@ async def _create_session_from_existing_agent(
 
     # Validate the host workspace before creating a session or worktree.
     canonical_workspace: str | None = body.workspace
+    if body.needs and body.host_id is None:
+        raise OmnigentError(
+            "needs requires host_id: capabilities are matched against a host",
+            code=ErrorCode.INVALID_INPUT,
+        )
     if body.host_id is not None:
         canonical_workspace = await _validate_session_workspace(
             user_id=user_id,
@@ -14097,6 +14102,7 @@ async def _create_session_from_existing_agent(
             agent=agent,
             agent_cache=agent_cache,
             request=request,
+            needs=body.needs,
         )
 
     from omnigent.server.routes._session_harness_readiness import (

@@ -72,6 +72,7 @@ from omnigent.harness_plugins import (
     native_provider_for_key,
 )
 from omnigent.host.launch_audit import request_client_audit_attributes
+from omnigent.host_capabilities import CLOUD_KIND_CAPABILITIES
 from omnigent.resources import examples as _examples_resources
 from omnigent.resources import proactive as _proactive_resources
 from omnigent.runtime import (
@@ -321,6 +322,9 @@ class ServerInfoResponse(BaseModel):
     # ``{"agent_sandbox": "Keep your laptop signed in."}``. The automation form
     # shows the run target's notice. Providers without one are absent.
     sandbox_provider_automation_notices: dict[str, str] = {}
+    # Capability tags each cloud sandbox kind declares, e.g.
+    # ``{"claude-cloud": ["os:linux"]}``; matched against a start's ``needs``.
+    cloud_kind_capabilities: dict[str, list[str]] = {}
     enabled_connections: list[str]
     sharing_mode: Literal["on", "read_only", "restricted_read_only", "off"]
     public_sharing_enabled: bool
@@ -4257,6 +4261,9 @@ def create_app(
                 "sandbox_providers": sandbox_providers,
                 "sandbox_provider_capabilities": sandbox_provider_capabilities,
                 "sandbox_provider_automation_notices": sandbox_provider_automation_notices,
+                "cloud_kind_capabilities": {
+                    kind: list(tags) for kind, tags in CLOUD_KIND_CAPABILITIES.items()
+                },
                 "enabled_connections": enabled_connections,
                 "sharing_mode": sharing_mode.value,
                 "public_sharing_enabled": public_sharing_enabled,

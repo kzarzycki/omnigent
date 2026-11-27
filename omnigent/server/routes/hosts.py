@@ -1134,6 +1134,9 @@ def create_hosts_router(
                 # gateway-backed".
                 "gateway_inference": host_registry.gateway_inference(host.host_id),
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
+                # Tags for what the machine has (``os:macos``, ``tool:xcode``);
+                # ``None`` is "no report on this replica", not "has nothing".
+                "capabilities": host_registry.host_capabilities(host.host_id),
                 **_reported_build(host.host_id),
                 # False also when another replica holds the tunnel: unverified.
                 "long_session_messages_supported": bool(
@@ -1200,6 +1203,7 @@ def create_hosts_router(
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
+            "capabilities": host_registry.host_capabilities(host.host_id),
             **_reported_build(host.host_id),
             "long_session_messages_supported": bool(
                 conn is not None and CAP_LONG_SESSION_MESSAGES in conn.hello.capabilities
