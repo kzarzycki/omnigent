@@ -797,22 +797,24 @@ async def _post_event(
     client: httpx.AsyncClient,
     session_id: str,
     event: OutboundEvent,
-) -> None:
+) -> bool:
     """
     POST one mapped event with the shared bounded-retry delivery loop.
 
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param event: The mapped event to deliver.
-    :returns: None. Delivery failures are logged inside the retry loop; an
-        ambiguous conversation-item failure is intentionally not retried (a
-        re-post would duplicate the item).
+    :returns: Whether the server accepted the event (a sub-400 response, or a
+        status edge handed to the sub-agent retry queue). Delivery failures are
+        logged inside the retry loop; an ambiguous conversation-item failure is
+        intentionally not retried (a re-post would duplicate the item). Callers
+        that cannot afford a lost edge (the turn-close IDLE) read the flag.
     """
     url = f"/v1/sessions/{url_component(session_id)}/events"
     payload: dict[str, object] = {"type": event.event_type, "data": event.data}
     status_retry = _status_retry.get() if event.event_type == "external_session_status" else None
 
-    async def _post_once() -> None:
+    async def _post_once() -> bool:
         response = await post_session_event_with_retry(
             client=client,
             url=url,
@@ -826,12 +828,13 @@ async def _post_event(
         )
         if status_retry is not None:
             raise_for_subagent_delivery_not_confirmed(response)
+        return response is not None and response.status_code < 400
 
     if status_retry is None:
-        await _post_once()
-    else:
-        # A refused parent delivery retries in the background.
-        await status_retry.send(session_id, _post_once)
+        return await _post_once()
+    # A refused parent delivery retries in the background.
+    await status_retry.send(session_id, _post_once)
+    return True
 
 
 def _resolve_cascade_id(bridge_dir: Path) -> str | None:
@@ -1120,7 +1123,9 @@ async def _watch_for_rotation(
         if on_quiescent is not None:
             if _cascade_is_idle(summaries, bound_cascade_id):
                 idle_ticks += 1
-                if idle_ticks == _QUIESCENT_TICKS_TO_CLOSE:
+                # ``>=``, not ``==``: a close whose edge was not delivered is
+                # retried every tick while agy stays idle (a no-op once closed).
+                if idle_ticks >= _QUIESCENT_TICKS_TO_CLOSE:
                     await on_quiescent()
             else:
                 idle_ticks = 0
@@ -1135,6 +1140,42 @@ async def _watch_for_rotation(
         )
         on_rotation(new_cascade_id)
         return
+
+
+async def _close_stranded_turn(
+    *,
+    client: httpx.AsyncClient,
+    session_id: str,
+    cascade_id: str,
+    state: _ReaderState,
+) -> None:
+    """
+    Turn-close BACKSTOP body: post IDLE for a turn agy reports finished.
+
+    The step-based close (``_is_turn_close_step``) is the fast path; this fires
+    only when agy itself has reported the cascade idle and Omnigent still
+    believes a turn is open — the close was missed, or its edge never reached the
+    server. Reconciliation rather than edge detection, so a missed/unknown/
+    reordered step costs one detector interval instead of stranding the session.
+    The turn stays open when the edge is not delivered, so the next quiescent
+    tick retries.
+
+    :param client: HTTP client for Omnigent event posts.
+    :param session_id: Omnigent conversation id to mirror into.
+    :param cascade_id: agy cascade id the reader is bound to (for the log line).
+    :param state: Per-run shared trackers; ``turn_active`` is cleared on delivery.
+    :returns: None.
+    """
+    if not state.turn_active:
+        return
+    _logger.info(
+        "agy reader closing a turn agy reports finished but Omnigent still had "
+        "open (step-based close was missed or its edge was not delivered): "
+        "session=%s cascade=%s",
+        session_id,
+        cascade_id,
+    )
+    state.turn_active = not await _post_event(client, session_id, _status_event(_STATUS_IDLE))
 
 
 async def supervise_reader(
@@ -1269,21 +1310,9 @@ async def supervise_reader(
                 body_holder[0].cancel()
 
     async def _close_turn_if_stranded() -> None:
-        # Turn-close BACKSTOP. The step-based close (``_is_turn_close_step``) is the
-        # fast path; this fires only when agy itself has reported the cascade idle
-        # and Omnigent still believes a turn is open — i.e. the close was missed.
-        # Reconciliation rather than edge detection, so a missed/unknown/reordered
-        # step costs one detector interval instead of stranding the session.
-        if not state.turn_active:
-            return
-        state.turn_active = False
-        _logger.info(
-            "agy reader closing a turn agy reports finished but Omnigent still had "
-            "open (step-based close was missed): session=%s cascade=%s",
-            session_id,
-            cascade_id,
+        await _close_stranded_turn(
+            client=client, session_id=session_id, cascade_id=cascade_id, state=state
         )
-        await _post_event(client, session_id, _status_event(_STATUS_IDLE))
 
     def _body_should_stop() -> bool:
         # The reader body stops either on the caller's stop OR once a rotation was
@@ -2501,13 +2530,16 @@ async def _emit_step(
         await _post_event(client, session_id, event)
 
     if _is_turn_close_step(step) and turn_active:
-        turn_active = False
         # An ERROR planner closes the turn as FAILED, not a clean idle: a model /
         # safety-policy / rate-limit / provider-overload error must surface as a
         # failed turn (alongside the error item the mapper now emits), not a
         # silent empty success that looks identical to a normal reply (#6).
         close_status = _STATUS_FAILED if _step_is_error_planner(step) else _STATUS_IDLE
-        await _post_event(client, session_id, _status_event(close_status))
+        # A closing edge the server never received leaves the session ``running``
+        # for good: the turn is over in agy, so nothing else would post it. Keep
+        # the turn open on a failed delivery and the idle backstop
+        # (``_close_turn_if_stranded``) re-posts it on the next quiescent tick.
+        turn_active = not await _post_event(client, session_id, _status_event(close_status))
 
     return turn_active
 

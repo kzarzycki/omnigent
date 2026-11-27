@@ -851,7 +851,14 @@ async def _best_effort_stop(
     try:
         descendant_ids = await _collect_descendant_conversation_ids(conversation_store, session_id)
         status = _session_status_with_child_rollup(session_id, descendant_ids)
-        own_status = _session_status_from_cache(session_id)
+        # A replica with no relay cache entry (restarted, or the runner is gone) still
+        # reads the persisted status: an orphaned ``running`` row must be settled too.
+        own_row = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        own_status = _session_status_from_cache(
+            session_id, own_row.live_status if own_row is not None else None
+        )
+        if own_status == "running":
+            status = "running"
     except Exception:  # noqa: BLE001
         _logger.warning(
             "Descendant lookup failed for %s; skipping best-effort stop",
@@ -872,7 +879,18 @@ async def _best_effort_stop(
 
     async def _stop(target_id: str) -> None:
         try:
-            await _stop_session_via_runner(target_id, runner_router)
+            delivered = await _stop_session_via_runner(target_id, runner_router)
+            if not delivered:
+                # No runner took the stop, so nothing will ever emit the terminal
+                # edge of a turn the row still shows as running (#991). Settle it,
+                # as the ``stop_session`` event does; the store only transitions a
+                # row whose runner stamp is stale, so a live runner is untouched.
+                await asyncio.to_thread(
+                    reconcile_orphaned_running_status,
+                    target_id,
+                    conversation_store,
+                    int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                )
         except Exception:  # noqa: BLE001
             _logger.debug(
                 "Best-effort stop failed for %s; proceeding anyway",
