@@ -267,6 +267,8 @@ class RunnerSessionInitializer:
         timeout: float,
         suppress_recovery_turn: bool = False,
         resume_interrupted_turn: bool = False,
+        recovery_id: str | None = None,
+        recovery_prompt: str | None = None,
         generation: int | None = None,
         store_slots: asyncio.Semaphore | None = None,
         trigger: str = "unspecified",
@@ -362,22 +364,26 @@ class RunnerSessionInitializer:
                             tunnel_registry=self._registry,
                         )
                 taken = None
-                recovery_id = None
+                init_recovery_id = recovery_id
                 resume = resume_interrupted_turn
 
                 def envelope_options() -> dict[str, Any]:
-                    nonlocal taken, recovery_id, resume
+                    nonlocal taken, init_recovery_id, resume
                     self.require_generation(runner_id, runner_client, generation)
                     # Decided here, with no await before the post: a session whose
                     # runner died mid-turn continues unless a person cancelled since.
                     taken = session_revival.take_resume(conversation)
                     resume = taken is not None or resume_interrupted_turn
                     if resume:
-                        recovery_id = self._recovery_ids.setdefault(key, uuid4().hex)
+                        init_recovery_id = init_recovery_id or self._recovery_ids.setdefault(
+                            key, uuid4().hex
+                        )
                     return {
                         "suppress_recovery_turn": suppress_recovery_turn,
                         "resume_interrupted_turn": resume,
-                        "recovery_id": recovery_id,
+                        "recovery_id": init_recovery_id,
+                        "recovery_prompt": recovery_prompt,
+                        "require_recovery_admission": trigger == "host_recovery",
                     }
 
                 async def post(payload: dict[str, object]) -> httpx.Response:
@@ -390,7 +396,7 @@ class RunnerSessionInitializer:
                             timeout=timeout,
                             resume_interrupted_turn=resume,
                             suppress_recovery_turn=suppress_recovery_turn,
-                            recovery_id=recovery_id,
+                            recovery_id=init_recovery_id,
                             generation=generation,
                             trigger=trigger,
                             init_attempt_id=init_attempt_id,

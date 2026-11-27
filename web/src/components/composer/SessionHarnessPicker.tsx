@@ -14,14 +14,17 @@ import { useSessionModelLabel } from "@/hooks/useSessionModelLabel";
 import { MODEL_PICKER_KEYS } from "@/hooks/useModelPickerHotkey";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
 import { modelConfigurationSourceRows } from "@/lib/modelConfigurationSource";
-import { useChatStore, type ConversationState } from "@/store/chatStore";
-import { useConversationEntryValue } from "@/hooks/useConversationEntryState";
+import { useChatStore } from "@/store/chatStore";
 import { nativeCodingAgentForHarness } from "@/lib/nativeCodingAgents";
 import { nativeModelLabel } from "@/components/HarnessConfigControls";
 import {
   ComposerConfigSections,
   type ComposerConfigSection,
 } from "@/components/composer/ComposerConfigSections";
+import {
+  ComposerPaletteSettings,
+  MODEL_BUSY_REASON,
+} from "@/components/composer/composerSectionSettings";
 import { useComposerConfigCycleHotkeys } from "@/hooks/useComposerConfigCycleHotkeys";
 import { buildFusionSections } from "@/components/composer/fusionSections";
 import { fusionOption, isFusionModelUid } from "@/lib/devinFusion";
@@ -37,20 +40,7 @@ import {
   type NativeModelPickerKind,
 } from "@/lib/composerCapabilities";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
-
-/**
- * A field of *sessionId*'s conversation, or of the active conversation when
- * omitted (the main composer's case, read straight from the root store).
- */
-function useSessionField<T>(
-  sessionId: string | undefined,
-  select: (state: ConversationState) => T,
-): T {
-  // Each half reads only its own source, so neither re-renders for the other's updates.
-  const active = useChatStore((state) => (sessionId === undefined ? select(state) : null));
-  const entry = useConversationEntryValue(sessionId ?? null, select);
-  return sessionId === undefined ? (active as T) : entry;
-}
+import { useSessionField } from "@/components/composer/sessionPickerInputs";
 
 /** The conversation a picker targets: *sessionId*, else whichever is active now. */
 function useTargetConversationId(sessionId: string | undefined): string | null {
@@ -97,6 +87,7 @@ export function SessionHarnessPicker({
   disabled,
   openNonce = 0,
   modelPickerShortcutEnabled = false,
+  paletteSettingsSource,
 }: {
   appearance?: "composer" | "header";
   busy: boolean;
@@ -124,6 +115,8 @@ export function SessionHarnessPicker({
   modelPickerShortcutEnabled?: boolean;
   /** Read and change this session instead of the active conversation. */
   sessionId?: string;
+  /** Offer Model and Reasoning Effort in ⌘K under this; unset while quick_pick_palette is off. */
+  paletteSettingsSource?: string;
 }) {
   const isMobile = useIsMobileViewport();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -520,7 +513,7 @@ export function SessionHarnessPicker({
       />
     </>
   );
-  return (
+  const picker = (
     <HarnessPicker
       contentSide={appearance === "header" ? "bottom" : "top"}
       cyclePreview={
@@ -598,6 +591,31 @@ export function SessionHarnessPicker({
         </HarnessPickerConfigRow>
       )}
     </HarnessPicker>
+  );
+  const routing = costRoutingEligible &&
+    showModels && {
+      active: routingOn,
+      unavailableReason: busy || pendingModelChange !== null ? MODEL_BUSY_REASON : undefined,
+      select: () => {
+        cancelCycle();
+        void apply(() => useChatStore.getState().setCostControlMode("on", ...target));
+      },
+    };
+  // The picker keeps its place as a source comes and goes, so it never remounts; without a
+  // source the ⌘K settings never mount and their hooks never run.
+  return (
+    <>
+      {paletteSettingsSource !== undefined && (
+        <ComposerPaletteSettings
+          source={paletteSettingsSource}
+          models={disabled ? undefined : modelSection}
+          efforts={disabled ? undefined : effortSection}
+          effortRouted={routingOn}
+          routing={routing || undefined}
+        />
+      )}
+      {picker}
+    </>
   );
 }
 

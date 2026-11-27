@@ -1,5 +1,4 @@
 import { lazy, Suspense } from "react";
-import { ArcaShutdownToast } from "@/components/ArcaShutdownToast";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 import { ImportReviewGate } from "@/components/onboarding/HostImportReview";
 import { Toaster } from "@/components/ui/sonner";
@@ -9,6 +8,18 @@ import { isElectronShell } from "@/lib/nativeBridge";
 import { updateOverlayToastOffset } from "@/lib/updateOverlayInset";
 import { CommandPalette } from "./CommandPalette";
 import { RecentSessionsSwitcher } from "./RecentSessionsSwitcher";
+
+// The QuickPick palette and its theme picker load only with quick_pick_palette, so the
+// default bundle keeps the flagged code, and what it imports, out of the first load. The
+// palette mounts closed when the flag resolves, to start loading before use.
+const QuickPickCommandPalette = lazy(() =>
+  import("./QuickPickCommandPalette").then((module) => ({
+    default: module.QuickPickCommandPalette,
+  })),
+);
+const ThemePicker = lazy(() =>
+  import("./ThemePicker").then((module) => ({ default: module.ThemePicker })),
+);
 
 // Dev-only preview; lazy so the sample data never ships in production bundles.
 const ImportContextPreview = import.meta.env.DEV
@@ -23,6 +34,8 @@ export interface AppShellOverlaysProps {
   setCommandPaletteOpen: (open: boolean) => void;
   toggleLeftSidebar: () => void;
   toggleRightPanel: () => void;
+  /** Switches the open palette to searching sessions only. */
+  goToSession: () => void;
   gridRoute: boolean;
   allConversations: Conversation[] | undefined;
   serverConversationId: string | undefined;
@@ -44,12 +57,16 @@ export function AppShellOverlays({
   setCommandPaletteOpen,
   toggleLeftSidebar,
   toggleRightPanel,
+  goToSession,
   gridRoute,
   allConversations,
   serverConversationId,
   updateOverlayHeight,
   onCloseSidebar,
 }: AppShellOverlaysProps) {
+  // Both palettes take the same props; the flag picks one for ⌘K and the session switcher.
+  const quickPick = isFeatureEnabled(serverInfo, "quick_pick_palette");
+  const Palette = quickPick ? QuickPickCommandPalette : CommandPalette;
   return (
     <>
       {/* Keyboard-shortcuts reference. Self-contained (owns its open state +
@@ -57,8 +74,6 @@ export function AppShellOverlays({
       <KeyboardShortcutsDialog />
       {/* Opens the import modal once per newly connected host. */}
       {!isEmbedded && <ImportReviewGate />}
-      {/* Keep this after Outlet so a visible chat banner wins before the toast effect runs. */}
-      {isFeatureEnabled(serverInfo, "arca_shutdown_warnings") && <ArcaShutdownToast />}
       {/* Dev-only `?import-preview` for the post-setup import modal. */}
       {ImportContextPreview && (
         <Suspense fallback={null}>
@@ -69,16 +84,25 @@ export function AppShellOverlays({
           and in embedded mode — the sidebar's "Search" button opens it
           there even though the ⌘K hotkey is disabled (it belongs to the
           host page). */}
-      <CommandPalette
-        key={sessionSearch ? "sessions" : "commands"}
-        sessionsOnly={sessionSearch}
-        open={commandPaletteOpen}
-        onOpenChange={setCommandPaletteOpen}
-        onToggleLeftSidebar={toggleLeftSidebar}
-        onToggleRightSidebar={toggleRightPanel}
-        rightSidebarShortcutEnabled={!gridRoute}
-        onCloseSidebar={onCloseSidebar}
-      />
+      <Suspense fallback={null}>
+        <Palette
+          key={sessionSearch ? "sessions" : "commands"}
+          sessionsOnly={sessionSearch}
+          open={commandPaletteOpen}
+          onOpenChange={setCommandPaletteOpen}
+          onToggleLeftSidebar={toggleLeftSidebar}
+          onToggleRightSidebar={toggleRightPanel}
+          rightSidebarShortcutEnabled={!gridRoute}
+          onCloseSidebar={onCloseSidebar}
+          onGoToSession={goToSession}
+        />
+      </Suspense>
+      {/* "Select theme…" from ⌘K; previews each theme as the user moves through them. */}
+      {quickPick && (
+        <Suspense fallback={null}>
+          <ThemePicker />
+        </Suspense>
+      )}
       <RecentSessionsSwitcher
         conversations={allConversations}
         activeSessionId={serverConversationId ?? null}

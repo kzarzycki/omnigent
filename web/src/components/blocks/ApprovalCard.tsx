@@ -33,7 +33,7 @@
 //   3. rolls back to "pending" on network error.
 
 import type { NativePermissionDelivery } from "@/lib/nativePermissionDelivery";
-import { useContext, useMemo } from "react";
+import { type ComponentProps, type ReactNode, useContext, useMemo } from "react";
 import {
   CheckIcon,
   ChevronRightIcon,
@@ -64,6 +64,7 @@ import {
 } from "@/lib/askUserQuestion";
 import { askUserQuestionSignature } from "@/lib/askUserQuestionDrafts";
 import { NON_BLOCKING_QUESTION_POLICY } from "@/lib/blocks";
+import { splitSentSessionMentions } from "@/lib/composerMentions";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
@@ -91,6 +92,7 @@ import {
 import { ExitPlanModeReview } from "./ExitPlanModeReview";
 import { FileEditDiffView } from "./FileEditBody";
 import { ToolValueView } from "./ToolValueView";
+import { SessionMentionPill } from "./ChatMarkdown";
 
 const AUTO_RESOLVED_DETAIL =
   "This request was answered outside this view, for example in the " +
@@ -106,6 +108,30 @@ const QUESTION_TITLES = [
 
 // A workflow question comes from whichever harness runs the workflow; its
 // message names the task waiting on it.
+/**
+ * A submitted answer's text. Session tags show as the composer's session pills; every other
+ * character stays as typed. Multi-select answers are each split, then joined.
+ */
+function SubmittedAnswer({ answer }: { answer: unknown }): ReactNode {
+  const answers = Array.isArray(answer) ? answer : [answer];
+  const nodes: ReactNode[] = [];
+  for (const part of answers) {
+    if (nodes.length > 0) nodes.push(", ");
+    for (const piece of splitSentSessionMentions(String(part))) {
+      nodes.push(
+        typeof piece === "string" ? (
+          piece
+        ) : (
+          <SessionMentionPill key={nodes.length} id={piece.id} isSubagent={piece.isSubagent}>
+            {`@${piece.title}`}
+          </SessionMentionPill>
+        ),
+      );
+    }
+  }
+  return nodes;
+}
+
 function questionPromptTitle(policyName: string, phase: string, message: string): string {
   if (phase === WORKFLOW_QUESTION_PHASE && message) return message;
   const match = QUESTION_TITLES.find(
@@ -187,6 +213,51 @@ function FileEditApproval({
         </CollapsibleContent>
       </Collapsible>
     </div>
+  );
+}
+
+// The narrow (touch) layout has no hover tooltip, so the label wraps there to show
+// the whole rule; the wide layout keeps one line and relies on the tooltip.
+const WRAP_IN_NARROW_LAYOUT_CLASS = "mobile-app:overflow-visible mobile-app:whitespace-normal";
+
+// One-line "commands starting with <prefix>" button: a long prefix shrinks first
+// and ends in an ellipsis; the full prefix stays in the title and accessible name.
+function CommandPrefixButton({
+  lead,
+  prefix,
+  trail,
+  ...buttonProps
+}: {
+  lead: string;
+  prefix: string;
+  trail?: string;
+} & Omit<ComponentProps<typeof Button>, "children" | "size" | "variant">) {
+  // Flex items drop the spaces between them from the computed name.
+  const name = [lead, prefix, trail].filter(Boolean).join(" ");
+  const wordsClass = cn("truncate", WRAP_IN_NARROW_LAYOUT_CLASS);
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      aria-label={name}
+      {...buttonProps}
+      className={cn("max-w-full", MOBILE_CHOICE_CLASS, buttonProps.className)}
+    >
+      <CheckIcon className="mr-1 size-3.5 shrink-0" />
+      <span className="flex min-w-0 items-baseline gap-1 mobile-app:flex-wrap">
+        <span className={wordsClass}>{lead}</span>
+        <code
+          className={cn(
+            "min-w-0 shrink-[1000] truncate rounded bg-muted px-1 font-mono",
+            WRAP_IN_NARROW_LAYOUT_CLASS,
+            "mobile-app:break-all",
+          )}
+        >
+          {prefix}
+        </code>
+        {trail && <span className={wordsClass}>{trail}</span>}
+      </span>
+    </Button>
   );
 }
 
@@ -504,6 +575,7 @@ export function ApprovalCard({
     codexCommand?.execPolicyAmendment && codexCommand.execPolicyAmendment.length > 0
       ? codexCommand.execPolicyAmendment
       : null;
+  const execPolicyPrefix = execPolicyAmendment ? JSON.stringify(execPolicyAmendment) : null;
   const acceptedWithExecPolicy =
     isCodexCommandApproval && response?.action === "accept" && response.content?.remember === true;
   const acceptedAllEdits = response?.content?.allow_all_edits === true;
@@ -555,41 +627,23 @@ export function ApprovalCard({
       </KeyboardShortcutTooltip>
       {agyPermission?.alwaysAllowPattern && (
         <>
-          <Button
-            size="sm"
-            variant="outline"
-            className={cn("h-auto max-w-full whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+          <CommandPrefixButton
+            lead="Allow commands starting with"
+            prefix={agyPermission.alwaysAllowPattern}
+            trail="for this session"
             onClick={() => submitPersist("session")}
             title={`Ask Antigravity to allow commands starting with “${agyPermission.alwaysAllowPattern}” for this conversation`}
             data-testid="approval-card-agy-session-allow"
             componentId="approval.approve_session_agy"
-          >
-            <CheckIcon className="mr-1 size-3.5 shrink-0" />
-            <span className="min-w-0">
-              Allow commands starting with{" "}
-              <code className="break-all rounded bg-muted px-1 font-mono">
-                {agyPermission.alwaysAllowPattern}
-              </code>{" "}
-              for this session
-            </span>
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className={cn("h-auto max-w-full whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+          />
+          <CommandPrefixButton
+            lead="Always allow commands starting with"
+            prefix={agyPermission.alwaysAllowPattern}
             onClick={() => submitPersist("always")}
             title={`Ask Antigravity to save a rule allowing commands starting with “${agyPermission.alwaysAllowPattern}” for this Omnigent session`}
             data-testid="approval-card-agy-always-allow"
             componentId="approval.approve_always_agy"
-          >
-            <CheckIcon className="mr-1 size-3.5 shrink-0" />
-            <span className="min-w-0">
-              Always allow commands starting with{" "}
-              <code className="break-all rounded bg-muted px-1 font-mono">
-                {agyPermission.alwaysAllowPattern}
-              </code>
-            </span>
-          </Button>
+          />
         </>
       )}
       {codexPersistModes.includes("session") && (
@@ -697,22 +751,14 @@ export function ApprovalCard({
           Approve
         </Button>
       </KeyboardShortcutTooltip>
-      {execPolicyAmendment && codexCommand?.requestFingerprint && (
-        <Button
-          size="sm"
-          variant="outline"
-          className={cn("h-auto max-w-full whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+      {execPolicyPrefix && codexCommand?.requestFingerprint && (
+        <CommandPrefixButton
+          lead="Approve and remember commands starting with"
+          prefix={execPolicyPrefix}
           onClick={submitExecPolicyAmendment}
+          title={`Approve and remember commands starting with ${execPolicyPrefix}`}
           componentId="approval.approve_command_remember"
-        >
-          <CheckIcon className="mr-1 size-3.5 shrink-0" />
-          <span className="min-w-0">
-            Approve and remember commands starting with{" "}
-            <code className="break-all rounded bg-muted px-1 font-mono">
-              {JSON.stringify(execPolicyAmendment)}
-            </code>
-          </span>
-        </Button>
+        />
       )}
       <KeyboardShortcutTooltip label="Reject" keys={declineKeys}>
         <Button
@@ -909,7 +955,7 @@ export function ApprovalCard({
             {isCodexCommandApproval ? (
               <>
                 {codexCommand.reason && <span>{codexCommand.reason}</span>}
-                <pre className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap">
+                <pre className="max-h-64 overflow-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap">
                   {codexCommand.command}
                 </pre>
                 {codexCommand.cwd && (
@@ -920,11 +966,11 @@ export function ApprovalCard({
                     </code>
                   </span>
                 )}
-                {acceptedWithExecPolicy && execPolicyAmendment && (
+                {acceptedWithExecPolicy && execPolicyPrefix && (
                   <span>
                     Remembered command prefix:{" "}
-                    <code className="break-all rounded bg-muted px-1 font-mono text-sm">
-                      {JSON.stringify(execPolicyAmendment)}
+                    <code className="inline-block max-h-64 overflow-y-auto break-all rounded bg-muted px-1 align-top font-mono text-sm">
+                      {execPolicyPrefix}
                     </code>
                   </span>
                 )}
@@ -949,7 +995,7 @@ export function ApprovalCard({
                   <li key={q} className="flex flex-wrap items-baseline gap-x-1.5">
                     <span className="text-muted-foreground">{q}</span>
                     <span className="font-medium">
-                      {Array.isArray(ans) ? ans.join(", ") : String(ans)}
+                      <SubmittedAnswer answer={ans} />
                     </span>
                   </li>
                 ))}
@@ -1028,7 +1074,7 @@ export function ApprovalCard({
           <>
             <span>Codex wants to run this command.</span>
             {codexCommand.reason && <span className="text-foreground">{codexCommand.reason}</span>}
-            <pre className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-sm text-foreground whitespace-pre-wrap">
+            <pre className="max-h-64 overflow-auto rounded bg-muted px-2 py-1 font-mono text-sm text-foreground whitespace-pre-wrap">
               {codexCommand.command}
             </pre>
             {codexCommand.cwd && (

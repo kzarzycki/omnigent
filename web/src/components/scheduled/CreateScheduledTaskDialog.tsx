@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { DisabledActionTooltip } from "@/components/DisabledActionTooltip";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -610,7 +611,7 @@ export function CreateScheduledTaskDialog({
     [anchoredScheduling, subhourSupported, triggerPollMinutes],
   );
   const savedSchedule = useMemo(
-    () => (editingTask ? parseRRuleToScheduleModel(editingTask.rrule) : null),
+    () => (editingTask?.rrule ? parseRRuleToScheduleModel(editingTask.rrule) : null),
     [editingTask],
   );
 
@@ -642,7 +643,16 @@ export function CreateScheduledTaskDialog({
         : hasTriggerHeader(savedPrompt)
           ? { userPrompt: stripTriggerHeader(savedPrompt), systemPrompt: null }
           : splitTriggerPrompt(savedPrompt);
-      const savedRun = workflowsEnabled ? parseSavedWorkflowMessage(parts.userPrompt) : null;
+      const parsedRun = workflowsEnabled ? parseSavedWorkflowMessage(parts.userPrompt) : null;
+      // A task that stores its workflow is read from those fields, not its prompt's wording.
+      const savedRun =
+        workflowsEnabled && editingTask?.workflowId
+          ? {
+              id: editingTask.workflowId,
+              name: parsedRun?.name ?? "Saved workflow",
+              details: editingTask.workflowDetails ?? "",
+            }
+          : parsedRun;
       setWorkflowChoice(
         workflowsEnabled
           ? (lockedWorkflow ??
@@ -662,8 +672,10 @@ export function CreateScheduledTaskDialog({
         setPickedModel(editingTask.modelOverride ?? "");
         setPickedEffort(editingTask.reasoningEffort ?? "");
         setPickedPermission(editingTask.permissionMode ?? "");
-        setSchedule(parsedSchedule ?? DEFAULT_SCHEDULE_MODEL);
-        setScheduleUnsupported(parsedSchedule === null);
+        // The server withholds a trigger's rule when it decides when the trigger polls.
+        const ruleless = editingTask.rrule === null;
+        setSchedule(parsedSchedule ?? (ruleless ? defaultTriggerSchedule : DEFAULT_SCHEDULE_MODEL));
+        setScheduleUnsupported(parsedSchedule === null && !ruleless);
         setHostId(editingTask.hostId ?? "");
         setWorkspace(savedWorkspace);
         setBaseBranch(editingTask.baseBranch ?? null);
@@ -1072,10 +1084,9 @@ export function CreateScheduledTaskDialog({
   // host/workspace pairing at all, so the rule doesn't apply.
   const workspaceWithoutHost = !sandboxMode && workspace.trim() !== "" && hostId === "";
   // Metadata edits can preserve an expired schedule; rescheduling requires a future cutoff.
-  const allowPastEnd =
-    savedSchedule !== null &&
-    timezone === editingTask?.timezone &&
-    buildRRule(schedule) === buildRRule(savedSchedule);
+  const scheduleUnchanged =
+    savedSchedule !== null && buildRRule(schedule) === buildRRule(savedSchedule);
+  const allowPastEnd = scheduleUnchanged && timezone === editingTask?.timezone;
   const requiresAnchoredScheduling = schedule.preset === "custom" || schedule.end?.type === "count";
   const unsupportedByScheduler = !anchoredScheduling && requiresAnchoredScheduling;
   // The source an edited trigger watches now: its open form, or its prompt's opening line.
@@ -1124,6 +1135,8 @@ export function CreateScheduledTaskDialog({
   // Whether each match's session can start as a run of the trigger's saved workflow.
   const workflowIdSupported =
     workflowsEnabled && info !== "loading" && info.session_create_workflow_id === true;
+  // The server stores a schedule's workflow and writes its prompt, even with workflows off here.
+  const scheduledWorkflowSupported = info !== "loading" && info.scheduled_task_workflow_id === true;
   // The prompt when no trigger form is open: as typed, or an older trigger's instructions
   // inside its saved template text, whose creation call follows the workflow they run.
   const syncedFreeTextPrompt = syncTriggerWorkflowId(
@@ -1179,11 +1192,20 @@ export function CreateScheduledTaskDialog({
     (!sandboxMode || sandboxWorkspace === savedWorkspace) &&
     baseBranch === (editingTask.baseBranch ?? null) &&
     (hostId === "" || hostId === editingTask.hostId);
-  const scheduleInvalid =
-    scheduleUnsupported ||
-    unsupportedByScheduler ||
-    validateSchedule(schedule, { allowPastEnd, sessionMode, subhourSupported, executionTarget }) !==
-      null;
+  let scheduleError: string | null;
+  if (scheduleUnsupported) {
+    scheduleError = "Choose a frequency to replace this schedule.";
+  } else if (unsupportedByScheduler) {
+    scheduleError = "Choose a frequency this server supports.";
+  } else {
+    scheduleError = validateSchedule(schedule, {
+      allowPastEnd,
+      sessionMode,
+      subhourSupported,
+      executionTarget,
+    });
+  }
+  const scheduleInvalid = scheduleError !== null;
   const triggerPromptContext = {
     sessionLink,
     pollingIntervalMinutes:
@@ -1219,6 +1241,34 @@ export function CreateScheduledTaskDialog({
     renderedTriggerPrompt = renderTriggerConfigPrompt(renderedTriggerConfig, triggerPromptContext);
   }
   const effectivePrompt = trigger !== null ? renderedTriggerPrompt : freeTextPrompt;
+  // A schedule's saved workflow, sent as itself to a server that stores it: the server
+  // writes the prompt, and only workflowId null stops running the workflow.
+  const scheduledWorkflowInput = () => {
+    if (!scheduledWorkflowSupported) return {};
+    const stopsStoredWorkflow = editingTask?.workflowId ? { workflowId: null } : {};
+    // A trigger runs its own prompt, so a schedule turned into one stops running the workflow.
+    if (trigger !== null || isTriggerPrompt(freeTextPrompt)) return stopsStoredWorkflow;
+    // Saved as typed when the Workflow field is off or cleared, or the run sits inside a
+    // header or template text: the server stores the workflow it runs, or stops one it
+    // no longer does.
+    if (
+      !workflowsEnabled ||
+      workflowChoice === null ||
+      systemPrompt !== null ||
+      (editingTask !== null && hasTriggerHeader(editingTask.prompt))
+    ) {
+      return parseSavedWorkflowMessage(effectivePrompt) === null ? stopsStoredWorkflow : {};
+    }
+    const workflowDetails = keepsWorkflowDetails ? prompt.trim() : "";
+    // Unchanged, so other edits save without the server loading the workflow, which may be gone.
+    if (
+      editingTask?.workflowId === workflowChoice.id &&
+      workflowDetails === (editingTask.workflowDetails ?? "")
+    ) {
+      return { prompt: undefined };
+    }
+    return { prompt: undefined, workflowId: workflowChoice.id, workflowDetails };
+  };
   const triggerMode =
     trigger !== null ||
     (sessionMode === "continue" && (editingTemplateTrigger || isTriggerPrompt(effectivePrompt)));
@@ -1486,25 +1536,48 @@ export function CreateScheduledTaskDialog({
         };
   const maxCostUsd = costLimit.trim() === "" ? null : Number(costLimit);
   const costLimitInvalid = maxCostUsd !== null && (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0);
-  const canSubmit =
-    !curationPending &&
-    name.trim() !== "" &&
-    (startsFromSession ||
-      (effectivePrompt.trim() !== "" &&
-        (trigger !== null || withWorkflow(prompt).trim() !== ""))) &&
-    (trigger !== null || systemPrompt === null || systemPrompt.trim() !== "") &&
-    (isEdit || effectiveAgentId !== null) &&
-    (isEdit || sandboxMode || hostId !== "") &&
-    !workspaceWithoutHost &&
-    !scheduleInvalid &&
-    !costLimitInvalid &&
-    !workflowKeepsTaskSession &&
-    !pollingBlockedReason &&
-    !(workerSettings !== null && workerHarnessSettings.blockedReason) &&
-    mcpBlockedReason === null &&
-    !mcpAuthorizing &&
-    mcpSigningIn === null &&
-    !mutationPending;
+  const missingInstructions =
+    !startsFromSession &&
+    (effectivePrompt.trim() === "" || (trigger === null && withWorkflow(prompt).trim() === ""));
+  // The schedule's control sits in the top row, under Advanced, or (for a trigger) is
+  // hidden behind a replace note below the instructions.
+  const scheduleInTopRow = !usesTriggerSchedule && !isEdit && fromSession === null;
+  const scheduleInAdvanced = !usesTriggerSchedule && (isEdit || fromSession !== null);
+  const scheduleReason = hiddenTriggerScheduleNeedsReplacement
+    ? "Use a supported schedule."
+    : scheduleError;
+  // Why Save is off, in dialog order; the disabled button explains the first.
+  const submitBlockers = [
+    curationPending && "Loading…",
+    name.trim() === "" && "Enter a name in the field at the top.",
+    scheduleInTopRow && scheduleReason,
+    missingInstructions &&
+      (trigger === null
+        ? "Add instructions."
+        : "Fill in the trigger's required fields and instructions."),
+    trigger === null &&
+      systemPrompt?.trim() === "" &&
+      "The template's system prompt can't be empty.",
+    workflowKeepsTaskSession && "Remove the workflow to save.",
+    usesTriggerSchedule && scheduleReason,
+    !isEdit &&
+      !sandboxMode &&
+      hostId === "" &&
+      (hostsPending ? "Loading hosts…" : "Pick a host to run on."),
+    !isEdit &&
+      effectiveAgentId === null &&
+      (agents === undefined ? "Loading agents…" : "Pick an agent."),
+    mcpBlockedReason,
+    (mcpAuthorizing || mcpSigningIn !== null) && "Finishing MCP sign-in…",
+    scheduleInAdvanced && scheduleReason,
+    workspaceWithoutHost && "Pick a host before pinning a workspace.",
+    costLimitInvalid && "Enter a cost limit greater than zero, or leave it blank.",
+    pollingBlockedReason,
+    workerSettings !== null && workerHarnessSettings.blockedReason,
+  ];
+  const submitBlockedReason =
+    submitBlockers.find((reason): reason is string => Boolean(reason)) ?? null;
+  const canSubmit = !mutationPending && submitBlockedReason === null;
   // Problems that disable Save but whose explanation or fix lives under Advanced settings.
   const advancedBlocksSubmit =
     !curationPending &&
@@ -1667,7 +1740,8 @@ export function CreateScheduledTaskDialog({
       const input = {
         name: name.trim(),
         prompt: systemPrompt === null ? effectivePrompt.trim() : effectivePrompt,
-        rrule: buildRRule(schedule),
+        // An untouched schedule keeps its stored spelling, so the pending run isn't rescheduled.
+        rrule: editingTask?.rrule && scheduleUnchanged ? editingTask.rrule : buildRRule(schedule),
         timezone,
         ...(maxCostUsd !== (editingTask?.maxCostUsd ?? null) ? { maxCostUsd } : {}),
         ...(executionTargetChanged ? { executionTarget } : {}),
@@ -1677,6 +1751,7 @@ export function CreateScheduledTaskDialog({
         ...(!sandboxMode && hostId !== "" ? { hostId } : {}),
         ...workspacePatch,
         ...((editingTask?.sessionMode ?? "new") !== sessionMode ? { sessionMode } : {}),
+        ...scheduledWorkflowInput(),
       };
       const projectInput = await projectChangeInput(
         // Saving over a deleted project clears it, matching the "No project" shown.
@@ -1707,6 +1782,8 @@ export function CreateScheduledTaskDialog({
           id: editingTask.id,
           input: {
             ...input,
+            // Keep the trigger's withheld rule.
+            ...(editingTask.rrule === null ? { rrule: undefined } : {}),
             ...overrides,
             ...projectInput,
             ...(sessionMode === "continue" &&
@@ -1811,7 +1888,8 @@ export function CreateScheduledTaskDialog({
         onPointerDownOutside={guardDialogDismiss}
         onInteractOutside={guardDialogDismiss}
       >
-        <DialogHeader className="shrink-0 px-6 pt-6 pb-0">
+        {/* The right padding keeps the bordered name field clear of the close button. */}
+        <DialogHeader className="shrink-0 pt-5 pr-[4.5rem] pb-0 pl-6">
           <DialogTitle className="sr-only">
             {fromSession
               ? `New automation from “${fromSession.title || "this session"}”`
@@ -1824,8 +1902,9 @@ export function CreateScheduledTaskDialog({
             value={name}
             placeholder="Name your automation"
             aria-label="Automation title"
+            aria-required
             data-testid="task-name-input"
-            className="h-8 border-0 px-0 py-0 pr-10 font-heading text-[1.25em] leading-[32px] font-[600] focus-visible:border-transparent focus-visible:ring-0 md:text-[1.25em]"
+            className="h-9 px-3 font-heading text-[1.25em] font-[600] md:text-[1.25em]"
             onChange={(event) => setName(event.target.value)}
           />
           <DialogDescription className="sr-only">
@@ -1956,9 +2035,6 @@ export function CreateScheduledTaskDialog({
                               onFocusOutside={keepParentPopoverOpenOnFocus}
                               onInteractOutside={keepParentPopoverOpenForNestedMenu}
                             >
-                              <PickerSectionHeader className="px-5 pt-3 pb-2">
-                                Schedule
-                              </PickerSectionHeader>
                               {recurrenceFields}
                               {scheduleUnsupported && (
                                 <p className="px-4 pb-3 text-sm text-destructive" role="alert">
@@ -2454,9 +2530,6 @@ export function CreateScheduledTaskDialog({
                                   onFocusOutside={keepParentPopoverOpenOnFocus}
                                   onInteractOutside={keepParentPopoverOpenForNestedMenu}
                                 >
-                                  <PickerSectionHeader className="px-5 pt-3 pb-2">
-                                    Schedule
-                                  </PickerSectionHeader>
                                   {recurrenceFields}
                                   {scheduleUnsupported && (
                                     <p className="px-4 pb-3 text-sm text-destructive" role="alert">
@@ -2866,15 +2939,22 @@ export function CreateScheduledTaskDialog({
           >
             Cancel
           </Button>
-          <Button
-            onClick={handleSubmit}
-            loading={mutationPending}
-            disabled={!canSubmit}
-            data-testid="create-scheduled-task-submit"
-            componentId="tasks.scheduled.save"
+          <DisabledActionTooltip
+            reason={submitBlockedReason ?? undefined}
+            label={isEdit ? "Save changes" : "Create"}
+            className="flex-col sm:flex-row"
+            delayDuration={0}
           >
-            {isEdit ? "Save changes" : "Create"}
-          </Button>
+            <Button
+              onClick={handleSubmit}
+              loading={mutationPending}
+              disabled={!canSubmit}
+              data-testid="create-scheduled-task-submit"
+              componentId="tasks.scheduled.save"
+            >
+              {isEdit ? "Save changes" : "Create"}
+            </Button>
+          </DisabledActionTooltip>
         </DialogFooter>
       </DialogContent>
     </Dialog>

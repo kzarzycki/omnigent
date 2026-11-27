@@ -103,6 +103,7 @@ import {
   usePullRequestChangedFiles,
   usePullRequestDiff,
   usePullRequestInfo,
+  usePullRequestReadPriority,
   useSetPullRequestPreference,
   useUpdateSessionPr,
   type NormalizedPullRequestInfo,
@@ -774,7 +775,7 @@ type Associations = Pick<
   PullRequestInfo,
   "prs" | "tracking_available" | "selected_pr_url" | "provider" | "provider_display"
 >;
-type PullRequestSubtab = "summary" | "comments" | "changes";
+export type PullRequestSubtab = "summary" | "comments" | "changes";
 
 function PullRequestListRow({
   conversationId,
@@ -966,6 +967,24 @@ function PullRequestListRow({
   );
 }
 
+/** Read every pull request query of a session again, as the panel's Refresh does. */
+export function refreshSessionPullRequests(
+  queryClient: QueryClient,
+  conversationId: string,
+): Promise<unknown> {
+  return Promise.all(
+    [
+      "github-info",
+      "github-review-threads",
+      "github-changed-files",
+      "github-pr-diff",
+      "github-pr-commits",
+      "github-pr-commit-diff",
+      "session-pull-requests",
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
+  );
+}
+
 interface PullRequestPanelView {
   selected?: string;
   showingDetails: boolean;
@@ -989,10 +1008,16 @@ export function selectPullRequestInPanel(
 export function PullRequestPanel({
   conversationId,
   active = true,
+  onOpenPullRequest,
 }: {
   conversationId: string;
   /** False while the panel is mounted but hidden (collapsed rail); pauses the poll. */
   active?: boolean;
+  /**
+   * Shows a chosen pull request somewhere of its own, such as a sidebar tab. The panel then
+   * stays a list, even of one, and hands over each pull request it would have opened.
+   */
+  onOpenPullRequest?: (url: string, section?: PullRequestSubtab) => void;
 }) {
   const mobileHeaderTarget = useMobilePanelHeaderTarget();
   const inMobileDrawer = mobileHeaderTarget !== undefined;
@@ -1013,7 +1038,7 @@ export function PullRequestPanel({
   }
   const view = cacheChanged ? cachedView : localView.view;
   const selected = view.selected;
-  const showingDetails = view.showingDetails;
+  const showingDetails = view.showingDetails && !onOpenPullRequest;
   const activeTab = view.subtab;
   const updateView = useCallback(
     (update: Partial<typeof view>) => {
@@ -1036,9 +1061,13 @@ export function PullRequestPanel({
   );
   const setActiveTab = (value: PullRequestSubtab) => updateView({ subtab: value });
   const localReviewTarget = useLocalReviewNavigation(conversationId);
+  const openElsewhere = useRef(onOpenPullRequest);
+  openElsewhere.current = onOpenPullRequest;
   useEffect(() => {
     const prUrl = localReviewTarget?.anchor_metadata?.pr_url;
-    if (prUrl) updateView({ selected: prUrl, showingDetails: true, subtab: "changes" });
+    if (!prUrl) return;
+    if (openElsewhere.current) openElsewhere.current(prUrl, "changes");
+    else updateView({ selected: prUrl, showingDetails: true, subtab: "changes" });
   }, [localReviewTarget, updateView]);
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("");
@@ -1046,6 +1075,7 @@ export function PullRequestPanel({
     poll: active ? (selected && !showingDetails ? "list" : true) : false,
     prUrl: selected,
   });
+  usePullRequestReadPriority(conversationId, active && showingDetails ? selected : undefined);
   const showPullRequestList = () => {
     updateView({ showingDetails: false, subtab: "summary" });
   };
@@ -1061,17 +1091,7 @@ export function PullRequestPanel({
   const refresh = async () => {
     setRefreshing(true);
     try {
-      await Promise.all(
-        [
-          "github-info",
-          "github-review-threads",
-          "github-changed-files",
-          "github-pr-diff",
-          "github-pr-commits",
-          "github-pr-commit-diff",
-          "session-pull-requests",
-        ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
-      );
+      await refreshSessionPullRequests(queryClient, conversationId);
     } finally {
       setRefreshing(false);
     }
@@ -1158,6 +1178,23 @@ export function PullRequestPanel({
       : info;
   const linkInEmptyState =
     prs.length === 0 && derivePullRequestPanelState(detailsInfo).kind === "no-pr";
+  // A host that lists no linked PRs, being older or not yet synced, may still send the branch's.
+  const branchPr = onOpenPullRequest && prs.length === 0 ? detailsInfo.data?.pr : undefined;
+  const listedPrs: PullRequestAssociation[] =
+    branchPr && detailsInfo.data
+      ? [
+          {
+            url: branchPr.url,
+            host: parseHttpUrl(branchPr.url)?.host ?? "",
+            repository: detailsInfo.data.repo?.name_with_owner ?? "",
+            number: branchPr.number,
+            title: branchPr.title,
+            relationship: "inferred",
+            state: branchPr.state,
+            is_draft: branchPr.is_draft,
+          },
+        ]
+      : prs;
   const unlinkPr = (prUrl: string) =>
     unlink.mutate(prUrl, {
       onSuccess: (remaining) => {
@@ -1248,6 +1285,10 @@ export function PullRequestPanel({
       </div>
     ) : undefined;
   const showTrackingControls = !!associations?.tracking_available && !linkInEmptyState;
+  const showsList =
+    (listedPrs.length > 1 || (!!onOpenPullRequest && listedPrs.length > 0)) && !showingDetails;
+  // A host's list, without tracking controls, still needs the panel's title and Refresh.
+  const handsOffList = !!onOpenPullRequest && showsList;
   const headerActions = (
     <TooltipProvider delayDuration={0}>
       <IconButton label="Refresh" disabled={refreshing} onClick={refresh}>
@@ -1309,7 +1350,7 @@ export function PullRequestPanel({
             </div>
           </div>
         )
-      ) : !inMobileDrawer && panelState.kind !== "ready" ? (
+      ) : !inMobileDrawer && (panelState.kind !== "ready" || handsOffList) ? (
         <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border px-2">
           <PanelTitle showTitle />
           {refreshButton}
@@ -1334,9 +1375,9 @@ export function PullRequestPanel({
         </p>
       ) : null}
       <div className="min-h-0 flex-1">
-        {prs.length > 1 && !showingDetails ? (
+        {showsList ? (
           <ul aria-label="Pull requests" className="h-full overflow-y-auto">
-            {prs.map((pr) => (
+            {listedPrs.map((pr) => (
               <PullRequestListRow
                 key={pr.url}
                 conversationId={conversationId}
@@ -1350,9 +1391,12 @@ export function PullRequestPanel({
                 hostOffline={hostOffline}
                 sandboxAsleep={sandboxAsleep}
                 unlinkPending={unlink.isPending}
-                onUnlink={associations?.tracking_available ? () => unlinkPr(pr.url) : undefined}
+                onUnlink={
+                  associations?.tracking_available && !branchPr ? () => unlinkPr(pr.url) : undefined
+                }
                 onSelect={() => {
-                  updateView({ selected: pr.url, showingDetails: true, subtab: "summary" });
+                  if (onOpenPullRequest) onOpenPullRequest(pr.url);
+                  else updateView({ selected: pr.url, showingDetails: true, subtab: "summary" });
                 }}
               />
             ))}
@@ -1403,7 +1447,7 @@ export function PullRequestPanel({
  * to the server's stored PRs. Live info cached before they went away counts as
  * offline too, since its failed refetch would otherwise replace the PR.
  */
-function useHostOffline(
+export function useHostOffline(
   conversationId: string,
   info: Pick<ReturnType<typeof usePullRequestInfo>, "error">,
 ): boolean {
@@ -1498,7 +1542,8 @@ function StoredPullRequestDetails({
   );
 }
 
-function PullRequestPanelDetails({
+/** One pull request's details: its heading, tabs and their contents, from `info`. */
+export function PullRequestPanelDetails({
   active,
   conversationId,
   info,

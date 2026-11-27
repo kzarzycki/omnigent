@@ -1,7 +1,6 @@
 import { useReducer } from "react";
 import { ArrowUpCircleIcon } from "lucide-react";
 import { useHosts, type Host, type HostUpdate } from "@/hooks/useHosts";
-import { dateKey } from "@/lib/arcaShutdownWarning";
 import { cn } from "@/lib/utils";
 import { CommandCopyButton } from "./ArcaShutdownBanner";
 
@@ -10,6 +9,10 @@ const unavailableStorage = new Map<string, string>();
 
 function dismissalKey(host: Host): string {
   return `omnigent:host-update:dismissed:${host.host_id}`;
+}
+
+function dateKey(now: Date): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 // A dismissal holds for one target build on one day, so the nudge returns
