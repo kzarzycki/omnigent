@@ -333,3 +333,35 @@ async def test_child_sessions_leaves_child_with_fresh_runner(
     row = next(c for c in resp.json()["data"] if c["id"] == child_id)
     assert row["busy"] is True
     assert row["current_task_status"] == "in_progress"
+
+
+# ── Archive settles an orphaned "running" session (#991) ─────────────────
+
+
+async def test_archive_settles_orphaned_running_session(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archiving a session stuck "running" with a gone runner leaves it idle and archived.
+
+    The archive's deferred stop found no runner to deliver to and used to stop
+    there, so the row kept reading "running" and anything that queued on it never
+    ran. The same settle the ``stop_session`` event does now runs.
+    """
+    import asyncio
+
+    from omnigent.server.routes import sessions as sessions_facade
+    from omnigent.server.routes._sessions import orchestration
+
+    monkeypatch.setattr(sessions_facade, "_ARCHIVE_STOP_UNDO_GRACE_S", 0.0)
+    session_id = _seed_running_session(db_uri, runner_fresh=False)
+
+    resp = await client.patch(f"/v1/sessions/{session_id}", json={"archived": True})
+    assert resp.status_code == 200
+    await asyncio.gather(*list(orchestration._detached_stop_tasks), return_exceptions=True)
+
+    row = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+    assert row is not None
+    assert row.archived is True
+    assert row.live_status == "idle"
