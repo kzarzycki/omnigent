@@ -688,6 +688,32 @@ async def test_first_launch_stamps_an_unknown_origin(
     assert (conv.labels[_STAMP_HOST], conv.labels[_STAMP_CWD]) == ("", "")
 
 
+async def test_fork_first_launch_leaves_the_origin_to_its_source(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A fork's first bind stamps nothing: the seed reads its source's binding instead."""
+    register_host(launch_status="launched")
+    source_id = await _bare_session(client, "stamp-fork-source")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(source_id, _OLD_HOST_ID, "/old/repo")
+    fork = store.fork_conversation(source_id)
+
+    resp = await _launch(client, fork.id)
+
+    assert resp.status_code == 200, resp.text
+    conv = store.get_conversation(fork.id)
+    assert conv is not None and conv.host_id == _HOST_ID
+    assert _STAMP_HOST not in conv.labels and _STAMP_CWD not in conv.labels
+    from omnigent.harnesses.claude_native.main import _fetch_seeded_origin
+
+    assert await _fetch_seeded_origin(client, fork.id) == {
+        "host": _OLD_HOST_ID,
+        "cwd": "/old/repo",
+    }
+
+
 async def test_failed_cross_host_launch_leaves_no_stamp(
     register_host: RegisterHost,
     client: httpx.AsyncClient,

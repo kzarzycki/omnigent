@@ -3406,6 +3406,57 @@ def test_seeded_origin_stamp_is_authoritative_even_when_empty(labels: dict[str, 
 
 
 @pytest.mark.asyncio
+async def test_fork_seed_origin_ignores_the_source_move_stamp_and_a_cwd_only_stamp() -> None:
+    """A moved source still names its current binding; any stamp key on the fork wins."""
+    from omnigent.stores.conversation_store import (
+        FORK_SOURCE_LABEL_KEY,
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Serve a moved source (it carries its own stamp) and a fork."""
+        if request.url.path.endswith("/conv_src"):
+            return httpx.Response(
+                200,
+                json={
+                    "host_id": "host_src",
+                    "workspace": "/src",
+                    "labels": {
+                        SEED_ORIGIN_HOST_LABEL_KEY: "host_older",
+                        SEED_ORIGIN_CWD_LABEL_KEY: "/older",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "host_id": "host_new",
+                "workspace": "/new",
+                "labels": {FORK_SOURCE_LABEL_KEY: "conv_src"},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        assert await claude_native._fetch_seeded_origin(client, "conv_fork") == {
+            "host": "host_src",
+            "cwd": "/src",
+        }
+        # A cwd-only stamp on the fork is still a stamp: the source is not consulted.
+        record = {
+            "host_id": "host_new",
+            "workspace": "/new",
+            "labels": {FORK_SOURCE_LABEL_KEY: "conv_src", SEED_ORIGIN_CWD_LABEL_KEY: "/mine"},
+        }
+        assert await claude_native._fetch_seeded_origin(client, "conv_fork", record) == {
+            "host": None,
+            "cwd": "/mine",
+        }
+
+
+@pytest.mark.asyncio
 async def test_fork_seed_origin_reads_the_source_session() -> None:
     """A fork's own row is bound to the new host, so its origin is the source's binding."""
     from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY

@@ -3686,6 +3686,27 @@ def test_rebind_stamps_previous_binding_so_seed_names_the_old_host(
     assert _origin_from_session_record(record) == {"host": old_host, "cwd": "/old/repo"}
 
 
+def test_fork_drops_the_source_move_stamp(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A fork's origin is its source's current binding, so the source's stamp isn't copied."""
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    source = conversation_store.create_conversation()
+    conversation_store.set_host_id(source.id, "b" * 32, "/new/repo")
+    conversation_store.set_labels(
+        source.id, {SEED_ORIGIN_HOST_LABEL_KEY: "a" * 32, SEED_ORIGIN_CWD_LABEL_KEY: "/old"}
+    )
+
+    fork = conversation_store.fork_conversation(source.id)
+
+    assert SEED_ORIGIN_HOST_LABEL_KEY not in fork.labels
+    assert SEED_ORIGIN_CWD_LABEL_KEY not in fork.labels
+
+
 # ── sort_by=updated_at ────────────────────────────────
 
 

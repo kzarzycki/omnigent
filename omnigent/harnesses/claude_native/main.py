@@ -6386,6 +6386,7 @@ async def _fetch_seeded_origin(
     """
     from omnigent.stores.conversation_store import (
         FORK_SOURCE_LABEL_KEY,
+        SEED_ORIGIN_CWD_LABEL_KEY,
         SEED_ORIGIN_HOST_LABEL_KEY,
     )
 
@@ -6394,7 +6395,8 @@ async def _fetch_seeded_origin(
     labels = (session_record or {}).get("labels")
     if isinstance(labels, dict):
         source_id = labels.get(FORK_SOURCE_LABEL_KEY)
-        if SEED_ORIGIN_HOST_LABEL_KEY not in labels and isinstance(source_id, str) and source_id:
+        has_stamp = SEED_ORIGIN_HOST_LABEL_KEY in labels or SEED_ORIGIN_CWD_LABEL_KEY in labels
+        if not has_stamp and isinstance(source_id, str) and source_id:
             # A fork's own row is bound to the new host; its history ran on the source's.
             source = await _get_session_record(client, source_id)
             # The source's current binding, not its own move stamp.

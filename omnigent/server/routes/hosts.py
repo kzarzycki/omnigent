@@ -1700,7 +1700,16 @@ def create_hosts_router(
                     await asyncio.to_thread(
                         _drop_claude_launch_args_from_another_host, conversation_store, bound
                     )
-                if target.conv.host_id != host_id or target.conv.workspace != workspace:
+                from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY
+
+                # A fork's first bind has no previous host to name; its origin is its
+                # source's binding, which the seed reads through the fork label.
+                is_fork_first_bind = (
+                    target.conv.host_id is None and FORK_SOURCE_LABEL_KEY in target.conv.labels
+                )
+                if not is_fork_first_bind and (
+                    target.conv.host_id != host_id or target.conv.workspace != workspace
+                ):
                     from omnigent.server.routes._sessions.helpers import stamp_seed_origin
 
                     # Stamped after the rebind lands, so a failed one leaves no stamp.
