@@ -238,6 +238,8 @@ from omnigent.server.routes._sessions.helpers import (
     _validated_cost_control_mode_override,
     _validated_subagent_routing_override,
     reconcile_orphaned_running_status,
+    restore_seed_origin,
+    stamp_seed_origin,
 )
 from omnigent.server.routes._sessions.orchestration import (
     HOST_OFFLINE_HOLD_S,
@@ -1117,6 +1119,7 @@ def register_core_routes(
         git_branch: str | None,
         labels: dict[str, str] | None,
         claim: str,
+        seed_labels: dict[str, str] | None = None,
     ) -> None:
         """
         Undo a refused sandbox move: old binding, then launch, then claim.
@@ -1145,6 +1148,8 @@ def register_core_routes(
         :param git_branch: Its worktree branch there, or ``None``.
         :param labels: The sandbox labels the move removed, or ``None``.
         :param claim: The runner id the move claimed the session with.
+        :param seed_labels: The session's labels before the move, to restore the
+            seed-origin stamp from.
         """
         try:
             current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
@@ -1169,6 +1174,10 @@ def register_core_routes(
                         # the session is another host's, and nothing here is this move's.
                         holds_claim = False
                     raise
+                if seed_labels is not None:
+                    await asyncio.to_thread(
+                        restore_seed_origin, conversation_store, session_id, seed_labels
+                    )
                 if labels is not None:
                     # A launch refused after writing its own sandbox labels leaves them.
                     restored = await asyncio.to_thread(
@@ -5907,6 +5916,14 @@ def register_core_routes(
         async def detach_old_host() -> None:
             # Runs once the launch is visible to message handling, so a message
             # sent from now on waits for the sandbox instead of being dropped.
+            await _settled_write(
+                session_id,
+                stamp_seed_origin,
+                conversation_store,
+                session_id,
+                previous_host_id,
+                previous_workspace,
+            )
             cleared = await _settled_write(
                 session_id,
                 conversation_store.clear_host_binding,
@@ -5979,6 +5996,7 @@ def register_core_routes(
                     git_branch=conv.git_branch,
                     labels=stale_labels,
                     claim=claim,
+                    seed_labels=conv.labels,
                 )
 
             if isinstance(exc, asyncio.CancelledError):

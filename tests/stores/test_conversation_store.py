@@ -3659,6 +3659,54 @@ def test_runner_host_rebind_does_not_bump_updated_at(
     )
 
 
+def test_rebind_stamps_previous_binding_so_seed_names_the_old_host(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    After a move rebinds the session, the seed origin is the old host, not the new.
+
+    The row's ``host_id``/``workspace`` name the destination by the time the
+    runner seeds, so the origin must come from the stamp written before the rebind.
+    """
+    from omnigent.harnesses.claude_native.main import _origin_from_session_record
+    from omnigent.server.routes._sessions.helpers import stamp_seed_origin
+
+    old_host, new_host = "a" * 32, "b" * 32
+    conv = conversation_store.create_conversation()
+    conversation_store.set_host_id(conv.id, old_host, "/old/repo")
+
+    stamp_seed_origin(conversation_store, conv.id, old_host, "/old/repo")
+    conversation_store.clear_host_binding(conv.id, keep_runner=True)
+    conversation_store.set_host_id(conv.id, new_host, "/new/repo")
+
+    moved = conversation_store.get_conversation(conv.id)
+    assert moved is not None
+    record = {"host_id": moved.host_id, "workspace": moved.workspace, "labels": moved.labels}
+    assert record["host_id"] == new_host
+    assert _origin_from_session_record(record) == {"host": old_host, "cwd": "/old/repo"}
+
+
+def test_fork_drops_the_source_move_stamp(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A fork's origin is its source's current binding, so the source's stamp isn't copied."""
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    source = conversation_store.create_conversation()
+    conversation_store.set_host_id(source.id, "b" * 32, "/new/repo")
+    conversation_store.set_labels(
+        source.id, {SEED_ORIGIN_HOST_LABEL_KEY: "a" * 32, SEED_ORIGIN_CWD_LABEL_KEY: "/old"}
+    )
+
+    fork = conversation_store.fork_conversation(source.id)
+
+    assert SEED_ORIGIN_HOST_LABEL_KEY not in fork.labels
+    assert SEED_ORIGIN_CWD_LABEL_KEY not in fork.labels
+
+
 # ── sort_by=updated_at ────────────────────────────────
 
 

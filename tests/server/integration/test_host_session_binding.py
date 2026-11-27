@@ -1253,6 +1253,9 @@ async def test_session_moves_from_its_host_onto_a_new_managed_sandbox(
     assert len(tunnels) == 1
     assert conv.host_id == _MOVED_SANDBOX_HOST_ID
     assert conv.workspace == "/root/workspace"
+    # The seed names the laptop the history ran on, not the sandbox it moved to.
+    assert conv.labels["omnigent.seed_origin.host"] == _LAPTOP_HOST_ID
+    assert conv.labels["omnigent.seed_origin.cwd"] == "/Users/alice/repo"
     # The laptop's worktree branch doesn't exist in the sandbox's checkout.
     assert conv.git_branch is None
     assert conv.runner_id is not None and conv.runner_id.startswith("runner_token_")
@@ -1949,6 +1952,11 @@ async def test_session_stays_with_a_refused_move_until_its_rollback_finishes(
     """
     env = managed_session_env
     session_id = await _session_released_from_laptop(env, agent_name="move-rollback-hold-agent")
+    earlier_stamp = {
+        "omnigent.seed_origin.host": "earlier_host",
+        "omnigent.seed_origin.cwd": "/earlier",
+    }
+    env.conv_store.set_labels(session_id, earlier_stamp)
     loop = asyncio.get_running_loop()
     set_host_id = env.conv_store.set_host_id
     attempts: list[int] = []
@@ -1978,6 +1986,8 @@ async def test_session_stays_with_a_refused_move_until_its_rollback_finishes(
         "/Users/alice/repo",
         None,
     )
+    # The move stamped the laptop as the origin; the refusal puts the earlier stamp back.
+    assert {k: v for k, v in conv.labels.items() if k in earlier_stamp} == earlier_stamp
     assert env.app.state.managed_launches.get(session_id) is None
 
 
