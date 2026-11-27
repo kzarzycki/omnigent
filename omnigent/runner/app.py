@@ -222,7 +222,12 @@ from omnigent.runner.subagent_work import (
     wrapper_label_from_labels,
 )
 from omnigent.runner.transports.ws_tunnel.frames import TEXT_SEGMENT_CAPABILITY
-from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
+from omnigent.runtime.harnesses.process_manager import (
+    HarnessProcessManager,
+    NoLiveHarnessError,
+    post_event,
+    stream_event,
+)
 from omnigent.runtime.prompt import (
     build_instructions,
     build_instructions_nullable,
@@ -5230,7 +5235,11 @@ def create_runner_app(
             return
         try:
             harness_client = await process_manager.get_client(conv_id, "any")
-            resp = await harness_client.post(
+            resp = await post_event(
+                process_manager,
+                conv_id,
+                "any",
+                harness_client,
                 f"/v1/sessions/{conv_id}/events",
                 json={"type": "session_ended"},
                 timeout=_SESSION_ENDED_FORWARD_TIMEOUT_S,
@@ -7546,11 +7555,14 @@ def create_runner_app(
                 else None
             )
             try:
-                async with client.stream(
-                    "POST",
+                async with stream_event(
+                    manager,
+                    conv_id,
+                    harness_name,
+                    client,
                     f"/v1/sessions/{conv_id}/events",
                     json=event_body,
-                    timeout=None,
+                    env=spawn_env,
                 ) as harness_resp:
                     if harness_resp.status_code != 200:
                         if not _owns_live_turn():

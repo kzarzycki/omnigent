@@ -30,7 +30,7 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1104,6 +1104,16 @@ class HarnessProcessManager:
             return False
         return True
 
+    def worker_left(self, conversation_id: str, client: httpx.AsyncClient) -> bool:
+        """Whether the worker behind ``client`` is gone, replaced, or in its shutdown window."""
+        entry = self._entries.get(conversation_id)
+        return (
+            entry is None
+            or entry.client is not client
+            or entry.process.returncode is not None
+            or entry.ending_file_exists()
+        )
+
     def has_session(self, conversation_id: str) -> bool:
         """
         Check whether a harness subprocess is registered for
@@ -1709,6 +1719,83 @@ class HarnessProcessManager:
                         "conversation %s; will retry on a later pass",
                         conv_id,
                     )
+
+
+def _worker_left(manager: Any, conversation_id: str, client: Any) -> bool:
+    """Whether ``client``'s worker left; a manager without ``worker_left`` never says so."""
+    check = getattr(manager, "worker_left", None)
+    return bool(check(conversation_id, client)) if check is not None else False
+
+
+async def post_event(
+    manager: HarnessProcessManager,
+    conversation_id: str,
+    harness: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    timeout: float | None,
+    env: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST an event with a client got earlier, once more to a fresh worker if it left.
+
+    A worker can mark itself as ending (and exit) between the caller's ``get_client``
+    and this POST. The send is resent through ``get_client`` (which waits for the marked
+    worker to exit, then respawns or raises :class:`NoLiveHarnessError`) only when it was
+    demonstrably not delivered: the connection was never made (``httpx.ConnectError``),
+    or the worker answered an error while marked ending, gone or replaced (it refuses all
+    it is sent then). Any other failure, and any error from a worker still serving, may
+    follow a request the worker took, and is never resent.
+
+    :returns: The response of the first POST, or of the resend.
+    """
+    try:
+        resp = await client.post(url, json=json, timeout=timeout)
+    except httpx.ConnectError:
+        if not _worker_left(manager, conversation_id, client):
+            raise
+    else:
+        if resp.status_code < 400 or not _worker_left(manager, conversation_id, client):
+            return resp
+    fresh = await manager.get_client(conversation_id, harness, env=env)
+    return await fresh.post(url, json=json, timeout=timeout)
+
+
+@contextlib.asynccontextmanager
+async def stream_event(
+    manager: HarnessProcessManager,
+    conversation_id: str,
+    harness: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    env: dict[str, str] | None = None,
+) -> AsyncIterator[httpx.Response]:
+    """Open a streaming POST like :func:`post_event`, resending once if undelivered.
+
+    Resends only before the stream is accepted (a ``ConnectError``, or a non-200 status
+    from a worker that left); once a 200 is yielded nothing is resent.
+    """
+    for attempt in range(2):
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                resp = await stack.enter_async_context(
+                    client.stream("POST", url, json=json, timeout=None)
+                )
+            except httpx.ConnectError:
+                if attempt or not _worker_left(manager, conversation_id, client):
+                    raise
+            else:
+                if (
+                    resp.status_code == 200
+                    or attempt
+                    or not _worker_left(manager, conversation_id, client)
+                ):
+                    yield resp
+                    return
+        client = await manager.get_client(conversation_id, harness, env=env)
 
 
 async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) -> None:
