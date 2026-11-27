@@ -813,6 +813,14 @@ class Executor:
         """Ask the executor to interrupt a currently running turn, if supported."""
         return False
 
+    def note_conversation(self, conversation_id: str) -> None:  # noqa: ARG002 — default no-op
+        """Tell the executor which Omnigent conversation it serves, as the runtime names it.
+
+        Unlike the adapter's session key, which is new for each worker, this id is the same in
+        the next worker, so an executor that leaves state for it can find it again.
+        """
+        return
+
     async def end_session(self, session_key: str) -> None:  # noqa: ARG002 — default no-op; subclasses that can tell their agent override
         """The Omnigent session was archived or deleted, as opposed to a cancel or a restart.
 

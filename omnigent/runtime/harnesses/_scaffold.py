@@ -51,6 +51,7 @@ from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from omnigent.debug_logging import current_session_id_scope
 from omnigent.errors import ErrorCode, HarnessTransportClosedError, OmnigentError
 from omnigent.host_sleep import HostSleepWatch
 from omnigent.inner.executor import (
@@ -1429,7 +1430,8 @@ class HarnessApp:
         if isinstance(body, InterruptEvent):
             return await self._handle_interrupt_event()
         if isinstance(body, SessionEndedEvent):
-            await self.on_session_ended()
+            with current_session_id_scope(conversation_id):
+                await self.on_session_ended()
             return Response(status_code=204)
         if isinstance(body, ToolResultEvent):
             return await self._handle_tool_result_event(body)

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -61,7 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
-from omnigent.debug_logging import debug_event
+from omnigent.debug_logging import current_session_id, debug_event
 from omnigent.inner import _proc
 from omnigent.inner._acp_metadata import _META_INPUT_ITEM_ID
 from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
@@ -417,6 +418,41 @@ def _unattended_auth_method_id(initialize_result: _AcpJsonObject) -> str | None:
     return None
 
 
+def _idle_handoff_path(session_key: str) -> Path:
+    """Where a worker that left idle notes its ACP session for the worker that is told the end."""
+    digest = hashlib.sha256(session_key.encode()).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / f"omnigent-acp-idle-{os.getuid()}" / f"{digest}.json"
+
+
+def _write_idle_handoff(session_key: str, method: str, acp_session_id: str | None) -> None:
+    """Note the ACP session an idle-exiting worker held; best effort."""
+    if acp_session_id is None:
+        return
+    path = _idle_handoff_path(session_key)
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text(json.dumps({"method": method, "sessionId": acp_session_id}))
+        path.chmod(0o600)
+
+
+def _read_idle_handoff(session_key: str) -> tuple[str, str] | None:
+    """The ``(method, ACP session id)`` an idle-exited worker noted, or ``None``."""
+    try:
+        data = json.loads(_idle_handoff_path(session_key).read_text())
+    except (OSError, ValueError):
+        return None
+    method, sid = (
+        (data.get("method"), data.get("sessionId")) if isinstance(data, dict) else (None, None)
+    )
+    return (method, sid) if isinstance(method, str) and isinstance(sid, str) else None
+
+
+def _clear_idle_handoff(session_key: str) -> None:
+    """Drop a handoff once it is used or the session has ended."""
+    with contextlib.suppress(OSError):
+        _idle_handoff_path(session_key).unlink()
+
+
 def _resolve_cwd(cwd: str | None, *, session_id: str | None = None) -> str:
     """Resolve and validate the working directory for the ACP agent subprocess.
 
@@ -504,6 +540,7 @@ class AcpExecutor(Executor):
         self._config = config
         self._on_idle_exit = on_idle_exit
         self._idle_watch_task: asyncio.Task[None] | None = None
+        self._handoff_key: str | None = None
         self._turns_active = 0
         self._between_turns = asyncio.Event()
         self._between_turns.set()
@@ -1622,6 +1659,10 @@ class AcpExecutor(Executor):
         candidates = {c for c in (name, raw_tool, meta_tool) if c}
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
+    def note_conversation(self, conversation_id: str) -> None:
+        """Keep the conversation id, the key an idle-exited worker's note is left under."""
+        self._handoff_key = conversation_id
+
     def _watch_idle_exit(self) -> None:
         """Report the agent's idle exit to ``on_idle_exit``, once it happens between turns."""
         proc, status = self._proc, self._idle_exit_status
@@ -1639,6 +1680,10 @@ class AcpExecutor(Executor):
             if proc.returncode != status or proc is not self._proc:
                 return
             logger.info("acp[%s] agent left idle; ending this worker", self._config.name)
+            if self._handoff_key is not None and self._session_ended_method is not None:
+                _write_idle_handoff(
+                    self._handoff_key, self._session_ended_method, self._session_id
+                )
             if self._on_idle_exit is not None:
                 self._on_idle_exit()
 
@@ -2286,6 +2331,15 @@ class AcpExecutor(Executor):
         otherwise is not. A failure is logged, never raised.
         """
         method, acp_session_id = self._session_ended_method, self._session_id
+        handed_off = False
+        if (method is None or acp_session_id is None) and self._proc is None:
+            # A fresh worker, started only to be told: the one that left idle noted the ACP
+            # session it held, which is how the agent finds what it must end.
+            handoff = _read_idle_handoff(current_session_id() or session_key)
+            if handoff is not None:
+                method, acp_session_id = handoff
+                self._session_id = acp_session_id
+                handed_off = True
         if method is None or acp_session_id is None:
             if self._advertised_session_ended:
                 logger.warning(
@@ -2296,7 +2350,16 @@ class AcpExecutor(Executor):
             return
         restarted = False
         try:
-            if self._proc is None:
+            if self._proc is None and handed_off:
+                restarted = True
+                await self._start_process(
+                    cwd=self._cwd if os.path.isdir(self._cwd) else tempfile.gettempdir()
+                )
+                await self._ensure_initialized()
+                method = self._session_ended_method
+                if method is None:
+                    return
+            elif self._proc is None:
                 logger.warning(
                     "acp[%s] session %s ended with no live agent to tell",
                     self._config.name,
@@ -2333,6 +2396,7 @@ class AcpExecutor(Executor):
                 exc_info=True,
             )
         finally:
+            _clear_idle_handoff(current_session_id() or session_key)
             if restarted:
                 await self._stop_notice_process()
 

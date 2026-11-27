@@ -37,10 +37,6 @@ class _Executor(Executor):
 async def test_the_adapter_tells_its_executor_the_session_ended(caplog) -> None:
     executor = _Executor()
     adapter = ExecutorAdapter(lambda: executor, session_key="key")
-    with caplog.at_level(logging.WARNING):
-        await adapter.on_session_ended()  # no executor built yet: nothing to tell
-    assert "no executor in this harness to tell" in caplog.text
-    adapter._executor = executor
     response = await adapter._post_session_event(
         "c" * 32,
         SessionEndedEvent(type="session_ended"),

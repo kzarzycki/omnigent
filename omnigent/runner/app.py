@@ -5178,6 +5178,48 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
 
+    async def _tell_idle_worker_session_ended(conv_id: str) -> bool:
+        """Start an ACP worker just to hear ``session_ended`` after the session's worker left idle.
+
+        The worker of an idle-exited agent is gone, and only an agent can end what it holds
+        (a cloud session). A new worker reads what the old one noted and tells the agent.
+        Returns whether the event was delivered; any other harness, or a session this runner
+        has no spec for, is not started.
+        """
+        if process_manager is None or _session_harness_name(conv_id) != "acp":
+            return False
+        entry = _session_spec_cache.get(conv_id)
+        spec = _unwrap_spec_entry(entry)
+        raw_harness = _session_harness_overrides.get(conv_id) or (
+            spec.executor.config.get("harness") or spec.executor.type if spec else None
+        )
+        if spec is None or raw_harness is None:
+            return False
+        try:
+            spawn_env = _build_spawn_env_from_spec(
+                spec,
+                raw_harness,
+                workdir=_resolved_spec_workdir(entry),
+                cwd=await _session_runtime_cwd(conv_id),
+                session_id=conv_id,
+                resource_registry=resource_registry,
+            )
+            client = await process_manager.get_client(conv_id, "acp", env=spawn_env)
+            resp = await client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={"type": "session_ended"},
+                timeout=_SESSION_ENDED_FORWARD_TIMEOUT_S,
+            )
+        except Exception:
+            _logger.warning(
+                "Could not start a worker to tell session %s it ended",
+                conv_id,
+                exc_info=True,
+                extra={"session_id": conv_id},
+            )
+            return False
+        return resp.status_code < 400
+
     async def _forward_session_ended(conv_id: str) -> None:
         """Best-effort POST ``{"type":"session_ended"}`` to a conversation's harness.
 
@@ -5201,6 +5243,8 @@ def create_runner_app(
                     extra={"session_id": conv_id},
                 )
         except NoLiveHarnessError:
+            if await _tell_idle_worker_session_ended(conv_id):
+                return
             _logger.warning(
                 "Session %s ended with no live harness to tell",
                 conv_id,

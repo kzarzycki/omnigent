@@ -9,7 +9,7 @@ import pytest
 
 from omnigent.runner.app import create_runner_app
 from omnigent.runtime.harnesses.process_manager import NoLiveHarnessError
-from omnigent.spec.types import AgentSpec
+from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import _runner_client
 from tests.runner.helpers import NullServerClient
 
@@ -80,3 +80,65 @@ async def test_a_refusing_harness_is_logged_not_failed(caplog) -> None:
     response = await _send(_app(harness), "session_ended")
     assert response.status_code == 204
     assert "refused session_ended" in caplog.text
+
+
+class _IdleExitedProcessManager(_ProcessManager):
+    """No live worker: ``"any"`` finds nothing, and the harness family starts one."""
+
+    def __init__(self, client: _HarnessClient) -> None:
+        super().__init__(None)
+        self.started = client
+        self.spawned: list[tuple[str, dict[str, str] | None]] = []
+
+    async def get_client(self, conversation_id: str, harness: str, env: Any = None) -> Any:
+        if harness == "any":
+            raise NoLiveHarnessError(conversation_id)
+        self.spawned.append((harness, env))
+        return self.started
+
+
+@pytest.mark.asyncio
+async def test_session_ended_after_an_idle_exit_starts_a_worker_to_tell() -> None:
+    """A session whose worker left idle is not left behind: a worker starts to hear it."""
+    spec = AgentSpec(
+        spec_version=1,
+        name="cloud",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "acp", "command": "bridge"}),
+    )
+
+    async def resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        return spec
+
+    harness = _HarnessClient()
+    manager = _IdleExitedProcessManager(harness)
+    app = create_runner_app(
+        process_manager=manager,  # type: ignore[arg-type]
+        spec_resolver=resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _runner_client(app) as client:
+        created = await client.post(
+            "/v1/sessions", json={"session_id": CONVERSATION_ID, "agent_id": "agent"}
+        )
+        assert created.status_code == 201, created.text
+        manager.spawned.clear()
+        response = await client.post(
+            f"/v1/sessions/{CONVERSATION_ID}/events", json={"type": "session_ended"}
+        )
+    assert response.status_code == 204
+    assert [family for family, _ in manager.spawned] == ["acp"]
+    assert harness.posts[-1]["json"] == {"type": "session_ended"}
+
+
+@pytest.mark.asyncio
+async def test_session_ended_with_no_worker_and_no_spec_starts_nothing(caplog) -> None:
+    manager = _IdleExitedProcessManager(_HarnessClient())
+    app = create_runner_app(
+        process_manager=manager,  # type: ignore[arg-type]
+        spec_resolver=None,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    response = await _send(app, "session_ended")
+    assert response.status_code == 204
+    assert manager.spawned == []
+    assert "ended with no live harness" in caplog.text
