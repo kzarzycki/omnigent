@@ -47,6 +47,7 @@ import type * as PullRequestsModule from "@/hooks/usePullRequests";
 import {
   markConversationRead,
   markConversationSeen,
+  markConversationUnread,
   resetReadStateForTests,
   seedReadState,
 } from "@/hooks/useUnseenConversations";

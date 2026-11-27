@@ -592,7 +592,7 @@ function PullRequestRefLink({
         followLinkWithPopupFallback(event, url, fileViewerConversationId);
       }}
     >
-      <PullRequestLinkLabel>{children}</PullRequestLinkLabel>
+      <GithubLinkLabel kind="pull">{children}</GithubLinkLabel>
     </a>
   );
 }

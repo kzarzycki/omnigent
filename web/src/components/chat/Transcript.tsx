@@ -78,6 +78,7 @@ import { usePeerSessionMessageDisplay } from "@/lib/peerSessionMessagePreference
 import { SCROLL_RESTORE_BUDGET_MS } from "@/shell/useScrollRestore";
 
 export interface TranscriptProps {
+  hostId: string | null | undefined;
   /** Ref callback for the conversation wrapper element (SelectionPopup scope +
    *  JumpToTopButton hover ancestor). Owned by the parent, forwarded here. */
   setConversationEl: (el: HTMLDivElement | null) => void;
@@ -190,6 +191,7 @@ export function findShortcutRoute(
  * dialogs bail out via React's normal prop-equality check.
  */
 function TranscriptImpl({
+  hostId,
   setConversationEl,
   containerEl,
   scroller,

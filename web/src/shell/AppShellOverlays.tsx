@@ -41,7 +41,7 @@ export interface AppShellOverlaysProps {
   serverConversationId: string | undefined;
   updateOverlayHeight: number;
   /** Close the left sidebar before the palette navigates on a phone. */
-  onCloseSidebar: (path: string) => void;
+  onCloseSidebar?: (path: string) => void;
 }
 
 /**

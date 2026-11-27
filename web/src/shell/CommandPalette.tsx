@@ -4,13 +4,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ChevronRightIcon,
-  CornerDownRightIcon,
-  FolderIcon,
-  LocateFixedIcon,
-  XIcon,
-} from "lucide-react";
+import { LocateFixedIcon, XIcon } from "lucide-react";
 import { useNavigate, useParams } from "@/lib/routing";
 import { isSearchTimeout } from "@/hooks/useConversations";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -44,7 +38,7 @@ export interface CommandPaletteProps {
   /** False on grid routes, where ⌘⌥] belongs to the grid's own workspace. */
   rightSidebarShortcutEnabled?: boolean;
   /** Close the left sidebar; called with the target path before a navigation on mobile. */
-  onCloseSidebar: (path: string) => void;
+  onCloseSidebar?: (path: string) => void;
   /** Switches ⌘K to searching sessions only, as its session chord opens it; QuickPick offers it. */
   onGoToSession?: () => void;
 }
@@ -140,7 +134,7 @@ export function CommandPalette({
   // the page the palette opens; the docked desktop sidebar keeps its state.
   const go = useCallback(
     (path: string): void => {
-      if (isMobile) onCloseSidebar(path);
+      if (isMobile) onCloseSidebar?.(path);
       navigate(path);
     },
     [isMobile, navigate, onCloseSidebar],

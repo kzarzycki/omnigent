@@ -85,7 +85,7 @@ import {
 import { readableSentText, replaceSentMentions } from "@/lib/composerMentions";
 import { mentionPillMarkdown } from "@/lib/mentionPills";
 import { splitSessionMessageOrigin, type SessionMessageOrigin } from "@/lib/sessionMessageOrigin";
-import type { AnyBlock, ImageContentBlock, MessageContentBlock } from "@/lib/blocks";
+import type { ImageContentBlock, MessageContentBlock } from "@/lib/blocks";
 import {
   attachmentLabel,
   ELICITATION_RESPONSE_PREFIX,
@@ -191,25 +191,23 @@ function SessionMessageOriginLine({
   senderLabel: string | null;
   currentSessionId: string | null;
 }) {
-  return (
-    sourceId === null ? (
-      <div
-        data-testid="message-origin"
-        className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
-      >
-        <CornerDownRightIcon className="size-3 shrink-0" />
-        <span className="shrink-0 whitespace-nowrap">From</span>
-        <span>{senderLabel}</span>
-      </div>
-    ) : (
-      <SessionMessageLabel
-        sessionId={sourceId}
-        currentSessionId={currentSessionId}
-        verb="From"
-        icon={CornerDownRightIcon}
-        testId="message-origin"
-      />
-    )
+  return sourceId === null ? (
+    <div
+      data-testid="message-origin"
+      className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+    >
+      <CornerDownRightIcon className="size-3 shrink-0" />
+      <span className="shrink-0 whitespace-nowrap">From</span>
+      <span>{senderLabel}</span>
+    </div>
+  ) : (
+    <SessionMessageLabel
+      sessionId={sourceId}
+      currentSessionId={currentSessionId}
+      verb="From"
+      icon={CornerDownRightIcon}
+      testId="message-origin"
+    />
   );
 }
 

@@ -5317,7 +5317,7 @@ export function ConversationMenuItems({
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
   setLeaveOpen: (open: boolean) => void;
-  setDetailsOpen: (open: boolean) => void;
+  setDetailsOpen?: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -5679,10 +5679,12 @@ export function ConversationMenuItems({
           </C.Sub>
         ))}
       {/* Open to everyone: reading details changes nothing. The dialog copies the id. */}
-      <C.Item data-testid="session-details" onSelect={() => setDetailsOpen(true)}>
-        <InfoIcon className="size-3.5" />
-        Details…
-      </C.Item>
+      {setDetailsOpen && (
+        <C.Item data-testid="session-details" onSelect={() => setDetailsOpen(true)}>
+          <InfoIcon className="size-3.5" />
+          Details…
+        </C.Item>
+      )}
       {/* Stop / Archive / Delete are grouped at the bottom, below a
           divider: lifecycle-ending actions separated from the everyday
           ones above. */}
