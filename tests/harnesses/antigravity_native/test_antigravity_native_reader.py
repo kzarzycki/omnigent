@@ -5476,3 +5476,71 @@ async def test_subagent_idle_check_failure_keeps_mirroring(
 
     monkeypatch.setattr(reader, "get_all_cascade_trajectories", _raise)
     assert await reader._subagent_cascade_is_idle(4242, "child-aaa") is False
+
+
+# ---------------------------------------------------------------------------
+# #991: a closing IDLE edge the server never received must not strand the turn
+# ---------------------------------------------------------------------------
+
+
+class _FlakyStatusSink(_PostSink):
+    """A sink whose ``external_session_status`` idle post fails while ``fail_idle`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_idle = True
+
+    async def __call__(self, **kwargs: Any) -> httpx.Response | None:  # type: ignore[override]
+        payload = cast(dict[str, object], kwargs["payload"])
+        data = cast(dict[str, object], payload.get("data"))
+        if (
+            kwargs["event_type"] == "external_session_status"
+            and data.get("status") == "idle"
+            and self.fail_idle
+        ):
+            # Same shape the shared retry loop returns once every attempt raised.
+            return None
+        return await super().__call__(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_undelivered_idle_edge_keeps_the_turn_open_until_the_backstop_reposts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final assistant message's IDLE edge is retried when the post was lost (#991).
+
+    Before the fix ``_emit_step`` cleared ``turn_active`` whether or not the edge
+    reached the server, so a lost post left the session ``running`` forever and
+    the idle backstop (gated on ``turn_active``) never ran.
+    """
+    sink = _FlakyStatusSink()
+    monkeypatch.setattr(reader, "post_session_event_with_retry", sink)
+    client = httpx.AsyncClient(base_url="http://test")
+    try:
+        turn_active = False
+        for step in (_load("user_input"), _load("planner_response_text")):
+            turn_active = await reader._emit_step(
+                step,
+                client=client,
+                session_id=_SESSION_ID,
+                cascade_id=_CASCADE_ID,
+                turn_active=turn_active,
+            )
+        # The idle post was lost: the turn must stay open so the backstop can retry.
+        assert turn_active is True
+        assert sink.statuses() == ["running"]
+    finally:
+        await client.aclose()
+
+    # The quiescent backstop (what the rotation detector calls) now delivers it.
+    sink.fail_idle = False
+    state = reader._ReaderState(seen=set(), interacted=set(), turn_active=True)
+    client = httpx.AsyncClient(base_url="http://test")
+    try:
+        await reader._close_stranded_turn(
+            client=client, session_id=_SESSION_ID, cascade_id=_CASCADE_ID, state=state
+        )
+    finally:
+        await client.aclose()
+    assert state.turn_active is False
+    assert sink.statuses() == ["running", "idle"]
