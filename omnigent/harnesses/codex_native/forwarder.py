@@ -71,6 +71,7 @@ from omnigent.harnesses.codex_native.elicitation import (
 from omnigent.harnesses.codex_native.elicitation import (
     is_codex_request_id as _is_codex_request_id,
 )
+from omnigent.harnesses.codex_native.shell_identity import rotate_shell_identity
 from omnigent.inner.databricks_executor import DatabricksAuthError
 from omnigent.native._native_forwarder_health import (
     note_post_success as note_native_post_success,
@@ -3339,6 +3340,7 @@ async def _create_thread_replacement_session(
     )
     transfer_resp.raise_for_status()
 
+    rotate_shell_identity(bridge_dir, old_session_id=old_session_id, new_session_id=new_session_id)
     write_bridge_state(
         bridge_dir,
         CodexNativeBridgeState(
