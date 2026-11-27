@@ -56,6 +56,27 @@ export const SESSION_TITLE_INSTRUCTIONS_ENTRY = settingsEntry({
   },
 });
 
+export const KEEP_THINKING_EXPANDED_ENTRY = settingsEntry({
+  id: "keep-thinking-expanded",
+  section: "general",
+  label: "Keep thinking expanded",
+  description:
+    "Leave thinking notes and status updates open in finished turns, also after a reload. Click a header to fold it.",
+  keywords: ["chat", "thinking", "reasoning", "expand", "fold", "collapse", "status updates"],
+});
+
+export const THINKING_SUMMARIES_ENTRY = settingsEntry({
+  id: "thinking-summaries",
+  section: "general",
+  available: (availability) => availability.thinkingSummaries,
+  label: "Ask for thinking summaries",
+  description:
+    "Sessions you start ask Claude and Codex to write out their thinking, which costs extra output tokens. A running session picks this up when it restarts.",
+  keywords: ["chat", "thinking", "reasoning", "summaries", "claude", "codex", "tokens"],
+  parts: { retry: "Retry loading thinking summaries" },
+  presence: { retry: { states: ["load failed"] } },
+});
+
 export const OPEN_SUBAGENTS_IN_PANEL_ENTRY = settingsEntry({
   id: "open-subagents-in-panel",
   section: "general",
@@ -219,6 +240,8 @@ export const GENERAL_SETTINGS = [
   BACKGROUND_SESSION_TITLES_ENTRY,
   SESSION_TITLE_INSTRUCTIONS_ENTRY,
   OPEN_SUBAGENTS_IN_PANEL_ENTRY,
+  KEEP_THINKING_EXPANDED_ENTRY,
+  THINKING_SUMMARIES_ENTRY,
   TERMINAL_CLIPBOARD_ENTRY,
   OPEN_LINKS_IN_APP_ENTRY,
   OPEN_IN_DESKTOP_APP_ENTRY,

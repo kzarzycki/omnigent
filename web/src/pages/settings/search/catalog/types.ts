@@ -194,6 +194,7 @@ export interface SettingsAvailability {
   sessionTitleInstructions: boolean;
   /** The server offers the proactive agent. */
   proactiveAgent: boolean;
+  thinkingSummaries: boolean;
 }
 
 export interface SettingsEntry {

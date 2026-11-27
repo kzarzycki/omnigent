@@ -63,6 +63,7 @@ const SHOWN: SettingsAvailability = {
   projectKanban: true,
   sessionTitleInstructions: true,
   proactiveAgent: true,
+  thinkingSummaries: true,
 };
 const HIDDEN: SettingsAvailability = {
   globalShortcut: false,
@@ -78,6 +79,7 @@ const HIDDEN: SettingsAvailability = {
   projectKanban: false,
   sessionTitleInstructions: false,
   proactiveAgent: false,
+  thinkingSummaries: false,
 };
 
 const targets = settingsSearchTargets(

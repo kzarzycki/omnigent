@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
+import { MemoryRouter } from "react-router-dom";
 
 import { ThinkingSummariesControl } from "./ThinkingSummariesControl";
 import { getThinkingSummaries, saveThinkingSummaries } from "@/lib/thinkingSummariesApi";
@@ -13,6 +14,13 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const getMock = vi.mocked(getThinkingSummaries);
 const saveMock = vi.mocked(saveThinkingSummaries);
+
+function renderControl() {
+  // The row reveals itself from the URL hash, so it renders under a router.
+  return render(<ThinkingSummariesControl />, {
+    wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+  });
+}
 
 async function loadedToggle(): Promise<HTMLElement> {
   const toggle = await screen.findByTestId("thinking-summaries-toggle");
@@ -33,7 +41,7 @@ afterEach(() => {
 describe("ThinkingSummariesControl", () => {
   it.each([true, false])("shows the stored value (%s)", async (stored) => {
     getMock.mockResolvedValue({ enabled: stored });
-    render(<ThinkingSummariesControl />);
+    renderControl();
 
     const toggle = await loadedToggle();
 
@@ -42,7 +50,7 @@ describe("ThinkingSummariesControl", () => {
   });
 
   it("writes each toggle to the server", async () => {
-    render(<ThinkingSummariesControl />);
+    renderControl();
     const toggle = await loadedToggle();
 
     fireEvent.click(toggle);
@@ -56,7 +64,7 @@ describe("ThinkingSummariesControl", () => {
 
   it("keeps the stored value and reports a failed save", async () => {
     saveMock.mockRejectedValue(new Error("server unavailable"));
-    render(<ThinkingSummariesControl />);
+    renderControl();
     const toggle = await loadedToggle();
 
     fireEvent.click(toggle);
@@ -72,7 +80,7 @@ describe("ThinkingSummariesControl", () => {
 
   it("disables the switch after a failed load and retries", async () => {
     getMock.mockRejectedValueOnce(new Error("offline"));
-    render(<ThinkingSummariesControl />);
+    renderControl();
 
     expect(await screen.findByTestId("thinking-summaries-status")).toHaveTextContent(
       "Couldn't load your thinking summaries setting.",

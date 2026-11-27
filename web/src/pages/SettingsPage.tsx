@@ -38,7 +38,6 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -109,6 +108,7 @@ import {
 import {
   ADMIN_VIEW_ENTRY,
   ALWAYS_STEER_ENTRY,
+  KEEP_THINKING_EXPANDED_ENTRY,
   BACKGROUND_SESSION_TITLES_ENTRY,
   OPEN_IN_DESKTOP_APP_ENTRY,
   OPEN_LINKS_IN_APP_ENTRY,
@@ -1953,31 +1953,25 @@ function AlwaysSteerControl() {
 
 function KeepThinkingExpandedControl() {
   const [value, setValue] = useState(() => readKeepThinkingExpanded());
-  const labelId = useId();
-  const descriptionId = useId();
   const toggle = useCallback((next: boolean) => {
     setValue(next);
     writeKeepThinkingExpanded(next);
   }, []);
   return (
-    <div className="flex items-start justify-between gap-6">
-      <SettingsLabel
-        label="Keep thinking expanded"
-        labelId={labelId}
-        descriptionId={descriptionId}
-        className="flex-1"
-        description="Leave thinking notes and status updates open in finished turns, also after a reload. Click a header to fold it."
-      />
+    <SettingsItem
+      entry={KEEP_THINKING_EXPANDED_ENTRY}
+      className="flex items-start justify-between gap-6"
+    >
+      <SettingsEntryLabel entry={KEEP_THINKING_EXPANDED_ENTRY} className="flex-1" />
       <Switch
-        aria-labelledby={labelId}
-        aria-describedby={descriptionId}
+        {...settingsControlProps(KEEP_THINKING_EXPANDED_ENTRY)}
         checked={value}
         onCheckedChange={toggle}
         data-testid="keep-thinking-expanded-toggle"
         className="mt-0.5 shrink-0"
         componentId="settings.general.keep_thinking_expanded"
       />
-    </div>
+    </SettingsItem>
   );
 }
 

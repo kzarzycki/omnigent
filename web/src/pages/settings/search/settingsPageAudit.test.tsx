@@ -402,7 +402,8 @@ const OMNI_ADVISOR_PROMPT: SettingsRoute = {
   url: "/v1/proactive-agent/prompt",
   body: { prompt: "Be useful.", default_prompt: "Be useful.", overridden: false },
 };
-const GENERAL_WEB_HIDES = {
+const THINKING_SUMMARIES_OFF = "The server doesn't offer thinking summaries.";
+const GENERAL_WEB_HIDES_WITH_SUMMARIES = {
   "open-links-in-app": DESKTOP_ONLY,
   "global-shortcut": DESKTOP_ONLY,
   "floating-composer-shortcut": DESKTOP_ONLY,
@@ -411,6 +412,10 @@ const GENERAL_WEB_HIDES = {
   "admin-view": ADMIN_VIEW_NOT_LOADED,
   "project-kanban-board": PROJECT_KANBAN_OFF,
   "proactive-agent": PROACTIVE_AGENT_OFF,
+};
+const GENERAL_WEB_HIDES = {
+  ...GENERAL_WEB_HIDES_WITH_SUMMARIES,
+  "thinking-summaries": THINKING_SUMMARIES_OFF,
 };
 const TITLES_LOADED = "0 / 500 characters";
 const TITLES_SAVED = "16 / 500 characters";
@@ -688,6 +693,26 @@ const SCENARIOS: readonly SettingsAuditScenario[] = [
         body: { detail: "Unavailable" },
         status: 503,
       },
+    ],
+  },
+  {
+    section: "general",
+    scenario: "web › thinking summaries offered",
+    info: { thinking_summaries: true },
+    ready: [{ row: "thinking-summaries" }],
+    hides: GENERAL_WEB_HIDES_WITH_SUMMARIES,
+    states: { "session-title-instructions": ["loaded"] },
+    routes: [{ url: "/v1/settings/thinking-summaries", body: { enabled: false } }],
+  },
+  {
+    section: "general",
+    scenario: "web › thinking summaries failed to load",
+    info: { thinking_summaries: true },
+    ready: ["Couldn't load your thinking summaries setting."],
+    hides: GENERAL_WEB_HIDES_WITH_SUMMARIES,
+    states: { "session-title-instructions": ["loaded"], "thinking-summaries": ["load failed"] },
+    routes: [
+      { url: "/v1/settings/thinking-summaries", body: { detail: "Unavailable" }, status: 503 },
     ],
   },
   {
