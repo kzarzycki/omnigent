@@ -14757,8 +14757,18 @@ async def _create_session_from_existing_agent(
                 exc_info=True,
             )
 
+    # A sub-agent whose spec declares no stance starts in its parent's current mode; the
+    # codex default bypass derived below would otherwise hide it.
+    if needs_launch_args_from_spec:
+        validated_launch_args = await asyncio.to_thread(
+            _inherited_parent_permission_launch_args,
+            _parent_for_routing,
+            selected_harness,
+            own_spec,
+        )
     if (
         needs_launch_args_from_spec
+        and validated_launch_args is None
         and own_spec is not None
         and (not spec_names_harness(own_spec) or _spec_harness(own_spec) == selected_harness)
     ):
@@ -14781,6 +14791,17 @@ async def _create_session_from_existing_agent(
             own_spec,
         )
 
+    # The codex default bypass is a fallback, not a choice: a creator's mode outranks it
+    # when the spec leaves the mode open.
+    spec_default_launch_args: list[str] | None = None
+    if (
+        validated_launch_args == list(_CODEX_DEFAULT_LAUNCH_ARGS)
+        and _spec_leaves_permission_mode_open(own_spec)
+        and needs_launch_args_from_spec
+    ):
+        spec_default_launch_args = validated_launch_args
+        validated_launch_args = None
+
     # Inherit the creator's mode only when the request, automation and readable spec
     # select none.
     creator_permission_labels: dict[str, str] = {}
@@ -14801,6 +14822,8 @@ async def _create_session_from_existing_agent(
         )
         if creator_launch_options is not None:
             validated_launch_args, creator_permission_labels = creator_launch_options
+    if validated_launch_args is None:
+        validated_launch_args = spec_default_launch_args
 
     # No spec spoke for this harness (not loaded, or it names another one, as for a
     # named child overridden to codex): codex still gets the default bypass stance.
@@ -14808,6 +14831,8 @@ async def _create_session_from_existing_agent(
         selected_harness == _CODEX_NATIVE_HARNESS
         and validated_launch_args is None
         and not launch_args_spec_consulted
+        # A spec that could not be read might set its own mode; never widen it to bypass.
+        and not (needs_launch_args_from_spec and own_spec is None and not body.sub_agent_name)
         and body.permission_mode is None
         and not (selection_spec is not None and _spec_declares_stance(selection_spec))
         and (body.sub_agent_name or needs_launch_args_from_spec)

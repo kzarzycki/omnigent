@@ -1749,8 +1749,23 @@ async def _codex_creator(auth_client, auth_app, db_uri, monkeypatch, permission_
             id="explicit-own-host",
         ),
         # Full Access was chosen for the run's host, not a new sandbox or another host.
-        pytest.param("full-access", "managed", None, None, None, id="approval-skipping-off-host"),
-        pytest.param("full-access", "other-host", None, None, None, id="explicit-other-host"),
+        # No inheritance: the codex worker keeps its agent default (the headless bypass).
+        pytest.param(
+            "full-access",
+            "managed",
+            None,
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            id="approval-skipping-off-host",
+        ),
+        pytest.param(
+            "full-access",
+            "other-host",
+            None,
+            None,
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            id="explicit-other-host",
+        ),
         pytest.param(
             "approve-for-me",
             "managed",
@@ -2101,7 +2116,7 @@ async def test_added_agent_and_independent_worker_inheritance(
     )
     worker = store.get_conversation(result["conversation_id"])
     assert worker.parent_conversation_id is None
-    assert worker.terminal_launch_args is None
+    assert worker.terminal_launch_args == ["--dangerously-bypass-approvals-and-sandbox"]
 
 
 @pytest.mark.parametrize(

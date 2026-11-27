@@ -1990,6 +1990,8 @@ def _pr_status_before(
     :param deadline: A ``time.monotonic()`` value.
     :returns: ``(status, timed_out)``, as :func:`_pr_title_before` returns.
     """
+    if _background_reads_paused():  # asked again once the pause ends
+        return None, True
     with _gh_deadline_scope(deadline):
         data = _pr_json(root, reference, _PR_STATUS_FIELDS)
         if data is None:

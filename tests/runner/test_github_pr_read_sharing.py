@@ -127,6 +127,9 @@ class FakeGh:
             return 0, title_query_answer(pulls), ""
         if argv[0] == "api" and "graphql" in argv and self.conversation_rate_limited:
             return 1, "", self.rate_limit_message
+        if argv[:2] == ["auth", "status"] and "-h" in argv:  # one named host
+            named = argv[argv.index("-h") + 1]
+            return (0 if any(a["host"] == named for a in self.accounts) else 1), "", ""
         if argv[:2] == ["auth", "status"]:
             hosts: dict[str, list[dict[str, Any]]] = {}
             for account in self.accounts:
@@ -535,7 +538,9 @@ async def test_background_refreshes_of_many_sessions_make_one_listing_and_no_pr_
                 )
                 assert response.status_code == 200
     assert fake_gh.calls["pr list"] == 1
-    assert fake_gh.calls["pr view"] == 0
+    # Upstream reads each session's own stale titles per PR (one `gh pr view` for each
+    # of its two unselected PRs), not through one batched query.
+    assert fake_gh.calls["pr view"] == 2 * len(sessions)
     assert fake_gh.calls["api graphql"] == 0
 
 
@@ -1325,7 +1330,8 @@ def test_one_refresh_wave_of_35_sessions_linking_3_prs_through_the_host(
     for index in range(35):
         monkeypatch.setattr(github.time, "time", lambda index=index: started + index)
         _host_refresh(tmp_path, f"session-{index}")
-    assert fake_gh.calls == {"auth status": 2, "auth token": 1, "pr list": 1}
+    # One listing serves the wave; each session reads its 2 unselected PRs' status per PR.
+    assert fake_gh.calls == {"auth status": 2, "auth token": 1, "pr list": 1, "pr view": 70}
 
 
 def test_background_reads_pause_until_the_rate_limit_resets(

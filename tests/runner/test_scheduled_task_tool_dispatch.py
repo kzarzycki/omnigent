@@ -778,7 +778,8 @@ async def test_archive_when_done_reaches_the_request(tool: str) -> None:
         json.dumps({"scheduled_task_id": _TASK_ID, **_REVIEW_FIELDS, **fields}),
         server_client=client,
     )
-    _, _, body = client.calls[0]
+    # Create asks /v1/info about the default timezone first; the write is last.
+    _, _, body = client.calls[-1]
     assert body is not None and {k: body[k] for k in fields} == fields
 
 
@@ -946,7 +947,7 @@ async def test_create_forwards_max_cost_usd() -> None:
         json.dumps({**_REVIEW_FIELDS, "name": "n", "rrule": "FREQ=DAILY", "max_cost_usd": 2.5}),
         server_client=client,
     )
-    assert client.calls[0][2]["max_cost_usd"] == 2.5
+    assert client.calls[-1][2]["max_cost_usd"] == 2.5
 
 
 @pytest.mark.asyncio
@@ -977,9 +978,14 @@ async def test_every_advertised_field_reaches_the_request(
             "scheduled_task_projects": True,
             "scheduled_task_session_modes": True,
             "scheduled_task_mcp_services": True,
+            "scheduled_task_workflow_id": True,
         }
     )
     client = _RecordingClient(info=info)
+    if tool_name == "sys_scheduled_task_create":
+        # A create naming a saved workflow must leave the prompt out.
+        arguments.pop("prompt")
+        fields = [name for name in fields if name != "prompt"]
     await _execute_scheduled_task_tool(tool_name, json.dumps(arguments), server_client=client)
     # The session-mode fields are checked against /v1/info first; the write comes last.
     body = client.calls[-1][2]
