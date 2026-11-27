@@ -1500,6 +1500,11 @@ def create_hosts_router(
             elif host_profile is None:
                 await asyncio.to_thread(conversation_store.clear_host_binding, body.session_id)
             try:
+                from omnigent.server.routes._sessions.helpers import restore_seed_origin
+
+                await asyncio.to_thread(
+                    restore_seed_origin, conversation_store, body.session_id, target.conv.labels
+                )
                 if worktree is not None or (body.git is not None and body.git.existing_worktree):
                     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
 
@@ -1694,6 +1699,28 @@ def create_hosts_router(
                 if bound is not None:
                     await asyncio.to_thread(
                         _drop_claude_launch_args_from_another_host, conversation_store, bound
+                    )
+                from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY
+
+                # A fork's first bind has no previous host to name; its origin is its
+                # source's binding, which the seed reads through the fork label.
+                is_fork_first_bind = (
+                    target.conv.host_id is None and FORK_SOURCE_LABEL_KEY in target.conv.labels
+                )
+                if not is_fork_first_bind and (
+                    target.conv.host_id != host_id or target.conv.workspace != workspace
+                ):
+                    from omnigent.server.routes._sessions.helpers import stamp_seed_origin
+
+                    # Stamped after the rebind lands, so a failed one leaves no stamp.
+                    # ponytail: only the latest previous binding is kept, so a
+                    # session moved twice names the intermediate host.
+                    await asyncio.to_thread(
+                        stamp_seed_origin,
+                        conversation_store,
+                        body.session_id,
+                        target.conv.host_id,
+                        target.conv.workspace,
                     )
 
             persist_task = asyncio.create_task(persist_binding())

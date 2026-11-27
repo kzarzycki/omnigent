@@ -3313,6 +3313,241 @@ async def test_ensure_local_claude_resume_transcript_uses_workspace_dir(
 
 
 @pytest.mark.asyncio
+async def test_resume_transcript_marks_every_seeded_record_with_original_host_and_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Seeding history onto a new host marks each record as imported.
+
+    The session record names the host and workspace the history ran on;
+    every seeded record carries them in ``omnigentSeeded``, while the
+    top-level ``cwd`` stays the new workspace so ``--resume`` loads it.
+    """
+    monkeypatch.setattr(claude_native, "_CLAUDE_PROJECTS_DIR", tmp_path / "projects")
+    workspace = Path("/new/host/repo")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Serve the session record and a two-item history page."""
+        if request.url.path.endswith("/items"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "hello"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "name": "Bash",
+                            "call_id": "call_1",
+                            "arguments": "{}",
+                        },
+                    ],
+                    "has_more": False,
+                },
+            )
+        return httpx.Response(200, json={"host_id": "host_old", "workspace": "/old/host/repo"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        written = await claude_native._ensure_local_claude_resume_transcript(
+            client,
+            session_id="conv_abc",
+            external_session_id="sid123",
+            workspace=workspace,
+        )
+
+    assert written is not None
+    records = [json.loads(line) for line in written.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 2
+    for record in records:
+        assert record["omnigentSeeded"] == {"host": "host_old", "cwd": "/old/host/repo"}
+        assert record["cwd"] == str(workspace)
+
+
+def test_seeded_origin_prefers_move_stamp_over_current_binding() -> None:
+    """A moved session's stamp names the old host; the row's own binding is the new one."""
+    from omnigent.stores.conversation_store import (
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    record = {
+        "host_id": "host_new",
+        "workspace": "/new",
+        "labels": {SEED_ORIGIN_HOST_LABEL_KEY: "host_old", SEED_ORIGIN_CWD_LABEL_KEY: "/old"},
+    }
+    assert claude_native._origin_from_session_record(record) == {
+        "host": "host_old",
+        "cwd": "/old",
+    }
+    assert claude_native._origin_from_session_record(None) == {"host": None, "cwd": None}
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {"omnigent.seed_origin.host": "", "omnigent.seed_origin.cwd": ""},
+        {"omnigent.seed_origin.host": "", "omnigent.seed_origin.cwd": "/kept"},
+        {"omnigent.seed_origin.cwd": "/kept"},
+    ],
+)
+def test_seeded_origin_stamp_is_authoritative_even_when_empty(labels: dict[str, str]) -> None:
+    """An unknown part of a stamp stays null; it never falls back to the new binding."""
+    origin = claude_native._origin_from_session_record(
+        {"host_id": "host_new", "workspace": "/new", "labels": labels}
+    )
+    assert origin["host"] is None
+    assert origin["cwd"] == (labels.get("omnigent.seed_origin.cwd") or None)
+
+
+@pytest.mark.asyncio
+async def test_fork_seed_origin_ignores_the_source_move_stamp_and_a_cwd_only_stamp() -> None:
+    """A moved source still names its current binding; any stamp key on the fork wins."""
+    from omnigent.stores.conversation_store import (
+        FORK_SOURCE_LABEL_KEY,
+        SEED_ORIGIN_CWD_LABEL_KEY,
+        SEED_ORIGIN_HOST_LABEL_KEY,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Serve a moved source (it carries its own stamp) and a fork."""
+        if request.url.path.endswith("/conv_src"):
+            return httpx.Response(
+                200,
+                json={
+                    "host_id": "host_src",
+                    "workspace": "/src",
+                    "labels": {
+                        SEED_ORIGIN_HOST_LABEL_KEY: "host_older",
+                        SEED_ORIGIN_CWD_LABEL_KEY: "/older",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "host_id": "host_new",
+                "workspace": "/new",
+                "labels": {FORK_SOURCE_LABEL_KEY: "conv_src"},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        assert await claude_native._fetch_seeded_origin(client, "conv_fork") == {
+            "host": "host_src",
+            "cwd": "/src",
+        }
+        # A cwd-only stamp on the fork is still a stamp: the source is not consulted.
+        record = {
+            "host_id": "host_new",
+            "workspace": "/new",
+            "labels": {FORK_SOURCE_LABEL_KEY: "conv_src", SEED_ORIGIN_CWD_LABEL_KEY: "/mine"},
+        }
+        assert await claude_native._fetch_seeded_origin(client, "conv_fork", record) == {
+            "host": None,
+            "cwd": "/mine",
+        }
+
+
+@pytest.mark.asyncio
+async def test_fork_seed_origin_reads_the_source_session() -> None:
+    """A fork's own row is bound to the new host, so its origin is the source's binding."""
+    from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Serve the fork and its source."""
+        if request.url.path.endswith("/conv_src"):
+            return httpx.Response(200, json={"host_id": "host_src", "workspace": "/src"})
+        return httpx.Response(
+            200,
+            json={
+                "host_id": "host_new",
+                "workspace": "/new",
+                "labels": {FORK_SOURCE_LABEL_KEY: "conv_src"},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        origin = await claude_native._fetch_seeded_origin(client, "conv_fork")
+
+    assert origin == {"host": "host_src", "cwd": "/src"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http_error", "timeout", "status_500", "bad_json"])
+async def test_seeded_origin_falls_back_to_nulls(failure: str) -> None:
+    """Any failure reading the session record leaves the origin unknown, never the new host."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Fail the session read in the parametrized way."""
+        if failure == "http_error":
+            raise httpx.ConnectError("down", request=request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("slow", request=request)
+        if failure == "status_500":
+            return httpx.Response(500, json={"host_id": "host_new", "workspace": "/new"})
+        return httpx.Response(200, content=b"not json")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        origin = await claude_native._fetch_seeded_origin(client, "conv_abc")
+
+    assert origin == {"host": None, "cwd": None}
+
+
+def test_seeded_item_origin_and_compact_boundary_carry_the_marker() -> None:
+    """An item's own host/cwd wins, and the synthetic compact_boundary record is marked too."""
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+            "host_id": "host_item",
+            "cwd": "/item",
+        },
+        {
+            "id": "cmp_1",
+            "type": "compaction",
+            "compacted_messages": [
+                {"type": "message", "role": "user", "content": "summary"},
+            ],
+        },
+    ]
+    records = claude_native._claude_transcript_records_from_session_items(
+        items,
+        session_id="conv_test",
+        external_session_id="02857840-6362-408f-b41f-309e396ed7c6",
+        cwd=Path("/new"),
+        bridge_dir=Path("/tmp/test-bridge"),
+        seeded_origin={"host": "host_old", "cwd": "/old"},
+    )
+    boundary = next(r for r in records if r.get("subtype") == "compact_boundary")
+    assert boundary["omnigentSeeded"] == {"host": "host_old", "cwd": "/old"}
+    assert all(r["omnigentSeeded"] == {"host": "host_old", "cwd": "/old"} for r in records)
+
+    only_item = claude_native._claude_transcript_records_from_session_items(
+        items[:1],
+        session_id="conv_test",
+        external_session_id="02857840-6362-408f-b41f-309e396ed7c6",
+        cwd=Path("/new"),
+        bridge_dir=Path("/tmp/test-bridge"),
+        seeded_origin={"host": "host_old", "cwd": "/old"},
+    )
+    assert only_item[0]["omnigentSeeded"] == {"host": "host_item", "cwd": "/item"}
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_claude_resume_transcript_returns_none_when_no_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -3872,6 +3872,9 @@ async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
             if external_id:
                 patched_ids.append(external_id)
             return httpx.Response(200, json={})
+        if request.url.path == f"/v1/sessions/{session_id}":
+            # Session record read for the seeded-history origin marker.
+            return httpx.Response(200, json={"host_id": "host_old", "workspace": "/old/repo"})
         assert request.url.path == f"/v1/sessions/{session_id}/items"
         history_requests.append(request.url.path)
         return httpx.Response(
