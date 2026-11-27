@@ -14605,28 +14605,6 @@ async def test_start_refused_when_host_lacks_a_need(
     assert "os:linux," not in error["message"]
 
 
-async def test_start_without_needs_skips_the_capability_check(
-    client: httpx.AsyncClient, app: Any, db_uri: str
-) -> None:
-    """No ``needs`` (or a satisfied set) is not refused for capabilities."""
-    host_id = "bb9c07bfb42f687d53af44f018adebee"
-    await _register_capable_host(app, db_uri, host_id, ["os:linux"])
-    agent = await create_test_agent(client, name="no-needs-agent")
-
-    for needs in (None, [], ["os:linux"]):
-        body: dict[str, Any] = {
-            "agent_id": agent["id"],
-            "host_id": host_id,
-            "workspace": "/tmp/no-needs",
-        }
-        if needs is not None:
-            body["needs"] = needs
-        response = await client.post("/v1/sessions", json=body)
-        # The mock tunnel can't stat the workspace, so the start may fail
-        # later, but never on capabilities.
-        assert "lacks required capabilities" not in response.text
-
-
 async def test_start_with_needs_and_no_host_is_refused(
     client: httpx.AsyncClient,
 ) -> None:

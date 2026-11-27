@@ -727,3 +727,16 @@ def test_host_capabilities_are_normalized_and_cleared_on_reconnect() -> None:
     assert registry.host_capabilities("host_caps") == ["os:macos", "tool:xcode"]
     registry.register("host_caps", FakeWebSocket(), _make_hello(), owner="alice")
     assert registry.host_capabilities("host_caps") is None
+
+
+def test_host_capabilities_are_cleared_on_deregister() -> None:
+    """A disconnected host reports no capabilities, not its last connection's tags."""
+    registry = HostRegistry()
+    hello = _make_hello()
+    hello.host_capabilities = ["os:macos"]
+    registry.register("host_caps", FakeWebSocket(), hello, owner="alice")
+    assert registry.host_capabilities("host_caps") == ["os:macos"]
+
+    assert registry.deregister("host_caps") is True
+
+    assert registry.host_capabilities("host_caps") is None

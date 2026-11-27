@@ -848,6 +848,9 @@ class HostRegistry:
             if current is None or (conn is not None and current is not conn):
                 return False
             removed = self._hosts.pop(key)
+            # Offline hosts report no capabilities: readers must see "unknown",
+            # not the last connection's tags.
+            self._host_capabilities.pop(key[1], None)
         # Without this the route handler's loops keep running and its ping loop
         # keeps the host row online, even though the host is now unreachable.
         removed.retirement_reason = "deregistered"

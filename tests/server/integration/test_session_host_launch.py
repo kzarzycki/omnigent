@@ -187,6 +187,7 @@ async def _connect_host(
     *,
     name: str = "laptop",
     runners: list[str] | None = None,
+    host_capabilities: list[str] | None = None,
 ) -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
@@ -208,6 +209,7 @@ async def _connect_host(
             frame_protocol_version=1,
             name=name,
             runners=runners or [],
+            host_capabilities=host_capabilities,
         )
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
@@ -505,6 +507,28 @@ async def test_inline_launch_binds_runner_and_returns_host(
     assert conv.runner_id == body["runner_id"]
     assert conv.host_id == _HOST_ID
     assert conv.workspace == _WORKSPACE
+
+
+@pytest.mark.parametrize("needs", [None, [], ["os:linux"]])
+async def test_start_without_unmet_needs_still_launches(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    needs: list[str] | None,
+) -> None:
+    """No ``needs`` (or a satisfied set) starts exactly as before: 201 and a launch."""
+    comm = await _connect_host(app, host_capabilities=["os:linux"])
+    agent = await create_test_agent(client)
+    body: dict[str, Any] = {"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE}
+    if needs is not None:
+        body["needs"] = needs
+
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    resp = await client.post("/v1/sessions", json=body)
+    launch = await responder
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["host_id"] == _HOST_ID
+    assert launch.workspace == _WORKSPACE
 
 
 @pytest.mark.parametrize(
