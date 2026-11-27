@@ -3313,6 +3313,63 @@ async def test_ensure_local_claude_resume_transcript_uses_workspace_dir(
 
 
 @pytest.mark.asyncio
+async def test_resume_transcript_marks_every_seeded_record_with_original_host_and_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Seeding history onto a new host marks each record as imported.
+
+    The session record names the host and workspace the history ran on;
+    every seeded record carries them in ``omnigentSeeded``, while the
+    top-level ``cwd`` stays the new workspace so ``--resume`` loads it.
+    """
+    monkeypatch.setattr(claude_native, "_CLAUDE_PROJECTS_DIR", tmp_path / "projects")
+    workspace = Path("/new/host/repo")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Serve the session record and a two-item history page."""
+        if request.url.path.endswith("/items"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "hello"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "name": "Bash",
+                            "call_id": "call_1",
+                            "arguments": "{}",
+                        },
+                    ],
+                    "has_more": False,
+                },
+            )
+        return httpx.Response(200, json={"host_id": "host_old", "workspace": "/old/host/repo"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://example.com"
+    ) as client:
+        written = await claude_native._ensure_local_claude_resume_transcript(
+            client,
+            session_id="conv_abc",
+            external_session_id="sid123",
+            workspace=workspace,
+        )
+
+    assert written is not None
+    records = [json.loads(line) for line in written.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 2
+    for record in records:
+        assert record["omnigentSeeded"] == {"host": "host_old", "cwd": "/old/host/repo"}
+        assert record["cwd"] == str(workspace)
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_claude_resume_transcript_returns_none_when_no_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

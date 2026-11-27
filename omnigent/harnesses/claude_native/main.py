@@ -5831,6 +5831,7 @@ async def _ensure_local_claude_resume_transcript(
         external_session_id=external_session_id,
         cwd=current,
         bridge_dir=bridge_dir or bridge_dir_for_conversation_id(session_id),
+        seeded_origin=await _fetch_seeded_origin(client, session_id),
     )
     # Empty transcript → ``claude --resume`` exits fatally ("No conversation
     # found"), killing the terminal-as-agent. Return None so the caller
@@ -6005,6 +6006,7 @@ def _claude_transcript_records_from_session_items(
     external_session_id: str,
     cwd: Path,
     bridge_dir: Path,
+    seeded_origin: _JsonObject | None = None,
 ) -> list[_JsonObject]:
     """
     Convert Omnigent session items into Claude Code transcript records.
@@ -6019,6 +6021,10 @@ def _claude_transcript_records_from_session_items(
     :param cwd: Working directory to write into each transcript
         record, e.g. ``Path("/home/me/repo")``.
     :param bridge_dir: Launch bridge path identifying the attachment cache.
+    :param seeded_origin: Where the history originally ran, e.g.
+        ``{"host": "host_a", "cwd": "/old/repo"}``. Written as the
+        ``omnigentSeeded`` marker on every record; an item's own
+        ``host_id``/``cwd`` keys win when present. Unknown parts are ``None``.
     :returns: Claude JSONL record dictionaries.
     """
     records: list[_JsonObject] = []
@@ -6099,6 +6105,7 @@ def _claude_transcript_records_from_session_items(
                         cwd=cwd,
                         bridge_dir=bridge_dir,
                         allow_native_message_content=True,
+                        seeded_origin=seeded_origin,
                     )
                     if cm_record is not None:
                         records.append(cm_record)
@@ -6120,6 +6127,7 @@ def _claude_transcript_records_from_session_items(
             parent_uuid=tool_parent_by_call_id.get(str(item.get("call_id"))) or parent_uuid,
             cwd=cwd,
             bridge_dir=bridge_dir,
+            seeded_origin=seeded_origin,
         )
         if record is None:
             continue
@@ -6141,6 +6149,7 @@ def _claude_transcript_record_from_session_item(
     cwd: Path,
     bridge_dir: Path,
     allow_native_message_content: bool = False,
+    seeded_origin: _JsonObject | None = None,
 ) -> _JsonObject | None:
     """
     Convert one Omnigent item into one Claude transcript record.
@@ -6167,6 +6176,8 @@ def _claude_transcript_record_from_session_item(
     :param allow_native_message_content: Accept Claude-native string and
         content-block shapes when API-block conversion finds no content, and
         write a snapshot entry's ``message_id`` back as ``message.id``.
+    :param seeded_origin: Host and cwd the history originally ran on; see
+        :func:`_claude_transcript_records_from_session_items`.
     :returns: Claude transcript record, or ``None`` for unsupported or
         empty Omnigent items.
     """
@@ -6267,10 +6278,56 @@ def _claude_transcript_record_from_session_item(
         "isSidechain": False,
         "userType": "external",
         "sessionId": session_id,
+        # Kept as the new host's cwd: ``--resume`` resumes in the launch
+        # workspace, and the original path may not exist here. The marker
+        # below carries where the entry really ran.
         "cwd": str(cwd),
+        "omnigentSeeded": _seeded_marker(item, seeded_origin),
         "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "message": message,
         **extra,
+    }
+
+
+def _seeded_marker(item: _JsonObject, seeded_origin: _JsonObject | None) -> _JsonObject:
+    """
+    Build the ``omnigentSeeded`` marker for one seeded record.
+
+    Items carry no host or cwd of their own today, so the origin normally
+    comes from the session record; an item's own ``host_id``/``cwd`` wins if set.
+    Unknown parts stay ``None`` rather than being guessed.
+
+    :param item: Flat Omnigent item dict.
+    :param seeded_origin: Session-level origin, or ``None``.
+    :returns: ``{"host": <id or None>, "cwd": <path or None>}``.
+    """
+    origin = seeded_origin or {}
+    host = item.get("host_id") or origin.get("host")
+    cwd = item.get("cwd") or origin.get("cwd")
+    return {
+        "host": host if isinstance(host, str) and host else None,
+        "cwd": cwd if isinstance(cwd, str) and cwd else None,
+    }
+
+
+async def _fetch_seeded_origin(client: httpx.AsyncClient, session_id: str) -> _JsonObject:
+    """
+    Best-effort read of the session's recorded host and workspace.
+
+    :param client: HTTP client pointed at the Omnigent server.
+    :param session_id: Omnigent conversation id.
+    :returns: ``{"host": ..., "cwd": ...}``; values are ``None`` when unavailable.
+    """
+    try:
+        resp = await client.get(f"/v1/sessions/{session_id}")
+        payload = _json_object(resp.json()) if resp.status_code < 400 else None
+    except (httpx.HTTPError, ValueError):
+        payload = None
+    payload = payload or {}
+    host, workspace = payload.get("host_id"), payload.get("workspace")
+    return {
+        "host": host if isinstance(host, str) else None,
+        "cwd": workspace if isinstance(workspace, str) else None,
     }
 
 
