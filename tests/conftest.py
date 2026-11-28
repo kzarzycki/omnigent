@@ -8,10 +8,12 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import warnings
 from collections.abc import Callable, Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -433,6 +435,29 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
         )
 
 
+def _evict_sqlite_entries_added_since(
+    engine_cache: dict[str, Any],
+    engine_lock: threading.Lock,
+    engines_before: frozenset[str],
+    store_dicts: list[dict[str, Any]],
+    stores_before: list[frozenset[str]],
+) -> None:
+    """Drop the SQLite stores and engines added since the snapshots; dispose the engines.
+
+    Entries that were in a snapshot, and entries whose URI is not ``sqlite…``, are kept.
+    """
+    for stores, known in zip(store_dicts, stores_before, strict=True):
+        for uri in [u for u in stores if u not in known and u.startswith("sqlite")]:
+            stores.pop(uri, None)
+    with engine_lock:
+        created = [
+            uri for uri in engine_cache if uri not in engines_before and uri.startswith("sqlite")
+        ]
+        engines = [engine_cache.pop(uri) for uri in created]
+    for engine in engines:
+        engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _dispose_sqlite_engines_created_by_test() -> Generator[None, None, None]:
     """Dispose the SQLite engines a test left in the process-wide engine cache.
@@ -463,16 +488,9 @@ def _dispose_sqlite_engines_created_by_test() -> Generator[None, None, None]:
         before = frozenset(db_utils._engine_cache)
     stores_before = [frozenset(d) for d in store_dicts]
     yield
-    for stores, known in zip(store_dicts, stores_before, strict=True):
-        for uri in [u for u in stores if u not in known and u.startswith("sqlite")]:
-            stores.pop(uri, None)
-    with db_utils._engine_lock:
-        created = [
-            uri for uri in db_utils._engine_cache if uri not in before and uri.startswith("sqlite")
-        ]
-        engines = [db_utils._engine_cache.pop(uri) for uri in created]
-    for engine in engines:
-        engine.dispose()
+    _evict_sqlite_entries_added_since(
+        db_utils._engine_cache, db_utils._engine_lock, before, store_dicts, stores_before
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -27,3 +27,36 @@ def test_harness_root_is_owned_by_the_test_suite() -> None:
     from tests import conftest
 
     assert Path(os.environ["OMNIGENT_HARNESS_TMP_PARENT"]) == conftest._TEST_HARNESS_TMP_PARENT
+
+
+class _FakeEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    def dispose(self) -> None:
+        self.disposed = True
+
+
+def test_sqlite_cache_eviction_drops_new_entries_and_keeps_the_rest() -> None:
+    """The per-test cleanup of cached engines and stores (#790) evicts what the test added only."""
+    import threading
+
+    from tests.conftest import _evict_sqlite_entries_added_since
+
+    old, added, remote = _FakeEngine(), _FakeEngine(), _FakeEngine()
+    engines = {"sqlite:///old.db": old}
+    engines_before = frozenset(engines)
+    stores = {"sqlite:///old.db": "old-store"}
+    stores_before = frozenset(stores)
+    engines.update({"sqlite:///new.db": added, "postgresql://host/db": remote})
+    stores.update({"sqlite:///new.db": "new-store", "postgresql://host/db": "remote-store"})
+
+    _evict_sqlite_entries_added_since(
+        engines, threading.Lock(), engines_before, [stores], [stores_before]
+    )
+
+    assert set(engines) == {"sqlite:///old.db", "postgresql://host/db"}
+    assert set(stores) == {"sqlite:///old.db", "postgresql://host/db"}
+    assert added.disposed
+    assert not old.disposed
+    assert not remote.disposed
