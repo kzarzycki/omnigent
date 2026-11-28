@@ -4171,6 +4171,16 @@ async def _execute_session_create(
                     "scripted_sessions release flag (OMNIGENT_FEATURES=scripted_sessions)"
                 }
             )
+        if placement == "host" and info_data.get("scripted_host_policy") is False:
+            # An older server omits the field; the server's own check still applies.
+            return json.dumps(
+                {
+                    "error": "This server has no scripted host placement policy "
+                    "(scripted_host_policy in its config), so it refuses placement='host' "
+                    f"for host {args.get('host_id')!r} and agent {args.get('agent_id')!r}; "
+                    "no session was created"
+                }
+            )
         if placement == "host":
             host_id = str(args["host_id"])
             unconfirmed_creation["host_id"] = host_id
