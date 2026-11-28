@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Generator
 from pathlib import Path
+
+import pytest
 
 from omnigent.config import global_config_path
 
@@ -76,3 +79,68 @@ def test_sqlite_cache_cleanup_covers_all_four_per_uri_store_dicts() -> None:
     }
     for name in _SQLITE_STORE_MODULES:
         assert isinstance(importlib.import_module(name)._stores, dict)
+
+
+_FIXTURE_URI = "sqlite:////nonexistent/fixture-boundary-probe.db"
+_KEPT_URI = "sqlite:////nonexistent/fixture-boundary-kept.db"
+_REMOTE_URI = "postgresql://nonexistent/fixture-boundary-remote"
+_probe_engine = _FakeEngine()
+
+
+@pytest.fixture(scope="module")
+def _seeded_caches() -> Generator[dict[str, _FakeEngine], None, None]:
+    """Entries present before any test of this module runs, so the per-test snapshot keeps them."""
+    import importlib
+
+    from omnigent.db import utils as db_utils
+    from tests.conftest import _SQLITE_STORE_MODULES
+
+    kept, remote = _FakeEngine(), _FakeEngine()
+    dicts = [importlib.import_module(name)._stores for name in _SQLITE_STORE_MODULES]
+    db_utils._engine_cache[_KEPT_URI] = kept  # type: ignore[assignment]
+    db_utils._engine_cache[_REMOTE_URI] = remote  # type: ignore[assignment]
+    for stores in dicts:
+        stores[_KEPT_URI] = "kept"  # type: ignore[assignment]
+        stores[_REMOTE_URI] = "remote"  # type: ignore[assignment]
+    yield {"kept": kept, "remote": remote}
+    db_utils._engine_cache.pop(_KEPT_URI, None)
+    db_utils._engine_cache.pop(_REMOTE_URI, None)
+    for stores in dicts:
+        stores.pop(_KEPT_URI, None)
+        stores.pop(_REMOTE_URI, None)
+
+
+def test_a_test_that_leaves_sqlite_caches_populated(
+    _seeded_caches: dict[str, _FakeEngine],
+) -> None:
+    """Leaves a new engine and store entries behind; the next test sees the fixture's cleanup."""
+    import importlib
+
+    from omnigent.db import utils as db_utils
+    from tests.conftest import _SQLITE_STORE_MODULES
+
+    db_utils._engine_cache[_FIXTURE_URI] = _probe_engine  # type: ignore[assignment]
+    for name in _SQLITE_STORE_MODULES:
+        importlib.import_module(name)._stores[_FIXTURE_URI] = "leaked"  # type: ignore[assignment]
+
+
+def test_the_autouse_fixture_cleaned_up_after_the_previous_test(
+    _seeded_caches: dict[str, _FakeEngine],
+) -> None:
+    """Drives the autouse fixture across a test boundary; runs right after the test above."""
+    import importlib
+
+    from omnigent.db import utils as db_utils
+    from tests.conftest import _SQLITE_STORE_MODULES
+
+    assert _FIXTURE_URI not in db_utils._engine_cache
+    assert _probe_engine.disposed
+    for name in _SQLITE_STORE_MODULES:
+        stores = importlib.import_module(name)._stores
+        assert _FIXTURE_URI not in stores, name
+        assert stores[_KEPT_URI] == "kept", name
+        assert stores[_REMOTE_URI] == "remote", name
+    assert db_utils._engine_cache[_KEPT_URI] is _seeded_caches["kept"]
+    assert db_utils._engine_cache[_REMOTE_URI] is _seeded_caches["remote"]
+    assert not _seeded_caches["kept"].disposed
+    assert not _seeded_caches["remote"].disposed
