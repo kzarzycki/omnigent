@@ -60,3 +60,19 @@ def test_sqlite_cache_eviction_drops_new_entries_and_keeps_the_rest() -> None:
     assert added.disposed
     assert not old.disposed
     assert not remote.disposed
+
+
+def test_sqlite_cache_cleanup_covers_all_four_per_uri_store_dicts() -> None:
+    """The fixture evicts from each module that memoises a store per URI, none left out."""
+    import importlib
+
+    from tests.conftest import _SQLITE_STORE_MODULES
+
+    assert set(_SQLITE_STORE_MODULES) == {
+        "omnigent.stores.user_settings_store",
+        "omnigent.server.workflows",
+        "omnigent.server.session_journal",
+        "omnigent.server.session_pull_requests",
+    }
+    for name in _SQLITE_STORE_MODULES:
+        assert isinstance(importlib.import_module(name)._stores, dict)

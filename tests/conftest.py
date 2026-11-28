@@ -435,6 +435,14 @@ def _reap_module_leaked_processes(request: pytest.FixtureRequest) -> Generator[N
         )
 
 
+_SQLITE_STORE_MODULES = (
+    "omnigent.stores.user_settings_store",
+    "omnigent.server.workflows",
+    "omnigent.server.session_journal",
+    "omnigent.server.session_pull_requests",
+)
+
+
 def _evict_sqlite_entries_added_since(
     engine_cache: dict[str, Any],
     engine_lock: threading.Lock,
@@ -475,15 +483,7 @@ def _dispose_sqlite_engines_created_by_test() -> Generator[None, None, None]:
 
     # Server modules that memoise a store per database URI in a module-level ``_stores``
     # dict; each store holds its engine, so a cached store keeps the engine alive too.
-    store_dicts = [
-        importlib.import_module(name)._stores
-        for name in (
-            "omnigent.stores.user_settings_store",
-            "omnigent.server.workflows",
-            "omnigent.server.session_journal",
-            "omnigent.server.session_pull_requests",
-        )
-    ]
+    store_dicts = [importlib.import_module(name)._stores for name in _SQLITE_STORE_MODULES]
     with db_utils._engine_lock:
         before = frozenset(db_utils._engine_cache)
     stores_before = [frozenset(d) for d in store_dicts]
