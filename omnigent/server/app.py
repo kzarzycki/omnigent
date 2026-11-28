@@ -383,6 +383,8 @@ class ServerInfoResponse(BaseModel):
     # Session creates accept ``workflow_id``; older servers ignore it.
     session_create_workflow_id: bool = True
     scripted_sessions: bool = False
+    # A `scripted_host_policy` is loaded; `placement="host"` is refused without one.
+    scripted_host_policy: bool = False
     # Scheduled tasks accept explicit modes that skip approval; servers that omit
     # this may reject them, so clients hide those modes.
     scheduled_task_approval_skipping_modes: bool = True
@@ -2826,6 +2828,9 @@ def create_app(
     from omnigent.server.orchestration_hosts import OrchestrationHosts, OrchestrationLaunchGuard
 
     app.state.orchestration_hosts = OrchestrationHosts.from_env()
+    from omnigent.server.scripted_host_policy import load_scripted_host_policy
+
+    app.state.scripted_host_policy = load_scripted_host_policy(resolved_server_config)
     if app.state.orchestration_hosts is not None:
         orchestration_guard = OrchestrationLaunchGuard(
             app.state.orchestration_hosts, host_store, agent_store, agent_cache
@@ -4281,6 +4286,7 @@ def create_app(
                 "session_search_scope": True,
                 "session_list_scoped_archives": True,
                 "scripted_sessions": app.state.feature_flags.enabled(Feature.SCRIPTED_SESSIONS),
+                "scripted_host_policy": app.state.scripted_host_policy is not None,
                 "sibling_sessions": frontend_features[Feature.SIBLING_SESSIONS.value],
                 "request_managed_sandbox_host_id": True,
                 "session_fork_workspaces": True,

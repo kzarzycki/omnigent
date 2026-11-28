@@ -1758,6 +1758,38 @@ def register_core_routes(
             else:
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
+        leaves_sender_host = False
+        if (
+            source is not None
+            and body.host_type == "external"
+            and body.host_id is not None
+            and request.app.state.feature_flags.enabled(Feature.SCRIPTED_SESSIONS)
+        ):
+            from omnigent.server.scripted_host_policy import placement_check_applies
+
+            sender_placement = await asyncio.to_thread(
+                routing_host_session, source, conversation_store
+            )
+            leaves_sender_host = placement_check_applies(
+                True,
+                True,
+                sender_placement.host_id if sender_placement is not None else None,
+                body.host_id,
+            )
+        if leaves_sender_host and body.host_id is not None:
+            from omnigent.server.scripted_host_policy import require_scripted_host_placement
+
+            # One check where the destination host is resolved, for every orchestrated
+            # create that leaves the sender's host: an explicit host and an environment's
+            # pinned host alike. Refused before the session exists.
+            await require_scripted_host_placement(
+                getattr(request.app.state, "scripted_host_policy", None),
+                request.app.state.host_store,
+                body.host_id,
+                agent_store,
+                body.agent_id,
+                agent_cache,
+            )
         orchestration_marks = getattr(request.app.state, "orchestration_hosts", None)
         if orchestration_marks is not None and body.host_id is not None:
             from omnigent.server.orchestration_hosts import require_host_allows_agent

@@ -8623,6 +8623,11 @@
             "title": "Scheduled Task Worktrees",
             "type": "boolean"
           },
+          "scripted_host_policy": {
+            "default": false,
+            "title": "Scripted Host Policy",
+            "type": "boolean"
+          },
           "scripted_sessions": {
             "default": false,
             "title": "Scripted Sessions",

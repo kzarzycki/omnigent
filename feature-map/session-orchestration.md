@@ -215,6 +215,64 @@ placement. Older servers refuse the tool's new options through the
 host-create and PR-link routes also reject requests that reach older replicas
 in a mixed-version deployment.
 
+#### Placement policy for orchestrated creates that leave the sender's host
+
+An orchestrated create whose destination host differs from the sender's host is
+refused unless the server config (`config.yaml`, resolved like the rest of the
+server config) has a `scripted_host_policy` that allows the host and the agent.
+That covers `placement="host"` and an environment's pinned host
+(`environment_id`), which used to place a session on another host unchecked. Same-host,
+child and managed placement are unchanged, and so is an environment pinned to the
+sender's own host. With no policy, every such request is refused (fail closed). The
+check sits where the server resolves the destination host, before any session,
+worktree or runner exists, so every caller route shares it.
+
+```yaml
+scripted_host_policy:
+  rules:
+    - host_id: host_a1b2c3        # a host's stable id
+      agents: ["*"]               # any agent
+    - host_id: host_d4e5f6
+      agents: ["@cloud-bridge"]   # only operator agents on the configured cloud bridge
+    - host_id: host_a7b8c9
+      agents: [reviewer]          # operator-registered agents, by name
+```
+
+Rules name a host by `host_id` only, because a host name is self-advertised and its
+owner can change it. A request is allowed when some rule names the host id and lists
+the agent: `"*"`,
+`"@cloud-bridge"`, or the name of an operator-registered agent. A user-uploaded agent
+never matches by name or as a cloud bridge, and a bundle that embeds its own
+`acp_agent` command is not the configured bridge. A rule with any key besides
+`host_id` and `agents`, or a block with any key besides `rules`, makes the whole
+block malformed: it is logged and counts as no policy. The refusal names the host and
+agent and says the placement policy refused it. `GET /v1/info` reports
+`scripted_host_policy` (whether a policy is loaded); the runner's early check refuses
+with "no scripted host placement policy", naming the host and agent, when it is false,
+and leaves an older server that omits the field to its own check.
+
+With `scripted_sessions` off, the policy is never consulted: every create shape that
+works today (child, same-host, an environment pinned to another host, managed, the
+cloud bridge on another host, a plain host-bound create from a CLI client) behaves
+exactly as before, with no policy block. To see what a policy would do to real starts
+before turning the flag on, run the dry-run helper, which uses the server's own
+decision functions:
+
+```sh
+python -m omnigent.server.scripted_host_policy --dry-run requests.jsonl [--flag on|off] [--policy config.yaml]
+```
+
+Each line of `requests.jsonl` is `{"source_host_id", "dest_host_id", "agent", "harness",
+"operator_registered"}` (a null `source_host_id` means a top-level start with no orchestration source, which
+the route never checks and prints `allow (not checked: no orchestration source)`; set
+`"orchestrated": true` for a hostless orchestrating sender, and `"embedded_command":
+true` for a bundle that brings its own ACP command). It prints `allow` or `refuse` with the reason per line. `--flag` defaults to
+`on`; with no `--policy` the policy is absent, so a create that leaves the sender's host
+is refused.
+
+There are no per-repo rules: the server cannot learn a workspace's git origin from
+the host without trusting the host's own, spoofable answer, so repo limits stay out.
+
 Independent creates can use an existing owned `project_id` instead of
 `project_name`; never supply both. Project defaults do not replace the
 explicit agent, workspace or git selection. `sys_session_link_pr` takes
