@@ -1759,17 +1759,22 @@ def register_core_routes(
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
         leaves_sender_host = False
-        if source is not None and body.host_type == "external" and body.host_id is not None:
-            if explicit_host:
-                leaves_sender_host = True
-            elif project_placement is not None:
-                # An environment's pinned host: checked unless it is the sender's own.
-                sender_placement = await asyncio.to_thread(
-                    routing_host_session, source, conversation_store
-                )
-                leaves_sender_host = (
-                    sender_placement is None or sender_placement.host_id != body.host_id
-                )
+        if (
+            source is not None
+            and body.host_type == "external"
+            and body.host_id is not None
+            and request.app.state.feature_flags.enabled(Feature.SCRIPTED_SESSIONS)
+        ):
+            from omnigent.server.scripted_host_policy import placement_check_applies
+
+            sender_placement = await asyncio.to_thread(
+                routing_host_session, source, conversation_store
+            )
+            leaves_sender_host = placement_check_applies(
+                True,
+                sender_placement.host_id if sender_placement is not None else None,
+                body.host_id,
+            )
         if leaves_sender_host and body.host_id is not None:
             from omnigent.server.scripted_host_policy import require_scripted_host_placement
 

@@ -26,9 +26,12 @@ no independent way to learn a workspace's origin from the host.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import logging
-from collections.abc import Mapping
+import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -69,6 +72,34 @@ class ScriptedHostPolicy:
         """The error for a request no rule allows."""
         return refusal_error(host.name if host is not None else None, host_id, agent_name)
 
+    def allows(
+        self,
+        host_id: str,
+        agent_name: str | None,
+        operator_registered: bool,
+        is_cloud_bridge: Callable[[], bool],
+    ) -> bool:
+        """Whether a rule allows the agent on the host: the one decision server and dry-run share.
+
+        :param host_id: The destination host id.
+        :param agent_name: The agent's name, or ``None`` when unknown.
+        :param operator_registered: Whether the operator registered the agent.
+        :param is_cloud_bridge: Called only when a rule needs it; whether the agent is
+            an operator cloud bridge with no embedded command.
+        """
+        for rule in self.rules:
+            if rule.host != host_id:
+                continue
+            if ANY_AGENT in rule.agents:
+                return True
+            if agent_name is None:
+                continue
+            if operator_registered and agent_name in rule.agents:
+                return True
+            if CLOUD_BRIDGE_AGENT in rule.agents and is_cloud_bridge():
+                return True
+        return False
+
     def check(
         self, host: Host | None, host_id: str, agent: Agent | None, agent_cache: Any
     ) -> None:
@@ -80,18 +111,75 @@ class ScriptedHostPolicy:
         :param agent_cache: Cache for loading the agent's spec to read its harness.
         :raises OmnigentError: 403 when no rule allows the request.
         """
-        for rule in self.rules:
-            if rule.host != host_id:
-                continue
-            if ANY_AGENT in rule.agents:
-                return
-            if agent is None:
-                continue
-            if agent.operator_authored and agent.name in rule.agents:
-                return
-            if CLOUD_BRIDGE_AGENT in rule.agents and _is_cloud_bridge(agent, agent_cache):
-                return
+        if self.allows(
+            host_id,
+            agent.name if agent is not None else None,
+            agent is not None and agent.operator_authored,
+            lambda: agent is not None and _is_cloud_bridge(agent, agent_cache),
+        ):
+            return
         raise self.refusal(host, host_id, agent.name if agent is not None else None)
+
+
+def placement_check_applies(
+    flag_on: bool, source_host_id: str | None, dest_host_id: str | None
+) -> bool:
+    """Whether the policy governs a create: the flag is on and it leaves the sender's host.
+
+    With ``scripted_sessions`` off nothing is checked, so the create path behaves as
+    it did before the policy existed.
+    """
+    return flag_on and dest_host_id is not None and dest_host_id != source_host_id
+
+
+def decide_request(
+    policy: ScriptedHostPolicy | None, flag_on: bool, request: Mapping[str, Any]
+) -> tuple[bool, str]:
+    """Allow or refuse one dry-run request with the server's own functions.
+
+    :param request: ``{"source_host_id", "dest_host_id", "agent", "harness",
+        "operator_registered"}``; an optional ``"embedded_command"`` marks a bundle
+        that brings its own ACP command.
+    :returns: ``(allowed, reason)``.
+    """
+    dest = request.get("dest_host_id")
+    if not placement_check_applies(flag_on, request.get("source_host_id"), dest):
+        return True, "not checked: flag off or the create stays on the sender's host"
+    if policy is None:
+        return False, "no scripted host placement policy is configured"
+    operator = bool(request.get("operator_registered"))
+    bridge = (
+        operator
+        and request.get("harness") == CLOUD_SESSION_HARNESS
+        and not request.get("embedded_command")
+    )
+    if policy.allows(str(dest), request.get("agent"), operator, lambda: bridge):
+        return True, "a rule allows it"
+    return False, "no rule allows this agent on this host"
+
+
+def _dry_run(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m omnigent.server.scripted_host_policy",
+        description="Print allow or refuse for each request line of a JSONL file.",
+    )
+    parser.add_argument("--dry-run", metavar="REQUESTS_JSONL", required=True)
+    parser.add_argument("--flag", choices=("on", "off"), default="on")
+    parser.add_argument("--policy", metavar="YAML", help="a config file holding the block")
+    args = parser.parse_args(argv)
+    policy = None
+    if args.policy:
+        import yaml
+
+        with open(args.policy, encoding="utf-8") as handle:
+            policy = load_scripted_host_policy(yaml.safe_load(handle) or {})
+    with open(args.dry_run, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            allowed, reason = decide_request(policy, args.flag == "on", json.loads(line))
+            print(f"{number}: {'allow' if allowed else 'refuse'} ({reason})")
+    return 0
 
 
 def refusal_error(host_name: str | None, host_id: str, agent_name: str | None) -> OmnigentError:
@@ -186,3 +274,7 @@ async def require_scripted_host_placement(
             code=ErrorCode.FORBIDDEN,
         )
     await asyncio.to_thread(policy.check, host, host_id, agent, agent_cache)
+
+
+if __name__ == "__main__":
+    sys.exit(_dry_run())

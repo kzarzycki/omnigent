@@ -249,6 +249,23 @@ agent and says the placement policy refused it. `GET /v1/info` reports
 with "no scripted host placement policy", naming the host and agent, when it is false,
 and leaves an older server that omits the field to its own check.
 
+With `scripted_sessions` off, the policy is never consulted: every create shape that
+works today (child, same-host, an environment pinned to another host, managed, the
+cloud bridge on another host, a plain host-bound create from a CLI client) behaves
+exactly as before, with no policy block. To see what a policy would do to real starts
+before turning the flag on, run the dry-run helper, which uses the server's own
+decision functions:
+
+```sh
+python -m omnigent.server.scripted_host_policy --dry-run requests.jsonl [--flag on|off] [--policy config.yaml]
+```
+
+Each line of `requests.jsonl` is `{"source_host_id", "dest_host_id", "agent", "harness",
+"operator_registered"}` (add `"embedded_command": true` for a bundle that brings its own
+ACP command). It prints `allow` or `refuse` with the reason per line. `--flag` defaults to
+`on`; with no `--policy` the policy is absent, so a create that leaves the sender's host
+is refused.
+
 There are no per-repo rules: the server cannot learn a workspace's git origin from
 the host without trusting the host's own, spoofable answer, so repo limits stay out.
 

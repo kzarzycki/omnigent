@@ -3393,6 +3393,65 @@ def test_scripted_host_policy_fails_closed_on_missing_or_invalid_config(config):
     assert load_scripted_host_policy(config) is None
 
 
+def test_dry_run_uses_the_servers_decision_functions(tmp_path):
+    import subprocess
+    import sys
+
+    requests = tmp_path / "requests.jsonl"
+    requests.write_text(
+        "\n".join(
+            json.dumps(line)
+            for line in [
+                {
+                    "source_host_id": "a",
+                    "dest_host_id": "b",
+                    "agent": "w",
+                    "harness": "claude-native",
+                    "operator_registered": False,
+                },
+                {
+                    "source_host_id": "a",
+                    "dest_host_id": "a",
+                    "agent": "w",
+                    "harness": "claude-native",
+                    "operator_registered": False,
+                },
+                {
+                    "source_host_id": "a",
+                    "dest_host_id": "b",
+                    "agent": "c",
+                    "harness": "acp:claude-cloud",
+                    "operator_registered": True,
+                },
+            ]
+        )
+    )
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(
+        "scripted_host_policy:\n  rules:\n    - host_id: b\n      agents: ['@cloud-bridge']\n"
+    )
+
+    def run(*extra):
+        out = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.server.scripted_host_policy",
+                "--dry-run",
+                str(requests),
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        return [line.split(":")[1].split()[0] for line in out]
+
+    assert run("--flag", "off") == ["allow", "allow", "allow"]
+    assert run("--flag", "on") == ["refuse", "allow", "refuse"]
+    assert run("--flag", "on", "--policy", str(policy)) == ["refuse", "allow", "allow"]
+
+
 @pytest.mark.parametrize(
     ("operator_authored", "harness", "embedded_command", "allowed"),
     [
