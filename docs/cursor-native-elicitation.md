@@ -195,4 +195,5 @@ in-memory. Byte-scanning the frames for embedded JSON reveals the pending tool c
   (`Down`/`Space`/`Enter`, highlight resets per question). Verified live; re-check on cursor
   upgrades.
 - **Workspace-trust modal** (first-run) is not a tool call, so it isn't surfaced — answerable
-  only in the TUI.
+  only in the TUI. This modal appears on first connection to a new host and must be approved
+  in the embedded terminal before the session can proceed.
