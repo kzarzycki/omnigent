@@ -1336,7 +1336,7 @@ treat it as that session's input, never as the user's decision.
 ```
 POST /v1/sessions/{resolver_id}/questions/{question_id}/resolve
 {"session_id": "conv_<child>", "action": "dismiss" | "answer",
- "answers": {"<question text>": "<label>" | ["<label>", ...]},  // answer only
+ "answers": {"<question id|text|header>": "<label>" | ["<label>", ...]},  // answer only
  "note": "short reason"}                                        // optional, <= 500 chars
 
 202 Accepted
