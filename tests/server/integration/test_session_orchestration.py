@@ -3202,10 +3202,10 @@ async def test_scripted_host_worktree_respects_ownership_and_policy(
             + ("sibling_sessions" if nested else "-sibling_sessions")
         }
     )
-    auth_app.state.scripted_host_policy = load_scripted_host_policy(
-        {"scripted_host_policy": {"rules": [{"host": "review-host", "agents": ["*"]}]}}
-    )
     host = uuid4().hex
+    auth_app.state.scripted_host_policy = load_scripted_host_policy(
+        {"scripted_host_policy": {"rules": [{"host_id": host, "agents": ["*"]}]}}
+    )
     owner = "bob" if scenario == "foreign_host" else "alice"
     _register_online_host(auth_app, host, owner)
     auth_app.state.host_store.upsert_on_connect(host, "review-host", owner)
@@ -3273,13 +3273,10 @@ async def test_scripted_host_worktree_respects_ownership_and_policy(
 
 
 _POLICY_RULES = {
-    "allowed_by_name": [{"host": "review-host", "agents": ["*"]}],
-    "allowed_by_id": [{"host": "{host}", "agents": ["*"]}],
-    "no_rule_for_host": [{"host": "other-host", "agents": ["*"]}],
-    "local_agent_on_cloud_bridge_only_host": [
-        {"host": "review-host", "agents": ["@cloud-bridge"]}
-    ],
-    "unregistered_agent_name_rule": [{"host": "review-host", "agents": ["{agent}"]}],
+    "allowed_by_id": [{"host_id": "{host}", "agents": ["*"]}],
+    "no_rule_for_host": [{"host_id": "some-other-host", "agents": ["*"]}],
+    "local_agent_on_cloud_bridge_only_host": [{"host_id": "{host}", "agents": ["@cloud-bridge"]}],
+    "user_agent_with_an_operator_agents_name": [{"host_id": "{host}", "agents": ["test-agent"]}],
     "no_policy": None,
 }
 
@@ -3306,9 +3303,7 @@ async def test_scripted_host_placement_policy(
     if rules is None:
         auth_app.state.scripted_host_policy = None
     else:
-        rules = json.loads(
-            json.dumps(rules).replace("{host}", host).replace("{agent}", "some-agent")
-        )
+        rules = json.loads(json.dumps(rules).replace("{host}", host))
         auth_app.state.scripted_host_policy = load_scripted_host_policy(
             {"scripted_host_policy": {"rules": rules}}
         )
@@ -3369,7 +3364,7 @@ async def test_info_reports_whether_a_scripted_host_policy_is_loaded(auth_client
     assert "scripted_host_policy" in info, sorted(info)
     assert info["scripted_host_policy"] is False
     auth_app.state.scripted_host_policy = load_scripted_host_policy(
-        {"scripted_host_policy": {"rules": [{"host": "h", "agents": ["*"]}]}}
+        {"scripted_host_policy": {"rules": [{"host_id": "h", "agents": ["*"]}]}}
     )
     assert (await auth_client.get("/v1/info")).json()["scripted_host_policy"] is True
 
@@ -3380,12 +3375,60 @@ async def test_info_reports_whether_a_scripted_host_policy_is_loaded(auth_client
         {},
         {"scripted_host_policy": "yes"},
         {"scripted_host_policy": {"rules": "h"}},
-        {"scripted_host_policy": {"rules": [{"host": "h"}]}},
-        {"scripted_host_policy": {"rules": [{"host": "h", "agents": ["*"], "repos": ["x"]}]}},
+        {"scripted_host_policy": {"rules": [{"host_id": "h"}]}},
+        {"scripted_host_policy": {"rules": [{"host_id": "h", "agents": ["*"], "repos": ["x"]}]}},
+        # Names are not matched: a rule by name is malformed, never a broad rule.
+        {"scripted_host_policy": {"rules": [{"host": "h", "agents": ["*"]}]}},
+        {"scripted_host_policy": {"rules": [{"host_name": "h", "agents": ["*"]}]}},
+        # An unknown top-level key (a misspelled or unsupported restriction) voids the block.
+        {
+            "scripted_host_policy": {
+                "rules": [{"host_id": "h", "agents": ["*"]}],
+                "repos": ["example/repo"],
+            }
+        },
     ],
 )
 def test_scripted_host_policy_fails_closed_on_missing_or_invalid_config(config):
     assert load_scripted_host_policy(config) is None
+
+
+@pytest.mark.parametrize(
+    ("operator_authored", "harness", "embedded_command", "allowed"),
+    [
+        (True, "acp:claude-cloud", False, True),
+        (True, "acp:claude-cloud", True, False),
+        (False, "acp:claude-cloud", False, False),
+        (False, "acp:claude-cloud", True, False),
+        (True, "claude-native", False, False),
+    ],
+)
+def test_cloud_bridge_rule_matches_only_operator_agents_running_the_bridge(
+    operator_authored, harness, embedded_command, allowed
+):
+    from types import SimpleNamespace
+
+    from omnigent.errors import OmnigentError
+
+    config = {"harness": harness}
+    if embedded_command:
+        config["acp_agent"] = {"name": "x", "command": "/bin/sh"}
+    agent = SimpleNamespace(
+        id="a", name="bridge", operator_authored=operator_authored, bundle_location="loc"
+    )
+    cache = SimpleNamespace(
+        load=lambda *a, **k: SimpleNamespace(
+            spec=SimpleNamespace(executor=SimpleNamespace(type="acp", config=config))
+        )
+    )
+    policy = load_scripted_host_policy(
+        {"scripted_host_policy": {"rules": [{"host_id": "h", "agents": ["@cloud-bridge"]}]}}
+    )
+    if allowed:
+        policy.check(None, "h", agent, cache)
+        return
+    with pytest.raises(OmnigentError, match="placement policy refused"):
+        policy.check(None, "h", agent, cache)
 
 
 @pytest.mark.parametrize(

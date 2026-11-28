@@ -1758,11 +1758,24 @@ def register_core_routes(
             else:
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
-        if explicit_host and body.host_id is not None:
+        leaves_sender_host = False
+        if source is not None and body.host_type == "external" and body.host_id is not None:
+            if explicit_host:
+                leaves_sender_host = True
+            elif project_placement is not None:
+                # An environment's pinned host: checked unless it is the sender's own.
+                sender_placement = await asyncio.to_thread(
+                    routing_host_session, source, conversation_store
+                )
+                leaves_sender_host = (
+                    sender_placement is None or sender_placement.host_id != body.host_id
+                )
+        if leaves_sender_host and body.host_id is not None:
             from omnigent.server.scripted_host_policy import require_scripted_host_placement
 
-            # One check for every caller of a host-placed create; refused before the
-            # session exists, so a rejected create leaves nothing behind.
+            # One check where the destination host is resolved, for every orchestrated
+            # create that leaves the sender's host: an explicit host and an environment's
+            # pinned host alike. Refused before the session exists.
             await require_scripted_host_placement(
                 getattr(request.app.state, "scripted_host_policy", None),
                 request.app.state.host_store,

@@ -1593,6 +1593,7 @@ async def test_host_placement_refused_early_when_server_has_no_policy(policy_loa
         )
     if policy_loaded is False:
         assert "no scripted host placement policy" in result["error"]
+        assert "host" in result["error"] and "worker" in result["error"]
         assert not posts
     else:
         # An older server omits the field; its own check decides.

@@ -7,6 +7,8 @@ from fastapi import FastAPI
 
 from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
+from omnigent.server.feature_flags import FEATURES_ENV_VAR, resolve_feature_flags
+from omnigent.server.scripted_host_policy import load_scripted_host_policy
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.integration.test_session_orchestration_projects import _project, auth_app
 from tests.server.integration.test_sessions_attribution import _bind_runner
@@ -22,6 +24,8 @@ __all__ = ["auth_app"]
 
 PINNED_WORKSPACE = "/pinned/launch"
 ENVIRONMENT_ID = "env_fixture"
+# Every frame the fake host received in the current test.
+frames: list = []
 
 
 @pytest.fixture(autouse=True, params=[False, True], ids=["standalone", "nested"])
@@ -43,11 +47,16 @@ async def stack(auth_client, auth_app: FastAPI, db_uri, monkeypatch):
         auth_app.state.host_store.upsert_on_connect(host_id, host_id, "alice")
     store = SqlAlchemyConversationStore(db_uri)
     store.set_host_id(source["id"], sender_host, workspace="/sender/checkout")
+    # Cross-host placements are allowed by default; the policy tests narrow it.
+    auth_app.state.scripted_host_policy = _policy(pinned_host)
     auth_client.headers.update(_bind_runner(db_uri, source["id"]))
     _stub_late_runner_bind(monkeypatch)
 
+    frames.clear()
+
     def answer_host(connection, payload):
         frame = decode_host_frame(payload)
+        frames.append(frame)
         if isinstance(frame, HostStatFrame):
             connection.pending_stats[frame.request_id].set_result(
                 {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
@@ -67,8 +76,21 @@ async def _orchestrate(auth_client, source, **fields):
     )
 
 
-async def test_create_takes_host_and_workspace_from_the_named_environment(auth_client, stack):
+def _policy(*host_ids, agents=("*",)):
+    return load_scripted_host_policy(
+        {
+            "scripted_host_policy": {
+                "rules": [{"host_id": host_id, "agents": list(agents)} for host_id in host_ids]
+            }
+        }
+    )
+
+
+async def test_create_takes_host_and_workspace_from_the_named_environment(
+    auth_client, auth_app, stack
+):
     source, pinned_host, store = stack
+    auth_app.state.scripted_host_policy = _policy(pinned_host)
     project_id = await _project(
         auth_client,
         "Cloud",
@@ -81,6 +103,99 @@ async def test_create_takes_host_and_workspace_from_the_named_environment(auth_c
     created = store.get_conversation(response.json()["id"])
     assert (created.host_id, created.workspace) == (pinned_host, PINNED_WORKSPACE)
     assert created.project_id == project_id
+
+
+@pytest.mark.parametrize("policy", ["none", "other_host", "cloud_bridge_only"])
+async def test_a_cross_host_environment_pin_needs_the_placement_policy(
+    auth_client, auth_app, stack, policy
+):
+    """An environment's pinned host is a placement off the sender's host: policy applies."""
+    source, pinned_host, store = stack
+    auth_app.state.scripted_host_policy = {
+        "none": None,
+        "other_host": _policy(uuid4().hex),
+        "cloud_bridge_only": _policy(pinned_host, agents=("@cloud-bridge",)),
+    }[policy]
+    await _project(
+        auth_client,
+        "Cloud",
+        {"host_id": pinned_host, "workspace": PINNED_WORKSPACE, "environment_id": ENVIRONMENT_ID},
+    )
+    before = {c.id for c in store.list_conversations().data}
+    frames.clear()
+
+    response = await _orchestrate(auth_client, source, environment_id=ENVIRONMENT_ID)
+
+    assert response.status_code == 403, response.text
+    assert "placement policy refused" in response.text
+    assert {c.id for c in store.list_conversations().data} == before
+    assert not frames
+
+
+async def test_a_pin_on_the_senders_own_host_needs_no_policy(auth_client, auth_app, stack):
+    source, _, store = stack
+    sender_host = store.get_conversation(source["id"]).host_id
+    auth_app.state.scripted_host_policy = None
+    await _project(
+        auth_client,
+        "Own",
+        {"host_id": sender_host, "workspace": PINNED_WORKSPACE, "environment_id": ENVIRONMENT_ID},
+    )
+
+    response = await _orchestrate(auth_client, source, environment_id=ENVIRONMENT_ID)
+
+    assert response.status_code == 201, response.text
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "allowed",
+        "no_policy",
+        "host_not_in_rules",
+        "local_agent_on_cloud_bridge_only_host",
+        "user_agent_with_an_operator_agents_name",
+    ],
+)
+async def test_explicit_host_route_enforces_the_placement_policy(
+    auth_client, auth_app, stack, scenario
+):
+    """Reaches the server route directly, so the runner's /v1/info check cannot mask it."""
+    source, pinned_host, store = stack
+    auth_app.state.feature_flags = resolve_feature_flags({FEATURES_ENV_VAR: "scripted_sessions"})
+    agent_name = auth_app.state.agent_store.get(source["agent_id"]).name
+    assert agent_name == "test-agent"
+    auth_app.state.scripted_host_policy = {
+        "allowed": _policy(pinned_host),
+        "no_policy": None,
+        "host_not_in_rules": _policy(uuid4().hex),
+        "local_agent_on_cloud_bridge_only_host": _policy(pinned_host, agents=("@cloud-bridge",)),
+        # The fixture agent is user-uploaded: a name rule must not match it.
+        "user_agent_with_an_operator_agents_name": _policy(pinned_host, agents=(agent_name,)),
+    }[scenario]
+    before = {c.id for c in store.list_conversations().data}
+    frames.clear()
+
+    response = await auth_client.post(
+        "/v1/sessions/orchestrated/host",
+        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+        json={
+            "agent_id": source["agent_id"],
+            "host_id": pinned_host,
+            "host_type": "external",
+            "workspace": PINNED_WORKSPACE,
+        },
+    )
+
+    if scenario == "allowed":
+        assert response.status_code == 201, response.text
+        return
+    assert response.status_code == 403, response.text
+    message = response.json()["error"]["message"]
+    assert "placement policy refused" in message
+    assert pinned_host in message and agent_name in message
+    assert {c.id for c in store.list_conversations().data} == before
+    assert not frames
 
 
 @pytest.mark.parametrize(

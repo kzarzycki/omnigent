@@ -215,34 +215,39 @@ placement. Older servers refuse the tool's new options through the
 host-create and PR-link routes also reject requests that reach older replicas
 in a mixed-version deployment.
 
-#### Placement policy for `placement="host"`
+#### Placement policy for orchestrated creates that leave the sender's host
 
-A host-placed create is refused unless the server config (`config.yaml`, resolved
-like the rest of the server config) has a `scripted_host_policy` that allows the
-host and the agent. With the flag on and no policy, every `placement="host"`
-request is refused (fail closed); a malformed block is logged and counts as no
-policy. Child, same-host and managed placement are unchanged. The check sits where
-the server resolves the host for `/sessions/orchestrated/host`, so it runs before
-any session, worktree or runner exists, and every caller shares it.
+An orchestrated create whose destination host differs from the sender's host is
+refused unless the server config (`config.yaml`, resolved like the rest of the
+server config) has a `scripted_host_policy` that allows the host and the agent.
+That covers `placement="host"` and an environment's pinned host
+(`environment_id`), which used to place a session on another host unchecked. Same-host,
+child and managed placement are unchanged, and so is an environment pinned to the
+sender's own host. With no policy, every such request is refused (fail closed). The
+check sits where the server resolves the destination host, before any session,
+worktree or runner exists, so every caller route shares it.
 
 ```yaml
 scripted_host_policy:
   rules:
-    - host: build-host            # host name or host id
+    - host_id: host_a1b2c3        # a host's stable id; names are never matched
       agents: ["*"]               # any agent
-    - host: orchestration-host
-      agents: ["@cloud-bridge"]   # only agents on the cloud-bridge harness
-    - host: review-host
+    - host_id: host_d4e5f6
+      agents: ["@cloud-bridge"]   # only operator agents on the configured cloud bridge
+    - host_id: host_a7b8c9
       agents: [reviewer]          # operator-registered agents, by name
 ```
 
-A request is allowed when some rule names the host and lists the agent: `"*"`,
-`"@cloud-bridge"`, or the name of an operator-registered agent (a user-uploaded
-agent never matches by name). The refusal names the host and agent and says the
-placement policy refused it. `GET /v1/info` reports `scripted_host_policy`
-(whether a policy is loaded); the runner's early check refuses with "no scripted
-host placement policy" when it is false, and leaves an older server that omits the
-field to its own check.
+A request is allowed when some rule names the host id and lists the agent: `"*"`,
+`"@cloud-bridge"`, or the name of an operator-registered agent. A user-uploaded agent
+never matches by name or as a cloud bridge, and a bundle that embeds its own
+`acp_agent` command is not the configured bridge. A rule with any key besides
+`host_id` and `agents`, or a block with any key besides `rules`, makes the whole
+block malformed: it is logged and counts as no policy. The refusal names the host and
+agent and says the placement policy refused it. `GET /v1/info` reports
+`scripted_host_policy` (whether a policy is loaded); the runner's early check refuses
+with "no scripted host placement policy", naming the host and agent, when it is false,
+and leaves an older server that omits the field to its own check.
 
 There are no per-repo rules: the server cannot learn a workspace's git origin from
 the host without trusting the host's own, spoofable answer, so repo limits stay out.
