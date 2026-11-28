@@ -1755,6 +1755,11 @@ async def post_event(
     except httpx.ConnectError:
         if not _worker_left(manager, conversation_id, client):
             raise
+    except RuntimeError:
+        # A cleanup or reap closed the held client before the request was sent: httpx
+        # refuses a send on a closed client, so nothing was delivered.
+        if not client.is_closed:
+            raise
     else:
         if resp.status_code < 400 or not _worker_left(manager, conversation_id, client):
             return resp
@@ -1786,6 +1791,10 @@ async def stream_event(
                 )
             except httpx.ConnectError:
                 if attempt or not _worker_left(manager, conversation_id, client):
+                    raise
+            except RuntimeError:
+                # The held client was closed by a cleanup or reap before the send.
+                if attempt or not client.is_closed:
                     raise
             else:
                 if (
