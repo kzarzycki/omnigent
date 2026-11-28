@@ -52,6 +52,11 @@ class FakeGh:
         self.calls[" ".join(argv[:2])] += 1
         if argv[:2] == ["auth", "status"]:
             time.sleep(self.status_delay)
+            if "-h" in argv:  # `gh auth status -h HOST`: signed in only when an account is on HOST
+                host = argv[argv.index("-h") + 1]
+                return (
+                    (0, "", "") if any(a["host"] == host for a in self.accounts) else (1, "", "")
+                )
             hosts: dict[str, list[dict[str, Any]]] = {}
             for account in self.accounts:
                 hosts.setdefault(account["host"], []).append(account)
@@ -106,11 +111,11 @@ def test_an_enterprise_host_without_a_gh_login_is_not_read(
 ) -> None:
     monkeypatch.setattr(github._config, "github_account_preference", lambda _key: None)
     fake_gh.tokens = {}
+    fake_gh.accounts = [a for a in fake_gh.accounts if a["host"] == "github.com"]
     assert _read(ENTERPRISE_URL) is None
     with pytest.raises(ValueError, match="Sign in"):
         github._host_args("/work", PullRequestRef.from_url(ENTERPRISE_URL))
     assert fake_gh.calls["pr view"] == 0
-    assert fake_gh.calls["auth status"] == 0
 
 
 def test_an_auth_failure_drops_the_cache_so_a_re_login_is_seen(fake_gh: FakeGh) -> None:

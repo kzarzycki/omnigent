@@ -61,6 +61,9 @@ overlay `~/.config/omnigent/fork-dev.conf`, and fails naming the overlay when ne
   - `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint`:
     seconds after setup's warm-up; cold, from 30 s to over 6 minutes, depending on the
     network. Without `--group lint` pre-commit's ruff hooks fail with "No module named ruff".
+    The venv must hold copies, not hard links (uv.toml `link-mode = "copy"`, which setup.sh
+    enforces by rebuilding a hard-linked `.venv`): the Claude sandbox refuses a hard-linked runtime
+    and ~190 `tests/inner` tests fail with "mutable hard-link alias".
   - pytest with `-n auto --dist=loadfile`, one directory per call: `tests/server` about
     6 minutes; `tests/inner` and `tests/harnesses` under 2 each.
   - vitest, all of `web/`: about 8 minutes. Run it alone, or in shards when a run nears

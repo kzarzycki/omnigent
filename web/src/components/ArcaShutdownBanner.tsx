@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangleIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useMarkArcaBannerWhenVisible } from "@/hooks/useArcaShutdownBanner";
-import { offersWorkweek } from "@/lib/arcaShutdownWarning";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { copyText } from "@/lib/clipboard";
-import { cn } from "@/lib/utils";
-import { ArcaExtendActions, useCanExtendArca } from "./ArcaExtendActions";
 
+// Kept for HostUpdateBanner: upstream removed the shutdown banner (#14400) but this
+// fork's host-update nudge still reuses the copy-command chip.
 export function CommandCopyButton({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
   const resetTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,69 +41,6 @@ export function CommandCopyButton({ command }: { command: string }) {
           <CopyIcon className="size-3.5" aria-hidden="true" />
         )}
       </button>
-    </div>
-  );
-}
-
-export function ArcaShutdownBanner({
-  warning,
-  hasTasks = false,
-}: {
-  warning: { day: string; dismissToday: () => void };
-  hasTasks?: boolean;
-}) {
-  useMarkArcaBannerWhenVisible(warning.day);
-  const commands = ["arca extend overnight"];
-  if (offersWorkweek(new Date(`${warning.day}T12:00:00`))) commands.push("arca extend workweek");
-  const desktopExtend = useCanExtendArca();
-  const copyCommands = (
-    <div className="flex flex-wrap gap-2">
-      {commands.map((command) => (
-        <CommandCopyButton key={command} command={command} />
-      ))}
-    </div>
-  );
-
-  return (
-    <div
-      role="status"
-      className={cn(
-        "shrink-0 px-3 md:px-4",
-        hasTasks ? "mt-1" : "chat-tasks-preview mt-14 md:mt-12",
-      )}
-    >
-      <div className="mx-auto flex max-w-3xl items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-foreground">
-        <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
-        <div className="min-w-0 flex-1 text-ui">
-          <p className="font-medium">
-            Your Arca will shut down at about 6 PM unless you keep it running.
-          </p>
-          <div className="mt-1.5 flex flex-wrap gap-2">
-            {desktopExtend && (
-              <ArcaExtendActions
-                day={warning.day}
-                onSuccess={warning.dismissToday}
-                fallback={() => copyCommands}
-              />
-            )}
-            {desktopExtend === false && copyCommands}
-          </div>
-          {desktopExtend === false && (
-            <p className="mt-1.5 text-muted-foreground">
-              Run this on your laptop. Already extended? You can ignore this.
-            </p>
-          )}
-          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
-            <button
-              type="button"
-              className="underline underline-offset-2 hover:no-underline"
-              onClick={warning.dismissToday}
-            >
-              Not now
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

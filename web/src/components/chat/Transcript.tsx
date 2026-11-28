@@ -28,10 +28,7 @@ import { sendableQueuedHead, useChatStore } from "@/store/chatStore";
 import { TranscriptScrollbar } from "@/pages/TranscriptScrollbar";
 import { TurnRail, type Turn } from "@/pages/TurnRail";
 import { FloatingBannerStack, StreamBudgetBanner } from "@/components/StreamBudgetBanner";
-import { DbcertBanner } from "@/components/DbcertBanner";
-import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
 import { useSessionTasks } from "@/hooks/useSessionTasks";
-import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
 import { HostUpdateBanner, useOutdatedHost } from "@/components/HostUpdateBanner";
 import { useSearchParams } from "@/lib/routing";
 import { FIND_QUERY_PARAM, MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
@@ -76,6 +73,7 @@ import {
   userMessageOrigin,
   withUncommittedUserBubbles,
 } from "@/components/chat/chatBubbleParts";
+import { TranscriptPaletteCommands } from "@/components/chat/TranscriptPaletteCommands";
 import { usePeerSessionMessageDisplay } from "@/lib/peerSessionMessagePreferences";
 import { SCROLL_RESTORE_BUDGET_MS } from "@/shell/useScrollRestore";
 
@@ -209,6 +207,7 @@ function TranscriptImpl({
 }: TranscriptProps) {
   const blocks = useChatStore((s) => s.blocks);
   const pendingUserMessages = useChatStore((s) => s.pendingUserMessages);
+  const failedUploads = useChatStore((s) => s.failedUploads);
   const failedInputs = useChatStore((s) => s.failedInputs);
   const activeResponse = useChatStore((s) => s.activeResponse);
   const interruptedResponseIds = useChatStore((s) => s.interruptedResponseIds);
@@ -255,12 +254,14 @@ function TranscriptImpl({
       pendingUserMessages,
       failedInputs,
       getCurrentAuthorId(),
+      failedUploads,
     );
   }, [
     blocks,
     activeResponse,
     interruptedResponseIds,
     pendingUserMessages,
+    failedUploads,
     failedInputs,
     subagentRoutingOverride,
     sessionStatus,
@@ -462,11 +463,9 @@ function TranscriptImpl({
 
   const showWorkingIndicator =
     !sandboxFailed && shouldShowWorkingIndicator(display.showsWorking, display.bubbles);
-  const arcaWarning = useArcaShutdownBanner();
-  const showArcaBanner = arcaWarning.showForHost(hostId);
   const hostUpdate = useOutdatedHost(hostId);
   const outdatedHost = hostUpdate.outdated;
-  const hasPinnedBanner = display.hasTasks || showArcaBanner || outdatedHost !== null;
+  const hasPinnedBanner = display.hasTasks || outdatedHost !== null;
   return (
     <TaskMarkersProvider value={taskMarkers}>
       {/* Task preview pinned above the thread. Sibling of the viewport (not an
@@ -479,12 +478,11 @@ function TranscriptImpl({
           className="mt-14 md:mt-12"
         />
       )}
-      {showArcaBanner && <ArcaShutdownBanner warning={arcaWarning} hasTasks={display.hasTasks} />}
       {outdatedHost && (
         <HostUpdateBanner
           outdated={outdatedHost}
           onDismiss={() => hostUpdate.dismissToday(outdatedHost)}
-          hasPinnedAbove={display.hasTasks || showArcaBanner}
+          hasPinnedAbove={display.hasTasks}
         />
       )}
       {/* Wrapper div gives us a ref to scope the SelectionPopup to the
@@ -505,7 +503,8 @@ function TranscriptImpl({
             className={cn(
               "chat-conversation-content mx-auto w-full gap-4 px-4 pb-6 md:px-[clamp(0px,calc((var(--chat-column-width)+3.5rem-100cqi)*0.5),1.75rem)]",
               hasPinnedBanner ? "pt-4" : "pt-20",
-              showArcaBanner && "chat-content-under-arca-banner",
+              // In a chat pane, the panes view and the pane's strip already clear the header.
+              "in-data-chat-pane-body-host:pt-4",
               CHAT_COLUMN_WIDTH,
             )}
           >
@@ -597,6 +596,10 @@ function TranscriptImpl({
           </ConversationContent>
           {/* After the content, so the scroll element's ref is attached when its layout effect runs. */}
           <ConversationScrollRefBridge onScroller={setScroller} />
+          <TranscriptPaletteCommands
+            conversationId={display.conversationId}
+            bubbles={display.streamBubbles}
+          />
           <ConversationScrollButton
             className={
               isMobileViewport
@@ -629,7 +632,6 @@ function TranscriptImpl({
             />
           )}
           <StreamBudgetBanner />
-          <DbcertBanner conversationId={conversationId} hostId={hostId} />
           <SandboxActionBanner />
         </FloatingBannerStack>
         {/* Left-edge minimap: one tick per turn. Desktop-only. */}
@@ -1393,18 +1395,21 @@ export function VirtualBubbleList({
   }, [onGeometryChange, scrollToItem, activeTurnId, rangeNonce]);
 
   if (disableVirtualization) {
+    // Same wrapper and keyed rows as the virtualized list, so mounted rows keep
+    // their DOM nodes and the reader's selection survives into native find.
     return (
-      <div className="flex w-full flex-col gap-4">
+      <div className="flex w-full flex-col" style={{ rowGap: ROW_GAP_PX }}>
         {bubbles.map((bubble, index) => (
-          <BubbleView
-            key={rowKey(bubble)}
-            bubble={bubble}
-            isLastAssistant={index === lastAssistantIndex}
-            showsWorking={showsWorking && index === lastAssistantIndex}
-            actionsPersistent={
-              index === lastMessageIndex && bubble.kind === "assistant" && actionsPersist
-            }
-          />
+          <div key={rowKey(bubble)} className="relative">
+            <BubbleView
+              bubble={bubble}
+              isLastAssistant={index === lastAssistantIndex}
+              showsWorking={showsWorking && index === lastAssistantIndex}
+              actionsPersistent={
+                index === lastMessageIndex && bubble.kind === "assistant" && actionsPersist
+              }
+            />
+          </div>
         ))}
       </div>
     );

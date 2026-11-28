@@ -46,7 +46,14 @@ fi
 warm_up() {
   [ -n "$repo" ] || { echo "uv warm-up skipped: no omnigent checkout under /home/user" >> "$log"; return; }
   local started=$SECONDS rc=0
-  (cd "$repo" && OMNIGENT_SKIP_WEB_UI=true timeout -k 10 "$warm_up_seconds" \
+  # uv.toml's link-mode = "copy" only applies to what uv installs from now on: a venv built before
+  # it holds hard-linked files, which the Claude sandbox's trusted-runtime check refuses ("mutable
+  # hard-link alias"), so rebuild such a venv as copies.
+  if [ -d "$repo/.venv/lib" ] && [ -n "$(find "$repo/.venv/lib" -type f -links +1 -print -quit 2>/dev/null)" ]; then
+    rm -rf "$repo/.venv"
+    echo "rebuilt a hard-linked .venv as copies" >> "$log"
+  fi
+  (cd "$repo" && UV_LINK_MODE=copy OMNIGENT_SKIP_WEB_UI=true timeout -k 10 "$warm_up_seconds" \
     uv sync --locked --extra all --group test --group lint) >/dev/null 2>&1 || rc=$?
   case $rc in
     0) echo "uv warm-up done in $((SECONDS - started)) s" >> "$log" ;;

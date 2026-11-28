@@ -68,6 +68,7 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -99,6 +100,7 @@ from omnigent.runner.git_providers import (
     PR_LABELS_OBJECT,
     PR_MERGE_OBJECT,
     PR_REVIEWERS_OBJECT,
+    PullRequestStatus,
     ReviewerRef,
     local_git,
 )
@@ -114,6 +116,8 @@ _DEFAULT_GH_TIMEOUT_SECONDS = 15.0
 # A request with its own time budget bounds every ``gh`` call by this monotonic
 # deadline (see :func:`_gh_deadline_scope`); ``_gh_timed_out`` records a cut-off call.
 _gh_deadline: ContextVar[float | None] = ContextVar("gh_deadline", default=None)
+# The host the current panel step's ``gh`` calls are for, set by the provider facet.
+_gh_target_host: ContextVar[str | None] = ContextVar("gh_target_host", default=None)
 _gh_timed_out: ContextVar[bool] = ContextVar("gh_timed_out", default=False)
 
 # Always pass --json (bare gh pr view opens a pager); body, comments,
@@ -199,17 +203,43 @@ def _in_sandbox() -> bool:
     return in_managed_sandbox()
 
 
-def _gh(
-    argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
-) -> tuple[int | None, str, str]:
-    # ``timeout`` replaces the per-call limit: higher for a slow call such as a video
-    # upload, lower for a best-effort one.
-    timeout = timeout or _gh_timeout_seconds()
-    if (deadline := _gh_deadline.get()) is not None:
-        timeout = min(timeout, deadline - time.monotonic())
-        if timeout <= 0:
-            _gh_timed_out.set(True)
-            return None, "", "gh deadline exceeded"
+@dataclass(frozen=True)
+class GhInvocation:
+    """The process one ``gh`` call starts.
+
+    :ivar argv: The command and its arguments.
+    :ivar env: The child's whole environment, or ``None`` to inherit this process's.
+    :ivar host: The code host the call is for, from :func:`gh_target_host_scope`;
+        ``None`` when the step didn't name one.
+    """
+
+    argv: list[str]
+    env: dict[str, str] | None
+    host: str | None = None
+
+
+@contextmanager
+def gh_target_host_scope(host: str | None) -> Iterator[None]:
+    """Mark every ``gh`` call in the block as being for *host*.
+
+    The value is per context, so concurrent steps in other threads keep their own.
+    """
+    token = _gh_target_host.set(host.lower() if host else None)
+    try:
+        yield
+    finally:
+        _gh_target_host.reset(token)
+
+
+def _gh_invocation(argv: list[str], *, token: str | None, host: str | None) -> GhInvocation:
+    """Return the command and environment that run ``gh`` with *argv*.
+
+    Every ``gh`` call the panel makes starts through here.
+
+    :param argv: Arguments after ``gh``.
+    :param token: A GitHub token to run this one call as a chosen account, or ``None``.
+    :param host: The code host the call is for, or ``None``; every host runs ``gh``.
+    """
     # In a managed sandbox the panel must authenticate as the connected owner via
     # the per-user hosts.yml that configure_host_gh writes — never an ambient
     # GH_TOKEN/GITHUB_TOKEN, which gh ranks ABOVE hosts.yml. Scrub them so a stray
@@ -234,7 +264,22 @@ def _gh(
         env["GH_ENTERPRISE_TOKEN"] = token
         env.pop("GITHUB_TOKEN", None)
         env.pop("GITHUB_ENTERPRISE_TOKEN", None)
-    result = _run(["gh", *argv], cwd=cwd, timeout=timeout, env=env)
+    return GhInvocation(argv=["gh", *argv], env=env, host=host)
+
+
+def _gh(
+    argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
+) -> tuple[int | None, str, str]:
+    # ``timeout`` replaces the per-call limit: higher for a slow call such as a video
+    # upload, lower for a best-effort one.
+    timeout = timeout or _gh_timeout_seconds()
+    if (deadline := _gh_deadline.get()) is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            _gh_timed_out.set(True)
+            return None, "", "gh deadline exceeded"
+    invocation = _gh_invocation(argv, token=token, host=_gh_target_host.get())
+    result = _run(invocation.argv, cwd=cwd, timeout=timeout, env=invocation.env)
     if result[0] not in (0, None) and _AUTH_FAILURE_PATTERN.search(result[2]):
         _forget_account_lookups(token)
     if (
@@ -337,6 +382,19 @@ def _list_accounts(root: str) -> tuple[bool, list[dict[str, Any]]]:
     # Older gh (no --json hosts): fall back to the plain status exit code.
     rc, _, _ = _gh(["auth", "status"], cwd=root)
     return rc == 0, []
+
+
+def _gh_signed_in_to_host(root: str, host: str) -> bool:
+    """Whether ``gh`` reports a login on ``host``.
+
+    Some setups sign ``gh`` in to an enterprise host only when a command names that host,
+    so a host missing from the global listing is asked about directly.
+    """
+    _, accounts = _list_accounts(root)
+    if host in {account.get("host") for account in accounts}:
+        return True
+    rc, _, _ = _gh(["auth", "status", "-h", host], cwd=root)
+    return rc == 0
 
 
 def _resolved_base_nwo(root: str) -> str | None:
@@ -1038,6 +1096,15 @@ def _pr_view_json(root: str, fields: str, *, token: str | None = None) -> dict[s
     return _gh_pr_view([str(number), "-R", base_repo], fields, cwd=root, token=token)
 
 
+def _repo_payload(name_with_owner: str | None, url: object) -> dict[str, Any]:
+    """The repo payload; the forge host (omitted when unknown) tells github.com from Enterprise."""
+    repo: dict[str, Any] = {"name_with_owner": name_with_owner}
+    host = host_of(url) if isinstance(url, str) else None
+    if host:
+        repo["host"] = host
+    return repo
+
+
 def _workspace_github_info(root: str) -> dict[str, Any]:
     """Resolve GitHub context for the workspace: repo, branch, base, and PR.
 
@@ -1116,19 +1183,23 @@ def _workspace_github_info(root: str) -> dict[str, Any]:
             payload["pr"]["labels"] = _shape_labels(data["labels"])
         payload["authenticated"] = True
         payload["base_ref"] = data.get("baseRefName")
-        payload["repo"] = {"name_with_owner": _owner_repo_from_pr_url(data.get("url"))}
+        payload["repo"] = _repo_payload(_owner_repo_from_pr_url(data.get("url")), data.get("url"))
+        if payload["repo"]["name_with_owner"]:
+            payload["workspace_repo"] = dict(payload["repo"])
         return payload
 
     # No PR. Probe repo reachability to tell "no PR yet" from "can't reach repo".
-    rc, out, _ = _gh(["repo", "view", "--json", "nameWithOwner"], cwd=root, token=token)
+    rc, out, _ = _gh(["repo", "view", "--json", "nameWithOwner,url"], cwd=root, token=token)
     if rc == 0:
         try:
-            nwo = json.loads(out).get("nameWithOwner")
+            view = json.loads(out)
+            nwo, url = view.get("nameWithOwner"), view.get("url")
         except (ValueError, AttributeError):
-            nwo = None
+            nwo = url = None
         if nwo:
             payload["authenticated"] = True
-            payload["repo"] = {"name_with_owner": nwo}
+            payload["repo"] = _repo_payload(nwo, url)
+            payload["workspace_repo"] = dict(payload["repo"])
             return payload  # -> no-pr
 
     # Repo unreachable / not signed in — enumerate accounts so the panel can offer
@@ -1398,8 +1469,11 @@ def _resolve_read(root: str, token: str | None, host: str) -> tuple[str | None, 
 
 def _gh_can_read_host(root: str, host: str, token: str | None) -> bool:
     """Whether ``gh`` has a credential for *host*: github.com, or a token it would use there."""
-    return host == "github.com" or bool(
-        token or _ambient_token(host) or _active_gh_token(root, host)
+    return (
+        host == "github.com"
+        or bool(token or _ambient_token(host) or _active_gh_token(root, host))
+        # Some setups sign gh in to an enterprise host only when a command names it.
+        or _gh_signed_in_to_host(root, host)
     )
 
 
@@ -1629,7 +1703,7 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
         "gh_available": shutil.which("gh") is not None,
         "authenticated": False,
         "pr": None,
-        "repo": {"name_with_owner": reference.repository},
+        "repo": {"name_with_owner": reference.repository, "host": reference.host},
         "selected_pr_url": reference.url,
     }
     if not info["gh_available"] or _background_reads_paused():
@@ -1697,7 +1771,7 @@ _TITLE_QUERY_CHUNK = 50
 _UNREADABLE_ERROR_TYPES = frozenset({"NOT_FOUND", "FORBIDDEN"})
 _FINISHED_TITLES_MAX = 4096
 # Finished PRs' titles by title key, with when their lookup started; guarded by _preview_lock.
-_finished_titles: dict[tuple[str, ...], tuple[float, str | None]] = {}
+_finished_titles: dict[tuple[str, ...], tuple[float, str | None, str | None, bool]] = {}
 
 
 def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1718,14 +1792,20 @@ def _title_key(identity: str, reference: PullRequestRef) -> tuple[str, ...]:
     return ("pr", identity, _repo_argument(reference).lower(), str(reference.number), "title")
 
 
-def _remember_finished_title(key: tuple[str, ...], title: str | None, started: float) -> None:
-    """Keep a finished PR's title for the runner's life, unless a write began after ``started``."""
+def _remember_finished_title(
+    key: tuple[str, ...],
+    title: str | None,
+    started: float,
+    state: str | None = None,
+    is_draft: bool = False,
+) -> None:
+    """Keep a finished PR's title and state for the runner's life, barring a later write."""
     if _invalidated_since(key) >= started:
         return
     with _preview_lock:
         if key not in _finished_titles and len(_finished_titles) >= _FINISHED_TITLES_MAX:
             del _finished_titles[next(iter(_finished_titles))]
-        _finished_titles[key] = (started, title)
+        _finished_titles[key] = (started, title, state, is_draft)
 
 
 def _known_title(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1736,17 +1816,33 @@ def _known_title(identity: str, reference: PullRequestRef) -> dict[str, Any] | N
     if finished is not None:
         # Another runner's write to the PR stamps it; this runner's own write drops the entry.
         if _invalidated_since(key) < finished[0]:
-            return {"title": finished[1], "timed_out": False}
+            return {
+                "title": finished[1],
+                "timed_out": False,
+                "state": finished[2],
+                "is_draft": finished[3],
+            }
         with _preview_lock:
             _finished_titles.pop(key, None)
     shared = _title_from_shared_pr_data(identity, reference)
     if shared is not None:
-        return {"title": _pr_title(shared), "timed_out": False}
+        return {
+            "title": _pr_title(shared),
+            "timed_out": False,
+            "state": shared.get("state"),
+            "is_draft": shared.get("isDraft") is True,
+        }
     hit, answer = _cache_get(key, shared=True)
     if not hit or not isinstance(answer, dict):
         return None
     if answer.get("finished"):
-        _remember_finished_title(key, answer.get("title"), float(answer.get("started") or 0))
+        _remember_finished_title(
+            key,
+            answer.get("title"),
+            float(answer.get("started") or 0),
+            answer.get("state"),
+            answer.get("is_draft") is True,
+        )
     return answer
 
 
@@ -1763,7 +1859,7 @@ def _titles_query(references: Sequence[PullRequestRef]) -> list[str]:
         variables.append(f"$o{index}: String!, $n{index}: String!")
         fields.append(
             f"p{index}: repository(owner: $o{index}, name: $n{index}) "
-            f"{{ pullRequest(number: {int(reference.number)}) {{ title state }} }}"
+            f"{{ pullRequest(number: {int(reference.number)}) {{ title state isDraft }} }}"
         )
         arguments += ["-f", f"o{index}={owner}", "-f", f"n{index}={name}"]
     query = "query(" + ", ".join(variables) + ") {\n  " + "\n  ".join(fields) + "\n}"
@@ -1773,7 +1869,7 @@ def _titles_query(references: Sequence[PullRequestRef]) -> list[str]:
 def _graphql_titles(
     root: str, host: str, token: str | None, references: Sequence[PullRequestRef]
 ) -> dict[str, dict[str, Any] | None]:
-    """Read the PRs' titles in one GraphQL query: ``{url: {title, state} | None}``.
+    """Read the PRs' titles in one GraphQL query: ``{url: {title, state, isDraft} | None}``.
 
     ``None`` is a failed lookup. A PR or repository GitHub reports as not found or not
     readable answers ``{title: None, state: None}``; other PRs in the query still answer.
@@ -1802,9 +1898,13 @@ def _graphql_titles(
         node = data.get(alias)
         pull = node.get("pullRequest") if isinstance(node, dict) else None
         if isinstance(pull, dict):
-            found[reference.url] = {"title": pull.get("title"), "state": pull.get("state")}
+            found[reference.url] = {
+                "title": pull.get("title"),
+                "state": pull.get("state"),
+                "isDraft": pull.get("isDraft") is True,
+            }
         elif alias in data and errors.get(alias, set()) <= _UNREADABLE_ERROR_TYPES:
-            found[reference.url] = {"title": None, "state": None}
+            found[reference.url] = {"title": None, "state": None, "isDraft": False}
         else:
             found[reference.url] = None
     return found
@@ -1817,15 +1917,15 @@ def _query_titles(
     token: str | None,
     references: Sequence[PullRequestRef],
     deadline: float,
-) -> dict[str, tuple[str | None, bool]]:
+) -> dict[str, dict[str, Any]]:
     """Look up titles no one holds, one query per chunk, shared by the host's runners.
 
     One lookup per host and identity runs at a time; a waiter then finds its titles cached.
     A chunk the deadline reaches before it starts is left out.
     """
-    answers: dict[str, tuple[str | None, bool]] = {}
+    answers: dict[str, dict[str, Any]] = {}
     if not _gh_can_read_host(root, host, token):
-        return {reference.url: (None, False) for reference in references}
+        return {reference.url: _title_answer(None, False) for reference in references}
     for start in range(0, len(references), _TITLE_QUERY_CHUNK):
         if time.monotonic() >= deadline:
             break
@@ -1836,11 +1936,11 @@ def _query_titles(
                 if known is None:
                     missing.append(reference)
                 else:
-                    answers[reference.url] = (known["title"], bool(known["timed_out"]))
+                    answers[reference.url] = known
             if not missing:
                 continue
             if _background_reads_paused():  # asked again once the pause ends
-                answers.update({reference.url: (None, True) for reference in missing})
+                answers.update({reference.url: _title_answer(None, True) for reference in missing})
                 continue
             started = time.time()
             found = _graphql_titles(root, host, token, missing)
@@ -1853,6 +1953,8 @@ def _query_titles(
                     "timed_out": pull is None and timed_out,
                     "finished": finished,
                     "started": started,
+                    "state": pull.get("state") if pull is not None else None,
+                    "is_draft": pull is not None and pull.get("isDraft") is True,
                 }
                 if pull is None:
                     ttl = _FAILED_READ_TTL_SECONDS
@@ -1861,9 +1963,16 @@ def _query_titles(
                 key = _title_key(identity, reference)
                 _cache_put(key, answer, ttl, shared=True, started=started)
                 if finished:
-                    _remember_finished_title(key, answer["title"], started)
-                answers[reference.url] = (answer["title"], answer["timed_out"])
+                    _remember_finished_title(
+                        key, answer["title"], started, answer["state"], answer["is_draft"]
+                    )
+                answers[reference.url] = answer
     return answers
+
+
+def _title_answer(title: str | None, timed_out: bool) -> dict[str, Any]:
+    """A title answer that carries no state, for a read that could not be made."""
+    return {"title": title, "timed_out": timed_out, "state": None, "is_draft": False}
 
 
 def _pr_titles_before(
@@ -1881,7 +1990,42 @@ def _pr_titles_before(
         ended the lookup, or a rate-limit pause skipped a background one. A PR whose
         chunk the deadline reached first is left out.
     """
-    answers: dict[str, tuple[str | None, bool]] = {}
+    return {
+        url: (answer["title"], bool(answer["timed_out"]))
+        for url, answer in _pr_answers_before(root, references, deadline).items()
+    }
+
+
+def _pr_statuses_before(
+    root: str, references: Sequence[PullRequestRef], deadline: float
+) -> dict[str, tuple[PullRequestStatus | None, bool]]:
+    """Look up PRs' titles, states and draft flags with the batching and shared caches of
+    :func:`_pr_titles_before`, so a refresh of many PRs is one query per host and identity.
+
+    :returns: ``{url: (status, timed_out)}``; ``status`` is ``None`` when the PR could not be read.
+        A PR whose chunk the deadline reached first is left out.
+    """
+    statuses: dict[str, tuple[PullRequestStatus | None, bool]] = {}
+    for url, answer in _pr_answers_before(root, references, deadline).items():
+        state = answer.get("state")
+        status = (
+            PullRequestStatus(
+                title=answer["title"],
+                state=state if state in ("OPEN", "MERGED", "CLOSED") else None,
+                is_draft=answer.get("is_draft") is True,
+            )
+            if answer["title"] is not None or state is not None
+            else None
+        )
+        statuses[url] = (status, bool(answer["timed_out"]))
+    return statuses
+
+
+def _pr_answers_before(
+    root: str, references: Sequence[PullRequestRef], deadline: float
+) -> dict[str, dict[str, Any]]:
+    """The title answers behind :func:`_pr_titles_before` and :func:`_pr_statuses_before`."""
+    answers: dict[str, dict[str, Any]] = {}
     groups: dict[tuple[str, str], tuple[str | None, list[PullRequestRef]]] = {}
     with _gh_deadline_scope(deadline):
         for reference in references:
@@ -1889,7 +2033,7 @@ def _pr_titles_before(
             identity = identity or _unbound_identity(reference.host)
             known = _known_title(identity, reference)
             if known is not None:
-                answers[reference.url] = (known["title"], bool(known["timed_out"]))
+                answers[reference.url] = known
             else:
                 groups.setdefault((reference.host, identity), (token, []))[1].append(reference)
         for (host, identity), (token, missing) in groups.items():
@@ -1902,6 +2046,35 @@ def _pr_title_before(
 ) -> tuple[str | None, bool]:
     """Look up one PR's title like :func:`_pr_titles_before`."""
     return _pr_titles_before(root, [reference], deadline).get(reference.url, (None, True))
+
+
+# What a title refresh reads: the state and draft flag come with the title in one call.
+_PR_STATUS_FIELDS = "title,state,isDraft"
+
+
+def _pr_status_before(
+    root: str, reference: PullRequestRef, deadline: float
+) -> tuple[PullRequestStatus | None, bool]:
+    """Look up one PR's title, state and draft flag in the ``gh`` call a title lookup makes.
+
+    :param deadline: A ``time.monotonic()`` value.
+    :returns: ``(status, timed_out)``, as :func:`_pr_title_before` returns.
+    """
+    if _background_reads_paused():  # asked again once the pause ends
+        return None, True
+    with _gh_deadline_scope(deadline):
+        data = _pr_json(root, reference, _PR_STATUS_FIELDS)
+        if data is None:
+            return None, _gh_timed_out.get()
+    state = data.get("state")
+    return (
+        PullRequestStatus(
+            title=_pr_title(data),
+            state=state if state in ("OPEN", "MERGED", "CLOSED") else None,
+            is_draft=data.get("isDraft") is True,
+        ),
+        False,
+    )
 
 
 def _verify_pr_access(root: str, reference: PullRequestRef) -> None:

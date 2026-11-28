@@ -49,6 +49,7 @@ import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictio
 import { SESSION_ACTIONS_LOADING } from "@/lib/sessionCapabilities";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { fetchSessionRepositoryBranches, forkSession, launchRunner } from "@/lib/sessionsApi";
+import { conversationRowFromSession, insertCreatedRowIntoCaches } from "@/lib/sessionListCache";
 import { useAvailableAgents, prefetchAvailableAgentDetails } from "@/hooks/useAvailableAgents";
 import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { partitionAgentsByKind } from "@/lib/agentGrouping";
@@ -57,6 +58,13 @@ import { useSession } from "@/hooks/useSession";
 import type { NativeModelOption, Session } from "@/lib/types";
 import { useHosts, useHostModelOptions, type Host } from "@/hooks/useHosts";
 import { hostBuildLabel } from "./HostLabel";
+import {
+  newSandboxModelOptions,
+  noReachableModelsMessage,
+  useNewSandboxModelCatalog,
+} from "@/hooks/useNewSandboxModelCatalog";
+import { markSandboxLaunch } from "@/hooks/useSandboxLaunchSelectionCheck";
+import { getCurrentUserId } from "@/lib/identity";
 import {
   nativeAgentHasCapability,
   nativeCodingAgentForAvailableAgent,
@@ -141,9 +149,10 @@ const SAME_AS_SOURCE = "__same__";
 const FORK_SELECT_ITEM_SM = "[&_[data-slot=select-item]]:text-sm";
 
 /** Form fields that can block submit, mapped to the control a blocked click focuses. */
-type ForkField = "host" | "directory" | "sandboxRepo" | "sandboxProfile";
+type ForkField = "host" | "agent" | "directory" | "sandboxRepo" | "sandboxProfile";
 const FORK_FIELD_IDS: Record<ForkField, string> = {
   host: "fork-session-host",
+  agent: "fork-session-agent",
   directory: "fork-session-directory",
   sandboxRepo: "fork-session-sandbox-repo-input",
   sandboxProfile: "fork-session-sandbox-profile",
@@ -298,7 +307,9 @@ export interface ForkRunConfigValue {
  * @param selectedHostId - Host whose model catalog feeds the model picker; null
  *   leaves it on Default until a host is chosen.
  * @param modelCatalog - Models to offer instead of the host's, e.g. a new
- *   sandbox's; omitted to list the selected host's.
+ *   sandbox's, and why none are listed; omitted to list the selected host's.
+ * @param modelCatalogKey - Where the model list comes from; when it changes,
+ *   the model and effort picks start over.
  * @param remembered - Settings to start on in place of the source's, e.g. the
  *   last ones used for a new session. With it, every shown control reports its
  *   value, changed or not: a new session has no source to inherit from.
@@ -312,6 +323,7 @@ export function ForkRunConfig({
   sameAgentAsSource,
   selectedHostId,
   modelCatalog,
+  modelCatalogKey,
   remembered,
   onChange,
 }: {
@@ -321,7 +333,8 @@ export function ForkRunConfig({
   sameFamilyAsSource: boolean;
   sameAgentAsSource: boolean;
   selectedHostId: string | null;
-  modelCatalog?: { options: NativeModelOption[]; loading: boolean };
+  modelCatalog?: { options: NativeModelOption[]; loading: boolean; emptyReason?: string | null };
+  modelCatalogKey?: string;
   remembered?: ForkRunConfigValue;
   onChange: (value: ForkRunConfigValue) => void;
 }) {
@@ -505,6 +518,15 @@ export function ForkRunConfig({
     setMode(v);
   };
 
+  // A model picked from another destination's list, and the effort that goes
+  // with it, starts over rather than naming a model this list may lack.
+  const catalogKeyRef = useRef(modelCatalogKey);
+  useEffect(() => {
+    if (catalogKeyRef.current === modelCatalogKey) return;
+    catalogKeyRef.current = modelCatalogKey;
+    setTouched((t) => ({ ...t, model: false, effort: false }));
+  }, [modelCatalogKey]);
+
   // Re-seed whenever the seeding basis changes (agent switch, source load), but
   // never clobber a control the user already touched — a catalog refetch that
   // recomputes `seededModel` must not overwrite a manual pick.
@@ -600,9 +622,10 @@ export function ForkRunConfig({
             )}
             {!modelsLoading && modelOptions.length === 0 && (
               <div className="px-2.5 py-1 text-sm text-muted-foreground">
-                {selectedHostId === null && modelCatalog === undefined
-                  ? "Select a host to list models"
-                  : "Models unavailable"}
+                {modelCatalog?.emptyReason ??
+                  (selectedHostId === null && modelCatalog === undefined
+                    ? "Select a host to list models"
+                    : "Models unavailable")}
               </div>
             )}
           </RoutingModelSelect>
@@ -1344,6 +1367,64 @@ function SupportedForkSessionForm({
   // picked yet) and whether it clones several repos.
   const forkEffectiveProvider =
     sandboxProvider ?? (info !== "loading" ? info.sandbox_provider : null);
+  // A new sandbox has no host to list models, so offer its provider's catalog as
+  // New Chat does. Forks keep saved inference settings and skip bound profiles.
+  const sourceInferenceConfigured = sourceSession?.inferenceConfigured === true;
+  const destinationBindsInference =
+    info !== "loading" &&
+    forkEffectiveProvider !== null &&
+    info.sandbox_provider_capabilities?.[forkEffectiveProvider]?.inference_models === true;
+  const newSandbox = useNewSandboxModelCatalog(
+    forkEffectiveProvider,
+    targetHarness,
+    switching ? agentChoice : (sourceAgent?.id ?? null),
+    getCurrentUserId(),
+    sandboxSelected && !sourceInferenceConfigured && !destinationBindsInference,
+  );
+  // As in New Chat, a provider certain that no model serves the target says why
+  // and blocks the fork; a failed listing only explains the empty menu.
+  const sandboxUnsupportedReason = newSandbox.unsupported
+    ? (newSandbox.preview.data?.error ??
+      noReachableModelsMessage(
+        switching
+          ? switchableAgents.find((agent) => agent.id === agentChoice)?.display_name
+          : sourceAgentDisplay,
+      ))
+    : null;
+  const sandboxModelCatalog = useMemo(() => {
+    if (!sandboxSelected) return undefined;
+    if (sourceInferenceConfigured) {
+      return {
+        options: [],
+        loading: false,
+        emptyReason: "The fork keeps the original session's model settings.",
+      };
+    }
+    return {
+      options: newSandboxModelOptions(
+        targetHarness,
+        newSandbox.catalog,
+        newSandbox.pending || newSandbox.unsupported || newSandbox.boundCatalogError !== null,
+      ),
+      loading: newSandbox.pending,
+      emptyReason:
+        sandboxUnsupportedReason ?? newSandbox.boundCatalogError ?? newSandbox.defaultCatalogError,
+    };
+  }, [
+    sandboxSelected,
+    sourceInferenceConfigured,
+    targetHarness,
+    newSandbox.catalog,
+    newSandbox.pending,
+    newSandbox.unsupported,
+    newSandbox.boundCatalogError,
+    newSandbox.defaultCatalogError,
+    sandboxUnsupportedReason,
+  ]);
+  // Each destination lists its own models.
+  const modelCatalogSource = sandboxSelected
+    ? `sandbox:${forkEffectiveProvider ?? ""}`
+    : (selectedHostId ?? "");
   const {
     launchError: sandboxProfileError,
     selection: selectedSandboxProfile,
@@ -1401,6 +1482,9 @@ function SupportedForkSessionForm({
   // (the server provisions both), only a coherent repository.
   const submitBlocker = ((): { field: ForkField; message: string } | null => {
     if (sandboxSelected) {
+      if (sandboxUnsupportedReason !== null) {
+        return { field: "agent", message: sandboxUnsupportedReason };
+      }
       if (sandboxProfileError !== null) {
         return { field: "sandboxProfile", message: sandboxProfileError };
       }
@@ -1647,6 +1731,22 @@ function SupportedForkSessionForm({
             }
           : undefined,
       });
+      // As after New Chat, the fork's page resets a pick the live sandbox lacks.
+      if (sandboxSelected) {
+        const model =
+          runConfig.modelOverride && runConfig.modelOverride !== "default"
+            ? runConfig.modelOverride
+            : null;
+        const pickedRow = sandboxModelCatalog?.options.find((row) => row.id === model);
+        markSandboxLaunch(fork.id, {
+          model,
+          effort:
+            runConfig.reasoningEffort && runConfig.reasoningEffort !== "default"
+              ? runConfig.reasoningEffort
+              : null,
+          modelLabel: pickedRow ? nativeModelLabel(pickedRow) : null,
+        });
+      }
       // Coding fork: launch the runner in the BACKGROUND, then navigate
       // into the (already-created, unbound) clone immediately — awaiting the
       // launch would block the modal for a worktree create (up to minutes)
@@ -1690,6 +1790,8 @@ function SupportedForkSessionForm({
           console.warn(`Clone ${fork.id}: background runner launch failed`, e);
         });
       }
+      // Show the fork now and keep it listed while the list refetch lags.
+      insertCreatedRowIntoCaches(queryClient, conversationRowFromSession(fork));
       // Fire-and-forget: the sidebar refresh must not gate navigation.
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       // The fork inherits the source's project, and each folder renders its
@@ -2003,6 +2105,7 @@ function SupportedForkSessionForm({
               ))}
             </SelectContent>
           </Select>
+          <ForkFieldError message={fieldError("agent")} />
         </div>
 
         {/* Run config (native targets only): model / effort / permission mode.
@@ -2021,6 +2124,8 @@ function SupportedForkSessionForm({
             sameFamilyAsSource={sameFamilyAsSource}
             sameAgentAsSource={sameAgentAsSource}
             selectedHostId={isCodingSource ? selectedHostId : (sourceHostId ?? null)}
+            modelCatalog={sandboxModelCatalog}
+            modelCatalogKey={modelCatalogSource}
             onChange={setRunConfig}
           />
         )}

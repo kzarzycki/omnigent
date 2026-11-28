@@ -127,6 +127,9 @@ class FakeGh:
             return 0, title_query_answer(pulls), ""
         if argv[0] == "api" and "graphql" in argv and self.conversation_rate_limited:
             return 1, "", self.rate_limit_message
+        if argv[:2] == ["auth", "status"] and "-h" in argv:  # one named host
+            named = argv[argv.index("-h") + 1]
+            return (0 if any(a["host"] == named for a in self.accounts) else 1), "", ""
         if argv[:2] == ["auth", "status"]:
             hosts: dict[str, list[dict[str, Any]]] = {}
             for account in self.accounts:

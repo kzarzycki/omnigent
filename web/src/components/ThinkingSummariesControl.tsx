@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { SettingsLabel } from "@/components/SettingsLabel";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { getThinkingSummaries, saveThinkingSummaries } from "@/lib/thinkingSummariesApi";
+import { SettingsEntryLabel, SettingsItem } from "@/pages/settings/search/SettingsItem";
+import { THINKING_SUMMARIES_ENTRY } from "@/pages/settings/search/catalog/general";
+import { settingsControlProps } from "@/pages/settings/search/settingsControl";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -13,8 +15,6 @@ export function ThinkingSummariesControl() {
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [enabled, setEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
-  const labelId = useId();
-  const descriptionId = useId();
   // Guards every async state update, from the initial load, Retry and toggle.
   const mountedRef = useRef(false);
 
@@ -55,18 +55,15 @@ export function ThinkingSummariesControl() {
   }, []);
 
   return (
-    <div className="flex flex-col gap-2" data-testid="thinking-summaries-control">
+    <SettingsItem
+      entry={THINKING_SUMMARIES_ENTRY}
+      className="flex flex-col gap-2"
+      data-testid="thinking-summaries-control"
+    >
       <div className="flex items-start justify-between gap-6">
-        <SettingsLabel
-          label="Ask for thinking summaries"
-          labelId={labelId}
-          descriptionId={descriptionId}
-          className="flex-1"
-          description="Sessions you start ask Claude and Codex to write out their thinking, which costs extra output tokens. A running session picks this up when it restarts."
-        />
+        <SettingsEntryLabel entry={THINKING_SUMMARIES_ENTRY} className="flex-1" />
         <Switch
-          aria-labelledby={labelId}
-          aria-describedby={descriptionId}
+          {...settingsControlProps(THINKING_SUMMARIES_ENTRY)}
           checked={enabled}
           disabled={loadState !== "ready" || saving}
           onCheckedChange={(next) => void toggle(next)}
@@ -84,6 +81,7 @@ export function ThinkingSummariesControl() {
             variant="outline"
             size="sm"
             onClick={() => void load()}
+            {...settingsControlProps(THINKING_SUMMARIES_ENTRY, "retry")}
             data-testid="thinking-summaries-retry"
             componentId="settings.general.thinking_summaries.retry"
           >
@@ -91,6 +89,6 @@ export function ThinkingSummariesControl() {
           </Button>
         </div>
       )}
-    </div>
+    </SettingsItem>
   );
 }

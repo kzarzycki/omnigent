@@ -1445,10 +1445,10 @@ describe("InboxPage replies", () => {
     await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1));
   });
 
-  it("never sends on Enter with a touch pointer", async () => {
+  it("never sends on Enter in the mobile layout", async () => {
     const realMatchMedia = window.matchMedia;
     window.matchMedia = ((query: string) => ({
-      matches: query === "(pointer: coarse)",
+      matches: query.includes("max-width"),
       media: query,
       onchange: null,
       addListener: () => {},
@@ -1812,6 +1812,8 @@ describe("InboxPage filter tabs", () => {
       "Awaiting response",
       "Unread",
       "All",
+      // Omni Advisor is on by default in these tests, so its tab follows the standard three.
+      "Omni Advisor",
     ]);
   });
 
@@ -2115,6 +2117,10 @@ describe("agent suggestions", () => {
   }
 
   it("summarizes listed suggestions, so one read suggestion is counted like it is shown", () => {
+    // The header summary only shows while an approval is pending, so keep one pending.
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([conversation({ id: "sess_approval", pending_elicitations_count: 1 })]),
+    );
     stub({ items: [suggestion({ status: "read" })], unreadCount: 0 });
     renderPage();
     expect(screen.getByText(/1 suggestion\b/)).toBeInTheDocument();

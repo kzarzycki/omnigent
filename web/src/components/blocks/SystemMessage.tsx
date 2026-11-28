@@ -13,7 +13,10 @@ import { cn } from "@/lib/utils";
 import { useRevealedOpen } from "@/components/chat/chatFindReveal";
 import type { ParsedSystemMessage, SystemMessageKind } from "@/lib/systemMessage";
 
-const KIND_ICON: Record<Exclude<SystemMessageKind, "subagent_wake">, LucideIcon> = {
+const KIND_ICON: Record<
+  Exclude<SystemMessageKind, "subagent_wake" | "session_resumed">,
+  LucideIcon
+> = {
   task_completed: CheckCircle2Icon,
   task_failed: AlertCircleIcon,
   task_cancelled: BanIcon,
@@ -42,7 +45,7 @@ interface SystemMessageViewProps {
 export function SystemMessageView({ message, revealed = false }: SystemMessageViewProps) {
   const [openByReader, setOpenByReader] = useState(false);
   const [open, setOpen] = useRevealedOpen(revealed, openByReader, setOpenByReader);
-  if (message.kind === "subagent_wake") return null;
+  if (message.kind === "subagent_wake" || message.kind === "session_resumed") return null;
   const Icon = KIND_ICON[message.kind];
   const hasBody = message.body.trim().length > 0;
 

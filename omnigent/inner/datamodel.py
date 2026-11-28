@@ -552,6 +552,15 @@ class WritePathSpec:
             raise ValueError("write_paths.copy_on_write must be a boolean")
 
 
+@dataclass(frozen=True)
+class HostWritePathSpec(WritePathSpec):
+    """A persistent write grant added by the host's ``runner.sandbox_grants``.
+
+    YAML cannot produce it: :attr:`OSEnvSandboxSpec.write_path_specs` tags the entries
+    listed in :attr:`OSEnvSandboxSpec.host_write_paths`.
+    """
+
+
 def parse_write_paths(raw: object) -> list[str | WritePathSpec] | None:
     """Validate write grants, preserving the existing string shorthand."""
     if raw is None:
@@ -911,6 +920,9 @@ class OSEnvSandboxSpec:
     # through a user-systemd slice rather than the sandbox backend.
     resources: SandboxResourcesSpec | None = None
     tcp_egress: list[TcpEgressRoute] | None = None
+    # ``write_paths`` strings the runner added from the host's ``runner.sandbox_grants``.
+    # A field rather than an entry type so the marker survives JSON transport to harnesses.
+    host_write_paths: list[str] | None = None
 
     @property
     def requires_network_enforcement(self) -> bool:
@@ -919,8 +931,11 @@ class OSEnvSandboxSpec:
     @property
     def write_path_specs(self) -> list[WritePathSpec]:
         """Normalize shorthand and structured grants at the policy boundary."""
+        host_paths = set(self.host_write_paths or ())
         return [
-            WritePathSpec(entry) if isinstance(entry, str) else entry
+            (HostWritePathSpec(entry) if entry in host_paths else WritePathSpec(entry))
+            if isinstance(entry, str)
+            else entry
             for entry in parse_write_paths(self.write_paths) or []
         ]
 

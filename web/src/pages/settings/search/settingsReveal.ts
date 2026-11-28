@@ -79,7 +79,7 @@ function ownedControls(row: HTMLElement): HTMLElement[] {
 
 /** The control a part (or `""`, the main control) names, as the row shows it. */
 function partControl(row: HTMLElement, entry: SettingsEntry, part: string): HTMLElement | null {
-  const id = part === "" ? entry.id : settingsControlId(entry, part);
+  const id = settingsControlId(entry, part);
   return (
     ownedControls(row).find(
       (control) =>
@@ -176,6 +176,38 @@ function selectedTab(list: HTMLElement): HTMLElement | null {
 }
 
 /**
+ * Keeps a revealed control in view while its row settles during the reveal window, as when
+ * content loading above it pushes it down. The user's own input, or focus leaving it, ends this.
+ */
+function keepFocusedControlInView(
+  row: HTMLElement,
+  control: HTMLElement,
+  signal: AbortSignal,
+  windowEndsAt: number,
+) {
+  // A navigation already left needs no tracking: its abort has fired.
+  if (typeof ResizeObserver === "undefined" || signal.aborted) return;
+  let stopped = false;
+  const observer = new ResizeObserver(() => {
+    if (stopped) return;
+    if (document.activeElement === control) control.scrollIntoView?.({ block: "nearest" });
+    else stop();
+  });
+  const timer = window.setTimeout(stop, Math.max(0, windowEndsAt - Date.now()));
+  const userEvents = ["keydown", "pointerdown", "wheel", "touchstart"] as const;
+  function stop() {
+    stopped = true;
+    observer.disconnect();
+    window.clearTimeout(timer);
+    signal.removeEventListener("abort", stop);
+    for (const type of userEvents) document.removeEventListener(type, stop, true);
+  }
+  signal.addEventListener("abort", stop);
+  for (const type of userEvents) document.addEventListener(type, stop, true);
+  observer.observe(row);
+}
+
+/**
  * Focuses the row's control now, or once it exists and is enabled, while the reveal window is
  * open. A part that isn't usable yet lands on a stand-in at once, then takes focus over from it
  * when it appears, as one shown once data loads does, unless the user has acted in the meantime.
@@ -203,8 +235,11 @@ function focusControlWhenReady(
     if (control === standIn && document.activeElement === standIn) return false;
     control.focus({ preventScroll: true });
     if (document.activeElement !== control) return false;
+    // A row taller than the window is centered on its middle; bring the control itself in too.
+    control.scrollIntoView?.({ block: "nearest" });
     const wanted = candidates[0] === control && isAskedFor(row, entry, part, control);
     standIn = wanted ? null : control;
+    if (wanted) keepFocusedControlInView(row, control, signal, windowEndsAt);
     return wanted;
   };
   if (focusIfReady()) return;
@@ -217,10 +252,8 @@ function focusControlWhenReady(
     if (movedAway || focusIfReady()) stop();
   });
   const timer = window.setTimeout(stop, Math.max(0, windowEndsAt - Date.now()));
-  // Pressing a key or the pointer once the reveal has landed makes the focus the user's own.
-  const userActed = () => {
-    if (standIn) stop();
-  };
+  // Pressing a key or the pointer while the reveal waits makes the focus the user's own.
+  const userActed = () => stop();
   function stop() {
     observer.disconnect();
     window.clearTimeout(timer);

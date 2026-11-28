@@ -126,6 +126,7 @@ from omnigent.host.frames import (
     HostPluginsResultFrame,
     HostProbeAccountsFrame,
     HostProbeAccountsResultFrame,
+    HostRecoverSessionsFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
@@ -1456,6 +1457,13 @@ class HostProcess:
         self._pending_replacements: dict[str, asyncio.Future[HostReplaceRunnerResultFrame]] = {}
         self._replacement_task: asyncio.Task[None] | None = None
         self._replacement_settings_error: str | None = None
+        from omnigent.onboarding.provider_config import load_config
+
+        host_config = load_config().get("host", {})
+        self._recover_interrupted_sessions = (
+            isinstance(host_config, dict)
+            and host_config.get("recover_interrupted_sessions") is True
+        )
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -2284,6 +2292,12 @@ class HostProcess:
 
         workspace = Path(frame.workspace).expanduser()
         workspace_recreated = False
+        if frame.recovery and not workspace.is_dir():
+            return self._launch_failed(
+                frame,
+                workspace_missing_message(workspace),
+                error_code=WORKSPACE_MISSING_ERROR_CODE,
+            )
         if not workspace.is_dir():
             # Recreate a vanished leaf (pruned worktree, an agent's rm -rf) so the
             # session keeps working; a missing *parent* signals a stale path or an
@@ -6231,6 +6245,7 @@ class HostProcess:
             stale_adopted_runners=self._stale_adopted_runner_count(),
             workspace_socket=str(listener.path) if (listener := self._workspace_socket) else None,
             workspace_token_key=listener.token_key if listener else None,
+            recover_interrupted_sessions=self._recover_interrupted_sessions,
         )
         try:
             encoded_hello = self._encode_frame(hello)
@@ -6245,6 +6260,7 @@ class HostProcess:
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
         resources_task = asyncio.create_task(self._resources_loop(ws))
+        recovery_task = asyncio.create_task(self._session_recovery_loop(ws))
         credential_probe_task = asyncio.create_task(self._credential_probe_loop())
         try:
             # Reports raised while disconnected must wait until registration;
@@ -6288,11 +6304,28 @@ class HostProcess:
         finally:
             if (diagnostics := self._diagnostics_for(ws)) is not None:
                 diagnostics.freeze()
-            for task in (readiness_task, resources_task, credential_probe_task):
+            for task in (readiness_task, resources_task, credential_probe_task, recovery_task):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
             await self._cancel_all_harness_logins()
+
+    async def _session_recovery_loop(self, ws: websockets.asyncio.client.ClientConnection) -> None:
+        """Only opted-in hosts request recovery after their local state is ready."""
+        from omnigent.session_recovery import RECOVERY_RETRY_S
+
+        if not self._recover_interrupted_sessions:
+            return
+        while True:
+            await self._send_text(
+                ws,
+                encode_host_frame(
+                    HostRecoverSessionsFrame(
+                        runners=self._alive_runner_ids(),
+                    )
+                ),
+            )
+            await asyncio.sleep(RECOVERY_RETRY_S)
 
     async def _harness_readiness_loop(
         self,

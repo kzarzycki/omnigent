@@ -221,7 +221,9 @@ describe("usePullRequestInfo turn-end invalidate", () => {
     );
     stubChatStore("conv_live", "idle");
     rerender(tree());
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1 + openCount));
+    // Per-PR reads run through a shared queue that allows 2 in flight at once; the rest wait.
+    const inFlightReads = 2;
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1 + inFlightReads));
 
     // A second turn end while those fetches are in flight joins them, not restarts them.
     stubChatStore("conv_live", "running");
@@ -229,12 +231,15 @@ describe("usePullRequestInfo turn-end invalidate", () => {
     stubChatStore("conv_live", "idle");
     rerender(tree());
     await waitFor(() => expect(qc.isFetching()).toBe(1 + openCount));
-    expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
+    expect(fetchMock).toHaveBeenCalledTimes(1 + inFlightReads);
 
-    act(() => {
-      release.forEach((resolveFetch) => resolveFetch());
+    // Releasing in-flight reads lets the queued ones start; each open PR is still fetched once.
+    await waitFor(() => {
+      act(() => {
+        release.splice(0).forEach((resolveFetch) => resolveFetch());
+      });
+      expect(qc.isFetching()).toBe(0);
     });
-    await waitFor(() => expect(qc.isFetching()).toBe(0));
     expect(fetchMock).toHaveBeenCalledTimes(1 + openCount);
   });
 });

@@ -980,6 +980,12 @@ class _Completed:
     [
         ("pi 0.79.10\n", "", (0, 79, 10)),
         ("", "@earendil-works/pi-coding-agent v1.2.3", (1, 2, 3)),
+        (
+            "",
+            "[omnigent-sandbox] activated; spawning target=/opt/pi/1.2.3/bin/pi\n0.68.0\n",
+            (0, 68, 0),
+        ),
+        ("", "[omnigent-sandbox] target=/opt/pi/1.2.3/bin/pi\n", None),
         ("no version here", "", None),
         # oh-my-pi's own version is not a Pi version; treating it as >= 0.79
         # would pass --approve, which omp rejects with exit 2.
@@ -996,7 +1002,7 @@ def test_pi_version_parses_cli_output(
         calls.append(argv)
         return _Completed(stdout, stderr)
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("omnigent.inner._proc.run_isolated", fake_run)
 
     assert pi.pi_version("/bin/pi") == expected
     assert calls == [["/bin/pi", "--version"]]
@@ -1008,7 +1014,7 @@ def test_pi_version_is_none_when_the_probe_fails(
     def failing(argv: list[str], **kwargs: object) -> None:
         raise OSError("not executable")
 
-    monkeypatch.setattr("subprocess.run", failing)
+    monkeypatch.setattr("omnigent.inner._proc.run_isolated", failing)
 
     assert pi.pi_version("/bin/pi") is None
 
