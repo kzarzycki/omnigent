@@ -14831,8 +14831,14 @@ async def _create_session_from_existing_agent(
         selected_harness == _CODEX_NATIVE_HARNESS
         and validated_launch_args is None
         and not launch_args_spec_consulted
-        # A spec that could not be read might set its own mode; never widen it to bypass.
-        and not (needs_launch_args_from_spec and own_spec is None and not body.sub_agent_name)
+        # A spec that could not be read might set its own mode; a worker another session
+        # created never widens to bypass on that. A session created directly keeps the default.
+        and not (
+            needs_launch_args_from_spec
+            and own_spec is None
+            and not body.sub_agent_name
+            and created_by is not None
+        )
         and body.permission_mode is None
         and not (selection_spec is not None and _spec_declares_stance(selection_spec))
         and (body.sub_agent_name or needs_launch_args_from_spec)
