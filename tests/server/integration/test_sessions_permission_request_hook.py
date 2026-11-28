@@ -43,13 +43,15 @@ from omnigent.native.elicitation_reattach import (
     HELD_POLL_READ_TIMEOUT_S,
     PRE_RESOLVED_ELICITATION_TTL_S,
 )
-from omnigent.runtime import session_stream
+from omnigent.runtime import pending_elicitations, session_stream
 from omnigent.server._elicitation_registry import (
     _harness_pre_resolved_elicitations,
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.routes import sessions as sessions_route
+from omnigent.server.routes.sessions import routes_hooks
+from omnigent.server.schemas import ElicitationResult
 from tests.server.helpers import create_session_for_agent as _create_session
 from tests.server.helpers import create_test_agent, start_session_stream_collector
 
@@ -841,7 +843,7 @@ async def test_permission_request_hook_auto_mode_round_trip(
         ("ExitPlanMode", "plan"),
         ("Bash", "plan"),
         ("Bash", "auto"),
-        ("Bash", "bypassPermissions"),
+        ("AskUserQuestion", "bypassPermissions"),
         ("Bash", "dontAsk"),
         ("Bash", "unknown"),
     ],
@@ -1393,6 +1395,142 @@ async def test_permission_request_hook_remember_webfetch_no_host_tool_wide(
             "destination": "session",
         }
     ]
+
+
+_STORED_CLAUDE_BYPASS = {"terminal_launch_args": ["--dangerously-skip-permissions"]}
+_STORED_CLAUDE_BYPASS_LABEL = {
+    "labels": {"omnigent.claude_native.permission_mode": "bypassPermissions"}
+}
+
+
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+@pytest.mark.parametrize("request_mode", ["bypassPermissions", "default", None])
+async def test_permission_request_hook_bypass_session_denies_without_card(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+    request_mode: str | None,
+) -> None:
+    """A session stored in bypass gets a readable deny and no card, whatever the request says."""
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+    agent = await create_test_agent(client, "test-permission-bypass-deny")
+    created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
+    assert created.status_code == 201, created.text
+    payload = await _claude_permission_payload()
+    payload.pop("permission_mode")
+    if request_mode is not None:
+        payload["permission_mode"] = request_mode
+    payload["decision_reason"] = "dangerousRemoval"
+
+    response = await client.post(
+        f"/v1/sessions/{created.json()['id']}/hooks/permission-request", json=payload
+    )
+
+    assert response.status_code == 200, response.text
+    output = response.json()["hookSpecificOutput"]
+    assert output["hookEventName"] == "PermissionRequest"
+    assert output["decision"]["behavior"] == "deny"
+    message = output["decision"]["message"]
+    assert "dangerousRemoval" in message
+    assert "Rewrite the command without the flagged part" in message
+    assert "split it into smaller steps" in message
+    publish.assert_not_awaited()
+
+
+_QUESTION_INPUT = {
+    "questions": [
+        {
+            "question": "Which database?",
+            "header": "DB",
+            "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+            "multiSelect": False,
+        }
+    ]
+}
+
+
+async def _post_bypass_question(
+    client: httpx.AsyncClient, session_fields: dict[str, Any], tool_input: dict[str, Any]
+) -> httpx.Response:
+    agent = await create_test_agent(client, "test-permission-bypass-question")
+    created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
+    assert created.status_code == 201, created.text
+    payload = await _claude_permission_payload(tool_name="AskUserQuestion")
+    payload["permission_mode"] = "bypassPermissions"
+    payload["tool_input"] = tool_input
+    return await client.post(
+        f"/v1/sessions/{created.json()['id']}/hooks/permission-request", json=payload
+    )
+
+
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+async def test_permission_request_hook_bypass_session_shows_question_with_options(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """A question in a bypass session reaches the owner as the question, with its options."""
+    publish = AsyncMock(
+        return_value=ElicitationResult(action="accept", content={"Which database?": "SQLite"})
+    )
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    response = await _post_bypass_question(client, session_fields, _QUESTION_INPUT)
+
+    assert response.status_code == 200, response.text
+    decision = response.json()["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "allow"
+    assert decision["updatedInput"]["answers"] == {"Which database?": "SQLite"}
+    publish.assert_awaited_once()
+    params = publish.await_args.kwargs["params"]
+    assert params.model_extra["ask_user_question"]["questions"][0]["options"][0] == {
+        "label": "Postgres"
+    }
+
+
+@pytest.mark.parametrize("session_fields", [_STORED_CLAUDE_BYPASS, _STORED_CLAUDE_BYPASS_LABEL])
+async def test_permission_request_hook_bypass_session_denies_unshowable_question(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """A question with no options to show raises no permission card; the agent asks in chat."""
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    response = await _post_bypass_question(client, session_fields, {"questions": []})
+
+    assert response.status_code == 200, response.text
+    decision = response.json()["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "deny"
+    assert "normal chat message" in decision["message"]
+    publish.assert_not_awaited()
+
+
+@pytest.mark.parametrize("request_mode", ["bypassPermissions", "default", None])
+async def test_permission_request_hook_request_cannot_claim_bypass(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    request_mode: str | None,
+) -> None:
+    """A session not stored in bypass keeps its card even when the request claims bypass."""
+    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+    agent = await create_test_agent(client, "test-permission-bypass-claim")
+    session_id = await _create_session(client, agent["id"])
+    payload = await _claude_permission_payload()
+    payload.pop("permission_mode")
+    if request_mode is not None:
+        payload["permission_mode"] = request_mode
+
+    response = await client.post(
+        f"/v1/sessions/{session_id}/hooks/permission-request", json=payload
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    publish.assert_awaited_once()
 
 
 async def test_permission_request_hook_forwards_cwd_and_permission_mode(
@@ -3143,6 +3281,280 @@ async def test_codex_command_approval_hook_accept_round_trip(
     resp = await hook_task
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"decision": "accept"}
+
+
+_CODEX_COMMAND_APPROVAL = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "execCommandApproval": {"decision": "denied"},
+}
+
+
+def _codex_command_payload(method: str) -> dict[str, Any]:
+    return {
+        "id": 14,
+        "method": method,
+        "params": {
+            "threadId": "thread_123",
+            "conversationId": "thread_123",
+            "callId": "call_1",
+            "command": "pytest",
+            "cwd": "/tmp/workspace",
+        },
+    }
+
+
+async def _post_codex_command_approval(
+    client: httpx.AsyncClient, session_fields: dict[str, Any], method: str
+) -> httpx.Response:
+    agent = await create_test_agent(
+        client,
+        "test-codex-command-bypass",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    created = await client.post("/v1/sessions", json={"agent_id": agent["id"], **session_fields})
+    assert created.status_code == 201, created.text
+    return await client.post(
+        f"/v1/sessions/{created.json()['id']}/hooks/codex-elicitation-request",
+        json=_codex_command_payload(method),
+    )
+
+
+@pytest.mark.parametrize("method", list(_CODEX_COMMAND_APPROVAL))
+@pytest.mark.parametrize(
+    "session_fields",
+    [
+        {"labels": {"omnigent.codex_native.bypass_sandbox": "1"}},
+        {"terminal_launch_args": ["--dangerously-bypass-approvals-and-sandbox"]},
+        {"terminal_launch_args": ["-a", "never"]},
+    ],
+)
+async def test_codex_command_approval_hook_never_ask_session_declines_without_card(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    session_fields: dict[str, Any],
+) -> None:
+    """A Codex session set to never ask answers a command approval with a decline, no card."""
+    publish = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    resp = await _post_codex_command_approval(client, session_fields, method)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == _CODEX_COMMAND_APPROVAL[method]
+    publish.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "session_fields",
+    [
+        {"terminal_launch_args": ["-s", "danger-full-access", "-a", "on-request"]},
+        {
+            "terminal_launch_args": [
+                "--sandbox=danger-full-access",
+                "--ask-for-approval=untrusted",
+            ]
+        },
+        {"terminal_launch_args": ["--", "--yolo"]},
+        {"labels": {"omnigent.codex_native.bypass_sandbox": "0"}},
+        {},
+    ],
+)
+async def test_codex_command_approval_hook_asking_session_keeps_card(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_fields: dict[str, Any],
+) -> None:
+    """Full access under on-request, a prompt after --, and a 0 label all keep the card."""
+    publish = AsyncMock(return_value=ElicitationResult(action="accept"))
+    monkeypatch.setattr(routes_hooks, "_publish_and_wait_for_harness_elicitation", publish)
+
+    resp = await _post_codex_command_approval(
+        client, session_fields, "item/commandExecution/requestApproval"
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"decision": "accept"}
+    publish.assert_awaited_once()
+
+
+_MIRROR_PAYLOAD = {
+    "id": 15,
+    "method": "item/commandExecution/requestApproval",
+    "params": {"threadId": "thread_1", "itemId": "item_1", "command": "pytest"},
+}
+
+
+async def _park_codex_approval(
+    client: httpx.AsyncClient, session_id: str
+) -> tuple[dict[str, Any], asyncio.Task[httpx.Response]]:
+    """Park a Codex command approval on ``session_id``; returns its event and the hook task."""
+    drain_task = asyncio.create_task(_drain_until_elicitation(session_id))
+    await asyncio.sleep(0.05)  # custom-lint: disable=sleep-then-assert -- subscribe first
+    hook_task = asyncio.create_task(
+        client.post(
+            f"/v1/sessions/{session_id}/hooks/codex-elicitation-request", json=_MIRROR_PAYLOAD
+        )
+    )
+    return await drain_task, hook_task
+
+
+def _mirror_into(ancestor_id: str, event: dict[str, Any], target_id: str) -> None:
+    """Copy a parked card into ``ancestor_id`` naming ``target_id`` as its owner."""
+    session_stream.publish(
+        ancestor_id, {**event, "params": {**event["params"], "target_session_id": target_id}}
+    )
+
+
+async def _create_child_session(client: httpx.AsyncClient, db_uri: str, parent_id: str) -> str:
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    agent = await create_test_agent(
+        client,
+        f"child-of-{parent_id}",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    return (
+        SqlAlchemyConversationStore(db_uri)
+        .create_conversation(
+            kind="sub_agent",
+            title="Codex:approval",
+            parent_conversation_id=parent_id,
+            agent_id=agent["id"],
+        )
+        .id
+    )
+
+
+async def test_codex_command_approval_resolved_through_parent_reaches_child_codex(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """A verdict sent to a parent holding the child's copy answers the child's waiting hook."""
+    agent = await create_test_agent(
+        client,
+        "test-codex-mirror-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    parent_id = await _create_session(client, agent["id"])
+    child_id = await _create_child_session(client, db_uri, parent_id)
+    event, hook_task = await _park_codex_approval(client, child_id)
+    elicitation_id = event["elicitation_id"]
+    _mirror_into(parent_id, event, child_id)
+
+    resolved = await client.post(
+        f"/v1/sessions/{parent_id}/elicitations/{elicitation_id}/resolve",
+        json={"action": "accept"},
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    assert (await hook_task).json() == {"decision": "accept"}
+    for session_id in (child_id, parent_id):
+        assert pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None
+
+
+async def test_mirrored_card_naming_an_unrelated_session_resolves_nothing_there(
+    client: httpx.AsyncClient,
+) -> None:
+    """A copy that names a same-user session that is not a descendant settles nothing there."""
+    agent = await create_test_agent(
+        client,
+        "test-codex-mirror-unrelated",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    unrelated_id = await _create_session(client, agent["id"])
+    own_id = await _create_session(client, agent["id"])
+    event, hook_task = await _park_codex_approval(client, unrelated_id)
+    elicitation_id = event["elicitation_id"]
+    _mirror_into(own_id, event, unrelated_id)
+
+    resolved = await client.post(
+        f"/v1/sessions/{own_id}/elicitations/{elicitation_id}/resolve",
+        json={"action": "accept"},
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    assert not sessions_route._harness_elicitation_registry[elicitation_id].done()
+    assert not hook_task.done()
+    # Clean up the parked waiter.
+    await _post_approval(client, unrelated_id, elicitation_id, "decline")
+    await hook_task
+
+
+async def test_hook_forged_mirror_target_cannot_resolve_another_session(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A card an antigravity hook writes with a foreign target forwards nothing to that session."""
+    from omnigent.server.routes._sessions import orchestration
+    from tests._helpers.polling import poll_until_async
+
+    agent = await create_test_agent(
+        client,
+        "test-codex-mirror-forged",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    foreign_id = await _create_session(client, agent["id"])
+    own_id = await _create_session(client, agent["id"])
+    forwarded: list[str] = []
+
+    async def record_forward(session_id: str, *args: Any, **kwargs: Any) -> None:
+        forwarded.append(session_id)
+
+    monkeypatch.setattr(orchestration, "_forward_approval_to_runner", record_forward)
+    forged_id = "elicit_forged_target"
+    forged_hook = asyncio.create_task(
+        client.post(
+            f"/v1/sessions/{own_id}/hooks/antigravity-elicitation-request",
+            json={
+                "elicitation_id": forged_id,
+                "params": {
+                    "mode": "form",
+                    "message": "forged",
+                    "requestedSchema": None,
+                    "target_session_id": foreign_id,
+                },
+            },
+        )
+    )
+    await poll_until_async(
+        lambda: pending_elicitations.lookup(forged_id, conversation_id=own_id) is not None
+    )
+
+    resolved = await client.post(
+        f"/v1/sessions/{own_id}/elicitations/{forged_id}/resolve", json={"action": "accept"}
+    )
+
+    assert resolved.status_code == 202, resolved.text
+    assert forwarded == [own_id]
+    forged_hook.cancel()
+
+
+async def test_mirrored_card_target_owned_by_another_user_resolves_nothing(
+    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A descendant the resolving user does not own is not forwarded to."""
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes._sessions import orchestration
+
+    agent = await create_test_agent(
+        client,
+        "test-codex-mirror-cross-user",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+    )
+    parent_id = await _create_session(client, agent["id"])
+    child_id = await _create_child_session(client, db_uri, parent_id)
+
+    def not_owner(*args: Any, **kwargs: Any) -> None:
+        raise OmnigentError("not owner", code=ErrorCode.FORBIDDEN)
+
+    monkeypatch.setattr("omnigent.server.session_orchestration.require_owned_session", not_owner)
+    assert not await orchestration._is_resolvable_descendant(
+        parent_id,
+        child_id,
+        get_conversation_store(),
+        "bob@example.com",
+        SimpleNamespace(),
+    )
 
 
 async def test_codex_command_approval_hook_remembers_offered_rule(

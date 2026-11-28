@@ -86,9 +86,12 @@ from omnigent.server.routes._sessions.helpers import (
     _allow_remember_eligible,
     _build_actor,
     _build_evaluation_context,
+    _claude_bypass_safety_denial,
     _claude_native_permission_directories,
     _claude_native_remember_host,
+    _claude_session_runs_in_bypass,
     _client_supplied_hook_elicitation_id,
+    _codex_session_never_asks,
     _emit_server_routing_decision,
     _forward_session_change_to_runner,
     _get_runner_client,
@@ -105,6 +108,7 @@ from omnigent.server.routes._sessions.orchestration import (
 )
 from omnigent.server.schemas import (
     ElicitationRequestParams,
+    ElicitationResult,
 )
 from omnigent.spec.types import (
     Phase,
@@ -389,6 +393,23 @@ def register_hooks_routes(
                 code=ErrorCode.CONFLICT,
             )
 
+        # Bypass mode asks nobody: answer Claude's own safety prompt with a deny it can read.
+        bypass_denial = (
+            _claude_bypass_safety_denial(payload, tool_name, conv) if is_claude else None
+        )
+        if bypass_denial is not None:
+            return Response(
+                content=json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": bypass_denial,
+                        }
+                    }
+                ),
+                media_type="application/json",
+            )
+
         try:
             preview_str = json.dumps(tool_input or {}, ensure_ascii=False)
         except (TypeError, ValueError):
@@ -462,6 +483,27 @@ def register_hooks_routes(
             ask_payload = _structured_ask_user_question(tool_input)
             if ask_payload is not None:
                 extras["ask_user_question"] = ask_payload
+            elif _claude_session_runs_in_bypass(conv):
+                # Nothing to render as a question, and a bypass session raises no
+                # permission card: have the agent ask in chat instead.
+                return Response(
+                    content=json.dumps(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PermissionRequest",
+                                "decision": {
+                                    "behavior": "deny",
+                                    "message": (
+                                        "This question has no options Omnigent can show. Ask "
+                                        "the same question in a normal chat message, then wait "
+                                        "for the user's reply."
+                                    ),
+                                },
+                            }
+                        }
+                    ),
+                    media_type="application/json",
+                )
         # When the gated tool is ExitPlanMode, ride the full
         # ``tool_input`` through verbatim so the UI can render a
         # dedicated plan-review card. ``content_preview`` is
@@ -1320,6 +1362,17 @@ def register_hooks_routes(
             )
         codex_request = parse_codex_elicitation_request(payload)
         from omnigent.server.routes import sessions as _sf
+
+        if codex_request.is_command_approval:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            # A bypass session asked nobody: decline instead of raising a card.
+            if conv is not None and _codex_session_never_asks(conv):
+                return Response(
+                    content=json.dumps(
+                        codex_request.build_response(ElicitationResult(action="decline"))
+                    ),
+                    media_type="application/json",
+                )
 
         result = await _publish_and_wait_for_harness_elicitation(
             request,

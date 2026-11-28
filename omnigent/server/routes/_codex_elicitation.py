@@ -69,6 +69,19 @@ class CodexElicitationRequest:
         return self.response_builder(result, self.method, self.codex_params)
 
     @property
+    def is_command_approval(self) -> bool:
+        """
+        Return whether this asks to run a command, in either protocol version.
+
+        :returns: ``True`` for ``item/commandExecution/requestApproval`` and
+            ``execCommandApproval``.
+        """
+        return self.method in (
+            _CODEX_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
+            _CODEX_EXEC_COMMAND_APPROVAL_METHOD,
+        )
+
+    @property
     def interrupts_on_decline(self) -> bool:
         """
         Return whether declining this request should interrupt Codex.
