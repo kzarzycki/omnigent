@@ -122,14 +122,15 @@ class ScriptedHostPolicy:
 
 
 def placement_check_applies(
-    flag_on: bool, source_host_id: str | None, dest_host_id: str | None
+    flag_on: bool, has_source: bool, source_host_id: str | None, dest_host_id: str | None
 ) -> bool:
-    """Whether the policy governs a create: the flag is on and it leaves the sender's host.
+    """Whether the policy governs a create: the route's own applicability condition.
 
-    With ``scripted_sessions`` off nothing is checked, so the create path behaves as
-    it did before the policy existed.
+    It governs only an orchestrated create (an orchestration source is present) with
+    the flag on that leaves the sender's host. With ``scripted_sessions`` off, or for a
+    top-level start, nothing is checked, so the create path behaves as it did before.
     """
-    return flag_on and dest_host_id is not None and dest_host_id != source_host_id
+    return flag_on and has_source and dest_host_id is not None and dest_host_id != source_host_id
 
 
 def decide_request(
@@ -138,12 +139,20 @@ def decide_request(
     """Allow or refuse one dry-run request with the server's own functions.
 
     :param request: ``{"source_host_id", "dest_host_id", "agent", "harness",
-        "operator_registered"}``; an optional ``"embedded_command"`` marks a bundle
-        that brings its own ACP command.
+        "operator_registered"}``; an optional ``"orchestrated"`` says whether an
+        orchestration source is present (default: ``source_host_id`` is not null; set true
+        for a hostless orchestrating sender), and an optional
+        ``"embedded_command"`` marks a bundle that brings its own ACP command.
     :returns: ``(allowed, reason)``.
     """
     dest = request.get("dest_host_id")
-    if not placement_check_applies(flag_on, request.get("source_host_id"), dest):
+    source_host_id = request.get("source_host_id")
+    # A null source host means a top-level start with no orchestration source; a hostless
+    # orchestrating sender sets "orchestrated": true.
+    has_source = bool(request.get("orchestrated", source_host_id is not None))
+    if not placement_check_applies(flag_on, has_source, source_host_id, dest):
+        if flag_on and not has_source:
+            return True, "not checked: no orchestration source"
         return True, "not checked: flag off or the create stays on the sender's host"
     if policy is None:
         return False, "no scripted host placement policy is configured"

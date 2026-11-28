@@ -230,7 +230,7 @@ worktree or runner exists, so every caller route shares it.
 ```yaml
 scripted_host_policy:
   rules:
-    - host_id: host_a1b2c3        # a host's stable id; names are never matched
+    - host_id: host_a1b2c3        # a host's stable id
       agents: ["*"]               # any agent
     - host_id: host_d4e5f6
       agents: ["@cloud-bridge"]   # only operator agents on the configured cloud bridge
@@ -238,7 +238,9 @@ scripted_host_policy:
       agents: [reviewer]          # operator-registered agents, by name
 ```
 
-A request is allowed when some rule names the host id and lists the agent: `"*"`,
+Rules name a host by `host_id` only, because a host name is self-advertised and its
+owner can change it. A request is allowed when some rule names the host id and lists
+the agent: `"*"`,
 `"@cloud-bridge"`, or the name of an operator-registered agent. A user-uploaded agent
 never matches by name or as a cloud bridge, and a bundle that embeds its own
 `acp_agent` command is not the configured bridge. A rule with any key besides
@@ -261,8 +263,10 @@ python -m omnigent.server.scripted_host_policy --dry-run requests.jsonl [--flag 
 ```
 
 Each line of `requests.jsonl` is `{"source_host_id", "dest_host_id", "agent", "harness",
-"operator_registered"}` (add `"embedded_command": true` for a bundle that brings its own
-ACP command). It prints `allow` or `refuse` with the reason per line. `--flag` defaults to
+"operator_registered"}` (a null `source_host_id` means a top-level start with no orchestration source, which
+the route never checks and prints `allow (not checked: no orchestration source)`; set
+`"orchestrated": true` for a hostless orchestrating sender, and `"embedded_command":
+true` for a bundle that brings its own ACP command). It prints `allow` or `refuse` with the reason per line. `--flag` defaults to
 `on`; with no `--policy` the policy is absent, so a create that leaves the sender's host
 is refused.
 

@@ -3447,6 +3447,51 @@ def test_dry_run_uses_the_servers_decision_functions(tmp_path):
         ).stdout.splitlines()
         return [line.split(":")[1].split()[0] for line in out]
 
+    top_level = tmp_path / "top_level.jsonl"
+    top_level.write_text(
+        json.dumps(
+            {
+                "source_host_id": None,
+                "dest_host_id": "b",
+                "agent": "w",
+                "harness": "claude-native",
+                "operator_registered": False,
+            }
+        )
+    )
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "omnigent.server.scripted_host_policy",
+            "--dry-run",
+            str(top_level),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "allow (not checked: no orchestration source)" in out
+    hostless = tmp_path / "hostless.jsonl"
+    hostless.write_text(
+        json.dumps(
+            {
+                "source_host_id": None,
+                "dest_host_id": "b",
+                "agent": "w",
+                "harness": "claude-native",
+                "operator_registered": False,
+                "orchestrated": True,
+            }
+        )
+    )
+    out = subprocess.run(
+        [sys.executable, "-m", "omnigent.server.scripted_host_policy", "--dry-run", str(hostless)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert out.startswith("1: refuse")
     assert run("--flag", "off") == ["allow", "allow", "allow"]
     assert run("--flag", "on") == ["refuse", "allow", "refuse"]
     assert run("--flag", "on", "--policy", str(policy)) == ["refuse", "allow", "allow"]

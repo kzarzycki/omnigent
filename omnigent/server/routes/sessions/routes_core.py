@@ -1772,6 +1772,7 @@ def register_core_routes(
             )
             leaves_sender_host = placement_check_applies(
                 True,
+                True,
                 sender_placement.host_id if sender_placement is not None else None,
                 body.host_id,
             )
