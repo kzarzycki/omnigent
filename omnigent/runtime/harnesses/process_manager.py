@@ -30,7 +30,7 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -179,6 +179,13 @@ def _resolve_harness_idle_timeout_s() -> float:
 # in-flight responses + close the FastAPI app cleanly; short
 # enough that a wedged subprocess doesn't block Omnigent shutdown.
 _RELEASE_GRACE_S = 5.0
+
+# A worker that decided to end itself (an idle exit) leaves a marker file named by this env var
+# before it signals itself. Until it is gone its socket is still open but it refuses new work, so
+# `get_client` waits for its exit and treats it as gone: one path for a message (the next worker
+# resumes) and for an archive (the idle-worker fallback).
+_HARNESS_ENDING_FILE_ENV = "OMNIGENT_HARNESS_ENDING_FILE"
+_ENDING_EXIT_WAIT_S = 15.0
 
 # Timeout for the per-conversation socket file to appear after
 # uvicorn boots inside the runner. Cold-start of an external SDK
@@ -511,6 +518,11 @@ class _SubprocessEntry:
         self.model = model
         self.acp_config = acp_config or {}
         self.last_used_at: float = 0.0
+        self.ending_file: Path | None = None
+
+    def ending_file_exists(self) -> bool:
+        """Whether the worker has left its marker that it is ending itself."""
+        return self.ending_file is not None and self.ending_file.exists()
 
 
 def _model_env_key(harness: str) -> str:
@@ -812,6 +824,19 @@ class HarnessProcessManager:
                     "while get_client waited"
                 )
             entry = self._entries.get(conversation_id)
+            if (
+                entry is not None
+                and entry.process.returncode is None
+                and entry.ending_file_exists()
+            ):
+                # The worker is in its shutdown window: still connected, but it will refuse
+                # what we send. Wait for it to go and respawn like for any exited worker.
+                _logger.info(
+                    "harness for conversation %s is ending; waiting for its exit",
+                    conversation_id,
+                )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(entry.process.wait(), timeout=_ENDING_EXIT_WAIT_S)
             # "any" control callers may hold an established connection past the
             # unlink; don't kill the turn they're interrupting. Concrete-harness
             # (new-turn) callers reconnect via the pathname and own recovery.
@@ -1078,6 +1103,16 @@ class HarnessProcessManager:
             )
             return False
         return True
+
+    def worker_left(self, conversation_id: str, client: httpx.AsyncClient) -> bool:
+        """Whether the worker behind ``client`` is gone, replaced, or in its shutdown window."""
+        entry = self._entries.get(conversation_id)
+        return (
+            entry is None
+            or entry.client is not client
+            or entry.process.returncode is not None
+            or entry.ending_file_exists()
+        )
 
     def has_session(self, conversation_id: str) -> bool:
         """
@@ -1367,6 +1402,11 @@ class HarnessProcessManager:
             auth_token = secrets.token_urlsafe(32)
             effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
 
+        ending_file = self._instance_dir / f"conv-{conversation_id}.ending"
+        with contextlib.suppress(OSError):
+            ending_file.unlink()
+        effective_env[_HARNESS_ENDING_FILE_ENV] = str(ending_file)
+
         parent_pid = os.getpid()
 
         # Subprocess inherits AP's stdout/stderr per §Process
@@ -1439,7 +1479,7 @@ class HarnessProcessManager:
                 # liveness to the heartbeat path.
                 timeout=httpx.Timeout(5.0, read=None),
             )
-            return _SubprocessEntry(
+            spawned = _SubprocessEntry(
                 process=process,
                 client=client,
                 endpoint=endpoint,
@@ -1451,6 +1491,8 @@ class HarnessProcessManager:
                 model=(env or {}).get(_model_env_key(harness)),
                 acp_config=_acp_startup_config(env) if harness == "acp" else None,
             )
+            spawned.ending_file = ending_file
+            return spawned
         except BaseException:
             # From spawn onward the process must have exactly one owner:
             # either it reaches the caller (who registers it in ``_entries``)
@@ -1677,6 +1719,92 @@ class HarnessProcessManager:
                         "conversation %s; will retry on a later pass",
                         conv_id,
                     )
+
+
+def _worker_left(manager: Any, conversation_id: str, client: Any) -> bool:
+    """Whether ``client``'s worker left; a manager without ``worker_left`` never says so."""
+    check = getattr(manager, "worker_left", None)
+    return bool(check(conversation_id, client)) if check is not None else False
+
+
+async def post_event(
+    manager: HarnessProcessManager,
+    conversation_id: str,
+    harness: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    timeout: float | None,
+    env: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST an event with a client got earlier, once more to a fresh worker if it left.
+
+    A worker can mark itself as ending (and exit) between the caller's ``get_client``
+    and this POST. The send is resent through ``get_client`` (which waits for the marked
+    worker to exit, then respawns or raises :class:`NoLiveHarnessError`) only when it was
+    demonstrably not delivered: the connection was never made (``httpx.ConnectError``),
+    or the worker answered an error while marked ending, gone or replaced (it refuses all
+    it is sent then). Any other failure, and any error from a worker still serving, may
+    follow a request the worker took, and is never resent.
+
+    :returns: The response of the first POST, or of the resend.
+    """
+    try:
+        resp = await client.post(url, json=json, timeout=timeout)
+    except httpx.ConnectError:
+        if not _worker_left(manager, conversation_id, client):
+            raise
+    except RuntimeError:
+        # A cleanup or reap closed the held client before the request was sent: httpx
+        # refuses a send on a closed client, so nothing was delivered.
+        if not client.is_closed:
+            raise
+    else:
+        if resp.status_code < 400 or not _worker_left(manager, conversation_id, client):
+            return resp
+    fresh = await manager.get_client(conversation_id, harness, env=env)
+    return await fresh.post(url, json=json, timeout=timeout)
+
+
+@contextlib.asynccontextmanager
+async def stream_event(
+    manager: HarnessProcessManager,
+    conversation_id: str,
+    harness: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    env: dict[str, str] | None = None,
+) -> AsyncIterator[httpx.Response]:
+    """Open a streaming POST like :func:`post_event`, resending once if undelivered.
+
+    Resends only before the stream is accepted (a ``ConnectError``, or a non-200 status
+    from a worker that left); once a 200 is yielded nothing is resent.
+    """
+    for attempt in range(2):
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                resp = await stack.enter_async_context(
+                    client.stream("POST", url, json=json, timeout=None)
+                )
+            except httpx.ConnectError:
+                if attempt or not _worker_left(manager, conversation_id, client):
+                    raise
+            except RuntimeError:
+                # The held client was closed by a cleanup or reap before the send.
+                if attempt or not client.is_closed:
+                    raise
+            else:
+                if (
+                    resp.status_code == 200
+                    or attempt
+                    or not _worker_left(manager, conversation_id, client)
+                ):
+                    yield resp
+                    return
+        client = await manager.get_client(conversation_id, harness, env=env)
 
 
 async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) -> None:

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -61,7 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
-from omnigent.debug_logging import debug_event
+from omnigent.debug_logging import current_session_id, debug_event
 from omnigent.inner import _proc
 from omnigent.inner._acp_metadata import _META_INPUT_ITEM_ID
 from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
@@ -417,6 +418,41 @@ def _unattended_auth_method_id(initialize_result: _AcpJsonObject) -> str | None:
     return None
 
 
+def _idle_handoff_path(session_key: str) -> Path:
+    """Where a worker that left idle notes its ACP session for the worker that is told the end."""
+    digest = hashlib.sha256(session_key.encode()).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / f"omnigent-acp-idle-{os.getuid()}" / f"{digest}.json"
+
+
+def _write_idle_handoff(session_key: str, method: str, acp_session_id: str | None) -> None:
+    """Note the ACP session an idle-exiting worker held; best effort."""
+    if acp_session_id is None:
+        return
+    path = _idle_handoff_path(session_key)
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text(json.dumps({"method": method, "sessionId": acp_session_id}))
+        path.chmod(0o600)
+
+
+def _read_idle_handoff(session_key: str) -> tuple[str, str] | None:
+    """The ``(method, ACP session id)`` an idle-exited worker noted, or ``None``."""
+    try:
+        data = json.loads(_idle_handoff_path(session_key).read_text())
+    except (OSError, ValueError):
+        return None
+    method, sid = (
+        (data.get("method"), data.get("sessionId")) if isinstance(data, dict) else (None, None)
+    )
+    return (method, sid) if isinstance(method, str) and isinstance(sid, str) else None
+
+
+def _clear_idle_handoff(session_key: str) -> None:
+    """Drop a handoff once it is used or the session has ended."""
+    with contextlib.suppress(OSError):
+        _idle_handoff_path(session_key).unlink()
+
+
 def _resolve_cwd(cwd: str | None, *, session_id: str | None = None) -> str:
     """Resolve and validate the working directory for the ACP agent subprocess.
 
@@ -482,6 +518,7 @@ class AcpExecutor(Executor):
         os_env: OSEnvSpec | None = None,
         *,
         extension: AcpExtension = NO_ACP_EXTENSION,
+        on_idle_exit: Callable[[], None] | None = None,
     ) -> None:
         """Initialize the generic ACP executor.
 
@@ -495,8 +532,18 @@ class AcpExecutor(Executor):
             that vendor's harness wrap (e.g.
             a vendor wrap). The default is protocol-only,
             so the generic ``acp`` harness reads no vendor field.
+        :param on_idle_exit: Called, on the event loop, once an agent that declared an idle
+            exit has left with that status between turns. The harness process passes the call
+            that ends itself, so the runner holds no worker for a session whose agent is gone;
+            the next message starts a worker, which starts the agent again.
         """
         self._config = config
+        self._on_idle_exit = on_idle_exit
+        self._idle_watch_task: asyncio.Task[None] | None = None
+        self._handoff_key: str | None = None
+        self._turns_active = 0
+        self._between_turns = asyncio.Event()
+        self._between_turns.set()
         self._extension = extension
         self._cwd = _resolve_cwd(cwd)
         self._os_env = os_env
@@ -928,6 +975,7 @@ class AcpExecutor(Executor):
         )
         status = idle_exit.get("status") if isinstance(idle_exit, dict) else None
         self._idle_exit_status = status if isinstance(status, int) else None
+        self._watch_idle_exit()
         ended = (
             result.get("agentCapabilities", {}).get(_SESSION_ENDED_CAPABILITY)
             if isinstance(result, dict)
@@ -1611,6 +1659,36 @@ class AcpExecutor(Executor):
         candidates = {c for c in (name, raw_tool, meta_tool) if c}
         return not self._bridge_tool_aliases.isdisjoint(candidates)
 
+    def note_conversation(self, conversation_id: str) -> None:
+        """Keep the conversation id, the key an idle-exited worker's note is left under."""
+        self._handoff_key = conversation_id
+
+    def _watch_idle_exit(self) -> None:
+        """Report the agent's idle exit to ``on_idle_exit``, once it happens between turns."""
+        proc, status = self._proc, self._idle_exit_status
+        if self._on_idle_exit is None or proc is None or status is None:
+            return
+        if self._idle_watch_task is not None:
+            self._idle_watch_task.cancel()
+
+        async def watch() -> None:
+            await proc.wait()
+            # An agent leaves right after answering, before its turn has returned, so wait the
+            # turn out. One that left as a prompt arrived is replaced by that turn (it resends the
+            # prompt), and a stopped agent is not an idle one.
+            await self._between_turns.wait()
+            if proc.returncode != status or proc is not self._proc:
+                return
+            logger.info("acp[%s] agent left idle; ending this worker", self._config.name)
+            if self._handoff_key is not None and self._session_ended_method is not None:
+                _write_idle_handoff(
+                    self._handoff_key, self._session_ended_method, self._session_id
+                )
+            if self._on_idle_exit is not None:
+                self._on_idle_exit()
+
+        self._idle_watch_task = asyncio.create_task(watch())
+
     async def _exited_idle(self) -> bool:
         """Whether the agent declared an idle exit and ended with its status."""
         if self._proc is None or self._idle_exit_status is None:
@@ -1961,6 +2039,24 @@ class AcpExecutor(Executor):
         system_prompt: str,
         config: ExecutorConfig | None = None,
     ) -> AsyncIterator[ExecutorEvent]:
+        """Run one turn of the agent loop via ACP, counted so an idle exit never ends it."""
+        self._turns_active += 1
+        self._between_turns.clear()
+        try:
+            async for event in self._run_turn(messages, tools, system_prompt, config):
+                yield event
+        finally:
+            self._turns_active -= 1
+            if not self._turns_active:
+                self._between_turns.set()
+
+    async def _run_turn(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        system_prompt: str,
+        config: ExecutorConfig | None = None,
+    ) -> AsyncIterator[ExecutorEvent]:
         """Run one turn of the agent loop via ACP.
 
         Sends ``session/prompt`` and yields streaming events (text, reasoning,
@@ -2235,6 +2331,15 @@ class AcpExecutor(Executor):
         otherwise is not. A failure is logged, never raised.
         """
         method, acp_session_id = self._session_ended_method, self._session_id
+        handed_off = False
+        if (method is None or acp_session_id is None) and self._proc is None:
+            # A fresh worker, started only to be told: the one that left idle noted the ACP
+            # session it held, which is how the agent finds what it must end.
+            handoff = _read_idle_handoff(current_session_id() or session_key)
+            if handoff is not None:
+                method, acp_session_id = handoff
+                self._session_id = acp_session_id
+                handed_off = True
         if method is None or acp_session_id is None:
             if self._advertised_session_ended:
                 logger.warning(
@@ -2245,14 +2350,23 @@ class AcpExecutor(Executor):
             return
         restarted = False
         try:
-            if self._proc is None:
+            if self._proc is None and handed_off:
+                restarted = True
+                await self._start_process(
+                    cwd=self._cwd if os.path.isdir(self._cwd) else tempfile.gettempdir()
+                )
+                await self._ensure_initialized()
+                method = self._session_ended_method
+                if method is None:
+                    return
+            elif self._proc is None:
                 logger.warning(
                     "acp[%s] session %s ended with no live agent to tell",
                     self._config.name,
                     session_key,
                 )
                 return
-            if self._proc.returncode is not None:
+            if self._proc is not None and self._proc.returncode is not None:
                 if self._proc.returncode != self._idle_exit_status:
                     logger.warning(
                         "acp[%s] session %s ended after the agent exited (status %s)",
@@ -2282,6 +2396,7 @@ class AcpExecutor(Executor):
                 exc_info=True,
             )
         finally:
+            _clear_idle_handoff(current_session_id() or session_key)
             if restarted:
                 await self._stop_notice_process()
 
@@ -2318,6 +2433,9 @@ class AcpExecutor(Executor):
         self._cancel_grace_deadline = None
         self._active_prompt_request_id = None
         self._reset_session_state()
+        if self._idle_watch_task is not None:
+            self._idle_watch_task.cancel()
+            self._idle_watch_task = None
         # Tear down the Omnigent MCP relay HTTP server + its bridge dir first.
         with contextlib.suppress(Exception):
             self._mcp.close()

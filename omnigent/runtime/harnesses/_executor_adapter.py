@@ -352,6 +352,8 @@ class ExecutorAdapter(HarnessApp):
         )
 
         turn_session_id = ctx.session_id or current_session_id() or self._session_key
+        if ctx.session_id:
+            self._ensure_executor().note_conversation(ctx.session_id)
         if tracing and self._tracing_ctx is None:
             self._tracing_ctx = TracingContext(session_id=turn_session_id)
         tctx = self._tracing_ctx if tracing else None
@@ -1497,12 +1499,9 @@ class ExecutorAdapter(HarnessApp):
 
     async def on_session_ended(self) -> None:
         """Let the executor end state it holds outside the runner."""
-        executor = self._executor
-        if executor is None:
-            _logger.warning(
-                "session %s ended with no executor in this harness to tell", self._session_key
-            )
-            return
+        # A worker started only to hear this has built no executor yet; one that left idle
+        # noted what it held, which a new executor reads.
+        executor = self._ensure_executor()
         await executor.end_session(self._session_key)
 
     async def on_shutdown(self) -> None:
