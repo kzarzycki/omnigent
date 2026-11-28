@@ -20,6 +20,7 @@ const navigate = vi.fn();
 vi.mock("@/lib/routing", () => ({
   useNavigate: () => navigate,
   useLocation: () => ({ pathname: "/", search: "", hash: "", state: null, key: "default" }),
+  useParams: () => ({}),
 }));
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({ session_search_scope: true }),
@@ -30,6 +31,7 @@ vi.mock("@/hooks/useConversations", () => ({
   useConversations: (...args: unknown[]) => useConversations(...args),
   useSessionSearch: (...args: unknown[]) => useSessionSearch(...args),
   useProjects: () => ({ data: [] }),
+  isSearchTimeout: () => false,
 }));
 
 beforeEach(() => {

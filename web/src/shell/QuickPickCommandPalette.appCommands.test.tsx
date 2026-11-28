@@ -17,6 +17,7 @@ import { QuickPickCommandPalette } from "./QuickPickCommandPalette";
 vi.mock("@/lib/routing", () => ({
   useNavigate: () => vi.fn(),
   useLocation: () => ({ pathname: "/", search: "", hash: "", state: null, key: "default" }),
+  useParams: () => ({}),
 }));
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({ session_search_scope: true }),
