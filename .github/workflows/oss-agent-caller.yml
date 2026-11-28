@@ -24,13 +24,16 @@ jobs:
       ref: mine
       # The repo's own check, as gate.yml's lint job runs it: the pre-commit hooks, on the files
       # the agent's commit(s) change against mine. A bare `ruff check .` also lints the
-      # pre-commit-excluded vendored trees. The checkout is one commit deep, so fetch mine's tip.
+      # pre-commit-excluded vendored trees. The base is the commit the checkout started from, the
+      # oldest entry in the reflog of origin/mine (the checkout writes it, and a later fetch only
+      # adds newer ones). No fetch, so a PR landing on mine meanwhile cannot move it.
       test_command: |
         set -e
-        git fetch --quiet --depth=1 origin mine
+        BASE="$(git reflog show --format=%H refs/remotes/origin/mine | tail -n 1)"
+        BASE="${BASE:-$(git rev-parse origin/mine)}"
         OMNIGENT_SKIP_WEB_UI=true uv sync --locked --extra all --group test --group lint
         corepack enable
         pnpm install --frozen-lockfile --filter web --filter omnigent-vscode
-        uv run --no-sync pre-commit run --from-ref FETCH_HEAD --to-ref HEAD
+        uv run --no-sync pre-commit run --from-ref "$BASE" --to-ref HEAD
     secrets:
       NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
