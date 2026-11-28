@@ -224,7 +224,7 @@ Session policies evaluate before agent spec and admin policies, so they can enfo
 
 ### When the server can't be reached
 
-Native Claude and Codex sessions check every tool call with the Omnigent server before it runs. A connection reset, a connect failure, a 429 or a 5xx is retried for up to 30 seconds, which covers a server restart. If no verdict arrives by then, nothing runs without one, and `policy_unavailable_fallback` in `~/.omnigent/config.yaml` picks what happens instead:
+Native Claude and Codex sessions check every tool call with the Omnigent server before it runs. A connection reset, a connection failure, a 429 or a 5xx is retried for up to 30 seconds, which covers a server restart. If no verdict arrives by then, nothing runs without one, and `policy_unavailable_fallback` in `~/.omnigent/config.yaml` picks what happens instead:
 
 ```yaml
 # ~/.omnigent/config.yaml
