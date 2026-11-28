@@ -7,8 +7,8 @@ import base64
 import json
 import threading
 import time
+from collections import Counter
 from pathlib import Path
-from threading import Barrier
 from types import SimpleNamespace
 
 import httpx
@@ -23,7 +23,7 @@ from omnigent.runner.slow_io import run_slow_io
 from omnigent.workspace_fs import WorkspaceReader
 from tests._helpers.polling import poll_until_async
 from tests.budgets import budget
-from tests.runner.helpers import NullServerClient
+from tests.runner.helpers import NullServerClient, title_query_answer, title_query_prs
 
 A = "https://github.com/example/one/pull/42"
 B = "https://github.com/example/two/pull/42"
@@ -86,16 +86,8 @@ def test_explicit_repo_is_used_for_all_pr_reads(
         == "second-repo-patch"
     )
     assert calls[0][calls[0].index("-R") + 1] == "github.com/example/two"
-    # The title refresh reads the state in the same call.
-    assert calls[1] == [
-        "pr",
-        "view",
-        "42",
-        "-R",
-        "github.com/example/one",
-        "--json",
-        github._PR_STATUS_FIELDS,
-    ]
+    assert title_query_prs(calls[1]) == {"p0": ("example/one", 42)}
+    assert calls[1][2:4] == ["--hostname", "github.com"]
     assert calls[2][-1] == "repos/example/two/pulls/42/files?per_page=100"
     assert calls[3][-2:] == ["-R", "github.com/example/two"]
 
@@ -108,6 +100,12 @@ def test_titles_include_unselected_prs_and_are_cached_between_polls(
 
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         calls.append(args)
+        if (asked := title_query_prs(args)) is not None:
+            pulls = {
+                alias: {"title": titles[f"github.com/{repository}"], "state": "OPEN"}
+                for alias, (repository, _) in asked.items()
+            }
+            return 0, title_query_answer(pulls), ""
         return 0, json.dumps({"title": titles[args[args.index("-R") + 1]]}), ""
 
     monkeypatch.setattr(github, "_gh", gh)
@@ -116,10 +114,11 @@ def test_titles_include_unselected_prs_and_are_cached_between_polls(
         A: "First repository",
         B: "Second",
     }
-    assert [call[-1] for call in calls] == [
-        github._PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository,headRepositoryOwner",
-        github._PR_STATUS_FIELDS,
-    ]
+    assert calls[0][-1] == (
+        github._PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository,headRepositoryOwner"
+    )
+    assert title_query_prs(calls[1]) == {"p0": ("example/one", 42)}
+    assert len(calls) == 2
     registry = SessionPrRegistry("session")
     assert {pr.url: pr.title for pr in registry.list()} == {A: "First repository", B: "Second"}
     before = registry.path.read_bytes()
@@ -140,8 +139,11 @@ def test_a_title_refresh_reports_each_unselected_prs_state(
     """The server stores every listed PR's state; only PRs looked up now carry one."""
 
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
-        if args[-1] == github._PR_STATUS_FIELDS:
-            return 0, json.dumps({"title": "First", "state": "MERGED", "isDraft": False}), ""
+        if (asked := title_query_prs(args)) is not None:
+            pulls = {
+                alias: {"title": "First", "state": "MERGED", "isDraft": False} for alias in asked
+            }
+            return 0, title_query_answer(pulls), ""
         return 0, json.dumps({"number": 42, "title": "Second", "state": "OPEN"}), ""
 
     monkeypatch.setattr(github, "_gh", gh)
@@ -209,12 +211,15 @@ def test_invalid_titles_fall_back_and_failed_lookups_are_cached(
 
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         calls.append(args)
+        if (asked := title_query_prs(args)) is not None:
+            pulls = {alias: {"title": title, "state": "OPEN"} for alias in asked}
+            return 0, title_query_answer(pulls), ""
         return 0, json.dumps({"title": title}), ""
 
     monkeypatch.setattr(github, "_gh", gh)
     info = github.github_info(tracked, session_id="session", pr_url=B)
     assert all(pr["title"] is None for pr in info["prs"])
-    assert calls[1][-1] == github._PR_STATUS_FIELDS
+    assert title_query_prs(calls[1]) is not None
     assert len(calls) == 2
     github.github_info(tracked, session_id="session", pr_url=B)
     assert len(calls) == 3
@@ -241,6 +246,9 @@ def test_title_cache_failure_does_not_break_metadata(
     tracked: str, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
+        if (asked := title_query_prs(args)) is not None:
+            pulls = {alias: {"title": "PR title", "state": "OPEN"} for alias in asked}
+            return 0, title_query_answer(pulls), ""
         return 0, '{"title": "PR title"}', ""
 
     monkeypatch.setattr(github, "_gh", gh)
@@ -269,7 +277,29 @@ def test_branch_inference_reuses_selected_title(
     assert SessionPrRegistry("untracked").list()[0].title == "Inferred"
 
 
-def test_slow_title_lookups_preserve_metadata_and_leave_queued_prs_for_next_poll(
+def _link_more_prs(registry: SessionPrRegistry, count: int) -> None:
+    """Link ``count`` more PRs of the first repository, numbered from 43."""
+    registry.record(
+        [PullRequestRef.from_url(A.replace("42", str(n))) for n in range(43, 43 + count)],
+        relationship="created",
+        source="test",
+    )
+
+
+def _answer_titles(title: str) -> object:
+    """A ``_run`` answering every title query with ``title`` and other reads as the selected PR."""
+
+    def run(argv: list[str], **_kwargs: object) -> tuple[int | None, str, str]:
+        asked = title_query_prs(argv[1:])
+        if asked is None:
+            return 0, '{"title": "Selected PR"}', ""
+        pulls = {alias: {"title": title, "state": "OPEN"} for alias in asked}
+        return 0, title_query_answer(pulls), ""
+
+    return run
+
+
+def test_slow_title_lookups_preserve_metadata_and_leave_later_chunks_for_next_poll(
     tracked: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = 10.0
@@ -277,28 +307,22 @@ def test_slow_title_lookups_preserve_metadata_and_leave_queued_prs_for_next_poll
     monkeypatch.setattr(github, "time", fake_time)
     monkeypatch.setattr(pr_resource, "time", fake_time)
     registry = SessionPrRegistry("session")
-    registry.record(
-        [PullRequestRef.from_url(A.replace("42", str(number))) for number in range(43, 49)],
-        relationship="created",
-        source="test",
-    )
+    _link_more_prs(registry, 59)  # 60 titles to look up: two chunks
     monkeypatch.setattr(pr_resource, "_PR_TITLE_LOOKUP_SECONDS", 0.2)
-    attempted: list[str] = []
-    title_lookups = Barrier(4, timeout=budget(5))
+    queried: list[list[int]] = []
 
     def run(argv: list[str], *, timeout: float, **_kwargs: object) -> tuple[int | None, str, str]:
         nonlocal clock
-        if argv[-1] != github._PR_STATUS_FIELDS:
+        asked = title_query_prs(argv[1:])
+        if asked is None:
             assert github._gh_deadline.get() is None
             assert timeout == github._gh_timeout_seconds()
             return 0, '{"title": "Selected PR"}', ""
         assert 0 < timeout <= 0.2
-        attempted.append(argv[3])
+        queried.append([number for _, number in asked.values()])
         deadline = github._gh_deadline.get()
         assert deadline is not None
-        title_lookups.wait()
-        # Concurrent timeouts expire at the same deadline, regardless of scheduling.
-        clock = deadline
+        clock = deadline  # the query runs until the deadline cuts it off
         return None, "", "timed out"
 
     monkeypatch.setattr(github, "_run", run)
@@ -306,11 +330,11 @@ def test_slow_title_lookups_preserve_metadata_and_leave_queued_prs_for_next_poll
     info = github.github_info(tracked, session_id="session", pr_url=B)
     assert clock - started == pytest.approx(0.2)
     assert info["pr"]["title"] == "Selected PR"
-    assert len(attempted) == 4
+    assert [len(numbers) for numbers in queried] == [github._TITLE_QUERY_CHUNK]
     skipped = {entry.url for entry in registry.list() if entry.title_checked_at == 0}
-    assert len(skipped) == 7 - len(attempted)
+    assert len(skipped) == 60 - github._TITLE_QUERY_CHUNK
 
-    monkeypatch.setattr(github, "_run", lambda *_a, **_kw: (0, '{"title": "Fetched"}', ""))
+    monkeypatch.setattr(github, "_run", _answer_titles("Fetched"))
     info = github.github_info(tracked, session_id="session", pr_url=B)
     assert all(pr["title"] == "Fetched" for pr in info["prs"] if pr["url"] in skipped)
 
@@ -323,41 +347,35 @@ def test_title_retries_do_not_starve_queued_prs_after_backoff_expires(
     monkeypatch.setattr(github.time, "monotonic", lambda: clock)
     monkeypatch.setattr(github.time, "time", lambda: wall_clock)
     registry = SessionPrRegistry("session")
-    registry.record(
-        [PullRequestRef.from_url(A.replace("42", str(number))) for number in range(43, 49)],
-        relationship="created",
-        source="test",
-    )
+    _link_more_prs(registry, 59)
     original_order = [entry.url for entry in registry.list()]
-    pending_numbers = {str(entry.number) for entry in registry.list() if entry.url != B}
-    attempted: list[str] = []
+    pending_numbers = {entry.number for entry in registry.list() if entry.url != B}
+    queried: list[set[int]] = []
 
     def run(argv: list[str], *, timeout: float, **_kwargs: object) -> tuple[int | None, str, str]:
         nonlocal clock
-        if argv[-1] != github._PR_STATUS_FIELDS:
+        asked = title_query_prs(argv[1:])
+        if asked is None:
             return 0, '{"title": "Selected PR"}', ""
-        attempted.append(argv[3])
+        queried.append({number for _, number in asked.values()})
         clock += timeout
         return None, "", "timed out"
 
     monkeypatch.setattr(github, "_run", run)
-    seen: set[str] = set()
-    for _ in range(len(pending_numbers)):
-        before = len(attempted)
-        info = github.github_info(tracked, session_id="session", pr_url=B)
-        batch = set(attempted[before:])
-        assert batch and batch.isdisjoint(seen)
-        seen.update(batch)
-        assert [entry["url"] for entry in info["prs"]] == original_order
-        assert all(
-            entry.title_lookup_timed_out and entry.title_checked_at == wall_clock
-            for entry in registry.list()
-            if entry.url != B and str(entry.number) in batch
-        )
-        if seen == pending_numbers:
-            break
-        wall_clock += pr_resource._PR_TITLE_TIMEOUT_RETRY_SECONDS + 1
-    assert seen == pending_numbers
+    info = github.github_info(tracked, session_id="session", pr_url=B)
+    (first,) = queried
+    assert len(first) == github._TITLE_QUERY_CHUNK
+    assert [entry["url"] for entry in info["prs"]] == original_order
+    assert all(
+        entry.title_lookup_timed_out and entry.title_checked_at == wall_clock
+        for entry in registry.list()
+        if entry.number in first and entry.url != B
+    )
+    # Once the retry window ends, the PRs the deadline left out go first.
+    wall_clock += pr_resource._PR_TITLE_TIMEOUT_RETRY_SECONDS + 1
+    github.github_info(tracked, session_id="session", pr_url=B)
+    assert queried[1] >= pending_numbers - first
+    assert len(queried) == 2
 
 
 @pytest.mark.parametrize("command_seconds", [0.6, 3])
@@ -412,7 +430,7 @@ def test_slow_selected_metadata_does_not_get_extra_title_work(
 
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         nonlocal clock
-        assert args[-1] != github._PR_STATUS_FIELDS
+        assert title_query_prs(args) is None
         clock += pr_resource._PR_TITLE_REQUEST_SECONDS + 0.1
         return 0, '{"title": "Selected PR"}', ""
 
@@ -436,14 +454,14 @@ def test_title_timeout_at_request_deadline_retries_after_short_backoff(
 
     def run(argv: list[str], *, timeout: float, **_kwargs: object) -> tuple[int | None, str, str]:
         nonlocal clock
-        if argv[-1] != github._PR_STATUS_FIELDS:
+        if title_query_prs(argv[1:]) is None:
             clock += 6.5
             return 0, '{"title": "Selected PR"}', ""
         timeouts.append(timeout)
         if len(timeouts) == 1:
             clock += timeout
             return None, "", "timed out"
-        return 0, '{"title": "Recovered title"}', ""
+        return 0, title_query_answer({"p0": {"title": "Recovered title", "state": "OPEN"}}), ""
 
     monkeypatch.setattr(github, "_run", run)
     info = github.github_info(tracked, session_id="session", pr_url=B)
@@ -490,7 +508,7 @@ def test_non_deadline_failures_keep_normal_title_cache(
 
     def run(argv: list[str], **_kwargs: object) -> tuple[int | None, str, str]:
         nonlocal clock, attempted
-        if argv[-1] != github._PR_STATUS_FIELDS:
+        if title_query_prs(argv[1:]) is None:
             return 0, '{"title": "Selected PR"}', ""
         attempted += 1
         clock += command_seconds
@@ -1104,7 +1122,7 @@ def test_default_selection_matches_metadata_and_all_pages(
 ) -> None:
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         if args[:2] == ["pr", "view"]:
-            if args[-1] == github._PR_STATUS_FIELDS:
+            if args[-1] == "title":
                 assert args[args.index("-R") + 1] == "github.com/example/two"
                 return 0, json.dumps({"title": "Second repository"}), ""
             assert args[args.index("-R") + 1] == "github.com/example/one"
@@ -1193,3 +1211,157 @@ def test_enterprise_host_signed_in_only_when_named_can_attach_and_read(
     assert info["pr"]["title"] == "Enterprise PR"
     files = github.github_changed_files(str(tmp_path), session_id="session", pr_url=url)
     assert [entry["path"] for entry in files["data"]] == ["enterprise.py"]
+
+
+def _use_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    clock = _Clock()
+    fake_time = SimpleNamespace(time=clock.time, monotonic=clock.monotonic)
+    monkeypatch.setattr(github, "time", fake_time)
+    monkeypatch.setattr(pr_resource, "time", fake_time)
+    return clock
+
+
+class _TitleGh:
+    """``gh`` signed in as one account, answering title queries and counting every call."""
+
+    def __init__(self, states: dict[tuple[str, int], str], *, status: str = "success") -> None:
+        self.states = states
+        self.titles = {pr: f"{pr[0]}#{pr[1]}" for pr in states}
+        self.status = status
+        self.calls: Counter[str] = Counter()
+        self.asked: Counter[tuple[str, int]] = Counter()
+
+    def __call__(
+        self, argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
+    ) -> tuple[int | None, str, str]:
+        if (asked := title_query_prs(argv)) is not None:
+            self.calls["api graphql"] += 1
+            assert token == "viewer-token"  # the identity the titles are cached under
+            self.asked.update(asked.values())
+            pulls = {
+                alias: {"title": self.titles[pr], "state": self.states[pr]}
+                for alias, pr in asked.items()
+            }
+            return 0, title_query_answer(pulls), ""
+        command = " ".join(argv[:2])
+        if argv[:2] == ["pr", "view"]:
+            command += " --json " + argv[argv.index("--json") + 1]
+        self.calls[command] += 1
+        if argv[:2] == ["auth", "token"]:
+            return 0, "viewer-token", ""
+        if argv[:2] == ["auth", "status"]:
+            # A spent quota makes ``gh auth status`` report the active account as failing.
+            account = {"login": "viewer", "active": True, "state": self.status}
+            return (
+                (0 if self.status == "success" else 1),
+                json.dumps({"hosts": {"github.com": [account]}}),
+                "",
+            )
+        if argv[:2] == ["pr", "view"]:
+            repository = argv[argv.index("-R") + 1].removeprefix("github.com/")
+            pr = (repository, int(argv[2]))
+            data = {"number": pr[1], "title": self.titles[pr], "state": self.states[pr]}
+            return (
+                0,
+                json.dumps({**data, "url": f"https://github.com/{repository}/pull/{pr[1]}"}),
+                "",
+            )
+        return 1, "", "not faked"
+
+
+def _signed_in_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gh: _TitleGh) -> None:
+    """Run ``gh`` as ``gh``, signed in through a ``hosts.yml``, with no other credential."""
+    config_dir = tmp_path / "gh-config"
+    config_dir.mkdir()
+    (config_dir / "hosts.yml").write_text("github.com:\n  user: viewer\n")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(github, "_gh", gh)
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    monkeypatch.setattr(github.shutil, "which", lambda _: "/bin/gh")
+    monkeypatch.setattr(github._config, "github_account_preference", lambda _: None)
+
+
+def _link(session_id: str, prs: list[tuple[str, int]]) -> list[str]:
+    urls = [f"https://github.com/{repository}/pull/{number}" for repository, number in prs]
+    SessionPrRegistry(session_id).record(
+        [PullRequestRef.from_url(url) for url in urls], relationship="created", source="test"
+    )
+    return urls
+
+
+def test_transcript_titles_cost_under_30_gh_calls_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transcript linking 20 PRs across 5 repositories, polled by 3 viewers every 10 s.
+
+    The poll's selected PR comes from the panel's own read, which, like its account choice,
+    is outside the titles' budget; every other title is looked up through ``gh``.
+    """
+    states = ["MERGED"] * 12 + ["CLOSED"] * 3 + ["OPEN"] * 5
+    prs = {(f"example/repo-{index % 5}", 100 + index): state for index, state in enumerate(states)}
+    gh = _TitleGh(prs)
+    _signed_in_gh(tmp_path, monkeypatch, gh)
+    clock = _use_clock(monkeypatch)
+    urls = _link("transcript", list(prs))
+    selected = urls[-1]  # an open PR
+    monkeypatch.setattr(
+        github,
+        "_reference_info",
+        lambda _root, reference: {
+            "available": True,
+            "gh_available": True,
+            "pr": {"url": reference.url, "title": "Selected"},
+            "selected_pr_url": reference.url,
+        },
+    )
+    open_prs = [pr for pr, state in prs.items() if state == "OPEN"][:-1]
+
+    for step in range(360):  # an hour of polls, 10 s apart
+        if step == 60:  # ten minutes in, the open PRs are renamed
+            gh.titles.update({pr: f"renamed {pr[1]}" for pr in open_prs})
+        for viewer in range(3):
+            clock.elapsed = step * 10.0 + viewer * 3
+            info = github.github_info(str(tmp_path), session_id="transcript", pr_url=selected)
+
+    assert sum(gh.calls.values()) < 30, gh.calls
+    assert gh.calls["auth status"] == 0
+    assert not [command for command in gh.calls if command.startswith("pr view")]
+    # The windows really ran out: a finished title was asked once, an open one again
+    # after 30 minutes, and the rename it read then is on the listing.
+    assert {pr: gh.asked[pr] for pr in prs if prs[pr] != "OPEN"} == {
+        pr: 1 for pr in prs if prs[pr] != "OPEN"
+    }
+    assert {gh.asked[pr] for pr in open_prs} == {2}
+    shown = {entry["url"]: entry["title"] for entry in info["prs"]}
+    assert [shown[f"https://github.com/{pr[0]}/pull/{pr[1]}"] for pr in open_prs] == [
+        f"renamed {pr[1]}" for pr in open_prs
+    ]
+    checked = [entry.title_checked_at for entry in SessionPrRegistry("transcript").list()]
+    assert min(checked) >= clock.time() - pr_resource._PR_TITLE_CACHE_SECONDS
+
+
+def test_titles_stay_cached_when_auth_status_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two sessions' runners show the same PRs while ``gh auth status`` reports an error."""
+    prs = {("example/one", 1): "MERGED", ("example/one", 2): "OPEN", ("example/two", 3): "OPEN"}
+    gh = _TitleGh(prs, status="error")
+    _signed_in_gh(tmp_path, monkeypatch, gh)
+    clock = _use_clock(monkeypatch)
+    selected = _link("first", list(prs))[0]
+    _link("second", list(prs))
+
+    for poll in range(3):
+        clock.elapsed = poll * (pr_resource._PR_TITLE_CACHE_SECONDS + 1)
+        for session_id in ("first", "second"):
+            github._preview_cache.clear()  # each session's runner is its own process
+            github._finished_titles.clear()
+            info = github.github_info(str(tmp_path), session_id=session_id, pr_url=selected)
+            assert {entry["title"] for entry in info["prs"]} == set(gh.titles.values())
+            assert info["accounts"][0]["state"] == "error"  # the panel still lists them
+
+    assert gh.calls["api graphql"] == 1
+    assert gh.asked == {pr: 1 for pr in prs if pr != ("example/one", 1)}
+    assert not [command for command in gh.calls if command.endswith("--json title")]
+    assert not [command for command in gh.calls if command.endswith("--json title,state")]

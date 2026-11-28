@@ -1771,7 +1771,7 @@ _TITLE_QUERY_CHUNK = 50
 _UNREADABLE_ERROR_TYPES = frozenset({"NOT_FOUND", "FORBIDDEN"})
 _FINISHED_TITLES_MAX = 4096
 # Finished PRs' titles by title key, with when their lookup started; guarded by _preview_lock.
-_finished_titles: dict[tuple[str, ...], tuple[float, str | None]] = {}
+_finished_titles: dict[tuple[str, ...], tuple[float, str | None, str | None, bool]] = {}
 
 
 def _title_from_shared_pr_data(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1792,14 +1792,20 @@ def _title_key(identity: str, reference: PullRequestRef) -> tuple[str, ...]:
     return ("pr", identity, _repo_argument(reference).lower(), str(reference.number), "title")
 
 
-def _remember_finished_title(key: tuple[str, ...], title: str | None, started: float) -> None:
-    """Keep a finished PR's title for the runner's life, unless a write began after ``started``."""
+def _remember_finished_title(
+    key: tuple[str, ...],
+    title: str | None,
+    started: float,
+    state: str | None = None,
+    is_draft: bool = False,
+) -> None:
+    """Keep a finished PR's title and state for the runner's life, barring a later write."""
     if _invalidated_since(key) >= started:
         return
     with _preview_lock:
         if key not in _finished_titles and len(_finished_titles) >= _FINISHED_TITLES_MAX:
             del _finished_titles[next(iter(_finished_titles))]
-        _finished_titles[key] = (started, title)
+        _finished_titles[key] = (started, title, state, is_draft)
 
 
 def _known_title(identity: str, reference: PullRequestRef) -> dict[str, Any] | None:
@@ -1810,17 +1816,33 @@ def _known_title(identity: str, reference: PullRequestRef) -> dict[str, Any] | N
     if finished is not None:
         # Another runner's write to the PR stamps it; this runner's own write drops the entry.
         if _invalidated_since(key) < finished[0]:
-            return {"title": finished[1], "timed_out": False}
+            return {
+                "title": finished[1],
+                "timed_out": False,
+                "state": finished[2],
+                "is_draft": finished[3],
+            }
         with _preview_lock:
             _finished_titles.pop(key, None)
     shared = _title_from_shared_pr_data(identity, reference)
     if shared is not None:
-        return {"title": _pr_title(shared), "timed_out": False}
+        return {
+            "title": _pr_title(shared),
+            "timed_out": False,
+            "state": shared.get("state"),
+            "is_draft": shared.get("isDraft") is True,
+        }
     hit, answer = _cache_get(key, shared=True)
     if not hit or not isinstance(answer, dict):
         return None
     if answer.get("finished"):
-        _remember_finished_title(key, answer.get("title"), float(answer.get("started") or 0))
+        _remember_finished_title(
+            key,
+            answer.get("title"),
+            float(answer.get("started") or 0),
+            answer.get("state"),
+            answer.get("is_draft") is True,
+        )
     return answer
 
 
@@ -1837,7 +1859,7 @@ def _titles_query(references: Sequence[PullRequestRef]) -> list[str]:
         variables.append(f"$o{index}: String!, $n{index}: String!")
         fields.append(
             f"p{index}: repository(owner: $o{index}, name: $n{index}) "
-            f"{{ pullRequest(number: {int(reference.number)}) {{ title state }} }}"
+            f"{{ pullRequest(number: {int(reference.number)}) {{ title state isDraft }} }}"
         )
         arguments += ["-f", f"o{index}={owner}", "-f", f"n{index}={name}"]
     query = "query(" + ", ".join(variables) + ") {\n  " + "\n  ".join(fields) + "\n}"
@@ -1847,7 +1869,7 @@ def _titles_query(references: Sequence[PullRequestRef]) -> list[str]:
 def _graphql_titles(
     root: str, host: str, token: str | None, references: Sequence[PullRequestRef]
 ) -> dict[str, dict[str, Any] | None]:
-    """Read the PRs' titles in one GraphQL query: ``{url: {title, state} | None}``.
+    """Read the PRs' titles in one GraphQL query: ``{url: {title, state, isDraft} | None}``.
 
     ``None`` is a failed lookup. A PR or repository GitHub reports as not found or not
     readable answers ``{title: None, state: None}``; other PRs in the query still answer.
@@ -1876,9 +1898,13 @@ def _graphql_titles(
         node = data.get(alias)
         pull = node.get("pullRequest") if isinstance(node, dict) else None
         if isinstance(pull, dict):
-            found[reference.url] = {"title": pull.get("title"), "state": pull.get("state")}
+            found[reference.url] = {
+                "title": pull.get("title"),
+                "state": pull.get("state"),
+                "isDraft": pull.get("isDraft") is True,
+            }
         elif alias in data and errors.get(alias, set()) <= _UNREADABLE_ERROR_TYPES:
-            found[reference.url] = {"title": None, "state": None}
+            found[reference.url] = {"title": None, "state": None, "isDraft": False}
         else:
             found[reference.url] = None
     return found
@@ -1891,15 +1917,15 @@ def _query_titles(
     token: str | None,
     references: Sequence[PullRequestRef],
     deadline: float,
-) -> dict[str, tuple[str | None, bool]]:
+) -> dict[str, dict[str, Any]]:
     """Look up titles no one holds, one query per chunk, shared by the host's runners.
 
     One lookup per host and identity runs at a time; a waiter then finds its titles cached.
     A chunk the deadline reaches before it starts is left out.
     """
-    answers: dict[str, tuple[str | None, bool]] = {}
+    answers: dict[str, dict[str, Any]] = {}
     if not _gh_can_read_host(root, host, token):
-        return {reference.url: (None, False) for reference in references}
+        return {reference.url: _title_answer(None, False) for reference in references}
     for start in range(0, len(references), _TITLE_QUERY_CHUNK):
         if time.monotonic() >= deadline:
             break
@@ -1910,11 +1936,11 @@ def _query_titles(
                 if known is None:
                     missing.append(reference)
                 else:
-                    answers[reference.url] = (known["title"], bool(known["timed_out"]))
+                    answers[reference.url] = known
             if not missing:
                 continue
             if _background_reads_paused():  # asked again once the pause ends
-                answers.update({reference.url: (None, True) for reference in missing})
+                answers.update({reference.url: _title_answer(None, True) for reference in missing})
                 continue
             started = time.time()
             found = _graphql_titles(root, host, token, missing)
@@ -1927,6 +1953,8 @@ def _query_titles(
                     "timed_out": pull is None and timed_out,
                     "finished": finished,
                     "started": started,
+                    "state": pull.get("state") if pull is not None else None,
+                    "is_draft": pull is not None and pull.get("isDraft") is True,
                 }
                 if pull is None:
                     ttl = _FAILED_READ_TTL_SECONDS
@@ -1935,9 +1963,16 @@ def _query_titles(
                 key = _title_key(identity, reference)
                 _cache_put(key, answer, ttl, shared=True, started=started)
                 if finished:
-                    _remember_finished_title(key, answer["title"], started)
-                answers[reference.url] = (answer["title"], answer["timed_out"])
+                    _remember_finished_title(
+                        key, answer["title"], started, answer["state"], answer["is_draft"]
+                    )
+                answers[reference.url] = answer
     return answers
+
+
+def _title_answer(title: str | None, timed_out: bool) -> dict[str, Any]:
+    """A title answer that carries no state, for a read that could not be made."""
+    return {"title": title, "timed_out": timed_out, "state": None, "is_draft": False}
 
 
 def _pr_titles_before(
@@ -1955,7 +1990,42 @@ def _pr_titles_before(
         ended the lookup, or a rate-limit pause skipped a background one. A PR whose
         chunk the deadline reached first is left out.
     """
-    answers: dict[str, tuple[str | None, bool]] = {}
+    return {
+        url: (answer["title"], bool(answer["timed_out"]))
+        for url, answer in _pr_answers_before(root, references, deadline).items()
+    }
+
+
+def _pr_statuses_before(
+    root: str, references: Sequence[PullRequestRef], deadline: float
+) -> dict[str, tuple[PullRequestStatus | None, bool]]:
+    """Look up PRs' titles, states and draft flags with the batching and shared caches of
+    :func:`_pr_titles_before`, so a refresh of many PRs is one query per host and identity.
+
+    :returns: ``{url: (status, timed_out)}``; ``status`` is ``None`` when the PR could not be read.
+        A PR whose chunk the deadline reached first is left out.
+    """
+    statuses: dict[str, tuple[PullRequestStatus | None, bool]] = {}
+    for url, answer in _pr_answers_before(root, references, deadline).items():
+        state = answer.get("state")
+        status = (
+            PullRequestStatus(
+                title=answer["title"],
+                state=state if state in ("OPEN", "MERGED", "CLOSED") else None,
+                is_draft=answer.get("is_draft") is True,
+            )
+            if answer["title"] is not None or state is not None
+            else None
+        )
+        statuses[url] = (status, bool(answer["timed_out"]))
+    return statuses
+
+
+def _pr_answers_before(
+    root: str, references: Sequence[PullRequestRef], deadline: float
+) -> dict[str, dict[str, Any]]:
+    """The title answers behind :func:`_pr_titles_before` and :func:`_pr_statuses_before`."""
+    answers: dict[str, dict[str, Any]] = {}
     groups: dict[tuple[str, str], tuple[str | None, list[PullRequestRef]]] = {}
     with _gh_deadline_scope(deadline):
         for reference in references:
@@ -1963,7 +2033,7 @@ def _pr_titles_before(
             identity = identity or _unbound_identity(reference.host)
             known = _known_title(identity, reference)
             if known is not None:
-                answers[reference.url] = (known["title"], bool(known["timed_out"]))
+                answers[reference.url] = known
             else:
                 groups.setdefault((reference.host, identity), (token, []))[1].append(reference)
         for (host, identity), (token, missing) in groups.items():

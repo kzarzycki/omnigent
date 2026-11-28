@@ -42,6 +42,7 @@ from omnigent.runner import pr_reports
 from omnigent.runner.git_providers import (
     PR_DIFF_OBJECT,
     AccountMergeFacet,
+    BatchStatusesFacet,
     BatchTitlesFacet,
     CommitCompareFacet,
     CommitsFacet,
@@ -482,16 +483,39 @@ def _session_prs_with_titles(
             return []
         return [(entry.url, *found[entry.url], None) for entry in batch if entry.url in found]
 
-    # A provider that reads many titles at once gets one lookup for all of its PRs, unless
-    # it also returns each PR's state, which a per-PR lookup reads in the same request.
+    def fetch_statuses(
+        facet: BatchStatusesFacet, batch: list[SessionPullRequest]
+    ) -> list[_TitleLookup]:
+        try:
+            found = facet.pr_statuses(root, batch, deadline)
+        except Exception:  # keep the existing cache when an optional lookup fails
+            provider = batch[0].provider
+            _logger.warning("Git provider %s failed in pr_statuses", provider, exc_info=True)
+            return []
+        return [
+            (
+                entry.url,
+                found[entry.url][0].title if found[entry.url][0] else None,
+                found[entry.url][1],
+                found[entry.url][0],
+            )
+            for entry in batch
+            if entry.url in found
+        ]
+
+    # A provider that reads many titles (with their states) at once gets one lookup for all
+    # of its PRs; the others read one PR per lookup.
     batches: dict[str, list[SessionPullRequest]] = {}
     lookups: list[Callable[[], list[_TitleLookup]]] = []
     for entry in pending:
         facet = facets[entry.provider]
-        if isinstance(facet, BatchTitlesFacet) and not isinstance(facet, PullRequestStatusFacet):
+        if isinstance(facet, BatchStatusesFacet | BatchTitlesFacet):
             if entry.provider not in batches:
                 batches[entry.provider] = []
-                lookups.append(functools.partial(fetch_titles, facet, batches[entry.provider]))
+                batch_lookup = (
+                    fetch_statuses if isinstance(facet, BatchStatusesFacet) else fetch_titles
+                )
+                lookups.append(functools.partial(batch_lookup, facet, batches[entry.provider]))
             batches[entry.provider].append(entry)
         else:
             lookups.append(functools.partial(fetch_title, entry))

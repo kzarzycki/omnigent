@@ -542,8 +542,11 @@ def test_optional_title_failure_keeps_selected_pr_and_healthy_titles(
     )
     monkeypatch.setattr(
         github,
-        "pr_status",
-        lambda *_args: (PullRequestStatus("Healthy GitHub title", "OPEN", False), False),
+        "pr_statuses",
+        lambda _root, references, _deadline: {
+            reference.url: (PullRequestStatus("Healthy GitHub title", "OPEN", False), False)
+            for reference in references
+        },
     )
 
     def broken(*_args):
@@ -609,7 +612,7 @@ def test_every_remote_provider_is_discovered_and_unlink_stays_removed(
         github, "pr_titles", lambda *_: pytest.fail("Discovery already read the title")
     )
     monkeypatch.setattr(
-        github, "pr_status", lambda *_: pytest.fail("Discovery already read the title")
+        github, "pr_statuses", lambda *_: pytest.fail("Discovery already read the title")
     )
     monkeypatch.setattr(
         github,

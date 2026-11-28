@@ -341,6 +341,21 @@ class PullRequestStatusFacet(Protocol):
 
 
 @runtime_checkable
+class BatchStatusesFacet(Protocol):
+    """Optional lookup of many PRs' titles and states at once, beside the per-PR status."""
+
+    def pr_statuses(
+        self, root: str, references: Sequence[PullRequestRef], deadline: float
+    ) -> dict[str, tuple[PullRequestStatus | None, bool]]:
+        """Look up the status of ``references``, giving up at ``deadline``. Never raises.
+
+        :returns: ``{url: (status, timed_out)}``. A PR left out was not looked up, and is asked
+            for on a later poll.
+        """
+        ...
+
+
+@runtime_checkable
 class CommitCompareFacet(Protocol):
     """Optional changes after one PR commit, up to the head, beside :class:`CommitsFacet`.
 

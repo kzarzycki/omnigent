@@ -201,6 +201,14 @@ class GitHubPullRequests:
 
         return github_resource._pr_titles_before(root, references, deadline)
 
+    def pr_statuses(
+        self, root: str, references: Sequence[PullRequestRef], deadline: float
+    ) -> dict[str, tuple[PullRequestStatus | None, bool]]:
+        """Look up PRs' titles, states and draft flags, one GraphQL query per host and identity."""
+        from omnigent.runner import github_resource
+
+        return github_resource._pr_statuses_before(root, references, deadline)
+
     def pr_status(
         self, root: str, reference: PullRequestRef, deadline: float
     ) -> tuple[PullRequestStatus | None, bool]:

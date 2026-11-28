@@ -97,6 +97,7 @@ import {
   collectInboxItems,
   collectUnreadInboxItems,
   groupInboxEntries,
+  sumPendingApprovals,
   type CommentInboxItem,
   type InboxItem,
   type InboxSource,
@@ -252,9 +253,11 @@ export function InboxPage() {
     serverInboxRows: allRows,
     comments: commentInbox,
     automationInbox,
-    inboxCount: pendingCount,
+    inboxRows,
     identityReady,
   } = useSidebarData();
+  // The header counts pending approvals only; the sidebar badge is a wider total.
+  const pendingCount = sumPendingApprovals(inboxRows);
   const navigate = useNavigate();
   const taskDetailsEnabled = isFeatureEnabled(useServerInfo(), "automations_v2");
   const [storedFilter, setFilter] = useState<InboxFilter>(readInboxFilter);
