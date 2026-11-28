@@ -10,11 +10,39 @@ from omnigent.native.permission_modes import (
     PERMISSION_MODE_CONCEPTS,
     PERMISSION_MODE_STRICTNESS,
     check_permission_mode_not_looser,
+    created_session_launch_args,
     inherited_permission_mode,
     launch_args_for_mode,
     mode_for_launch_args,
     permission_mode_exceeds_default,
 )
+
+_GATED = [
+    (harness, mode)
+    for harness, modes in PERMISSION_LAUNCH_ARGS.items()
+    for mode in modes
+    if mode not in APPROVAL_SKIPPING_PERMISSION_MODES
+]
+_SKIPPING = [
+    (harness, mode)
+    for harness, modes in PERMISSION_LAUNCH_ARGS.items()
+    for mode in modes
+    if mode in APPROVAL_SKIPPING_PERMISSION_MODES
+]
+
+
+@pytest.mark.parametrize(("harness", "mode"), _GATED)
+def test_modes_that_keep_approval_use_the_automation_launch_args(harness: str, mode: str) -> None:
+    assert created_session_launch_args(harness, mode) == (
+        list(PERMISSION_LAUNCH_ARGS[harness][mode]) or None
+    )
+
+
+@pytest.mark.parametrize(("harness", "mode"), _SKIPPING)
+def test_modes_that_skip_approval_are_refused(harness: str, mode: str) -> None:
+    # Every harness has one, so the refusal can't be bypassed by picking another harness.
+    with pytest.raises(ValueError, match="skips approval"):
+        created_session_launch_args(harness, mode)
 
 
 def test_every_launch_mode_has_a_strictness_position() -> None:
