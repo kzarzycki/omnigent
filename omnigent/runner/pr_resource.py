@@ -492,16 +492,13 @@ def _session_prs_with_titles(
             provider = batch[0].provider
             _logger.warning("Git provider %s failed in pr_statuses", provider, exc_info=True)
             return []
-        return [
-            (
-                entry.url,
-                found[entry.url][0].title if found[entry.url][0] else None,
-                found[entry.url][1],
-                found[entry.url][0],
-            )
-            for entry in batch
-            if entry.url in found
-        ]
+        lookups: list[_TitleLookup] = []
+        for entry in batch:
+            if entry.url not in found:
+                continue
+            status, timed_out = found[entry.url]
+            lookups.append((entry.url, status.title if status else None, timed_out, status))
+        return lookups
 
     # A provider that reads many titles (with their states) at once gets one lookup for all
     # of its PRs; the others read one PR per lookup.
